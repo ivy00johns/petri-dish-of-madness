@@ -12,12 +12,13 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 
 | Wave | Scope | State |
 |------|-------|-------|
-| W0 | Scaffold & contracts | ⬜ Not started |
-| W1 | Engine, providers, persistence | ⬜ Not started |
-| W2 | API & frontend (2D map + live feed) | ⬜ Not started |
-| W3 | Integration, QE, deploy | ⬜ Not started |
+| W0 | Scaffold & contracts | ✅ Contracts authored (`contracts/`) |
+| W1 | Engine, providers, persistence | 🔄 backend-agent building |
+| W2 | API & frontend (2D map + live feed) | 🔄 frontend + infra agents building |
+| W3 | Integration, QE, deploy | ⬜ Pending wave gate |
 
-Design approved 2026-05-26. Next step: implementation plan (`writing-plans`) → orchestrator build.
+Build in progress on branch `build/emergence-madness-v1` (orchestrator). Goal: ≥2 models in one
+world for ≥5 min on FreeLLMAPI. Three role-agents dispatched in parallel against `contracts/`.
 
 ## Which doc is which (ownership map)
 
