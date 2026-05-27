@@ -35,6 +35,10 @@ export function useSimulation(): SimulationState & SimulationControls {
   const wsRef = useRef<WebSocket | null>(null);
   const mockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mockSpeedRef = useRef<number>(2000);
+  const reconnectAttemptsRef = useRef<number>(0);
+  // After this many failed reconnects, fall back to mock so the UI is never
+  // dead. A recovered live socket still tears the mock loop down on open/msg.
+  const MAX_RECONNECTS_BEFORE_MOCK = 3;
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
 
@@ -81,6 +85,10 @@ export function useSimulation(): SimulationState & SimulationControls {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      // A live socket is open: kill any running mock loop so the two
+      // event sources can never push (and collide on seq) at once.
+      stopMockLoop();
+      reconnectAttemptsRef.current = 0;
       setConnected(true);
       setMockMode(false);
     };
@@ -88,6 +96,13 @@ export function useSimulation(): SimulationState & SimulationControls {
     ws.onmessage = (e: MessageEvent) => {
       try {
         const msg: WSMessage = JSON.parse(e.data);
+        // Defensive: the first live message guarantees the mock loop is dead.
+        // This closes the window where a transient onerror started the mock
+        // timer before onopen fired.
+        if (mockTimerRef.current) {
+          stopMockLoop();
+          setMockMode(false);
+        }
         if (msg.type === 'world_state') {
           setWorld(msg);
         } else if (msg.type === 'event') {
@@ -96,7 +111,14 @@ export function useSimulation(): SimulationState & SimulationControls {
           if (evt.payload && 'thought' in evt.payload) {
             evt.thought = evt.payload.thought as string;
           }
-          setEvents(prev => [evt, ...prev].slice(0, MAX_EVENTS));
+          // Belt-and-suspenders: ignore a seq we already hold so a backend
+          // resend or reconnect replay can't introduce a duplicate React key.
+          setEvents(prev => {
+            if (prev.length > 0 && prev.some(e => e.seq === evt.seq)) {
+              return prev;
+            }
+            return [evt, ...prev].slice(0, MAX_EVENTS);
+          });
         }
       } catch {
         // ignore parse errors
@@ -106,7 +128,18 @@ export function useSimulation(): SimulationState & SimulationControls {
     ws.onclose = () => {
       setConnected(false);
       wsRef.current = null;
-      // Reconnect after 2s; fall back to mock if can't connect
+      reconnectAttemptsRef.current += 1;
+
+      // If the backend is genuinely unreachable, fall back to mock after a
+      // few attempts so the UI stays alive. Only start mock if one isn't
+      // already running (and a live socket recovering will tear it down via
+      // onopen/onmessage).
+      if (reconnectAttemptsRef.current >= MAX_RECONNECTS_BEFORE_MOCK && !mockTimerRef.current) {
+        setMockMode(true);
+        startMockLoop();
+      }
+
+      // Keep trying to reconnect; a recovered socket always wins over mock.
       setTimeout(() => {
         if (!wsRef.current) {
           connectWS();
@@ -115,12 +148,18 @@ export function useSimulation(): SimulationState & SimulationControls {
     };
 
     ws.onerror = () => {
+      // Do NOT permanently flip to mock on a transient error while the
+      // socket may still open. If the socket is still CONNECTING, let the
+      // browser resolve it (onopen or onclose will fire). onclose handles
+      // reconnect; only after reconnect genuinely fails do we fall back to
+      // mock — and even then, onopen/onmessage will tear the mock loop down
+      // the instant a live socket recovers.
+      if (ws.readyState === WebSocket.CONNECTING) {
+        return;
+      }
       ws.close();
-      // Fallback to mock mode
-      setMockMode(true);
-      startMockLoop();
     };
-  }, [startMockLoop]);
+  }, [startMockLoop, stopMockLoop]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
