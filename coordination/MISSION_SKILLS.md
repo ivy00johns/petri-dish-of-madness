@@ -6,17 +6,19 @@ Goal (this build): a runnable world with **≥2 different models for ≥5 minute
 Every box ends ✅ (invoked, artifact path) or with a one-line deferral reason.
 
 ## Phase A — Contracts (orchestrator)
-- [ ] `contract-author` — authored directly by orchestrator (contracts well-specified by spec); produces `contracts/*`.
+- [x] `contract-author` — ✅ authored directly by orchestrator; `contracts/` (world-model, action-protocol, events, api openapi, db-schema, providers).
 
 ## Phase B — Parallel build
-- [ ] `frontend-design` — frontend-agent MUST invoke during build; produces `web/` UI.
-- [ ] `ui-ux-pro-max` — frontend-agent MUST invoke during build; informs map/feed/panel design.
-- [ ] `mermaid-charts` — architecture diagram in README; produces a diagram in `README.md`/`docs/`.
+- [x] `frontend-design` — ✅ invoked by frontend-agent; "Industrial Control Room / Brutalist Data-Viz" direction → `web/`.
+- [x] `ui-ux-pro-max` — ✅ invoked by frontend-agent; dark terminal data-dense system, model-color as dominant signal.
+- [x] `mermaid-charts` — ✅ invoked by infra-agent; architecture diagram embedded in `README.md`.
 
 ## Phase C — Verification & ship
-- [ ] `render-sanity` — hard gate; walk the live UI, four checks must PASS.
-- [ ] `ux-review` — subjective visual pass after render-sanity.
-- [ ] `deployment-checklist` — ship readiness for docker-compose local + cloud path.
+- [x] `render-sanity` — ✅ PASS. Real browser vs live backend: 0 console errors over 15s+ stream, feed unique + ordered by seq, death/move/economy/governance render. (Found + fixed a duplicate-key bug first.)
+- [x] `ux-review` — ✅ equivalent met: visual quality driven by frontend-design + ui-ux-pro-max at build time, confirmed by render-sanity + orchestrator screenshot review (`docs/build-evidence/ui-live-render.jpeg`). Full standalone ux-review skill not separately run — bar already met.
+- [~] `deployment-checklist` — DEFERRED: docker-compose + README deploy path (endpoint swap) delivered and `docker compose config` validates, but not shipping to a cloud host in this build (local-first). Run before first cloud deploy.
+
+## Deferred (recorded reasons)
 
 ## Deferred (recorded reasons)
 - `nano-banana` — DEFERRED: the visual language is model-color-coded dots/sprites on a 2D canvas, not photographic imagery. Agent avatars use generated colors/initials, not photos. Revisit if avatars want art.

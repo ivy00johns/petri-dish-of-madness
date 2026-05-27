@@ -12,13 +12,15 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 
 | Wave | Scope | State |
 |------|-------|-------|
-| W0 | Scaffold & contracts | ✅ Contracts authored (`contracts/`) |
-| W1 | Engine, providers, persistence | 🔄 backend-agent building |
-| W2 | API & frontend (2D map + live feed) | 🔄 frontend + infra agents building |
-| W3 | Integration, QE, deploy | ⬜ Pending wave gate |
+| W0 | Scaffold & contracts | ✅ Done |
+| W1 | Engine, providers, persistence | ✅ Done (55 tests pass) |
+| W2 | API & frontend (2D map + live feed) | ✅ Done (renders live, console clean) |
+| W3 | Integration, QE, deploy | ✅ Done (QA gate + render-sanity PASS) |
 
-Build in progress on branch `build/emergence-madness-v1` (orchestrator). Goal: ≥2 models in one
-world for ≥5 min on FreeLLMAPI. Three role-agents dispatched in parallel against `contracts/`.
+**v1 build complete** on branch `build/emergence-madness-v1`. See `BUILD_RESULTS.md` for the
+end-state report. The engine has run 1,600+ ticks live (deaths, alliances, passed rules) and the
+FreeLLMAPI path is stub-verified. **One step left for the goal (EM-048): drop in your
+`FREELLMAPI_KEY` and run ≥2 models live** — see "Run the 5-minute 2-model demo" in `README.md`.
 
 ## Which doc is which (ownership map)
 

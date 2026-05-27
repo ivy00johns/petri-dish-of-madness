@@ -79,3 +79,9 @@ What shipped and when. Append on each wave/milestone close.
 | Date | Wave / Item | Result |
 |------|-------------|--------|
 | 2026-05-26 | Design | Spec approved & committed (`8048235`); living plan set up |
+| 2026-05-26 | W0 Contracts | 6 contracts authored (`bca98f6`) |
+| 2026-05-26 | W1+W2 Build | backend (`58a8e7e`), frontend (`d90c1bb`), infra (`18aa21b`) shipped in parallel |
+| 2026-05-26 | Wave gate | Found + fixed TickLoop step/start lifecycle bug (`27f9027`) + regression tests |
+| 2026-05-26 | W3 QE | 55 tests pass; OpenAI/FreeLLMAPI adapter stub-verified; qa-report gate PASS (`d68a1da`) |
+| 2026-05-26 | W3 render-sanity | Found + fixed dual-event-source duplicate-key bug (`1f5964b`); re-verified PASS (0 console errors, ordered feed, live backend) |
+| 2026-05-26 | v1 complete | All waves shipped. Open: EM-043 (FE unit tests, P1) + EM-048 (live 2-model run, awaiting user token) |
