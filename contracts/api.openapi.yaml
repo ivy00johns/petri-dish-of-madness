@@ -1,0 +1,66 @@
+openapi: 3.0.3
+info:
+  title: EmergenceMadness Control API
+  version: 1.0.0
+  description: >
+    REST control + config surface for the chaos lab. The live data stream is WS /ws
+    (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
+servers:
+  - url: http://localhost:8000
+paths:
+  /api/health:
+    get:
+      summary: Liveness
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { status: { type: string }, tick: { type: integer }, running: { type: boolean } } } } } } }
+  /api/state:
+    get:
+      summary: Full world snapshot (same shape as WS world_state)
+      responses: { "200": { description: snapshot, content: { application/json: { schema: { type: object } } } } }
+  /api/config:
+    get:
+      summary: Effective world config
+      responses: { "200": { description: config, content: { application/json: { schema: { type: object } } } } }
+  /api/profiles:
+    get:
+      summary: Model profiles (the legend) with availability
+      responses: { "200": { description: profiles, content: { application/json: { schema: { type: array, items: { type: object, properties: { name: {type: string}, adapter: {type: string}, model_id: {type: string}, color: {type: string}, available: {type: boolean} } } } } } } }
+  /api/control/start:
+    post: { summary: Start/resume the loop, responses: { "200": { description: ok } } }
+  /api/control/pause:
+    post: { summary: Pause the loop, responses: { "200": { description: ok } } }
+  /api/control/step:
+    post: { summary: Advance exactly one turn, responses: { "200": { description: ok } } }
+  /api/control/speed:
+    post:
+      summary: Set tick interval (seconds between turns)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [tick_interval_seconds], properties: { tick_interval_seconds: { type: number, minimum: 0.1, maximum: 60 } } } } } }
+      responses: { "200": { description: ok } }
+  /api/control/reset:
+    post:
+      summary: Reset the world from config (optionally override seed)
+      responses: { "200": { description: ok } }
+  /api/agents/{id}/model:
+    post:
+      summary: Reassign an agent's model profile (takes effect next turn) — the marquee feature
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [profile], properties: { profile: { type: string } } } } } }
+      responses: { "200": { description: ok }, "404": { description: unknown agent }, "400": { description: unknown profile } }
+  /api/agents:
+    post:
+      summary: Spawn an agent
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name, profile], properties: { name: {type: string}, personality: {type: string}, profile: {type: string}, location: {type: string} } } } } }
+      responses: { "201": { description: created } }
+  /api/agents/{id}:
+    delete:
+      summary: Kill/remove an agent
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: ok } }
+  /api/events/inject:
+    post:
+      summary: Inject a random world event (chaos knob)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { kind: { type: string, enum: [windfall, famine, blackout, festival], description: "optional; random if omitted" } } } } } }
+      responses: { "200": { description: ok } }
+  /ws:
+    get:
+      summary: WebSocket event stream (see events.schema.json). Documented here for discoverability.
+      responses: { "101": { description: switching protocols } }

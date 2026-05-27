@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "emergence-madness/events/v1.0.0",
+  "title": "WebSocket message protocol",
+  "description": "Messages pushed over WS /ws. On connect, server sends one `world_state` snapshot, then a stream of incremental messages. Every message has seq (monotonic) + type. Frontend color-codes by `profile_color` where present.",
+  "oneOf": [
+    { "$ref": "#/$defs/world_state" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "world_state": {
+      "type": "object",
+      "description": "Full snapshot. Sent on connect and after structural changes (spawn/kill/reset).",
+      "required": ["type", "seq", "tick", "day", "running", "tick_interval_seconds", "places", "agents", "rules", "profiles"],
+      "properties": {
+        "type": { "const": "world_state" },
+        "seq": { "type": "integer" },
+        "tick": { "type": "integer" },
+        "day": { "type": "integer" },
+        "running": { "type": "boolean" },
+        "tick_interval_seconds": { "type": "number" },
+        "places": { "type": "array", "items": { "type": "object" } },
+        "agents": { "type": "array", "items": { "type": "object" }, "description": "Agent objects per world-model.md, each WITHOUT private beliefs detail except counts; include profile_color." },
+        "rules": { "type": "array", "items": { "type": "object" } },
+        "profiles": { "type": "array", "items": { "type": "object", "properties": { "name": {}, "model_id": {}, "color": {}, "adapter": {} } }, "description": "Model legend." }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["type", "seq", "tick", "kind"],
+      "properties": {
+        "type": { "const": "event" },
+        "seq": { "type": "integer" },
+        "tick": { "type": "integer" },
+        "kind": {
+          "type": "string",
+          "enum": ["turn_start","agent_action","agent_speech","agent_moved","economy","conflict","relationship","agent_died","agent_spawned","rule_proposed","rule_vote","rule_passed","rule_rejected","memory","parse_failure","model_reassigned","random_event","control"]
+        },
+        "actor_id": { "type": ["string","null"] },
+        "target_id": { "type": ["string","null"] },
+        "profile": { "type": ["string","null"], "description": "Model profile of the actor (for color-coding)." },
+        "profile_color": { "type": ["string","null"] },
+        "text": { "type": ["string","null"], "description": "Human-readable line for the live feed." },
+        "payload": { "type": "object", "description": "kind-specific structured data (e.g. {amount}, {place}, {rule_id}, {energy,credits} deltas)." },
+        "ts": { "type": "string", "description": "ISO timestamp." }
+      }
+    }
+  },
+  "x-feed-rendering": "Each `event` renders one feed line, left-bordered with profile_color. agent_action with thought may show the thought as a tooltip. world_state drives the map + panels (authoritative).",
+  "x-deltas": "After each turn the server emits the relevant `event`(s) AND a fresh per-agent state via a compact `world_state` resend OR agent-scoped events; v1 simplest-correct: resend `world_state` once per turn after events. Frontend must handle full-snapshot replacement."
+}
