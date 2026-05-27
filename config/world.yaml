@@ -1,0 +1,34 @@
+# config/world.yaml — World parameters and seed agents for EmergenceMadness
+# Adjust pacing, economy, and death thresholds here.
+# Seed agents: each must reference a profile name from profiles.yaml.
+
+world:
+  agent_count: 5                 # used if `agents:` not fully specified
+  tick_interval_seconds: 3
+  turns_per_day: 20
+  energy_decay_per_turn: 4
+  death_after_zero_turns: 5
+  starting_energy: 100
+  starting_credits: 10
+  recharge_cost: 2
+  recharge_amount: 30
+  work_reward: 4
+  forage_reward: 1
+  steal_max: 8
+  ubi_amount: 2
+  memory_window: 12
+  attack_energy_cost: 6
+
+places:
+  - { id: plaza,    name: Central Plaza, x: 500, y: 500, kind: social,     description: "Open square where everyone mingles." }
+  - { id: market,   name: Market,        x: 750, y: 400, kind: work,       description: "Earn credits by working." }
+  - { id: townhall, name: Town Hall,     x: 250, y: 350, kind: governance, description: "Propose and vote on rules." }
+  - { id: commons,  name: The Commons,   x: 500, y: 750, kind: wild,       description: "Forage for scraps." }
+  - { id: home,     name: Hearth,        x: 300, y: 650, kind: home,       description: "Rest and recharge." }
+
+agents:                          # seed agents; profile must match a profiles[].name
+  - { name: Ada,   personality: "Pragmatic engineer; values fairness, distrusts freeloaders.", profile: groq-llama,   location: plaza }
+  - { name: Bram,  personality: "Charismatic opportunist; will steal if it pays.",             profile: gemini-flash, location: market }
+  - { name: Cleo,  personality: "Idealistic organizer; loves rules and town halls.",           profile: groq-llama,   location: townhall }
+  - { name: Dov,   personality: "Quiet survivor; hoards credits, avoids conflict.",            profile: gemini-flash, location: home }
+  - { name: Esi,   personality: "Generous connector; builds alliances, shares freely.",        profile: groq-llama,   location: commons }

@@ -1,0 +1,38 @@
+# .dockerignore — EmergenceMadness
+# Keep image builds fast and small by excluding non-essential paths.
+
+# ── VCS ──────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Secrets (never bake into image) ──────────────────────────────────────────
+.env
+.env.*
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+htmlcov/
+*.db
+*.sqlite
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+web/node_modules/
+web/.vite/
+
+# ── Docs / miscellaneous ──────────────────────────────────────────────────────
+docs/
+contracts/
+coordination/
+*.md
+Makefile
+dev
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

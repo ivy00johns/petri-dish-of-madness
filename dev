@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# dev — One-command local development launcher for EmergenceMadness.
+#
+# Starts:
+#   • Backend  — uvicorn emergence.api.app:app --host 0.0.0.0 --port 8000
+#                (runs from backend/, uses EM_CONFIG_DIR=./config)
+#   • Frontend — vite dev server on port 5173
+#                (runs from web/)
+#
+# Prerequisites:
+#   • Python 3.11+ with the emergence package installed (pip install -e backend)
+#   • Node 18+ with web/ deps installed (cd web && npm install)
+#
+# Usage:
+#   ./dev
+#   ./dev --help
+#
+# Press Ctrl-C to stop both processes cleanly.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
+YELLOW='\033[1;33m'; RESET='\033[0m'
+
+info()  { printf "${CYAN}[dev]${RESET} %s\n" "$*"; }
+ok()    { printf "${GREEN}[dev]${RESET} %s\n" "$*"; }
+warn()  { printf "${YELLOW}[dev]${RESET} %s\n" "$*"; }
+err()   { printf "${RED}[dev]${RESET} %s\n" "$*" >&2; }
+
+# ── Help ─────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'EOF'
+Usage: ./dev [OPTIONS]
+
+Starts the EmergenceMadness backend and frontend together for local development.
+
+  --backend-only    Start only the backend (uvicorn)
+  --frontend-only   Start only the frontend (vite)
+  --help, -h        Show this message
+
+Environment:
+  Copy .env.example → .env and set FREELLMAPI_KEY (or leave blank for mock mode).
+  EM_CONFIG_DIR defaults to ./config (repo root).
+
+Ports:
+  Backend  http://localhost:8000
+  Frontend http://localhost:5173
+
+EOF
+  exit 0
+fi
+
+# ── Load .env if it exists ────────────────────────────────────────────────────
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  # Export vars from .env (skip comments and blank lines).
+  set -o allexport
+  # shellcheck disable=SC1090
+  source <(grep -v '^\s*#' "${REPO_ROOT}/.env" | grep -v '^\s*$')
+  set +o allexport
+  info "Loaded .env"
+else
+  warn ".env not found — using defaults. Copy .env.example → .env to configure."
+fi
+
+# EM_CONFIG_DIR defaults to repo root config/
+export EM_CONFIG_DIR="${EM_CONFIG_DIR:-${REPO_ROOT}/config}"
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+check_backend() {
+  if ! python -c "import emergence" &>/dev/null; then
+    err "Python package 'emergence' not found."
+    err "Run: pip install -e ${REPO_ROOT}/backend"
+    err "  (or: cd backend && pip install -e .)"
+    exit 1
+  fi
+}
+
+check_frontend() {
+  if [[ ! -d "${REPO_ROOT}/web/node_modules" ]]; then
+    err "web/node_modules not found."
+    err "Run: cd ${REPO_ROOT}/web && npm install"
+    exit 1
+  fi
+}
+
+BACKEND_ONLY=false
+FRONTEND_ONLY=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --backend-only)  BACKEND_ONLY=true ;;
+    --frontend-only) FRONTEND_ONLY=true ;;
+    *) err "Unknown option: $arg"; exit 1 ;;
+  esac
+done
+
+# ── Cleanup handler ───────────────────────────────────────────────────────────
+PIDS=()
+
+cleanup() {
+  info "Shutting down…"
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  # Give processes a moment to exit, then force-kill stragglers.
+  sleep 0.5
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  ok "All processes stopped."
+}
+
+trap cleanup INT TERM EXIT
+
+# ── Prefixed log helper ───────────────────────────────────────────────────────
+# Stream output with a colour prefix.
+# Usage: prefix_stream LABEL COLOR fd
+prefix_stream() {
+  local label="$1" color="$2"
+  while IFS= read -r line; do
+    printf "${color}[%s]${RESET} %s\n" "$label" "$line"
+  done
+}
+
+# ── Start backend ─────────────────────────────────────────────────────────────
+start_backend() {
+  check_backend
+  info "Starting backend on http://localhost:8000 …"
+  (
+    cd "${REPO_ROOT}/backend"
+    uvicorn emergence.api.app:app --host 0.0.0.0 --port 8000 --reload 2>&1
+  ) | prefix_stream "backend" "${RED}" &
+  PIDS+=($!)
+}
+
+# ── Start frontend ────────────────────────────────────────────────────────────
+start_frontend() {
+  check_frontend
+  info "Starting frontend on http://localhost:5173 …"
+  (
+    cd "${REPO_ROOT}/web"
+    npm run dev 2>&1
+  ) | prefix_stream "frontend" "${GREEN}" &
+  PIDS+=($!)
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+if $BACKEND_ONLY; then
+  start_backend
+elif $FRONTEND_ONLY; then
+  start_frontend
+else
+  start_backend
+  start_frontend
+fi
+
+ok "EmergenceMadness running. Press Ctrl-C to stop."
+echo ""
+printf "  ${GREEN}Frontend:${RESET} http://localhost:5173\n"
+printf "  ${RED}Backend: ${RESET} http://localhost:8000\n"
+echo ""
+
+# Wait for all background processes; exit when any one exits.
+wait "${PIDS[@]}"

@@ -1,0 +1,83 @@
+# docker-compose.yml — EmergenceMadness
+#
+# Mandatory services (always run):
+#   backend   — Python/FastAPI sim engine on :8000
+#   web       — Vite build served via nginx on :8080 (proxies /api + /ws to backend)
+#
+# Opt-in services (only run when the named compose profile is active):
+#   ollama       — Local Ollama LLM server  → `docker compose --profile ollama up`
+#   freellmapi   — Self-hosted FreeLLMAPI   → `docker compose --profile freellmapi up`
+#
+# Quickstart (mock or hosted FreeLLMAPI):
+#   cp .env.example .env && docker compose up
+#
+# With local Ollama:
+#   docker compose --profile ollama up
+#
+# With self-hosted FreeLLMAPI:
+#   docker compose --profile freellmapi up
+
+services:
+
+  # ── Backend ────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount config dir so profiles/world can be edited without rebuilding.
+      - ./config:/app/config:ro
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      EM_CONFIG_DIR: /app/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Frontend (nginx + built Vite app) ──────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Opt-in: Ollama ─────────────────────────────────────────────────────────
+  # Activate with: docker compose --profile ollama up
+  # First pull a model: docker exec emergence-ollama ollama pull llama3.2
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  # ── Opt-in: FreeLLMAPI (self-hosted gateway) ───────────────────────────────
+  # Activate with: docker compose --profile freellmapi up
+  # Set FREELLMAPI_KEY in .env before starting.
+  freellmapi:
+    profiles: [freellmapi]
+    image: ghcr.io/freellmapi/freellmapi:latest
+    ports:
+      - "3001:3001"
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

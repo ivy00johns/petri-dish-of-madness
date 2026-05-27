@@ -1,0 +1,44 @@
+# config/profiles.yaml — Model profile registry for EmergenceMadness
+# Each profile defines an adapter + endpoint + model.
+# Secrets are referenced by env-var name (api_key_env), never stored here.
+# ${VAR:-default} interpolation is supported for base_url and model_id.
+
+profiles:
+  # ── FreeLLMAPI profiles (default; routed through OpenAI-compatible proxy) ──
+
+  - name: groq-llama          # unique; referenced by agents + reassign API
+    adapter: openai           # openai|anthropic|gemini|mock
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY      # env var holding the bearer token (NOT the literal key)
+    model_id: llama-3.3-70b-versatile
+    max_tokens: 512
+    temperature: 0.8
+    color: "#e74c3c"
+
+  - name: gemini-flash
+    adapter: openai           # routed through FreeLLMAPI's OpenAI-compatible interface
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: gemini-2.0-flash
+    max_tokens: 512
+    temperature: 0.7
+    color: "#3498db"
+
+  # ── Mock profile (no network; deterministic scripted responses) ──
+  # Use this for offline development and the test suite.
+
+  - name: mock
+    adapter: mock
+    color: "#888"
+
+  # ── Ollama profile (opt-in; requires local Ollama or OLLAMA_BASE_URL) ──
+  # Uncomment and set OLLAMA_BASE_URL (or leave default for local Ollama).
+  #
+  # - name: ollama-llama
+  #   adapter: openai
+  #   base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
+  #   api_key_env: OLLAMA_API_KEY   # set to any non-empty string for Ollama (e.g. "ollama")
+  #   model_id: llama3.2
+  #   max_tokens: 512
+  #   temperature: 0.8
+  #   color: "#27ae60"
