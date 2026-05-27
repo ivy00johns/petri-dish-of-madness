@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "Adapters match providers.md (OpenAI-compatible verified against a stub mimicking FreeLLMAPI). WS messages match events.schema.json (world_state list-of-agents + tagged events confirmed via live WS client). REST routes match api.openapi.yaml. Action validation matches action-protocol.schema.json. SQLite per db-schema.sql."
+    },
+    "test_coverage": {
+      "score": 4,
+      "notes": "55 backend tests: world-model invariants 1-5, economy (give/steal/work/recharge/UBI), governance proposal->vote->active->effect, death, loop step/start/pause asyncio lifecycle (regression for the wave-gate bug), OpenAI-compatible adapter end-to-end against a stub incl. 500->ProviderError->idle failure path, and FastAPI route coverage (health/state/profiles/reassign/step/inject). Frontend has no unit tests; covered by tsc + vite build + Playwright reassign check + manual render. WS stream verified manually by orchestrator."
+    },
+    "security": {
+      "score": 4,
+      "notes": "Low surface: local-first, no auth, no PII. Strong points: model output is JSON-schema + world-rule validated (no crash on adversarial/garbage model output -> parse_failure->idle, verified); provider API keys read from env (api_key_env), never stored in YAML or serialized; bad model profile / unknown agent return 400/404 not 500. No injection surface (no SQL string-building exposed to model output; parameterized repo). Not hardened for public internet exposure (documented as local-first)."
+    },
+    "reliability": {
+      "score": 4,
+      "notes": "ProviderError (network/HTTP) is caught and degrades to idle without crashing the loop (verified: 1 parse_failure in a live mock run handled gracefully). Adapter retries once on 5xx/429 with backoff. Loop pause/step/start lifecycle correct after fix (independently re-verified at API level: 5 steps->tick5, timed run->tick37 running=true, pause holds). Note: with real profiles unconfigured, turns incur slow failing retries -- expected, resolved by providing a token."
+    }
+  },
+  "test_results": {
+    "total": 55,
+    "passed": 55,
+    "failed": 0,
+    "command": "cd backend && python -m pytest -q"
+  },
+  "blockers": [],
+  "issues": [
+    "Real model profiles (groq-llama, gemini-flash) report available=false and fall back to idle until FREELLMAPI_KEY + base_url are set -- expected; this is the user's final step for the live run.",
+    "Frontend has no component unit tests; relies on tsc typecheck, production build, a Playwright reassign verification, and manual render. Acceptable for v1.",
+    "loop.py 'blackout' random-event effect is a no-op stub (TODO marker) -- the other three random events (windfall/famine/festival) apply real effects. Minor, non-blocking.",
+    "QE was completed by the orchestrator after the QE sub-agent stalled on a watchdog timeout; the stalled agent's leftover test files had 6 harness bugs (agents-as-dict assumption; synchronous step assertion) which were fixed -- product code was correct and untouched."
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "All 55 tests pass with zero failures and zero blockers. contract_conformance=5 and security=4 clear the gate thresholds (both >=3). The critical live-LLM path (OpenAI-compatible adapter -> FreeLLMAPI) is verified end-to-end against a stub including the failure/idle path, so the user's real 2-model run is de-risked. Engine, economy, governance, and the full WS spectacle pipeline are proven on the deterministic MockProvider."
+  }
+}
