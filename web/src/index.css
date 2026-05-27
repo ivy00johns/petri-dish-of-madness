@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  body {
+    background-color: #0a0a0b;
+    color: #e8e8f0;
+    font-family: 'IBM Plex Mono', monospace;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0a0a0b;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #3a3a48;
+    border-radius: 2px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #5a5a72;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(200, 255, 0, 0.25);
+    color: #e8e8f0;
+  }
+
+  /* Focus styles */
+  :focus-visible {
+    outline: 1px solid #c8ff00;
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Panel chrome */
+  .lab-panel {
+    @apply bg-lab-surface border border-lab-border;
+  }
+
+  /* Section header */
+  .lab-header {
+    @apply font-mono text-xs font-semibold tracking-widest text-lab-muted uppercase px-3 py-2 border-b border-lab-border;
+  }
+
+  /* Chunky control button */
+  .lab-btn {
+    @apply font-mono text-xs font-semibold tracking-wider px-3 py-2 border cursor-pointer
+           transition-all duration-150 select-none
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .lab-btn-primary {
+    @apply lab-btn bg-lab-acid text-lab-bg border-lab-acid
+           hover:bg-white hover:border-white
+           active:scale-95;
+  }
+
+  .lab-btn-secondary {
+    @apply lab-btn bg-transparent text-lab-text border-lab-border
+           hover:border-lab-acid hover:text-lab-acid
+           active:scale-95;
+  }
+
+  .lab-btn-danger {
+    @apply lab-btn bg-transparent text-lab-danger border-lab-danger
+           hover:bg-lab-danger hover:text-white
+           active:scale-95;
+  }
+
+  /* Select / dropdown */
+  .lab-select {
+    @apply font-mono text-xs bg-lab-chrome text-lab-text border border-lab-border
+           px-2 py-1.5 cursor-pointer appearance-none
+           hover:border-lab-acid
+           focus:outline-none focus:border-lab-acid;
+  }
+
+  /* Energy bar */
+  .energy-bar-track {
+    @apply h-1 bg-lab-chrome rounded-full overflow-hidden;
+  }
+
+  /* Tooltip */
+  .lab-tooltip {
+    @apply absolute z-50 hidden group-hover:block
+           bg-lab-chrome border border-lab-border
+           font-mono text-xs text-lab-text
+           px-2 py-1.5 max-w-xs
+           pointer-events-none;
+  }
+
+  /* Grid lines on canvas bg */
+  .canvas-grid {
+    background-image:
+      linear-gradient(to right, #1a1a20 1px, transparent 1px),
+      linear-gradient(to bottom, #1a1a20 1px, transparent 1px);
+    background-size: 50px 50px;
+  }
+}
+
+/* Feed entry entrance animation */
+@keyframes feedSlideIn {
+  from {
+    transform: translateX(-6px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.feed-entry-new {
+  animation: feedSlideIn 0.2s ease-out;
+}
+
+/* Subtle scanline effect on header */
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+/* Agent death fade */
+@keyframes agentDie {
+  0% { opacity: 1; filter: saturate(1); }
+  100% { opacity: 0; filter: saturate(0); }
+}
+
+.agent-dying {
+  animation: agentDie 1s ease-out forwards;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
