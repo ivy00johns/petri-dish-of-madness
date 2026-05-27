@@ -69,7 +69,9 @@ class TickLoop:
         self._task: asyncio.Task | None = None
         self._step_event: asyncio.Event = asyncio.Event()
         self._paused: bool = True
-        self._step_requested: bool = False
+        # Count of explicit single-step requests queued while paused.
+        # Each consumed step advances exactly one turn then re-pauses.
+        self._pending_steps: int = 0
 
         # sequence counter for WS messages
         self._seq: int = 0
@@ -82,20 +84,32 @@ class TickLoop:
     # Control API
     # ──────────────────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
-        self._paused = False
-        self._world.running = True
+    def _ensure_task(self) -> None:
+        """Create the background run task if it isn't already alive."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
+
+    def start(self) -> None:
+        # Drop any stale single-step requests so continuous running can't be
+        # poisoned into re-pausing after one turn.
+        self._pending_steps = 0
+        self._paused = False
+        self._world.running = True
+        self._step_event.set()
+        self._ensure_task()
 
     def pause(self) -> None:
         self._paused = True
         self._world.running = False
+        # Wake the loop so it observes the pause promptly.
+        self._step_event.set()
 
     def step(self) -> None:
-        """Advance one turn regardless of pause state."""
-        self._step_requested = True
+        """Advance exactly one turn, even before start() has been called."""
+        self._pending_steps += 1
         self._step_event.set()
+        # A step must work even when the loop has never been started.
+        self._ensure_task()
 
     def set_speed(self, tick_interval_seconds: float) -> None:
         self._world.tick_interval_seconds = tick_interval_seconds
@@ -106,6 +120,7 @@ class TickLoop:
     async def reset(self, config: WorldConfig) -> None:
         """Reset world from config. Pauses loop, rebuilds state, starts new DB run."""
         self.pause()
+        self._pending_steps = 0
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -192,16 +207,22 @@ class TickLoop:
     async def _run(self) -> None:
         log.info("TickLoop started")
         while True:
-            # Wait for permission to run
-            while self._paused and not self._step_requested:
+            # Wait until either continuously running, or a step is queued.
+            while self._paused and self._pending_steps <= 0:
                 self._step_event.clear()
                 try:
                     await asyncio.wait_for(self._step_event.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
                     pass
 
-            step_only = self._step_requested
-            self._step_requested = False
+            # Decide whether this iteration is a one-shot step or a continuous turn.
+            # A queued step always advances exactly one turn (even while running);
+            # otherwise we advance because we're in continuous-run mode.
+            step_only = False
+            if self._pending_steps > 0:
+                self._pending_steps -= 1
+                # Only treat as a "stop after one turn" step when not running.
+                step_only = self._paused
             self._step_event.clear()
 
             agent = self._world.next_agent()
@@ -215,9 +236,10 @@ class TickLoop:
             await self._execute_turn(agent)
 
             if step_only:
+                # Single-step while paused: advance one turn, stay paused.
                 self._paused = True
                 self._world.running = False
-            else:
+            elif not self._paused:
                 interval = self._world.tick_interval_seconds
                 await asyncio.sleep(max(0.01, interval))
 
