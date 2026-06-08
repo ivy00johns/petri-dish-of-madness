@@ -74,7 +74,7 @@ export default function App() {
               {view === 'village' ? (
                 <CozyWorld world={world} events={events} />
               ) : (
-                <WorldMap world={world} />
+                <WorldMap world={world} events={events} />
               )}
             </div>
           </div>

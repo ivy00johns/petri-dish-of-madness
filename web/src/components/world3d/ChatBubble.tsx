@@ -56,19 +56,23 @@ export function ChatBubble({ text, isPrivate, stackIndex, baseY }: ChatBubblePro
           transform: `scale(${isPrivate ? 0.85 : 1})`,
           opacity,
           transition: `opacity ${FADE_MS}ms ease, transform 180ms ease`,
-          maxWidth: 180,
+          // An explicit width is required: under <Html center distanceFactor>
+          // the containing block shrink-fits to min-content, which (with
+          // word breaking) collapses the bubble to one character per line.
+          width: 168,
+          boxSizing: 'border-box',
           padding: '6px 10px',
           borderRadius: 14,
           background: isPrivate ? 'rgba(60,48,40,0.82)' : 'rgba(255,250,240,0.96)',
           color: isPrivate ? '#f0e6da' : '#3a2f25',
           fontFamily: '"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif',
           fontSize: 12,
-          lineHeight: 1.25,
+          lineHeight: 1.3,
           fontStyle: isPrivate ? 'italic' : 'normal',
           boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
           border: isPrivate ? '1px solid rgba(255,255,255,0.15)' : '1px solid rgba(0,0,0,0.08)',
           whiteSpace: 'normal',
-          wordBreak: 'break-word',
+          overflowWrap: 'break-word',
           textAlign: 'center',
           userSelect: 'none',
         }}

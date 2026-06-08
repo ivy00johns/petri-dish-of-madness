@@ -25,6 +25,26 @@ from ..providers.router import Router
 log = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Load repo-root .env so the backend is self-sufficient regardless of launcher.
+# Without this the process depends on the shell that started it having exported
+# the vars — which silently breaks under `uvicorn --reload` (code hot-swaps but
+# the stale environment persists) and when launched outside ./dev. .env is
+# gitignored and absent in Docker/prod, where real env vars are used instead, so
+# override=True simply makes the local .env authoritative when it exists.
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    from pathlib import Path as _Path
+
+    from dotenv import load_dotenv as _load_dotenv
+
+    _env_path = _Path(__file__).resolve().parents[3] / ".env"
+    if _env_path.is_file():
+        _load_dotenv(_env_path, override=True)
+        log.info("Loaded environment from %s", _env_path)
+except ImportError:
+    pass  # python-dotenv not installed; fall back to the shell environment
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Application state (module-level singletons, initialized on startup)
 # ──────────────────────────────────────────────────────────────────────────────
 
