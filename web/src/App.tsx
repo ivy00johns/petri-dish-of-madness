@@ -6,17 +6,22 @@
  * Right:  Controls + Model legend (scrollable)
  */
 
+import { useState } from 'react';
 import { useSimulation } from './hooks/useSimulation';
 import { Header } from './components/Header';
 import { WorldMap } from './components/map/WorldMap';
+import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
 import { AgentPanels } from './components/panels/AgentPanels';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
 
+type WorldView = 'village' | 'map';
+
 export default function App() {
   const sim = useSimulation();
   const { world, events, connected, mockMode } = sim;
+  const [view, setView] = useState<WorldView>('village');
 
   return (
     <div className="flex flex-col h-screen bg-lab-bg text-lab-text overflow-hidden">
@@ -46,16 +51,31 @@ export default function App() {
             className="border-b border-lab-border overflow-hidden"
             style={{ flex: '0 0 55%' }}
           >
-            <div className="lab-header flex items-center justify-between">
-              <span>WORLD MAP</span>
-              {world && (
-                <span className="font-mono text-[10px] text-lab-muted">
-                  {world.places.length} PLACES · {world.agents.filter(a => a.alive).length} AGENTS
-                </span>
-              )}
+            <div className="lab-header flex items-center justify-between gap-2">
+              <span>{view === 'village' ? 'THE VILLAGE' : 'WORLD MAP'}</span>
+              <div className="flex items-center gap-2">
+                {world && (
+                  <span className="font-mono text-[10px] text-lab-muted">
+                    {world.places.length} PLACES · {world.agents.filter(a => a.alive).length} AGENTS
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setView(v => (v === 'village' ? 'map' : 'village'))}
+                  className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid transition-colors rounded-sm"
+                  aria-label={view === 'village' ? 'Switch to 2D map' : 'Switch to 3D village'}
+                  title={view === 'village' ? 'Switch to 2D map' : 'Switch to 3D village'}
+                >
+                  {view === 'village' ? '2D MAP' : '3D VILLAGE'}
+                </button>
+              </div>
             </div>
             <div style={{ height: 'calc(100% - 28px)' }}>
-              <WorldMap world={world} />
+              {view === 'village' ? (
+                <CozyWorld world={world} events={events} />
+              ) : (
+                <WorldMap world={world} />
+              )}
             </div>
           </div>
 

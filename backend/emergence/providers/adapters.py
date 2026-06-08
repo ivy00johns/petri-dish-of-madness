@@ -28,7 +28,13 @@ async def _post_with_retry(
     headers: dict,
     payload: dict,
     profile: str,
-) -> dict:
+) -> tuple[dict, str | None]:
+    """POST with one retry on 5xx/429. Returns (parsed_json, routed_via).
+
+    `routed_via` is the value of the 'X-Routed-Via' response header (the model
+    the proxy actually routed to), or None if the header is absent. httpx
+    headers are case-insensitive, so the lookup matches any header casing.
+    """
     for attempt in range(2):
         try:
             resp = await client.post(url, headers=headers, json=payload, timeout=_TIMEOUT)
@@ -46,7 +52,8 @@ async def _post_with_retry(
         if not resp.is_success:
             raise ProviderError(profile, resp.status_code, resp.text[:300])
 
-        return resp.json()
+        routed_via = resp.headers.get("X-Routed-Via")
+        return resp.json(), routed_via
 
     raise ProviderError(profile, None, "exhausted retries")
 
@@ -64,6 +71,7 @@ class OpenAICompatibleAdapter:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model_id = model_id
+        self.last_routed_via: str | None = None
 
     async def chat(
         self,
@@ -84,7 +92,10 @@ class OpenAICompatibleAdapter:
             "temperature": temperature,
         }
         async with httpx.AsyncClient() as client:
-            data = await _post_with_retry(client, url, headers, payload, self.name)
+            data, routed_via = await _post_with_retry(client, url, headers, payload, self.name)
+        # Surface the model the proxy actually routed to. Prefer the explicit
+        # X-Routed-Via header, then the body's "model" field, then our request.
+        self.last_routed_via = routed_via or data.get("model") or self._model_id
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -102,6 +113,7 @@ class AnthropicAdapter:
         self._api_key = api_key
         self._model_id = model_id
         self._base_url = "https://api.anthropic.com"
+        self.last_routed_via: str | None = None
 
     async def chat(
         self,
@@ -130,7 +142,8 @@ class AnthropicAdapter:
             payload["system"] = "\n\n".join(system_parts)
 
         async with httpx.AsyncClient() as client:
-            data = await _post_with_retry(client, url, headers, payload, self.name)
+            data, _routed_via = await _post_with_retry(client, url, headers, payload, self.name)
+        self.last_routed_via = self._model_id
         try:
             return data["content"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -147,6 +160,7 @@ class GeminiAdapter:
         self.color = color
         self._api_key = api_key
         self._model_id = model_id
+        self.last_routed_via: str | None = None
 
     async def chat(
         self,
@@ -173,7 +187,8 @@ class GeminiAdapter:
             },
         }
         async with httpx.AsyncClient() as client:
-            data = await _post_with_retry(client, url, {}, payload, self.name)
+            data, _routed_via = await _post_with_retry(client, url, {}, payload, self.name)
+        self.last_routed_via = self._model_id
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:

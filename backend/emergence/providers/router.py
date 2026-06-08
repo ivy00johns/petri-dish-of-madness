@@ -98,6 +98,11 @@ class Router:
             raise ProviderError(profile_name, None, "no adapter for profile")
         return await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
 
+    def last_routed_via(self, profile_name: str) -> str | None:
+        """Return the model the proxy actually routed the last request to for
+        this profile's persistent adapter, or None if unknown."""
+        return getattr(self._adapters.get(profile_name), "last_routed_via", None)
+
     async def health(self, profile_name: str) -> bool:
         profile = self._profiles.get(profile_name)
         if profile is None:

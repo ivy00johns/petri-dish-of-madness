@@ -3,7 +3,7 @@
 # Seed agents: each must reference a profile name from profiles.yaml.
 
 world:
-  agent_count: 5                 # used if `agents:` not fully specified
+  agent_count: 3                 # used if `agents:` not fully specified
   tick_interval_seconds: 3
   turns_per_day: 20
   energy_decay_per_turn: 4
@@ -27,8 +27,6 @@ places:
   - { id: home,     name: Hearth,        x: 300, y: 650, kind: home,       description: "Rest and recharge." }
 
 agents:                          # seed agents; profile must match a profiles[].name
-  - { name: Ada,   personality: "Pragmatic engineer; values fairness, distrusts freeloaders.", profile: groq-llama,   location: plaza }
-  - { name: Bram,  personality: "Charismatic opportunist; will steal if it pays.",             profile: gemini-flash, location: market }
-  - { name: Cleo,  personality: "Idealistic organizer; loves rules and town halls.",           profile: groq-llama,   location: townhall }
-  - { name: Dov,   personality: "Quiet survivor; hoards credits, avoids conflict.",            profile: gemini-flash, location: home }
-  - { name: Esi,   personality: "Generous connector; builds alliances, shares freely.",        profile: groq-llama,   location: commons }
+  - { name: Ada,  personality: "Warm-hearted tinkerer who keeps the village fair and tidy; gently calls out freeloaders but always lends a hand.", profile: gemini-flash, location: plaza }
+  - { name: Bram, personality: "Charming market trader who loves a good deal; quick with a joke and might pocket a coin if nobody is watching.", profile: qwen-next,    location: market }
+  - { name: Cleo, personality: "Earnest town organizer who lives for proposals, votes, and community projects; dreams of a fairer commons.",        profile: deepseek-pro, location: townhall }

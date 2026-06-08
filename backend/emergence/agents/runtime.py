@@ -370,13 +370,17 @@ class AgentRuntime:
 
         if action_dict is None:
             # Second failure or ProviderError: idle + log
+            routed = self.router.last_routed_via(profile_name)
+            payload: dict = {"reason": parse_error or "parse_failure"}
+            if routed is not None:
+                payload["routed_via"] = routed
             return {
                 "kind": "parse_failure",
                 "actor_id": agent.id,
                 "profile": profile_name,
                 "profile_color": profile_color,
                 "text": f"{agent.name} failed to produce a valid action (idle fallback): {parse_error}",
-                "payload": {"reason": parse_error or "parse_failure"},
+                "payload": payload,
             }
 
         # Update mood if provided
@@ -385,6 +389,17 @@ class AgentRuntime:
 
         # Apply the action
         result_event = self._apply_action(agent, action_dict, profile_name, profile_color)
+
+        # Surface the model the proxy actually routed this turn to as an
+        # ADDITIVE, OPTIONAL field inside each emitted event's payload.
+        # (contracts/events.schema.json treats payload as an open object.)
+        routed = self.router.last_routed_via(profile_name)
+        if "_multi" in result_event:
+            for evt in result_event["_multi"]:
+                evt.setdefault("payload", {})["routed_via"] = routed
+        else:
+            result_event.setdefault("payload", {})["routed_via"] = routed
+
         return result_event
 
     async def _call_and_parse(

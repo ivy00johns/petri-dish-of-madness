@@ -26,6 +26,7 @@ from typing import Iterator
 class MockProvider:
     name = "mock"
     color = "#2ecc71"
+    last_routed_via = "mock"
 
     def __init__(self, script: list | None = None):
         self._script = script          # if set, all agents cycle this same list

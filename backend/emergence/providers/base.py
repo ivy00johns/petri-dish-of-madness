@@ -17,6 +17,10 @@ class ProviderError(Exception):
 class Provider(Protocol):
     name: str
     color: str
+    # The model the proxy *actually* routed the last request to. Set by the
+    # adapter after a successful chat() call; None until then. Part of the
+    # interface so callers can surface the real model per turn.
+    last_routed_via: str | None
 
     async def chat(
         self,
