@@ -16,11 +16,14 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 | W1 | Engine, providers, persistence | ✅ Done (55 tests pass) |
 | W2 | API & frontend (2D map + live feed) | ✅ Done (renders live, console clean) |
 | W3 | Integration, QE, deploy | ✅ Done (QA gate + render-sanity PASS) |
+| W4 | Cozy 3D village + live multi-model run | ✅ Done (live 3-agent run; routed-via surfaced) |
 
-**v1 build complete** on branch `build/emergence-madness-v1`. See `BUILD_RESULTS.md` for the
-end-state report. The engine has run 1,600+ ticks live (deaths, alliances, passed rules) and the
-FreeLLMAPI path is stub-verified. **One step left for the goal (EM-048): drop in your
-`FREELLMAPI_KEY` and run ≥2 models live** — see "Run the 5-minute 2-model demo" in `README.md`.
+**v1 + W4 complete.** W4 lives on branch `build/emergence-madness-3d`. The center view is now a
+cozy 3D village (Stardew × Animal-Crossing) built with React Three Fiber, and **EM-048 — the
+project goal — is done**: a 3-agent / 3-model world ran live on FreeLLMAPI for >11 minutes (all
+three alive, real chat, a passed town-hall rule). Because the proxy is a best-available router,
+the UI shows the model that *actually* answered each turn (`X-Routed-Via`). To run it yourself,
+see "Run the 5-minute live demo" in `README.md`. End-state report: `BUILD_RESULTS_3D.md`.
 
 ## Which doc is which (ownership map)
 

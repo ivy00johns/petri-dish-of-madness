@@ -110,48 +110,64 @@ cd web && npm install && cd ..
 ./dev
 ```
 
-Open **http://localhost:5173** — the 2D map and live feed will load immediately in mock mode (no API keys required).
+Open **http://localhost:5173** — the cozy 3D village and live feed load immediately in mock mode (no API keys required). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the legacy 2D **WORLD MAP**.
 
 ---
 
-## Run the 5-minute 2-model demo (FreeLLMAPI)
+## Run the 5-minute live demo — 3 agents in the 3D village (FreeLLMAPI)
 
-Runs 5 agents split across `groq-llama` (Llama 3.3 70B) and `gemini-flash` (Gemini 2.0 Flash), routed through [FreeLLMAPI](https://freellmapi.com)'s free OpenAI-compatible proxy (~1.3B tokens/month free).
+The default world is **3 cozy villagers** (Ada, Bram, Cleo) who start together in the
+plaza and chat, trade, forage, and pass town-hall rules. Each requests a different model;
+all are routed through a local [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)
+OpenAI-compatible proxy. The center view is a **cozy 3D village** (Stardew × Animal-Crossing
+vibe) — villagers walk between buildings with floating chat bubbles. A toggle in the panel
+header switches back to the legacy 2D map.
 
-**Step 1 — Get a FreeLLMAPI key**
+> **The fun twist:** FreeLLMAPI is a *best-available router* — it often serves your request
+> from a different provider than you asked for. The UI shows the model that **actually
+> answered** each turn (the `X-Routed-Via` header), so you ask for Gemini/Qwen/DeepSeek and
+> watch Cohere, Cerebras-GLM, gpt-oss-120b, or Gemma show up instead. That divergence is the
+> show.
 
-Sign up at https://freellmapi.com and copy your API key.
+**Step 1 — Run a FreeLLMAPI proxy and enable a provider**
+
+Run the proxy locally (default `http://localhost:3001`) and enable at least one provider on
+its dashboard — see the [FreeLLMAPI install guide](https://tashfeenahmed.github.io/freellmapi/).
+A zero-key anonymous provider (Pollinations / LLM7 / Kilo) is enough to smoke-test the pipe.
 
 **Step 2 — Configure**
 
 ```bash
 cp .env.example .env
 # Edit .env:
-#   FREELLMAPI_KEY=your-key-here
-#   FREELLMAPI_BASE_URL=https://api.freellmapi.com/v1   # or the URL from your dashboard
+#   FREELLMAPI_BASE_URL=http://localhost:3001/v1
+#   FREELLMAPI_KEY=freellmapi-...        # the proxy's unified key (dashboard → Keys)
 ```
 
-**Step 3 — Confirm the model IDs are active**
+The default profiles (`config/profiles.yaml`) request three distinct models:
+- `gemini-flash` → `gemini-3.5-flash`
+- `qwen-next` → `qwen/qwen3-next-80b-a3b-instruct:free`
+- `deepseek-pro` → `deepseek-ai/deepseek-v4-pro`
 
-The default profiles use:
-- `groq-llama` → model `llama-3.3-70b-versatile`
-- `gemini-flash` → model `gemini-2.0-flash`
+If your proxy exposes different IDs, edit `config/profiles.yaml` — the router will fail over
+regardless. Confirm what your proxy serves with `curl -s $FREELLMAPI_BASE_URL/models -H "Authorization: Bearer $FREELLMAPI_KEY"`.
 
-Both are available on FreeLLMAPI. If a model has been renamed in your gateway, update `config/profiles.yaml` accordingly.
-
-**Step 4 — Run**
+**Step 3 — Run**
 
 ```bash
 ./dev
 ```
 
-**Step 5 — Watch**
+**Step 4 — Watch**
 
-Open **http://localhost:5173**, click **Start**. Each agent badge is color-coded by model:
-- Red badge = `groq-llama` (Llama 3.3 70B)
-- Blue badge = `gemini-flash` (Gemini 2.0 Flash)
+Open **http://localhost:5173** and click **Start**. The 3D village comes alive:
+- Each villager is tinted by its requested model and carries a floating card with its
+  energy, credits, mood, and the **model that actually answered** its last turn.
+- Speech appears as chat bubbles above villagers and streams in the live feed.
+- Live-reassign any agent's model from its panel — it takes effect on the next turn.
 
-Live-reassign any agent's model from its panel. The change takes effect on the next tick.
+Runs comfortably past 5 minutes with all 3 alive (they recharge to survive); expect emergent
+gossip, alliances, the occasional theft, and passed rules.
 
 ---
 

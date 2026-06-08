@@ -70,6 +70,23 @@ docker-compose one-command up (backend, frontend, optional Ollama / FreeLLMAPI);
 - README documents one-command local run + path to cloud deploy.
 - `render-sanity` returns PASS.
 
+## Wave 4 — Cozy 3D village + live multi-model run (post-v1)
+
+Make the world a place you *watch*, and prove the marquee feature live.
+
+**Scope:** a cozy 3D village center view (React Three Fiber + drei) in the
+Stardew × Animal-Crossing register — procedural buildings per place-kind, walking
+villagers tinted by model, floating chat bubbles, orbit spectator cam, 2D/3D toggle;
+backend surfacing of the model that *actually* answered each turn (`X-Routed-Via` →
+`payload.routed_via`) displayed per villager; 3-agent / 3-model config (co-located seed
+for immediate conversation); the live FreeLLMAPI run (EM-048).
+
+**Exit criteria:**
+- `tsc -b` + `vite build` pass; backend suite green (incl. new routed_via tests).
+- A 3-agent, 3-model world runs live on FreeLLMAPI for ≥5 min with agents chatting.
+- The UI shows the actually-routed model per agent (not just the requested profile).
+- The 3D village renders from live data with a clean console.
+
 ---
 
 ## Closure log
@@ -85,3 +102,5 @@ What shipped and when. Append on each wave/milestone close.
 | 2026-05-26 | W3 QE | 55 tests pass; OpenAI/FreeLLMAPI adapter stub-verified; qa-report gate PASS (`d68a1da`) |
 | 2026-05-26 | W3 render-sanity | Found + fixed dual-event-source duplicate-key bug (`1f5964b`); re-verified PASS (0 console errors, ordered feed, live backend) |
 | 2026-05-26 | v1 complete | All waves shipped. Open: EM-043 (FE unit tests, P1) + EM-048 (live 2-model run, awaiting user token) |
+| 2026-06-08 | W4 build | Cozy 3D village (frontend, R4F+drei) + routed-via surfacing (backend) shipped in parallel; wave gate PASS (`tsc -b`+`vite build`, 55 tests) |
+| 2026-06-08 | EM-048 ✅ | Live 3-agent / 3-model FreeLLMAPI run >11 min, 3/3 alive, real chat + passed rule; proxy reroutes surfaced via `X-Routed-Via`. The project goal is met. |

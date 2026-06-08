@@ -3,10 +3,11 @@
 Every open item, ID'd and prioritized. This is the canonical "what exactly needs doing?"
 list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
-> **Status (2026-05-26):** v1 build complete on `build/emergence-madness-v1`. W0–W3 shipped;
-> 55 backend tests pass; QA gate PASS; render-sanity PASS. **Only open items: EM-043
-> (frontend unit tests, P1) and EM-048 (the live ≥2-model run — code is ready and the
-> FreeLLMAPI path is stub-verified; awaiting the user's `FREELLMAPI_KEY`).**
+> **Status (2026-06-08):** v1 shipped (W0–W3). **W4 (cozy 3D village + live run) complete on
+> `build/emergence-madness-3d`.** EM-048 (the project goal) is **DONE** — a 3-agent, 3-model
+> world ran live on FreeLLMAPI for >11 min, all 3 alive, with real chat and a passed rule. The
+> center view is now a cozy 3D village (Stardew × Animal-Crossing) and the UI surfaces the
+> model that *actually* answered each turn (`X-Routed-Via`). Open: EM-043 (FE unit tests, P1).
 
 ## Format & conventions
 
@@ -55,9 +56,13 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-045 | P0 | W3 | infra | spec §8 | Root README + one-command `dev` | done | infra |
 | EM-046 | P1 | W3 | infra | spec §8 | Cloud-deploy notes (endpoint swap) | done | infra |
 | EM-047 | P0 | W3 | qe | DoD | render-sanity + ux-review gate | done | orch |
-| EM-048 | P0 | W3 | qe | spec §12 | **Live ≥2-model arc run (≥5 min)** — code ready, FreeLLMAPI path stub-verified; awaiting user `FREELLMAPI_KEY` | blocked (user) | user |
+| EM-048 | P0 | W3 | qe | spec §12 | **Live ≥2-model arc run (≥5 min)** — DONE: 3 agents / 3 models ran live on FreeLLMAPI >11 min, 3/3 alive, real chat + passed rule | done | orch |
+| EM-049 | P1 | W4 | frontend | user req | Cozy 3D village view (React Three Fiber + drei): procedural buildings per place-kind, walking villagers, chat bubbles, orbit cam; default center view + 2D/3D toggle | done | frontend |
+| EM-050 | P1 | W4 | providers | user req | Surface actually-routed model — capture `X-Routed-Via` → `payload.routed_via`; display per-villager + feed | done | backend+frontend |
+| EM-051 | P1 | W4 | qe | user req | Regression tests for routed_via capture/fallback/injection | done | qe |
+| EM-052 | P2 | W4 | config | user req | Seed 3 agents co-located in plaza so conversation starts round 1 | done | orch |
 
-_Next free ID: EM-049._
+_Next free ID: EM-053._
 
 ## Notes
 
