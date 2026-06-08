@@ -1,4 +1,4 @@
-# config/world.yaml — World parameters and seed agents for EmergenceMadness
+# config/world.yaml — World parameters and seed agents for PetriDishOfMadness
 # Adjust pacing, economy, and death thresholds here.
 # Seed agents: each must reference a profile name from profiles.yaml.
 

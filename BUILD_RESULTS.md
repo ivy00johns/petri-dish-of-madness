@@ -1,4 +1,4 @@
-# EmergenceMadness v1 — Build Results
+# PetriDishOfMadness v1 — Build Results
 
 **Branch:** `build/emergence-madness-v1` (not merged to main)
 **Date:** 2026-05-26
@@ -23,7 +23,7 @@ the two real model profiles. The build does not assume your token, so this is a 
 | Area | What |
 |------|------|
 | **Contracts** | `contracts/`: world-model, action-protocol JSON schema, WS events, control API (OpenAPI), SQLite schema, provider router + config |
-| **Backend** (`backend/emergence/`) | asyncio tick loop + round-robin scheduler; needs/decay/**death**; economy (work/forage/recharge/give/steal); talk + relationships; **governance** (propose→vote→active→world-param mutation); cheap rolling memory; strict-JSON action parse + validate + 1 retry + idle fallback; FastAPI control API + **WebSocket** stream; SQLite persistence |
+| **Backend** (`backend/petridish/`) | asyncio tick loop + round-robin scheduler; needs/decay/**death**; economy (work/forage/recharge/give/steal); talk + relationships; **governance** (propose→vote→active→world-param mutation); cheap rolling memory; strict-JSON action parse + validate + 1 retry + idle fallback; FastAPI control API + **WebSocket** stream; SQLite persistence |
 | **Providers** | Unified `chat()` router; adapters: **OpenAI-compatible** (FreeLLMAPI/Ollama/vLLM/Groq/…), Anthropic, Gemini, **MockProvider**; per-agent **hot-swappable** model; `ProviderError`→idle resilience |
 | **Frontend** (`web/`) | React+Vite+TS 2D canvas map; live event feed color-coded by model; per-agent panels w/ model badges; **live model-reassign** control; chaos-knob event injector; model legend; mock mode for standalone runs. Design via `frontend-design` + `ui-ux-pro-max` ("brutalist dark terminal") |
 | **Infra** | `config/{profiles,world}.yaml` (2 FreeLLMAPI profiles seeded + mock + ollama example); `.env.example`; `docker/` Dockerfiles + nginx; `docker-compose.yml` (opt-in ollama/freellmapi); one-command `./dev` + `Makefile`; README with mermaid architecture diagram |
@@ -76,7 +76,7 @@ the two real model profiles. The build does not assume your token, so this is a 
 2. Confirm the two model IDs in `config/profiles.yaml` are live on your gateway: `groq-llama` → `llama-3.3-70b-versatile`, `gemini-flash` → `gemini-2.0-flash` (edit if the gateway renamed them).
 3. From the repo root: `./dev` (starts backend :8000 + frontend). Open the printed localhost URL.
 4. Hit **Start.** Agents Ada/Cleo/Esi think on `groq-llama` (red), Bram/Dov on `gemini-flash` (blue). Watch them diverge — and use **Model Reassign** to hot-swap any agent's brain mid-run.
-5. Zero-token sanity check anytime: reassign all agents to the `mock` profile, or run `cd backend && python -m emergence.run --ticks 40 --profile mock`.
+5. Zero-token sanity check anytime: reassign all agents to the `mock` profile, or run `cd backend && python -m petridish.run --ticks 40 --profile mock`.
 
 > Note: commits on this branch are unsigned (`--no-gpg-sign`) because the 1Password SSH agent
 > couldn't be unlocked non-interactively. Re-sign if your workflow requires it. Nothing has been

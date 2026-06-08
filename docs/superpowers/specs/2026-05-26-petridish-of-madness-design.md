@@ -1,4 +1,4 @@
-# EmergenceMadness — Design Spec
+# PetriDishOfMadness — Design Spec
 
 **Date:** 2026-05-26
 **Status:** Approved (design); pending implementation plan
@@ -191,7 +191,7 @@ personality + current state/needs + nearby agents & places + recent events (roll
 
 1. This spec → **writing-plans** for a detailed implementation plan.
 2. Plan → **orchestrator** executes as a parallel multi-agent build (backend / frontend / infra / QE), contract-first.
-3. `/Users/johns/Projects/EmergenceMadness` is **not yet a git repo** — `git init` + feature branch at the start of the build.
+3. `/Users/johns/Projects/petri-dish-of-madness` is **not yet a git repo** — `git init` + feature branch at the start of the build.
 
 ---
 

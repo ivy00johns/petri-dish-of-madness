@@ -1,6 +1,6 @@
-# EmergenceMadness — Backend
+# PetriDishOfMadness — Backend
 
-Python 3.11+ backend for the EmergenceMadness multi-agent simulation.
+Python 3.11+ backend for the PetriDishOfMadness multi-agent simulation.
 
 ## Quick start
 
@@ -13,7 +13,7 @@ pip install -e ".[dev]"
 ## Run the API server
 
 ```bash
-uvicorn emergence.api.app:app --host 0.0.0.0 --port 8000
+uvicorn petridish.api.app:app --host 0.0.0.0 --port 8000
 ```
 
 Health check: `curl -fsS localhost:8000/api/health`
@@ -21,7 +21,7 @@ Health check: `curl -fsS localhost:8000/api/health`
 ## Run headless (offline, no network, no LLM)
 
 ```bash
-python -m emergence.run --ticks 40 --profile mock
+python -m petridish.run --ticks 40 --profile mock
 ```
 
 ## Run tests
@@ -46,7 +46,7 @@ They are **never** stored in YAML files.
 ## Architecture
 
 ```
-emergence/
+petridish/
   config/       # YAML loader, WorldParams, ModelProfile
   engine/       # World state, tick/turn loop, economy, governance, death
   agents/       # Context assembly, action parse/validate/retry, rolling memory

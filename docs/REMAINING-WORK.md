@@ -1,4 +1,4 @@
-# EmergenceMadness — Remaining Work (tactical ledger)
+# PetriDishOfMadness — Remaining Work (tactical ledger)
 
 Every open item, ID'd and prioritized. This is the canonical "what exactly needs doing?"
 list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.

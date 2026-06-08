@@ -28,11 +28,11 @@ from typing import Any
 
 import pytest
 
-from emergence.engine.world import World, AgentState, PlaceState
-from emergence.config.loader import ModelProfile, WorldParams
-from emergence.agents.runtime import AgentRuntime
-from emergence.providers.adapters import OpenAICompatibleAdapter
-from emergence.providers.router import Router
+from petridish.engine.world import World, AgentState, PlaceState
+from petridish.config.loader import ModelProfile, WorldParams
+from petridish.agents.runtime import AgentRuntime
+from petridish.providers.adapters import OpenAICompatibleAdapter
+from petridish.providers.router import Router
 
 
 # ──────────────────────────────────────────────────────────────────────────────

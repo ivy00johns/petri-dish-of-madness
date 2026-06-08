@@ -1,5 +1,5 @@
 """
-Headless runner: python -m emergence.run --ticks N --profile mock
+Headless runner: python -m petridish.run --ticks N --profile mock
 
 Runs the simulation loop with NO API/network — useful for QE and offline dev.
 Exercises: economy, governance proposal + vote, death mechanics.
@@ -18,24 +18,24 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     stream=sys.stdout,
 )
-log = logging.getLogger("emergence.run")
+log = logging.getLogger("petridish.run")
 
 
 async def run_headless(ticks: int, profile_override: str | None) -> None:
-    from emergence.config.loader import load_config
-    from emergence.engine.world import World, AgentState, PlaceState
-    from emergence.engine.loop import TickLoop
-    from emergence.agents.runtime import AgentRuntime
-    from emergence.persistence.repository import SQLiteRepository
-    from emergence.providers.router import Router
-    from emergence.providers.mock import MockProvider
+    from petridish.config.loader import load_config
+    from petridish.engine.world import World, AgentState, PlaceState
+    from petridish.engine.loop import TickLoop
+    from petridish.agents.runtime import AgentRuntime
+    from petridish.persistence.repository import SQLiteRepository
+    from petridish.providers.router import Router
+    from petridish.providers.mock import MockProvider
 
     # Reset mock scripts for a fresh run
     MockProvider.reset_scripts()
 
     cfg = load_config(profile_override=profile_override)
 
-    log.info("=== EmergenceMadness Headless Run ===")
+    log.info("=== PetriDishOfMadness Headless Run ===")
     log.info("Ticks: %d | Profile override: %s", ticks, profile_override or "none")
     log.info("Agents: %s", [a.name for a in cfg.agents])
     log.info("Profiles: %s", [p.name for p in cfg.profiles])
@@ -193,7 +193,7 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="EmergenceMadness headless runner")
+    parser = argparse.ArgumentParser(description="PetriDishOfMadness headless runner")
     parser.add_argument("--ticks", type=int, default=40, help="Number of ticks to run")
     parser.add_argument("--profile", type=str, default="mock", help="Profile override (e.g. mock)")
     args = parser.parse_args()

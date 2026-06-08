@@ -1,4 +1,4 @@
-# docker-compose.yml — EmergenceMadness
+# docker-compose.yml — PetriDishOfMadness
 #
 # Mandatory services (always run):
 #   backend   — Python/FastAPI sim engine on :8000
@@ -56,7 +56,7 @@ services:
 
   # ── Opt-in: Ollama ─────────────────────────────────────────────────────────
   # Activate with: docker compose --profile ollama up
-  # First pull a model: docker exec emergence-ollama ollama pull llama3.2
+  # First pull a model: docker exec petridish-ollama ollama pull llama3.2
   ollama:
     profiles: [ollama]
     image: ollama/ollama:latest

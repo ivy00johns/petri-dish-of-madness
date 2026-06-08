@@ -1,4 +1,4 @@
-# EmergenceMadness — Start Here
+# PetriDishOfMadness — Start Here
 
 > The one place to land. If you're lost, read this first.
 > **Last updated:** 2026-05-26
@@ -33,7 +33,7 @@ see "Run the 5-minute live demo" in `README.md`. End-state report: `BUILD_RESULT
 - `docs/FUTURE.md` — explicitly out of scope for v1 (the deferred non-goals)
 
 **Frozen reference (read, don't edit):**
-- `docs/superpowers/specs/2026-05-26-emergence-madness-design.md` — the approved design spec. Source of truth for what v1 is. Changes go through a spec revision, not ad-hoc edits.
+- `docs/superpowers/specs/2026-05-26-petridish-of-madness-design.md` — the approved design spec. Source of truth for what v1 is. Changes go through a spec revision, not ad-hoc edits.
 
 **Archived (history; superseded):**
 - _none yet_ — superseded drafts will live under `docs/archive/` with a breadcrumb.

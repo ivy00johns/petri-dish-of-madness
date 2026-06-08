@@ -27,10 +27,10 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1">
           <span className="font-mono text-sm font-bold tracking-widest text-lab-acid uppercase">
-            EMERGENCE
+            PETRI DISH
           </span>
           <span className="font-mono text-sm font-bold tracking-widest text-lab-text uppercase">
-            MADNESS
+            OF MADNESS
           </span>
         </div>
         <span className="font-mono text-[10px] text-lab-dim border border-lab-border px-1 py-px hidden sm:inline">
