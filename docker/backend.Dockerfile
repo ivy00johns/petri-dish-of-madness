@@ -1,5 +1,5 @@
 # docker/backend.Dockerfile
-# Builds the EmergenceMadness backend (Python 3.11-slim + uvicorn).
+# Builds the PetriDishOfMadness backend (Python 3.11-slim + uvicorn).
 
 FROM python:3.11-slim
 
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy only the dependency manifest first for better layer caching.
 COPY backend/pyproject.toml ./backend/pyproject.toml
-COPY backend/emergence/__init__.py ./backend/emergence/__init__.py
+COPY backend/petridish/__init__.py ./backend/petridish/__init__.py
 
 # Install the package and all runtime dependencies.
 RUN pip install --no-cache-dir ./backend
@@ -30,6 +30,6 @@ ENV EM_CONFIG_DIR=/app/config
 
 EXPOSE 8000
 
-# Run from the backend/ directory so the `emergence` package is importable.
+# Run from the backend/ directory so the `petridish` package is importable.
 WORKDIR /app/backend
-CMD ["uvicorn", "emergence.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "petridish.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

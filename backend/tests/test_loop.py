@@ -14,13 +14,13 @@ import asyncio
 
 import pytest
 
-from emergence.engine.world import World, AgentState, PlaceState
-from emergence.config.loader import WorldParams, ModelProfile
-from emergence.agents.runtime import AgentRuntime
-from emergence.engine.loop import TickLoop
-from emergence.persistence.repository import SQLiteRepository
-from emergence.providers.router import Router
-from emergence.providers.mock import MockProvider
+from petridish.engine.world import World, AgentState, PlaceState
+from petridish.config.loader import WorldParams, ModelProfile
+from petridish.agents.runtime import AgentRuntime
+from petridish.engine.loop import TickLoop
+from petridish.persistence.repository import SQLiteRepository
+from petridish.providers.router import Router
+from petridish.providers.mock import MockProvider
 
 
 def _make_loop(interval: float = 0.02, agent_count: int = 3) -> tuple[TickLoop, World]:

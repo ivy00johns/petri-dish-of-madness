@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "emergence-madness/events/v1.0.0",
+  "$id": "petri-dish-of-madness/events/v1.0.0",
   "title": "WebSocket message protocol",
   "description": "Messages pushed over WS /ws. On connect, server sends one `world_state` snapshot, then a stream of incremental messages. Every message has seq (monotonic) + type. Frontend color-codes by `profile_color` where present.",
   "oneOf": [

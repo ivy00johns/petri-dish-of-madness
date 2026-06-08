@@ -1,4 +1,4 @@
-# Makefile — EmergenceMadness convenience targets
+# Makefile — PetriDishOfMadness convenience targets
 # See README.md for the full quickstart guide.
 
 .PHONY: help dev up down build install install-backend install-frontend \
@@ -16,7 +16,7 @@ VENV_PY := $(CURDIR)/$(VENV)/bin/python
 # ── Default target ────────────────────────────────────────────────────────────
 help:
 	@echo ""
-	@echo "  EmergenceMadness — available targets"
+	@echo "  PetriDishOfMadness — available targets"
 	@echo ""
 	@echo "  Local dev (no Docker):"
 	@echo "    make dev              Start backend + frontend together (same as ./dev)"

@@ -13,12 +13,12 @@ import asyncio
 import uuid
 import pytest
 
-from emergence.engine.world import World, AgentState, PlaceState, RelationshipState
-from emergence.config.loader import WorldParams
-from emergence.agents.runtime import AgentRuntime
-from emergence.providers.mock import MockProvider
-from emergence.providers.router import Router
-from emergence.config.loader import ModelProfile
+from petridish.engine.world import World, AgentState, PlaceState, RelationshipState
+from petridish.config.loader import WorldParams
+from petridish.agents.runtime import AgentRuntime
+from petridish.providers.mock import MockProvider
+from petridish.providers.router import Router
+from petridish.config.loader import ModelProfile
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ async def test_inv1_credits_conserved_across_ticks():
 
     # Use a single shared MockProvider with cycling script
     mock_p = MockProvider(script=script)
-    from emergence.providers.router import Router as R
+    from petridish.providers.router import Router as R
     router2 = R(
         [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#2ecc71")],
         adapter_overrides={"mock": mock_p},
@@ -281,8 +281,8 @@ async def test_inv3_ban_stealing_during_runtime():
     steal_attempts = []
     steal_script = [{"action": "steal", "args": {"target": agents[1].id}}] * 10
 
-    from emergence.providers.mock import MockProvider as MP
-    from emergence.providers.router import Router as R2
+    from petridish.providers.mock import MockProvider as MP
+    from petridish.providers.router import Router as R2
     mock = MP(script=steal_script)
     router2 = R2(
         [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#00ff00")],
@@ -497,7 +497,7 @@ async def test_parse_failure_falls_back_to_idle():
     garbage_script = [{"not_an_action": "garbage"}] * 10
     mock = MockProvider(script=garbage_script)
 
-    from emergence.providers.router import Router as R
+    from petridish.providers.router import Router as R
     router = R(
         [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#ff0000")],
         adapter_overrides={"mock": mock},
@@ -516,7 +516,7 @@ async def test_valid_action_succeeds():
 
     script = [{"action": "forage", "args": {}}]
     mock = MockProvider(script=script)
-    from emergence.providers.router import Router as R
+    from petridish.providers.router import Router as R
     router = R(
         [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#00ff00")],
         adapter_overrides={"mock": mock},

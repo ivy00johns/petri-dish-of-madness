@@ -1,8 +1,10 @@
-# EmergenceMadness
+# PetriDishOfMadness
 
 A tiny, fast, cheap multi-agent chaos lab — drop different LLMs into the same society and watch them cooperate, betray, hoard, legislate, and die.
 
 The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs one agent, Gemini-Flash runs another, a local Ollama model runs a third — all in one world, color-coded, live.
+
+> Built on ideas from [Emergence-World](https://github.com/EmergenceAI/Emergence-World) by EmergenceAI — we did our own small, cheap reinterpretation. See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
 
 ---
 
@@ -12,12 +14,12 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 through FreeLLMAPI, chatting live in the plaza. The feed streams every action; the chips above
 it filter by category.
 
-![EmergenceMadness — the cozy 3D village with three models chatting live](docs/screenshots/village-3d.png)
+![PetriDishOfMadness — the cozy 3D village with three models chatting live](docs/screenshots/village-3d.png)
 
 **World Map (2D)** — the same world, top-down and far lighter on the GPU. Toggle between the two
 from the panel header. Agents are tinted by model, clustered by location, and pulse when they speak.
 
-![EmergenceMadness — the 2D world map](docs/screenshots/world-map-2d.png)
+![PetriDishOfMadness — the 2D world map](docs/screenshots/world-map-2d.png)
 
 ---
 
@@ -25,70 +27,52 @@ from the panel header. Agents are tinted by model, clustered by location, and pu
 
 ```mermaid
 flowchart TB
-    subgraph browser["Browser (localhost:5173 dev / :8080 prod)"]
-        map["3D Village + 2D Map"]
-        feed[Live Event Feed]
-        panels[Agent Panels]
-        controls[Control Panel]
+    subgraph browser["🖥️ Browser — :5173 dev / :8080 prod"]
+        direction LR
+        views["3D Village · 2D Map<br/>Live Feed · Agent Panels"]
+        controls["Control Panel"]
     end
 
-    subgraph backend["Backend — FastAPI (localhost:8000)"]
+    subgraph backend["⚙️ Backend — FastAPI :8000"]
         direction TB
-        subgraph core["Sim Core"]
-            engine[Tick Loop & Scheduler]
-            runtime[Agent Runtime\ncontext assembly · action parse]
-            db[(SQLite\nPersistence)]
-        end
-        subgraph api["API Surface"]
-            rest[REST /api/...]
-            ws[WebSocket /ws]
-        end
-        router[Provider Router]
+        api["REST /api · WebSocket /ws"]
+        engine["Tick Loop & Scheduler"]
+        runtime["Agent Runtime<br/>context assembly · parse + validate"]
+        router["Provider Router<br/>pluggable, per-agent adapters"]
+        db[("SQLite<br/>agents · events · rules · snapshots")]
     end
 
-    subgraph providers["Model Providers"]
-        freellm([FreeLLMAPI\nOpenAI-compatible proxy])
-        ollama([Ollama\nlocalhost:11434])
-        anthropic([Anthropic\nMessages API])
-        gemini([Gemini\ngenerateContent])
-        mock([Mock\nno network])
+    subgraph providers["🧠 Model Providers — hot-swappable per agent"]
+        direction TB
+        openai(["FreeLLMAPI / Ollama · OpenAI-compatible"])
+        anthropic(["Anthropic · Messages API"])
+        gemini(["Gemini · generateContent"])
+        mock(["Mock · no network"])
     end
 
-    cfg[/"config/\nprofiles.yaml\nworld.yaml"/]
+    cfg[/"config/<br/>profiles.yaml · world.yaml"/]
 
-    controls -- "POST /api/control/\nPOST /api/agents" --> rest
-    panels -- "GET /api/state\nGET /api/profiles" --> rest
-    ws -- "events stream" --> feed
-    ws -- "world_state" --> map
+    controls -->|"POST /api/control · /api/agents"| api
+    views -->|"GET /api/state · /api/profiles"| api
+    api ==>|"world_state · events"| views
+    cfg -.->|"EM_CONFIG_DIR"| router
 
-    rest --> engine
-    engine --> runtime
-    runtime --> router
-    router --> db
+    api --> engine --> runtime --> router
     engine --> db
-    engine -.-> ws
-
-    router -- "openai adapter" --> freellm
-    router -- "openai adapter" --> ollama
-    router -- "anthropic adapter" --> anthropic
-    router -- "gemini adapter" --> gemini
-    router -- "mock adapter" --> mock
-
-    cfg -- "EM_CONFIG_DIR" --> router
+    runtime --> db
+    router --> openai & anthropic & gemini & mock
 
     classDef ui fill:#2c3e6b,stroke:#1a2540,color:#fff
     classDef core fill:#1a5276,stroke:#0e3352,color:#fff
-    classDef apiSurface fill:#1e6b4a,stroke:#114432,color:#fff
     classDef routerNode fill:#6b3a1f,stroke:#4a2515,color:#fff
     classDef provider fill:#4a235a,stroke:#2d1538,color:#fff
     classDef configFile fill:#5a5a1a,stroke:#3a3a10,color:#fff
     classDef dbNode fill:#5a3010,stroke:#3a1e08,color:#fff
 
-    class map,feed,panels,controls ui
-    class engine,runtime core
-    class rest,ws apiSurface
+    class views,controls ui
+    class api,engine,runtime core
     class router routerNode
-    class freellm,ollama,anthropic,gemini,mock provider
+    class openai,anthropic,gemini,mock provider
     class cfg configFile
     class db dbNode
 ```
@@ -111,8 +95,8 @@ flowchart TB
 
 ```bash
 # 1. Clone and enter the repo
-git clone <repo-url> EmergenceMadness
-cd EmergenceMadness
+git clone <repo-url> petri-dish-of-madness
+cd petri-dish-of-madness
 
 # 2. Copy the env template
 cp .env.example .env
@@ -219,7 +203,7 @@ the **backend** entirely offline, point the agents at `mock` in one of these way
   and click **Start**; or
 - **Reassign live in the UI** — open each agent's panel and choose **Reassign Model → mock**
   (takes effect on its next turn); or
-- **Headless** — from the repo root: `.venv/bin/python -m emergence.run --ticks 50 --profile mock`
+- **Headless** — from the repo root: `.venv/bin/python -m petridish.run --ticks 50 --profile mock`
   (no frontend; prints events to the console, remaps every agent to `mock`).
 
 > Note: simply opening the frontend with **no backend running** also shows a scripted mock
@@ -248,7 +232,7 @@ For Docker-based Ollama:
 ```bash
 docker compose --profile ollama up
 # Then pull a model inside the container:
-docker exec emergence-ollama ollama pull llama3.2
+docker exec petridish-ollama ollama pull llama3.2
 ```
 
 ---
@@ -308,9 +292,9 @@ docker compose down
 ## Project layout
 
 ```
-EmergenceMadness/
-├── backend/              # Python package `emergence` — engine, providers, API
-│   ├── emergence/
+petri-dish-of-madness/
+├── backend/              # Python package `petridish` — engine, providers, API
+│   ├── petridish/
 │   │   ├── engine/       # tick loop, world state, scheduler
 │   │   ├── agents/       # context assembly, action parsing
 │   │   ├── providers/    # router + openai/anthropic/gemini/mock adapters

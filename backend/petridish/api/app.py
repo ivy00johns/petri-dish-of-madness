@@ -125,7 +125,7 @@ async def lifespan(app: FastAPI):
     # Inject world reference into mock providers for dynamic voting
     _router.inject_world(_world)
 
-    log.info("EmergenceMadness backend started (tick_interval=%.2fs)",
+    log.info("PetriDishOfMadness backend started (tick_interval=%.2fs)",
              _config.world.tick_interval_seconds)
     yield
 
@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI):
 # FastAPI app
 # ──────────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="EmergenceMadness API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="PetriDishOfMadness API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

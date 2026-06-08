@@ -2,7 +2,7 @@
 
 **Branch:** `build/emergence-madness-3d` · **Date:** 2026-06-08 · **Build model:** orchestrator (ultracode / Workflow mode)
 
-This increment turns EmergenceMadness from a 2D spectator map into a **cozy 3D village you
+This increment turns PetriDishOfMadness from a 2D spectator map into a **cozy 3D village you
 watch live**, and closes out **EM-048** — the project's marquee goal — by running 3 agents on
 3 different models through FreeLLMAPI for well over 5 minutes.
 
@@ -25,7 +25,7 @@ no external assets), now the default center view with a one-click toggle back to
 - `ChatBubble.tsx` — billboarded speech bubbles spawned from live `agent_speech` events
   (seq-keyed, baseline-guarded so the backlog doesn't flood), pop-in/fade-out; whispers dimmer.
 
-### "Which model actually answered" (backend) — `backend/emergence/`
+### "Which model actually answered" (backend) — `backend/petridish/`
 FreeLLMAPI is a *best-available router* that frequently serves a request from a different
 provider than requested. We surface the truth:
 - `adapters.py` captures the `X-Routed-Via` response header (fallback: body `model` → requested id).

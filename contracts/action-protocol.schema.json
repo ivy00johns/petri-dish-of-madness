@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "emergence-madness/action-protocol/v1.0.0",
+  "$id": "petri-dish-of-madness/action-protocol/v1.0.0",
   "title": "Agent Action",
   "description": "The strict JSON object an agent's model must return each turn. Parsed from the model's text output (first valid JSON object). On parse/validation failure: one retry with the error appended; second failure -> idle.",
   "type": "object",

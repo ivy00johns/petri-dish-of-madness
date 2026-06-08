@@ -1,8 +1,8 @@
-# EmergenceMadness — Build Plan
+# PetriDishOfMadness — Build Plan
 
 Strategic roadmap. **Where are we going, and what have we finished?**
 Tactical detail (individual items) lives in `docs/REMAINING-WORK.md`.
-The approved design is frozen at `docs/superpowers/specs/2026-05-26-emergence-madness-design.md`.
+The approved design is frozen at `docs/superpowers/specs/2026-05-26-petridish-of-madness-design.md`.
 
 Build model: **contract-first, parallel multi-agent** (orchestrator). Contracts authored
 in W0 before any implementation agent is spawned. A QE gate closes every wave.

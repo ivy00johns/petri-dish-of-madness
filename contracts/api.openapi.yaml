@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: EmergenceMadness Control API
+  title: PetriDishOfMadness Control API
   version: 1.0.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws

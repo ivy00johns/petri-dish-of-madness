@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# dev — One-command local development launcher for EmergenceMadness.
+# dev — One-command local development launcher for PetriDishOfMadness.
 #
 # Starts:
-#   • Backend  — uvicorn emergence.api.app:app --host 0.0.0.0 --port 8000
+#   • Backend  — uvicorn petridish.api.app:app --host 0.0.0.0 --port 8000
 #                (runs from backend/, uses EM_CONFIG_DIR=./config)
 #   • Frontend — vite dev server on port 5173
 #                (runs from web/)
 #
 # Prerequisites:
-#   • Python 3.11+ with the emergence package installed (pip install -e backend)
+#   • Python 3.11+ with the petridish package installed (pip install -e backend)
 #   • Node 18+ with web/ deps installed (cd web && npm install)
 #
 # Usage:
@@ -35,7 +35,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'EOF'
 Usage: ./dev [OPTIONS]
 
-Starts the EmergenceMadness backend and frontend together for local development.
+Starts the PetriDishOfMadness backend and frontend together for local development.
 
   --backend-only    Start only the backend (uvicorn)
   --frontend-only   Start only the frontend (vite)
@@ -80,8 +80,8 @@ fi
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
 check_backend() {
-  if ! python -c "import emergence" &>/dev/null; then
-    err "Python package 'emergence' not found."
+  if ! python -c "import petridish" &>/dev/null; then
+    err "Python package 'petridish' not found."
     err "Set up a virtualenv (needs Python 3.11+) and install the backend:"
     err "  python3.12 -m venv .venv && source .venv/bin/activate"
     err "  pip install -e ${REPO_ROOT}/backend"
@@ -152,7 +152,7 @@ start_backend() {
   info "Starting backend on http://localhost:8000 …"
   (
     cd "${REPO_ROOT}/backend"
-    uvicorn emergence.api.app:app --host 0.0.0.0 --port 8000 --reload 2>&1
+    uvicorn petridish.api.app:app --host 0.0.0.0 --port 8000 --reload 2>&1
   ) | prefix_stream "backend" "${RED}" &
   PIDS+=($!)
 }
@@ -178,7 +178,7 @@ else
   start_frontend
 fi
 
-ok "EmergenceMadness running. Press Ctrl-C to stop."
+ok "PetriDishOfMadness running. Press Ctrl-C to stop."
 echo ""
 printf "  ${GREEN}Frontend:${RESET} http://localhost:5173\n"
 printf "  ${RED}Backend: ${RESET} http://localhost:8000\n"

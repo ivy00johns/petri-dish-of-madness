@@ -29,7 +29,7 @@ def client():
     os.environ.pop("EM_CONFIG_DIR", None)
 
     # Import app after env is clean
-    from emergence.api.app import app
+    from petridish.api.app import app
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
 

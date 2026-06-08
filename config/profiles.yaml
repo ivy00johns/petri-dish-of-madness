@@ -1,4 +1,4 @@
-# config/profiles.yaml — Model profile registry for EmergenceMadness
+# config/profiles.yaml — Model profile registry for PetriDishOfMadness
 # Each profile defines an adapter + endpoint + model.
 # Secrets are referenced by env-var name (api_key_env), never stored here.
 # ${VAR:-default} interpolation is supported for base_url and model_id.

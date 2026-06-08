@@ -1,5 +1,5 @@
-# Mission skill manifest — EmergenceMadness v1
-Source: docs/superpowers/specs/2026-05-26-emergence-madness-design.md + BUILD-PLAN.md · Scanned: 2026-05-26
+# Mission skill manifest — PetriDishOfMadness v1
+Source: docs/superpowers/specs/2026-05-26-petridish-of-madness-design.md + BUILD-PLAN.md · Scanned: 2026-05-26
 
 Goal (this build): a runnable world with **≥2 different models for ≥5 minutes** on the free token layer (FreeLLMAPI), verified end-to-end. MockProvider verifies the engine with zero tokens; live run uses user's FreeLLMAPI token.
 
