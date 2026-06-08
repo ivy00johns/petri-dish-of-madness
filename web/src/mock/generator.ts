@@ -64,6 +64,8 @@ function nextSeq() { return ++seq; }
 const EVENT_TEMPLATES: Array<{
   kind: EventKind;
   text: (actor: Agent, target?: Agent) => string;
+  /** Raw spoken line for agent_speech — drives the 3D chat bubble (payload.said). */
+  said?: (actor: Agent, target?: Agent) => string;
   thought?: (actor: Agent) => string;
   applyEffect: (actor: Agent, target?: Agent, state?: { agents: Agent[] }) => void;
 }> = [
@@ -75,7 +77,20 @@ const EVENT_TEMPLATES: Array<{
   },
   {
     kind: 'agent_speech',
-    text: (a, _t) => `${a.name} says: "The rules here are chaos. We need order."`,
+    text: a => `${a.name} says: "The rules here are chaos. We need order."`,
+    said: () => 'The rules here are chaos. We need order.',
+    applyEffect: () => {},
+  },
+  {
+    kind: 'agent_speech',
+    text: a => `${a.name} says: "Anyone want to trade? I've credits to spare."`,
+    said: () => "Anyone want to trade? I've credits to spare.",
+    applyEffect: () => {},
+  },
+  {
+    kind: 'agent_speech',
+    text: (a, t) => `${a.name} says: "Good day, ${t?.name ?? 'neighbour'}! How fares the village?"`,
+    said: (_a, t) => `Good day, ${t?.name ?? 'neighbour'}! How fares the village?`,
     applyEffect: () => {},
   },
   {
@@ -278,7 +293,9 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     profile_color: actor.profile_color,
     text: template.text(actor, target),
     thought: template.thought ? template.thought(actor) : undefined,
-    payload: {},
+    payload: template.said
+      ? { said: template.said(actor, target), private: false }
+      : {},
     ts: new Date().toISOString(),
   };
 

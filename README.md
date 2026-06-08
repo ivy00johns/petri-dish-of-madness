@@ -6,12 +6,27 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 
 ---
 
+## Screenshots
+
+**The Village (3D)** — three villagers (Ada · Bram · Cleo), each requesting a different model
+through FreeLLMAPI, chatting live in the plaza. The feed streams every action; the chips above
+it filter by category.
+
+![EmergenceMadness — the cozy 3D village with three models chatting live](docs/screenshots/village-3d.png)
+
+**World Map (2D)** — the same world, top-down and far lighter on the GPU. Toggle between the two
+from the panel header. Agents are tinted by model, clustered by location, and pulse when they speak.
+
+![EmergenceMadness — the 2D world map](docs/screenshots/world-map-2d.png)
+
+---
+
 ## Architecture
 
 ```mermaid
 flowchart TB
     subgraph browser["Browser (localhost:5173 dev / :8080 prod)"]
-        map[2D Canvas Map]
+        map["3D Village + 2D Map"]
         feed[Live Event Feed]
         panels[Agent Panels]
         controls[Control Panel]
@@ -86,7 +101,7 @@ flowchart TB
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| Python | 3.11+ | For local dev without Docker |
+| Python | 3.11+ | Local dev without Docker — installed into a project-local `.venv` |
 | Node.js | 18+ | For local dev without Docker |
 | Docker + Compose | v2.x | For `make up` / `docker compose up` |
 
@@ -102,15 +117,26 @@ cd EmergenceMadness
 # 2. Copy the env template
 cp .env.example .env
 
-# 3. Install dependencies
-pip install -e backend
-cd web && npm install && cd ..
+# 3. Install dependencies (backend into a local .venv + web deps)
+make install
+#    └─ equivalent to the manual steps:
+#       python3.12 -m venv .venv && source .venv/bin/activate
+#       pip install -e backend
+#       cd web && npm install && cd ..
 
 # 4. Start both backend + frontend
 ./dev
 ```
 
-Open **http://localhost:5173** — the cozy 3D village and live feed load immediately in mock mode (no API keys required). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the legacy 2D **WORLD MAP**.
+`./dev` auto-activates `.venv` if it exists, so you don't have to keep it activated yourself.
+
+Open **http://localhost:5173** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and use the filter chips above the feed to mute/focus event categories.
+
+> **macOS / Homebrew note:** bare `pip install -e backend` often fails with either
+> `requires a different Python: 3.10.x not in '>=3.11'` (a too-old Homebrew Python is
+> first on your `PATH`) or `error: externally-managed-environment` (PEP 668). Both are
+> solved by the local virtualenv above — that's exactly what `make install` creates. Pick
+> the interpreter explicitly if `python3.12` isn't present: `make install PYTHON=python3.13`.
 
 ---
 
@@ -165,23 +191,41 @@ Open **http://localhost:5173** and click **Start**. The 3D village comes alive:
   energy, credits, mood, and the **model that actually answered** its last turn.
 - Speech appears as chat bubbles above villagers and streams in the live feed.
 - Live-reassign any agent's model from its panel — it takes effect on the next turn.
+- Filter the live feed with the category chips (click to mute, shift-click to focus) —
+  e.g. mute **⚠ Errors** or focus **◉ Chat**.
 
 Runs comfortably past 5 minutes with all 3 alive (they recharge to survive); expect emergent
 gossip, alliances, the occasional theft, and passed rules.
+
+**Troubleshooting the live run**
+
+- **Every agent shows `idle fallback` with a `401: Invalid API key` (or, on older builds,
+  `Illegal header value b'Bearer '`)** — `FREELLMAPI_KEY` is missing or wrong. `.env` is read
+  **once at startup**, so if you add or change the key while `./dev` is running, **stop it
+  (Ctrl-C) and re-run `./dev`** — the live process won't pick up the new value otherwise.
+- **`Connection refused` to `:3001`** — the FreeLLMAPI proxy isn't running (or
+  `FREELLMAPI_BASE_URL` is wrong). Start the proxy and confirm with
+  `curl -s $FREELLMAPI_BASE_URL/models -H "Authorization: Bearer $FREELLMAPI_KEY"`.
 
 ---
 
 ## Run with zero tokens (mock profile)
 
-No API key, no network — fully deterministic scripted responses.
+No API key, no network — fully deterministic scripted responses via the built-in `mock`
+profile. The default world assigns the three villagers to FreeLLMAPI profiles, so to run
+the **backend** entirely offline, point the agents at `mock` in one of these ways:
 
-```bash
-# Leave FREELLMAPI_KEY blank in .env (or omit .env entirely)
-./dev
-# Open http://localhost:5173 → Start
-```
+- **Edit `config/world.yaml`** — set `profile: mock` for Ada, Bram, and Cleo, then `./dev`
+  and click **Start**; or
+- **Reassign live in the UI** — open each agent's panel and choose **Reassign Model → mock**
+  (takes effect on its next turn); or
+- **Headless** — from the repo root: `.venv/bin/python -m emergence.run --ticks 50 --profile mock`
+  (no frontend; prints events to the console, remaps every agent to `mock`).
 
-To assign an agent to the mock profile, use the **Reassign Model** control in the agent panel, or edit `config/world.yaml` to set any agent's `profile: mock` before starting.
+> Note: simply opening the frontend with **no backend running** also shows a scripted mock
+> preview (the UI animates itself). But `./dev` starts the real backend, which uses each
+> agent's configured profile — so for an offline *backend* run you must select the `mock`
+> profile as above.
 
 ---
 
@@ -303,7 +347,7 @@ See `config/profiles.yaml` for the commented Ollama profile example and inline d
 
 ```bash
 make dev          # Start backend + frontend (same as ./dev)
-make install      # pip install -e backend + cd web && npm install
+make install      # Create .venv (Python 3.11+) + pip install -e backend + npm install
 make up           # docker compose up --build
 make down         # docker compose down
 make validate     # Validate docker-compose config, YAML, and dev script syntax

@@ -81,10 +81,15 @@ class OpenAICompatibleAdapter:
         temperature: float,
     ) -> str:
         url = f"{self._base_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
+        headers = {"Content-Type": "application/json"}
+        # Only send the bearer token when we actually have one. An empty/whitespace
+        # key would produce "Authorization: Bearer " — which httpx rejects with a
+        # cryptic "Illegal header value". Omitting the header instead lets keyless
+        # servers (e.g. Ollama) work and lets auth-required proxies (FreeLLMAPI)
+        # return a clear 401 ProviderError rather than crashing client-side.
+        api_key = (self._api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         payload = {
             "model": self._model_id,
             "messages": messages,

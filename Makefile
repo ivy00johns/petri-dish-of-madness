@@ -2,7 +2,16 @@
 # See README.md for the full quickstart guide.
 
 .PHONY: help dev up down build install install-backend install-frontend \
-        lint test validate
+        lint test validate venv
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Interpreter used to create the project virtualenv. Must be Python 3.11+.
+# Bare `python`/`pip` on macOS often point at the wrong (or externally-managed)
+# Homebrew Python, so the backend always installs into a repo-local .venv.
+# Override on the CLI, e.g.  make install PYTHON=python3.13
+PYTHON  ?= python3.12
+VENV    := .venv
+VENV_PY := $(CURDIR)/$(VENV)/bin/python
 
 # ── Default target ────────────────────────────────────────────────────────────
 help:
@@ -11,8 +20,8 @@ help:
 	@echo ""
 	@echo "  Local dev (no Docker):"
 	@echo "    make dev              Start backend + frontend together (same as ./dev)"
-	@echo "    make install          Install Python pkg + Node deps"
-	@echo "    make install-backend  pip install -e backend"
+	@echo "    make install          Create .venv + install Python pkg + Node deps"
+	@echo "    make install-backend  Create .venv (Python 3.11+) + pip install -e backend"
 	@echo "    make install-frontend cd web && npm install"
 	@echo ""
 	@echo "  Docker:"
@@ -31,8 +40,14 @@ dev:
 
 install: install-backend install-frontend
 
-install-backend:
-	pip install -e backend
+# Create the virtualenv on demand (only when it doesn't already exist).
+venv: $(VENV_PY)
+$(VENV_PY):
+	$(PYTHON) -m venv $(VENV)
+	$(VENV_PY) -m pip install --upgrade pip
+
+install-backend: $(VENV_PY)
+	$(VENV_PY) -m pip install -e backend
 
 install-frontend:
 	cd web && npm install
@@ -55,9 +70,9 @@ validate:
 	bash -n ./dev && echo "  OK (bash)"
 	zsh -n ./dev && echo "  OK (zsh)"
 	@echo "==> YAML: config/profiles.yaml"
-	python -c "import yaml,sys; yaml.safe_load(open('config/profiles.yaml'))" && echo "  OK"
+	$(VENV_PY) -c "import yaml,sys; yaml.safe_load(open('config/profiles.yaml'))" && echo "  OK"
 	@echo "==> YAML: config/world.yaml"
-	python -c "import yaml,sys; yaml.safe_load(open('config/world.yaml'))" && echo "  OK"
+	$(VENV_PY) -c "import yaml,sys; yaml.safe_load(open('config/world.yaml'))" && echo "  OK"
 
 test:
-	cd backend && python -m pytest
+	cd backend && $(VENV_PY) -m pytest

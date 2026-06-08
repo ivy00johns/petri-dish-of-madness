@@ -2,9 +2,13 @@
  * EventFeed — live terminal-style event log.
  * Newest entries on top. Left-bordered with profile_color.
  * agent_action entries show thought on hover.
+ *
+ * Filtering: events are bucketed into categories; each can be muted via the
+ * filter bar (persisted to localStorage). Muting "Errors" hides the noisy
+ * parse_failure / idle-fallback lines.
  */
 
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import type { WorldEvent, EventKind } from '../../types';
 
 interface EventFeedProps {
@@ -44,6 +48,38 @@ const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   parse_failure:    '#ff9900',
   control:          '#5a5a72',
 };
+
+// ── Filter categories ─────────────────────────────────────────────────────────
+// Every EventKind maps to exactly one category so nothing is orphaned.
+interface FeedCategory {
+  key: string;
+  label: string;
+  icon: string;
+  kinds: EventKind[];
+}
+
+const CATEGORIES: FeedCategory[] = [
+  { key: 'chat',    label: 'Chat',    icon: '◉', kinds: ['agent_speech'] },
+  { key: 'actions', label: 'Actions', icon: '◆', kinds: ['agent_action', 'agent_moved'] },
+  { key: 'economy', label: 'Economy', icon: '¢', kinds: ['economy'] },
+  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'conflict', 'agent_died', 'agent_spawned'] },
+  { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory'] },
+  { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure'] },
+];
+
+const KIND_TO_CATEGORY: Partial<Record<EventKind, string>> = {};
+CATEGORIES.forEach((c) => c.kinds.forEach((k) => { KIND_TO_CATEGORY[k] = c.key; }));
+
+const STORAGE_KEY = 'em.feed.mutedCategories';
+
+function loadMuted(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return new Set(JSON.parse(raw) as string[]);
+  } catch { /* ignore */ }
+  return new Set();
+}
 
 function formatTime(ts: string | undefined): string {
   if (!ts) return '';
@@ -117,26 +153,109 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
   );
 }
 
+// How close to the top counts as "pinned to newest" (px).
+const TOP_THRESHOLD = 8;
+
 export function EventFeed({ events }: EventFeedProps) {
-  const [paused, setPaused] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const prevLengthRef = useRef(0);
+  const prevScrollHeightRef = useRef(0);
+  const highlightLenRef = useRef(0);
+  // Pinned to the top (newest) vs. scrolled down reading history. A ref so the
+  // layout effect reads the latest value without re-subscribing.
+  const pinnedRef = useRef(true);
   const newEventIdsRef = useRef<Set<number>>(new Set());
 
-  // Track new events
+  const [scrolledAway, setScrolledAway] = useState(false);
+  const [unseen, setUnseen] = useState(0);
+  const [muted, setMuted] = useState<Set<string>>(loadMuted);
+
+  // Persist muted categories.
   useEffect(() => {
-    if (events.length > prevLengthRef.current) {
-      const newCount = events.length - prevLengthRef.current;
-      // The first newCount events are new (newest-first)
-      const newIds = new Set(events.slice(0, newCount).map(e => e.seq));
-      newEventIdsRef.current = newIds;
-      // Clear after animation completes
-      setTimeout(() => {
-        newEventIdsRef.current = new Set();
-      }, 300);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify([...muted])); } catch { /* ignore */ }
+  }, [muted]);
+
+  // Apply category filter. Unmapped kinds (none, by construction) stay visible.
+  const visibleEvents = useMemo(
+    () => (muted.size === 0
+      ? events
+      : events.filter((e) => !muted.has(KIND_TO_CATEGORY[e.kind] ?? ''))),
+    [events, muted],
+  );
+
+  // Highlight freshly-arrived entries briefly. Tracked with its own length ref so
+  // it stays independent of the scroll effect's bookkeeping.
+  useEffect(() => {
+    if (visibleEvents.length > highlightLenRef.current) {
+      const added = visibleEvents.length - highlightLenRef.current;
+      newEventIdsRef.current = new Set(visibleEvents.slice(0, added).map((e) => e.seq));
+      highlightLenRef.current = visibleEvents.length;
+      const t = setTimeout(() => { newEventIdsRef.current = new Set(); }, 300);
+      return () => clearTimeout(t);
     }
-    prevLengthRef.current = events.length;
-  }, [events]);
+    highlightLenRef.current = visibleEvents.length;
+  }, [visibleEvents]);
+
+  // Newest entries are prepended at the top. Preserve the reader's position:
+  //  • Pinned to top → stay pinned to the newest entry.
+  //  • Scrolled down → offset scrollTop by the height of the inserted content
+  //    so the entries being read stay put, and count them as "unseen".
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const added = visibleEvents.length - prevLengthRef.current;
+
+    if (pinnedRef.current) {
+      el.scrollTop = 0;
+    } else if (added > 0) {
+      const delta = el.scrollHeight - prevScrollHeightRef.current;
+      if (delta > 0) el.scrollTop += delta;
+      setUnseen((c) => c + added);
+    }
+
+    prevScrollHeightRef.current = el.scrollHeight;
+    prevLengthRef.current = visibleEvents.length;
+  }, [visibleEvents]);
+
+  const handleScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    const atTop = el.scrollTop <= TOP_THRESHOLD;
+    pinnedRef.current = atTop;
+    setScrolledAway(!atTop);
+    if (atTop) setUnseen(0);
+  };
+
+  const jumpToNewest = () => {
+    const el = listRef.current;
+    if (!el) return;
+    pinnedRef.current = true;
+    setScrolledAway(false);
+    setUnseen(0);
+    el.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const toggleCategory = (key: string) => {
+    setMuted((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+    // A filter change re-pins to newest so the list doesn't jump unpredictably.
+    pinnedRef.current = true;
+    setScrolledAway(false);
+    setUnseen(0);
+  };
+
+  // Shift-click a chip to "solo" it: mute everything else.
+  const soloCategory = (key: string) => {
+    setMuted(new Set(CATEGORIES.map((c) => c.key).filter((k) => k !== key)));
+    pinnedRef.current = true;
+    setScrolledAway(false);
+    setUnseen(0);
+  };
+
+  const hiddenCount = events.length - visibleEvents.length;
 
   return (
     <div className="flex flex-col h-full">
@@ -145,41 +264,89 @@ export function EventFeed({ events }: EventFeedProps) {
         <span>EVENT STREAM</span>
         <div className="flex items-center gap-2">
           <span className="text-lab-muted text-[10px]">
-            {events.length > 0 ? `${events.length} events` : 'NO EVENTS'}
+            {events.length === 0
+              ? 'NO EVENTS'
+              : hiddenCount > 0
+                ? `${visibleEvents.length}/${events.length}`
+                : `${events.length} events`}
           </span>
-          <button
-            className={`font-mono text-[10px] px-1.5 py-0.5 border transition-colors duration-150 cursor-pointer
-                        ${paused
-                          ? 'border-lab-acid text-lab-acid'
-                          : 'border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid'
-                        }`}
-            onClick={() => setPaused(p => !p)}
-            title={paused ? 'Resume auto-scroll' : 'Pause auto-scroll'}
+          <span
+            className={`font-mono text-[10px] px-1.5 py-0.5 border
+                        ${scrolledAway
+                          ? 'border-lab-border text-lab-muted'
+                          : 'border-lab-acid text-lab-acid'}`}
+            title={scrolledAway ? 'Scrolled — newest entries are paused above' : 'Pinned to newest'}
           >
-            {paused ? 'PAUSED' : 'LIVE'}
-          </button>
+            {scrolledAway ? 'PAUSED' : 'LIVE'}
+          </span>
         </div>
       </div>
 
+      {/* Filter bar — click to mute/unmute a category, shift-click to focus one */}
+      <div className="flex flex-wrap items-center gap-1 px-2 py-1 border-b border-lab-border/40 bg-lab-chrome/20">
+        {CATEGORIES.map((cat) => {
+          const isMuted = muted.has(cat.key);
+          return (
+            <button
+              key={cat.key}
+              onClick={(e) => (e.shiftKey ? soloCategory(cat.key) : toggleCategory(cat.key))}
+              title={isMuted ? `Show ${cat.label} (shift-click: focus)` : `Mute ${cat.label} (shift-click: focus)`}
+              className={`font-mono text-[10px] px-1.5 py-0.5 rounded-sm border cursor-pointer transition-colors duration-100
+                          ${isMuted
+                            ? 'border-lab-border/40 text-lab-dim opacity-50 line-through'
+                            : 'border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid'}`}
+            >
+              <span aria-hidden="true">{cat.icon}</span> {cat.label}
+            </button>
+          );
+        })}
+        {muted.size > 0 && (
+          <button
+            onClick={() => { setMuted(new Set()); pinnedRef.current = true; setScrolledAway(false); setUnseen(0); }}
+            title="Show all categories"
+            className="font-mono text-[10px] px-1.5 py-0.5 rounded-sm border border-lab-acid/60
+                       text-lab-acid hover:bg-lab-acid/15 cursor-pointer transition-colors duration-100"
+          >
+            ✕ clear
+          </button>
+        )}
+      </div>
+
       {/* Feed list */}
-      <div
-        ref={listRef}
-        className="flex-1 overflow-y-auto"
-        onMouseEnter={() => setPaused(true)}
-        onMouseLeave={() => setPaused(false)}
-      >
-        {events.length === 0 ? (
-          <div className="flex items-center justify-center h-16 font-mono text-xs text-lab-dim">
-            WAITING FOR EVENTS…
-          </div>
-        ) : (
-          events.map((event) => (
-            <FeedEntry
-              key={event.seq}
-              event={event}
-              isNew={newEventIdsRef.current.has(event.seq)}
-            />
-          ))
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={listRef}
+          onScroll={handleScroll}
+          className="absolute inset-0 overflow-y-auto"
+        >
+          {visibleEvents.length === 0 ? (
+            <div className="flex items-center justify-center h-16 font-mono text-xs text-lab-dim text-center px-4">
+              {events.length === 0
+                ? 'WAITING FOR EVENTS…'
+                : 'ALL CATEGORIES MUTED — click a filter to show events'}
+            </div>
+          ) : (
+            visibleEvents.map((event) => (
+              <FeedEntry
+                key={event.seq}
+                event={event}
+                isNew={newEventIdsRef.current.has(event.seq)}
+              />
+            ))
+          )}
+        </div>
+
+        {/* Jump-to-newest pill — only while scrolled away from the top */}
+        {scrolledAway && (
+          <button
+            onClick={jumpToNewest}
+            className="absolute top-2 left-1/2 -translate-x-1/2 z-10 cursor-pointer
+                       font-mono text-[10px] px-2 py-1 rounded-full
+                       bg-lab-chrome border border-lab-acid text-lab-acid
+                       shadow-lg hover:bg-lab-acid/20 transition-colors duration-150"
+          >
+            ↑ {unseen > 0 ? `${unseen} new` : 'newest'}
+          </button>
         )}
       </div>
     </div>

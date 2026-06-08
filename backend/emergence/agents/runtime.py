@@ -57,35 +57,104 @@ IDLE_ACTION = {"action": "idle", "args": {}}
 # JSON extraction
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _extract_first_json(text: str) -> dict | None:
-    """Extract the first complete JSON object from model text output."""
-    # Try direct parse first (model may return clean JSON)
-    text = text.strip()
-    if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+def _strip_code_fences(text: str) -> str:
+    """Remove a surrounding markdown code fence (```json … ``` or ``` … ```)."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9]*\s*", "", t)
+        t = re.sub(r"\s*```\s*$", "", t)
+    return t.strip()
 
-    # Find first { … } block (handles models that wrap JSON in prose)
-    depth = 0
-    start = None
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if start is None:
-                start = i
-            depth += 1
-        elif ch == "}" and start is not None:
-            depth -= 1
-            if depth == 0:
-                candidate = text[start:i + 1]
+
+def _repair_truncated(frag: str) -> dict | None:
+    """Best-effort parse of a JSON object that was cut off mid-output.
+
+    Free models routed through the proxy often run out of tokens partway
+    through (typically inside a trailing string value). We close any open
+    string, drop a dangling trailing comma/colon, and balance the open
+    braces/brackets, then try to parse. Returns None if still unparseable.
+    """
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for ch in frag:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+
+    repaired = frag
+    if in_str:
+        repaired += '"'                       # close a dangling string
+    repaired = re.sub(r"[,:]\s*$", "", repaired.rstrip())  # drop trailing , or :
+    for opener in reversed(stack):
+        repaired += "}" if opener == "{" else "]"
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_first_json(text: str) -> dict | None:
+    """Extract the first JSON object from model output.
+
+    Tolerant of the ways free models deviate from "JSON only": markdown code
+    fences, prose preambles, and responses truncated mid-object.
+    """
+    text = _strip_code_fences(text)
+    if not text:
+        return None
+
+    # Clean JSON (possibly with trailing prose) — try a direct parse first.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    if start == -1:
+        return None
+    frag = text[start:]
+
+    # String-aware scan for the first *complete* balanced object.
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for i, ch in enumerate(frag):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
                 try:
-                    return json.loads(candidate)
+                    return json.loads(frag[:i + 1])
                 except json.JSONDecodeError:
-                    # Keep searching
-                    start = None
-                    depth = 0
-    return None
+                    break  # malformed; fall through to repair
+
+    # No complete object (truncated) — best-effort repair.
+    return _repair_truncated(frag)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -272,10 +341,10 @@ Mood: {agent.mood}
 === VALID ACTIONS ===
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
-RESPOND WITH ONLY a JSON object (no prose, no markdown, no code fences):
-{{"thought": "brief private reasoning (max 500 chars)", "mood": "optional mood update", "action": "<verb>", "args": {{...}}}}
+RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
+{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence"}}
 
-The "action" field is required. "args" must match the action. If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
+The "action" field is required and must come first. "args" must match the action. If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
     return [{"role": "system", "content": system_prompt}]
 

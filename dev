@@ -68,12 +68,24 @@ fi
 # EM_CONFIG_DIR defaults to repo root config/
 export EM_CONFIG_DIR="${EM_CONFIG_DIR:-${REPO_ROOT}/config}"
 
+# ── Activate project virtualenv if present ────────────────────────────────────
+# Bare `python`/`uvicorn` on macOS often resolve to a Homebrew Python that is the
+# wrong version or externally-managed (PEP 668). Prefer a repo-local .venv so the
+# backend always runs against the interpreter it was installed into.
+if [[ -z "${VIRTUAL_ENV:-}" && -f "${REPO_ROOT}/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.venv/bin/activate"
+  info "Activated .venv ($(python --version 2>&1))"
+fi
+
 # ── Sanity checks ─────────────────────────────────────────────────────────────
 check_backend() {
   if ! python -c "import emergence" &>/dev/null; then
     err "Python package 'emergence' not found."
-    err "Run: pip install -e ${REPO_ROOT}/backend"
-    err "  (or: cd backend && pip install -e .)"
+    err "Set up a virtualenv (needs Python 3.11+) and install the backend:"
+    err "  python3.12 -m venv .venv && source .venv/bin/activate"
+    err "  pip install -e ${REPO_ROOT}/backend"
+    err "  (or just: make install-backend)"
     exit 1
   fi
 }
@@ -102,18 +114,23 @@ PIDS=()
 
 cleanup() {
   info "Shutting down…"
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-  # Give processes a moment to exit, then force-kill stragglers.
-  sleep 0.5
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-  done
+  # Guard the array expansions: under `set -u`, macOS bash 3.2 treats an empty
+  # "${PIDS[@]}" as an unbound variable and aborts (e.g. when a sanity check
+  # exits before any process started). ${#PIDS[@]} is always safe.
+  if [[ ${#PIDS[@]} -gt 0 ]]; then
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+      fi
+    done
+    # Give processes a moment to exit, then force-kill stragglers.
+    sleep 0.5
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
   ok "All processes stopped."
 }
 
@@ -168,4 +185,6 @@ printf "  ${RED}Backend: ${RESET} http://localhost:8000\n"
 echo ""
 
 # Wait for all background processes; exit when any one exits.
-wait "${PIDS[@]}"
+if [[ ${#PIDS[@]} -gt 0 ]]; then
+  wait "${PIDS[@]}"
+fi

@@ -15,7 +15,7 @@ profiles:
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY      # env var holding the bearer token (NOT the literal key)
     model_id: gemini-3.5-flash
-    max_tokens: 256
+    max_tokens: 512
     temperature: 0.8
     color: "#36c5a8"
 
@@ -24,7 +24,7 @@ profiles:
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
     model_id: qwen/qwen3-next-80b-a3b-instruct:free
-    max_tokens: 256
+    max_tokens: 512
     temperature: 0.8
     color: "#f5a623"
 
@@ -33,7 +33,7 @@ profiles:
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
     model_id: deepseek-ai/deepseek-v4-pro
-    max_tokens: 256
+    max_tokens: 512
     temperature: 0.8
     color: "#a86bd6"
 
