@@ -737,9 +737,16 @@ class AnimalRuntime:
         consequence, extra_event = self._apply(animal, action, args)
         is_chaotic = self._is_chaotic(action, args)
 
-        events.append(self._animal_action_event(
+        action_event = self._animal_action_event(
             animal, action, args, animal_thought, consequence, is_chaotic,
-        ))
+        )
+        if action == "wander":
+            # W11a / event-log.md v1.2.0 note 2: a MOVING animal_action carries
+            # the destination payload.place (animal.location post-_apply), making
+            # animal replay exact instead of ~-approximate. Additive — nothing
+            # else about the event changes; consumers keep their fallback.
+            action_event["payload"]["place"] = animal.location
+        events.append(action_event)
         if extra_event is not None:
             # The shared building-damage path's structure_state_changed event —
             # tag it as the animal's so the W7 transition surfaces in the feed.

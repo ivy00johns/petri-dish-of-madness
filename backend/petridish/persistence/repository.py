@@ -35,6 +35,7 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS runs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at    TEXT NOT NULL,
+  ended_at      TEXT,                                -- W11a EM-086: null while running
   config_json   TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'running'
 );
@@ -120,6 +121,7 @@ class SQLiteRepository:
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA wal_autocheckpoint = 1000")
         self._migrate_events_v1_1_0()
+        self._migrate_runs_v1_3_0()
         self._conn.commit()
 
     def _migrate_events_v1_1_0(self) -> None:
@@ -153,6 +155,14 @@ class SQLiteRepository:
             "CREATE INDEX IF NOT EXISTS idx_events_run_actor ON events(run_id, actor_id)"
         )
 
+    def _migrate_runs_v1_3_0(self) -> None:
+        """Idempotent runs-table upgrade for pre-W11a file DBs (EM-086): add
+        `ended_at` (null while running / for runs that crashed). Fresh DBs get
+        it from SCHEMA's CREATE; the guard skips them."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)")}
+        if "ended_at" not in cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN ended_at TEXT")
+
     def start_run(self, config_json: str) -> int:
         cur = self._conn.execute(
             "INSERT INTO runs (started_at, config_json) VALUES (?, ?)",
@@ -163,7 +173,8 @@ class SQLiteRepository:
 
     def end_run(self, run_id: int) -> None:
         self._conn.execute(
-            "UPDATE runs SET status='ended' WHERE id=?", (run_id,)
+            "UPDATE runs SET status='ended', ended_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), run_id),
         )
         self._conn.commit()
 
@@ -294,6 +305,70 @@ class SQLiteRepository:
             "payload": json.loads(payload_json or "{}"),
             "ts": ts,
         }
+
+    def run_exists(self, run_id: int) -> bool:
+        """True iff a run row with this id exists (W11a EM-086 — the REST layer
+        validates an explicit ?run_id before scoping any read to it)."""
+        row = self._conn.execute(
+            "SELECT 1 FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _config_summary(config_json: str | None) -> dict:
+        """Small projection of runs.config_json for RunRow.config_summary
+        (api.openapi.yaml v1.3.0): {agents: [{name, profile}], seed?} — NEVER
+        the full blob. Tolerant of legacy blobs (pre-W11a runs stored only
+        {"world": ...} with no agents key) and of malformed JSON."""
+        try:
+            cfg = json.loads(config_json or "{}")
+        except (TypeError, ValueError):
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        agents = []
+        for a in cfg.get("agents") or []:
+            if isinstance(a, dict):
+                agents.append({"name": a.get("name"), "profile": a.get("profile")})
+        summary: dict = {"agents": agents}
+        world = cfg.get("world")
+        seed = cfg.get("seed")
+        if seed is None and isinstance(world, dict):
+            seed = world.get("seed")
+        if seed is not None:
+            summary["seed"] = seed
+        return summary
+
+    def list_runs(self, active_run_id: int | None = None) -> list[dict]:
+        """All persisted runs, newest first, as RunRow dicts (W11a EM-086).
+
+        ONE query with LEFT JOIN aggregates (no N+1): max_tick = MAX(events.tick)
+        (0 when the run has no events), event_count = COUNT(*). `is_active` is
+        True ONLY for the run the live loop currently holds (`active_run_id`) —
+        NEVER inferred from the `status` column, which crashes/hot-reloads leave
+        'running' forever."""
+        cur = self._conn.execute(
+            """SELECT r.id, r.started_at, r.ended_at, r.status, r.config_json,
+                      COALESCE(MAX(e.tick), 0) AS max_tick,
+                      COUNT(e.seq)             AS event_count
+               FROM runs r
+               LEFT JOIN events e ON e.run_id = r.id
+               GROUP BY r.id
+               ORDER BY r.id DESC"""
+        )
+        out: list[dict] = []
+        for rid, started_at, ended_at, status, config_json, max_tick, count in cur.fetchall():
+            out.append({
+                "id": rid,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "status": status,
+                "is_active": active_run_id is not None and rid == active_run_id,
+                "max_tick": int(max_tick or 0),
+                "event_count": int(count or 0),
+                "config_summary": self._config_summary(config_json),
+            })
+        return out
 
     def get_events(
         self,

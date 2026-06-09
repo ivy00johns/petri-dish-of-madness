@@ -87,6 +87,17 @@ world:
     llm_chance: 0.6           # P(LLM decision) on an acted tick; else a reflex micro-behavior
     model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
 
+  # W11a / EM-094 — Narrator mode (event-log.md v1.2.0 note 1). DEFAULT OFF:
+  # zero cost, zero LLM calls. When enabled, at most once per every_n_ticks the
+  # loop makes ONE LLM call on model_profile (off the agents' critical path,
+  # same pattern as the animal cadence) recapping the last window of events as
+  # a single `narrator_summary` event. A failed/timed-out call emits nothing
+  # and is never retried — the tick loop never stalls on the narrator.
+  narrator:
+    enabled: false
+    every_n_ticks: 50
+    model_profile: gemini-flash  # cheapest free profile (FreeLLMAPI); never a paid lane
+
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
   - { species: dog, name: Biscuit, location: commons, personality: "Loyal, excitable, food-motivated, impulsive; chases anything that moves and means well even mid-disaster." }

@@ -214,6 +214,27 @@ class AnimalParams:
 
 
 @dataclass
+class NarratorParams:
+    """W11a / EM-094 — Narrator mode (config `world.narrator`).
+
+    DEFAULT OFF (`enabled=False`): zero cost, zero LLM calls. When enabled, the
+    tick loop makes at most ONE LLM call per `every_n_ticks` window (off the
+    agents' critical path, same pattern as the animal cadence) asking
+    `model_profile` for a 2–3 sentence recap of the window, emitted as ONE
+    `narrator_summary` event (event-log.md v1.2.0 note 1). A failed/timed-out
+    call emits nothing and is never retried.
+
+      enabled       — master toggle (default False = zero calls).
+      every_n_ticks — window size; at most one narrator call per window.
+      model_profile — the (cheap/free) profile the recap routes to; the loop
+                      skips the call entirely when it is unavailable.
+    """
+    enabled: bool = False
+    every_n_ticks: int = 50
+    model_profile: str = ""
+
+
+@dataclass
 class AnimalSeed:
     """W8 / EM-064 — a seed critter from the top-level `animals:` list. Spawned at
     world init when `world.animals.enabled`. `personality` is optional flavour fed
@@ -267,6 +288,9 @@ class WorldParams:
     # W8 — LLM-driven chaos animals. Additive; default-disabled so a world.yaml
     # without an `animals` block behaves exactly as before.
     animals: AnimalParams = field(default_factory=AnimalParams)
+    # W11a / EM-094 — Narrator mode. Additive; default-disabled (zero LLM calls)
+    # so a world.yaml without a `narrator` block behaves exactly as before.
+    narrator: NarratorParams = field(default_factory=NarratorParams)
 
 
 @dataclass
@@ -428,6 +452,20 @@ def _parse_animals(raw: dict | None) -> AnimalParams:
     )
 
 
+def _parse_narrator(raw: dict | None) -> NarratorParams:
+    """Parse the optional `world.narrator` block (W11a / EM-094). Absent/empty ->
+    disabled defaults (backward-compatible, zero LLM calls). `model_profile`
+    stays "" when unset; the loop then skips the narrator call entirely."""
+    if not isinstance(raw, dict):
+        return NarratorParams()
+    d = NarratorParams()
+    return NarratorParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        every_n_ticks=max(1, int(raw.get("every_n_ticks", d.every_n_ticks))),
+        model_profile=str(raw.get("model_profile", d.model_profile) or ""),
+    )
+
+
 def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
     """Parse the top-level `animals:` seed list (the cat & dog). Absent -> [].
     Each entry needs species + name; location defaults to the first place."""
@@ -479,6 +517,7 @@ def _parse_world(
         spawn=_parse_spawn(w.get("spawn")),
         cache=_parse_cache(w.get("cache")),
         animals=_parse_animals(w.get("animals")),
+        narrator=_parse_narrator(w.get("narrator")),
     )
 
     places = [

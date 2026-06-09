@@ -560,8 +560,34 @@ def _active_run_id() -> int | None:
     return _loop._run_id
 
 
+def _resolve_run_id(run_id: int | None) -> int | None:
+    """Effective run scope for a read endpoint (W11a EM-086, api v1.3.0).
+
+    Omitted (None) → the active run, byte-identical to pre-W11a behavior.
+    Provided → validated against the runs table (SELECT 1 FROM runs WHERE id=?);
+    an unknown id raises 404 {"detail": "unknown run"}. NEVER inferred from the
+    `status` column — liveness is the loop's _run_id, nothing else."""
+    if run_id is None:
+        return _active_run_id()
+    if _repo is None or not _repo.run_exists(run_id):
+        raise HTTPException(404, "unknown run")
+    return run_id
+
+
+@app.get("/api/runs")
+async def list_runs():
+    """List all persisted runs, newest first (W11a EM-086 — the run browser).
+    `is_active` is true ONLY for the run the live loop holds; `status` is
+    reported as stored but is unreliable for liveness (crashes/hot-reloads
+    leave dead runs 'running'). Empty-200 when no repo — never 500."""
+    if _repo is None:
+        return []
+    return _repo.list_runs(active_run_id=_active_run_id())
+
+
 @app.get("/api/events")
 async def get_events(
+    run_id: int | None = None,  # query param: scope to a past run (default: active run)
     from_tick: int | None = Query(default=None),
     to_tick: int | None = Query(default=None),
     kinds: str | None = Query(default=None, description="comma-separated kinds"),
@@ -571,7 +597,7 @@ async def get_events(
     limit: int | None = Query(default=None),
     order: str = Query(default="asc"),
 ):
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     kind_list = [k for k in kinds.split(",") if k] if kinds else None
@@ -589,16 +615,16 @@ async def get_events(
 
 
 @app.get("/api/turns/{turn_id}")
-async def get_turn_trace(turn_id: str):
-    run_id = _active_run_id()
+async def get_turn_trace(turn_id: str, run_id: int | None = None):
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_turn_trace(run_id, turn_id)
 
 
 @app.get("/api/rules/history")
-async def get_rule_history():
-    run_id = _active_run_id()
+async def get_rule_history(run_id: int | None = None):
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_rule_history(run_id)
@@ -606,11 +632,12 @@ async def get_rule_history():
 
 @app.get("/api/relationships")
 async def get_relationships(
+    run_id: int | None = None,
     agent_id: str | None = Query(default=None),
     from_tick: int | None = Query(default=None),
     to_tick: int | None = Query(default=None),
 ):
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_relationship_timeline(
@@ -619,15 +646,15 @@ async def get_relationships(
 
 
 @app.get("/api/snapshots")
-async def get_snapshots():
-    run_id = _active_run_id()
+async def get_snapshots(run_id: int | None = None):
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_snapshots(run_id)
 
 
 @app.get("/api/replay")
-async def get_replay(tick: int = Query(...)):
+async def get_replay(tick: int = Query(...), run_id: int | None = None):
     """Replay materials for tick T (api.openapi.yaml v1.2.0, audit B7).
 
     `events` contains ONLY the fold-forward delta: rows with
@@ -635,8 +662,13 @@ async def get_replay(tick: int = Query(...)):
     already includes all tick-base.tick events, per event-log.md v1.1.0 §3).
     If no snapshot exists, base is null and events cover 0 <= e.tick <= T.
     Clients fold `events` onto `base.state` without further filtering.
+
+    W11a EM-086: with an explicit ?run_id this serves a PAST run unchanged —
+    snapshots + events are both run-scoped, and world geometry (places) comes
+    from base.state (that run's snapshot state_json), never the live-owned
+    `places` table (which the active run rewrites via INSERT OR REPLACE).
     """
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return {"base": None, "events": []}
     base = _repo.nearest_snapshot(run_id, tick)
@@ -647,10 +679,11 @@ async def get_replay(tick: int = Query(...)):
 
 @app.get("/api/analytics")
 async def get_analytics(
+    run_id: int | None = None,
     from_tick: int | None = Query(default=None),
     to_tick: int | None = Query(default=None),
 ):
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return {}
     return _repo.get_analytics(run_id, from_tick=from_tick, to_tick=to_tick)
