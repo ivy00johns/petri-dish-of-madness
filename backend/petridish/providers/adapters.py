@@ -93,6 +93,10 @@ class OpenAICompatibleAdapter:
         self._model_id = model_id
         self.last_routed_via: str | None = None
         self.last_usage: dict | None = None
+        # Ask for a JSON object so weak free models can't drift into prose
+        # (the T8 idle-fallback failure). Sticky-disabled the first time a
+        # provider rejects the param — see chat().
+        self._json_mode = True
 
     async def chat(
         self,
@@ -111,16 +115,39 @@ class OpenAICompatibleAdapter:
         api_key = (self._api_key or "").strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        payload = {
-            "model": self._model_id,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+
+        def _payload(json_mode: bool) -> dict:
+            p = {
+                "model": self._model_id,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if json_mode:
+                p["response_format"] = {"type": "json_object"}
+            return p
+
         # Time the whole post (incl. retry/backoff) with perf_counter (W6).
         started = time.perf_counter()
         async with httpx.AsyncClient() as client:
-            data, routed_via = await _post_with_retry(client, url, headers, payload, self.name)
+            try:
+                data, routed_via = await _post_with_retry(
+                    client, url, headers, _payload(self._json_mode), self.name
+                )
+            except ProviderError as exc:
+                # Providers that don't understand `response_format` answer 4xx.
+                # Disable JSON mode for this adapter's lifetime and retry once
+                # WITHOUT it — degrade to plain prompting, not a dead tick.
+                if not self._json_mode or exc.status not in (400, 404, 422):
+                    raise
+                log.warning(
+                    "[%s] response_format rejected (HTTP %s); disabling JSON mode",
+                    self.name, exc.status,
+                )
+                self._json_mode = False
+                data, routed_via = await _post_with_retry(
+                    client, url, headers, _payload(False), self.name
+                )
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         # Surface the model the proxy actually routed to. Prefer the explicit
         # X-Routed-Via header, then the body's "model" field, then our request.

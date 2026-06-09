@@ -256,6 +256,20 @@ def _extract_first_json(text: str) -> dict | None:
     return _repair_truncated(frag)
 
 
+def _no_json_error(text: str, finish_reason: str | None) -> str:
+    """Diagnostic message for a response containing no parseable JSON object.
+
+    Surfaces finish_reason so a reasoning model that exhausted max_tokens
+    (finish_reason="length") before emitting JSON is distinguishable from one
+    that simply narrated and stopped — and widens the snippet past the old
+    200-char cap that hid whether any JSON followed the prose preamble.
+    """
+    return (
+        f"no valid JSON object (finish_reason={finish_reason!r}) "
+        f"in response: {text[:400]!r}"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Schema + world validation
 # ──────────────────────────────────────────────────────────────────────────────
@@ -680,13 +694,25 @@ Mood: {agent.mood}
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
-{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "the chain of thought that led to this action"}}
+{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}}
 
 The "action" field is required and must come first. "args" must match the action.
 ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
-    return [{"role": "system", "content": system_prompt}]
+    # A final user turn that restates the format demand is the last thing weak
+    # free models see — it markedly reduces the prose-narration drift that costs
+    # an agent its turn to the idle fallback (T8). Pairs with the adapter's
+    # response_format=json_object request.
+    json_only = (
+        "Output ONLY the JSON object for your action now. "
+        "Begin your reply with { and end with } — no prose, no markdown, "
+        "no code fences before or after."
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json_only},
+    ]
 
 
 def _perceived_context(
@@ -993,7 +1019,8 @@ class AgentRuntime:
 
         action_dict = _extract_first_json(text)
         if action_dict is None:
-            return None, f"no valid JSON object in response: {text[:200]!r}", meta
+            finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
+            return None, _no_json_error(text, finish_reason), meta
 
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
         _sanitize_optional_trace_fields(action_dict)
