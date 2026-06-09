@@ -1,14 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "petri-dish-of-madness/action-protocol/v1.0.0",
+  "$id": "petri-dish-of-madness/action-protocol/v1.1.0",
   "title": "Agent Action",
-  "description": "The strict JSON object an agent's model must return each turn. Parsed from the model's text output (first valid JSON object). On parse/validation failure: one retry with the error appended; second failure -> idle.",
+  "description": "The strict JSON object an agent's model must return each turn. Parsed from the model's text output (first valid JSON object). On parse/validation failure: one retry with the error appended; second failure -> idle. v1.1.0 (W5 / EM-066) adds OPTIONAL decision-trace fields (perceived_summary, memories_used, reasoning) captured in the SAME single call -> zero extra LLM calls. They are optional so deterministic/Mock agents stay valid; the turn prompt strongly requests them and the engine records whatever is present into the perceived/memory_retrieved/reasoning/action_chosen event-log rows. See contracts/event-log.md.",
   "type": "object",
   "required": ["action"],
   "additionalProperties": false,
   "properties": {
     "thought": { "type": "string", "maxLength": 500, "description": "Brief private reasoning. Not broadcast." },
     "mood": { "type": "string", "maxLength": 40, "description": "Optional mood update." },
+    "perceived_summary": { "type": "string", "maxLength": 600, "description": "OPTIONAL (EM-066). One sentence on what the agent perceived this turn (who/what was nearby, what was overheard). Recorded into the `perceived` event-log row." },
+    "memories_used": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 160 }, "description": "OPTIONAL (EM-066). The memory/observation snippets (or their ids) the agent actually leaned on. Recorded into the `memory_retrieved` / `reasoning` rows." },
+    "reasoning": { "type": "string", "maxLength": 1200, "description": "OPTIONAL (EM-066). Fuller chain of thought leading to this action. Recorded into the `reasoning` event-log row; distinct from `thought` (a short private blurb)." },
     "action": {
       "type": "string",
       "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle"]
@@ -42,6 +45,7 @@
   "examples": [
     { "thought": "I'm broke and hungry, time to earn.", "action": "work", "args": {} },
     { "thought": "Ada keeps stealing. Propose a ban.", "action": "propose_rule", "args": { "effect": "ban_stealing", "text": "Theft destabilizes us all." } },
-    { "thought": "Greet the room.", "mood": "curious", "action": "say", "args": { "text": "Anyone want to team up at the market?" } }
+    { "thought": "Greet the room.", "mood": "curious", "action": "say", "args": { "text": "Anyone want to team up at the market?" } },
+    { "perceived_summary": "Bram is beside me in the plaza and looks low on energy; Cleo just proposed a UBI rule.", "memories_used": ["Bram gave me 3 credits last round", "the market pays best for work"], "reasoning": "Bram helped me before and is struggling, so repaying builds an ally and trust; I can spare 3 credits.", "thought": "Repay Bram.", "action": "give", "args": { "target": "agent_bram", "amount": 3 } }
   ]
 }

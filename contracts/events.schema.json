@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "petri-dish-of-madness/events/v1.0.0",
+  "$id": "petri-dish-of-madness/events/v1.1.0",
   "title": "WebSocket message protocol",
-  "description": "Messages pushed over WS /ws. On connect, server sends one `world_state` snapshot, then a stream of incremental messages. Every message has seq (monotonic) + type. Frontend color-codes by `profile_color` where present.",
+  "description": "Messages pushed over WS /ws. On connect, server sends one `world_state` snapshot, then a stream of incremental messages. Every message has seq (monotonic) + type. Frontend color-codes by `profile_color` where present. v1.1.0 (W5) adds turn_id/actor_type/sim_time and the per-turn decision-trace kinds (perceived, memory_retrieved, llm_call, reasoning, action_chosen, action_resolved). The `kind` enum is INTENTIONALLY OPEN-ENDED going forward (W6-W8 add more kinds); consumers MUST gracefully ignore unknown kinds rather than error.",
   "oneOf": [
     { "$ref": "#/$defs/world_state" },
     { "$ref": "#/$defs/event" }
@@ -34,18 +34,23 @@
         "tick": { "type": "integer" },
         "kind": {
           "type": "string",
-          "enum": ["turn_start","agent_action","agent_speech","agent_moved","economy","conflict","relationship","agent_died","agent_spawned","rule_proposed","rule_vote","rule_passed","rule_rejected","memory","parse_failure","model_reassigned","random_event","control"]
+          "description": "Open-ended event type: live-feed/domain kinds + W5 decision-trace chain kinds. Consumers MUST tolerate kinds not listed here (W6-W8 add more).",
+          "enum": ["turn_start","perceived","memory_retrieved","llm_call","reasoning","action_chosen","action_resolved","agent_action","agent_speech","agent_moved","economy","conflict","relationship","agent_died","agent_spawned","rule_proposed","rule_vote","rule_passed","rule_rejected","memory","parse_failure","model_reassigned","random_event","control"]
         },
         "actor_id": { "type": ["string","null"] },
+        "actor_type": { "type": ["string","null"], "default": "human_agent", "description": "human_agent|system|god|animal. Absent/null treated as human_agent." },
         "target_id": { "type": ["string","null"] },
+        "turn_id": { "type": ["string","null"], "description": "Correlation id grouping all rows of one agent turn into a single decision trace (OTel-style)." },
+        "sim_time": { "type": ["number","null"], "description": "Simulation seconds = tick * tick_interval_seconds." },
         "profile": { "type": ["string","null"], "description": "Model profile of the actor (for color-coding)." },
         "profile_color": { "type": ["string","null"] },
         "text": { "type": ["string","null"], "description": "Human-readable line for the live feed." },
-        "payload": { "type": "object", "description": "kind-specific structured data (e.g. {amount}, {place}, {rule_id}, {energy,credits} deltas)." },
-        "ts": { "type": "string", "description": "ISO timestamp." }
+        "payload": { "type": "object", "description": "kind-specific structured data. For the decision-trace chain see contracts/event-log.md (llm_call uses OTel GenAI attribute names: gen_ai.request.model, gen_ai.usage.input_tokens, etc.)." },
+        "ts": { "type": "string", "description": "ISO timestamp (wall_time)." }
       }
     }
   },
-  "x-feed-rendering": "Each `event` renders one feed line, left-bordered with profile_color. agent_action with thought may show the thought as a tooltip. world_state drives the map + panels (authoritative).",
-  "x-deltas": "After each turn the server emits the relevant `event`(s) AND a fresh per-agent state via a compact `world_state` resend OR agent-scoped events; v1 simplest-correct: resend `world_state` once per turn after events. Frontend must handle full-snapshot replacement."
+  "x-feed-rendering": "Each `event` renders one feed line, left-bordered with profile_color. agent_action with thought may show the thought as a tooltip. world_state drives the map + panels (authoritative). The decision-trace kinds (perceived/memory_retrieved/llm_call/reasoning/action_chosen/action_resolved) are LOW-NOISE on the live feed (default-muted) and are primarily consumed by the /inspector decision-trace view.",
+  "x-deltas": "After each turn the server emits the relevant `event`(s) AND a fresh per-agent state via a compact `world_state` resend OR agent-scoped events; v1 simplest-correct: resend `world_state` once per turn after events. Frontend must handle full-snapshot replacement.",
+  "x-turn-trace": "One agent turn emits an ordered chain sharing one turn_id: turn_start -> perceived -> memory_retrieved -> llm_call -> reasoning -> action_chosen -> action_resolved, plus any domain events (economy/conflict/relationship/...) the action produced (also tagged with that turn_id). This is the persisted source for the decision-trace inspector. See contracts/event-log.md."
 }

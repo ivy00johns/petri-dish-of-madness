@@ -13,7 +13,7 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 - **ID** — `EM-###`. Stable, never reused. New items take the next free number.
 - **Priority** — `P0` (blocks the wave) · `P1` (needed for v1, not blocking) · `P2` (nice-to-have) · `P3` (deferred-ish).
-- **Wave** — `W0`–`W3` (see `BUILD-PLAN.md`).
+- **Wave** — `W0`–`W8` (see `BUILD-PLAN.md`). W0–W4 shipped; W5–W8 are the v2 expansion.
 - **Area** — `infra` · `contracts` · `backend` · `providers` · `persistence` · `frontend` · `qe`.
 - **Source** — where it came from. New items from reports enter via `plan-intake`.
 - **Status** — `open` · `in-progress` · `blocked` · `done`.
@@ -61,8 +61,24 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-050 | P1 | W4 | providers | user req | Surface actually-routed model — capture `X-Routed-Via` → `payload.routed_via`; display per-villager + feed | done | backend+frontend |
 | EM-051 | P1 | W4 | qe | user req | Regression tests for routed_via capture/fallback/injection | done | qe |
 | EM-052 | P2 | W4 | config | user req | Seed 3 agents co-located in plaza so conversation starts round 1 | done | orch |
+| EM-053 | P0 | W5 | frontend | research-v2 #1 | Add `/inspector` route — a 2D *analysis annex* (3D village stays the **primary** view at `/`); unmount the WebGL canvas while analyzing | open | — |
+| EM-054 | P0 | W5 | persistence | research-v2 #2 | Append-only event-log schema (OTel-style linked turn traces) + WAL + periodic snapshots | open | — |
+| EM-055 | P1 | W6 | frontend | research-v2 #3 | Session replay viewer (2D timeline scrubber + top-down Canvas map) | open | — |
+| EM-056 | P1 | W6 | frontend | research-v2 #4 | Agent decision-trace inspector (perceived → memories → llm_call → reasoning → action) | open | — |
+| EM-057 | P1 | W6 | frontend | research-v2 #5 | Governance/laws history view w/ downstream-consequence links (the "clock tower" failure) | open | — |
+| EM-058 | P1 | W6 | frontend | research-v2 #6 | Relationship/social-graph viz (react-force-graph-2d, time-scrub) | open | — |
+| EM-059 | P1 | W6 | frontend | research-v2 #7 | Analytics: 9-AWI + model-vs-model dashboard (uPlot/Observable Plot) | open | — |
+| EM-060 | P2 | W7 | backend | research-v2 #8 | Expanded tiered tool catalog (🟢 reflex vs 🔵 LLM-served), location/agreement-gated | open | — |
+| EM-061 | P2 | W7 | backend | research-v2 #9 | Building/structure mutable state model (status/health/progress transitions) | open | — |
+| EM-062 | P2 | W7 | backend | research-v2 #10 | Collective-project pipeline (propose→fund→build→succeed/fail) | open | — |
+| EM-063 | P2 | W7 | backend | research-v2 #11 | Ad-hoc agent spawning mid-run (god-mode + governance-gated flag) | open | — |
+| EM-064 | P3 | W8 | backend | research-v2 #12 | LLM-driven cat & dog as distinct `actor_type:"animal"` chaos entities | open | — |
+| EM-065 | P3 | W8 | frontend | research-v2 #13 | Animal Chaos Feed + `is_chaotic` tagging/surfacing (magenta on timeline) | open | — |
+| EM-066 | P1 | W5 | contracts | research-v2 §patterns | Structured decision-trace action output `{perceived_summary, memories_used, reasoning, chosen_tool, args}` in one call (enabler for EM-054/056) | open | — |
+| EM-067 | P1 | W6 | providers | research-v2 §x-cut | Per-provider RPD/TPD usage tracking in event log + cap-aware throttling | open | — |
+| EM-068 | P2 | W7 | providers | research-v2 §x-cut | Decision/prompt-prefix caching (persona + memory-hash + coarse-world-state) | open | — |
 
-_Next free ID: EM-053._
+_Next free ID: EM-069._
 
 ## Notes
 
@@ -73,3 +89,8 @@ _Next free ID: EM-053._
   "Run the 5-minute 2-model demo" section of `README.md` and `BUILD_RESULTS.md`.
 - **EM-043** deferred: frontend is covered by tsc typecheck, production build, a Playwright
   reassign check, and render-sanity; component unit tests are a v1.1 nice-to-have.
+- **EM-053–EM-068 (v2 expansion)** entered 2026-06-08 via `plan-intake` from
+  `docs/research/deep-research-v2.md`. They open **W5–W8** (Foundations → Instrumentation →
+  Expanded world → Chaos animals). **W5 (EM-053/054/066) is the gate**: every later item reads
+  the append-only event log, so lock that schema before building any Phase-1 UI. The report's
+  own priority scale was translated into this ledger's "blocks-the-wave" P0–P3 semantics.

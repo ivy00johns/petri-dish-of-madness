@@ -89,6 +89,44 @@ for immediate conversation); the live FreeLLMAPI run (EM-048).
 
 ---
 
+## Wave 5–8 — v2 expansion (planned)
+
+Filed 2026-06-08 via `plan-intake` from `docs/research/deep-research-v2.md`. Tactical detail
++ IDs live in `docs/REMAINING-WORK.md` (EM-053–EM-068). Phases run in order; each wave reads
+the event log W5 establishes.
+
+**Wave 5 — Foundations (the gate).** The 3D village stays the **primary experience** (home
+route `/`). Add a separate 2D `/inspector` **analysis annex** on its own route so heavy
+data-viz panels never share a render loop with Three.js — and so the WebGL canvas can unmount
+entirely while you analyze (zero GPU). The 2D-ness is about using the right tool for charts/
+graphs and freeing the GPU during analysis — it is **not** a demotion of the 3D world. Lock
+the append-only event-log schema (OTel-style linked turn traces, WAL, periodic snapshots)
+every later feature reads. Items: **EM-053** (`/inspector` annex + WebGL unmount), **EM-054**
+(event-log schema), **EM-066** (structured decision-trace action output). _Build EM-053/054
+first — getting the log right now prevents painful migrations later._
+
+**Wave 6 — "See what happened": instrumentation & observability.** The #1 ask — make the
+already-recorded data watchable. Items: **EM-055** replay viewer, **EM-056** decision-trace
+inspector, **EM-057** governance/laws history (clock-tower failure), **EM-058** social graph,
+**EM-059** 9-AWI + model-vs-model dashboard, **EM-067** per-provider RPD/TPD tracking.
+
+**Wave 7 — Expanded world capabilities.** Items: **EM-060** tiered tool catalog (reflex vs
+LLM-served), **EM-061** building/structure state model, **EM-062** collective-project pipeline
+(propose→fund→build→succeed/fail), **EM-063** ad-hoc agent spawning, **EM-068** decision caching.
+These enrich the **3D village itself** — buildings carry visible mutable state (a clock tower
+rising as it's funded/built, scaffolding while under construction, scorched walls after arson),
+so the world "feels more real as it grows" on the primary 3D view, not only in 2D panels.
+
+**Wave 8 — The chaos layer.** Items: **EM-064** LLM-driven cat & dog chaos entities (which
+roam the **3D village** as distinct tinted critters, not just log lines), **EM-065** Animal
+Chaos Feed + tagging.
+
+**Free-scale is a hard constraint throughout:** RPD/TPD caps bind on free tiers, so favor slow
+ticks, reflex (no-LLM) tool resolution, aggressive caching, and per-provider usage tracking
+before adding entities.
+
+---
+
 ## Closure log
 
 What shipped and when. Append on each wave/milestone close.
