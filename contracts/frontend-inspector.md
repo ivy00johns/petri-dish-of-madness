@@ -1,6 +1,12 @@
-# Contract: Frontend Routing & the Inspector Annex — v1.1.0
+# Contract: Frontend Routing & the Inspector Annex — v1.3.0
 
 **Wave:** W5 (EM-053). **Owner:** frontend-agent.
+
+> **v1.3.0 (W11b, 2026-06-09):** adds §10 (billboard, personas, governance grouping,
+> usage alerts, mobile gate + a11y, fork affordance). NORMATIVE for W11b.
+
+> **v1.2.0 (W11a, 2026-06-09 — EM-086/093/094/095/096/099):** adds §8 (run browser) and
+> §9 (live-view layout, scroll, summary, critters, camera). Both NORMATIVE for W11a.
 
 > **v1.1.0 (W9, 2026-06-09 — audit §C1/C4/C8/D2, EM-069):** §7's deep-replay clause is
 > now NORMATIVE, not aspirational — `inspectorApi` with zero consumers is a contract
@@ -149,3 +155,92 @@ effect), and relationship/conflict/gift events. Without this the inspector is em
 Libraries added at W6: `react-force-graph-2d`, `uplot`, `@observablehq/plot`. Quality gates for
 the wave: `tsc -b` + `vite build` green, `design-token-guard` clean, and `render-sanity` PASS on
 `/` AND `/inspector` (every panel shows real-looking data, no lone `?`/`undefined`/empty shells).
+
+## 8. W11a — Run browser & cross-run comparison (EM-086)
+
+- **`RunBrowser.tsx`** (new, `web/src/inspector/`) lists runs from `GET /api/runs`
+  (api.openapi.yaml v1.3.0 `RunRow`), newest first: id, started_at, status chip
+  (**active = `is_active`, never the status column**), max_tick, event_count, agent
+  roster from `config_summary`.
+- **Selecting a past run puts the inspector in "archive mode":** a `selectedRunId`
+  state in `InspectorLayout`; `api.ts` fetchers all accept an optional `runId` and
+  thread it as the `run_id` query param. In archive mode the WS live merge is
+  DISABLED (the panels show only the selected run), a persistent "Viewing run #N
+  (archived) — back to live" affordance is visible, and the replay scrubber, decision
+  trace, governance, social graph and AWI panels all read the selected run. Returning
+  to live restores the WS-merged behavior exactly.
+- **Cross-run comparison:** a compare affordance picks TWO runs and renders their
+  `GET /api/analytics?run_id=` AWI summaries side-by-side (same 9 indicators, per-run
+  columns, no composite score). Minimum viable = side-by-side numbers + per-model
+  table; charts optional.
+- **Empty states mandatory** (§7 rule applies): zero past runs, run with no
+  snapshots, run with no events — all labeled, never blank. Mock mode renders the
+  RunBrowser with a labeled "no backend — live session only" state.
+
+## 9. W11a — Live view: layout, scroll, summary, critters, camera
+
+- **EM-093 scroll stability (sequenced FIRST — the layout builds on it):** when the
+  feed is NOT pinned to live, arriving events MUST NOT move the user's viewport
+  (use `overflow-anchor` or scrollTop compensation; either is fine, pick one and
+  test it). The "X new" pill remains the only signal; clicking it (or scrolling to
+  bottom) re-pins. Regression bar: with 50 events arriving while scrolled up, the
+  visible message stays visually fixed.
+- **EM-096 layout (user sketch, normative regions):** LEFT column (wider than today)
+  = full-height feed with the story-so-far summary block at its top; CENTER = the 3D
+  village with ~2× today's pixels; agents move OUT of the right column into a
+  horizontally-scrollable card strip at the BOTTOM edge of the world view (model
+  badge, energy, location stay visible per card); RIGHT column = controls + legend
+  (unchanged width or narrower). No information is lost vs today's layout.
+  **Priority clarification (user, 2026-06-09): the chat/feed is the product's
+  centerpiece right now — the city gets better over time, but chat is key.** The
+  feed's default width is generous (not a minimum-viable sliver), its typography and
+  line length are first-class reading experience, and the village's extra pixels
+  come from reclaiming the old agents column — NEVER from squeezing the feed. When
+  layout tradeoffs arise, the feed wins. (EM-105's drag handle lets the user trade
+  the balance either way at runtime.)
+- **EM-094 story so far:** an always-on, zero-LLM computed digest (pure selector over
+  the rolling history: deaths, active rules, project status, current-drama heuristic
+  such as recent conflicts/starvation) rendered at the top of the feed column,
+  updating live. Optional **Narrator mode** toggle surfaces `narrator_summary`
+  events (event-log.md v1.2.0) when the backend has it enabled; when no narrator
+  events exist the toggle shows a labeled "narrator off" state.
+- **EM-099 critters in the roster:** the bottom agent strip (or sidebar in
+  pre-redesign layouts) gets a CRITTERS group: species emoji, name, mood, model chip
+  (`animals.model_profile`), location, chaos count; clicking focuses/follows the
+  animal in the 3D view like agents.
+- **EM-095 3D camera:** pan (drag/keys), zoom-to-place (click a building →
+  smooth-move target), follow-agent mode (camera tracks the selected villager until
+  the user drags), and a reset-view control restoring the default framing. OrbitControls
+  remain the base; all modes must be escapable (user drag always wins).
+- **EM-097:** SocialGraph unmount cleanup must not read a React-18-detached ref —
+  capture the instance in the effect closure (or delete the dead path); un-xfail the
+  pinned test.
+
+## 10. W11b — Billboard, personas, governance grouping, alerts, a11y, fork
+
+- **EM-091 billboard:** a physical notice board mesh in the 3D village (at the plaza)
+  whose in-canvas label shows the newest post; `billboard_posted` events render in the
+  feed with a 📌 idiom; a billboard panel (live view, near the digest or as a feed
+  filter) lists recent posts newest-first with author + model chip. **God affordance:**
+  the control panel gets a "REPLY ON BILLBOARD" input that POSTs a god reply (backend
+  surface per api/world contract) rendered distinctly (god ink) — agent petitions to
+  the watchers get answerable.
+- **EM-092 personas:** the spawn form offers a persona picker fed by `GET /api/personas`
+  (card: name, archetype, one-line personality, suggested profile pre-selected) alongside
+  the existing freeform fields; picking a persona prefills and stays editable. Empty
+  library / no backend → labeled state, freeform unaffected.
+- **EM-087 governance grouping:** identical-effect ACTIVE rules group into one row with
+  a ×N stack badge (expandable to instances with their ticks/proposers) in the
+  governance panel + rules strip; pairs with the backend reject/renew semantics —
+  surface `renewed` outcomes distinctly from `passed`.
+- **EM-083 usage alerts:** `usage_alert` events raise a dismissible banner (same idiom
+  as routing-degraded, amber) "provider X at NN% of daily cap"; auto-clears next window.
+- **EM-082 decision = min-width gate + a11y pass:** below 1024px, `/` and `/inspector`
+  render a labeled full-screen gate ("desktop required — the lab needs ≥1024px") instead
+  of a broken layout. A11y: semantic landmarks/headings hierarchy, aria-labels on all
+  icon-only controls, visible focus states, prefers-reduced-motion respected for
+  feed/camera animation.
+- **EM-101 fork affordance:** in the Run Browser, each archived run row gets FORK →
+  prompts for tick (default max_tick) → `POST /api/runs/fork` → on 201, refresh the runs
+  list and show the new run (with its `forked_from ↩ #N @tick` lineage chip, also shown
+  for any forked run).

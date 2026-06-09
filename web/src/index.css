@@ -145,6 +145,27 @@
   animation: feedSlideIn 0.2s ease-out;
 }
 
+/* W11b (EM-079): the phantom-commitment ghost drifts gently — a small
+   delight on the headline failure mode. Disabled by the global
+   prefers-reduced-motion override below like every other animation. */
+@keyframes phantomDrift {
+  0%, 100% { transform: translateY(0); opacity: 0.85; }
+  50% { transform: translateY(-2px); opacity: 0.55; }
+}
+
+.phantom-drift {
+  display: inline-block;
+  animation: phantomDrift 2.4s ease-in-out infinite;
+}
+
+/* W11b (EM-107): top banners fade opacity ONLY — never height/transform (the
+   old in-flow mount/unmount reflowed the whole app: the "zoom" feeling).
+   Duration mirrors FADE_MS in BannerFade.tsx; the prefers-reduced-motion
+   block below forces it to ~0ms (instant) for motion-sensitive users. */
+.banner-fade {
+  transition: opacity 180ms ease-out;
+}
+
 /* Subtle scanline effect on header */
 @keyframes scanline {
   0% { transform: translateY(-100%); }

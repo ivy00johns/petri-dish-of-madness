@@ -10,8 +10,20 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 > unit tests)**, plus user-session items: reset button (EM-084), persistent runs (EM-085),
 > feed survives refresh (EM-088), animal model chips + 🧠 markers (EM-089), 8-profile
 > roster (EM-090), routing-banner hysteresis. Gate logs: `coordination/W{9,10}_BUILD.md`;
-> results: `BUILD_RESULTS_W{9,10}.md`. **Next: W11 — suggest splitting into UI batch
-> (EM-093–096 + 086) and sim-texture batch (EM-079–083, 087, 091, 092, 097).**
+> results: `BUILD_RESULTS_W{9,10}.md`. **W11a ✅ shipped** (`build/w11a-ui-batch`): run
+> browser + archive mode + cross-run AWI (EM-086), frozen-snapshot feed scroll (EM-093),
+> story-so-far digest + narrator mode (EM-094), 3D camera nav (EM-095), chat-first layout
+> (EM-096), SocialGraph cleanup (EM-097), critters in roster (EM-099), label declutter
+> (EM-102), collapsible legend (EM-104), resizable feed (EM-105). Backend 206 / frontend
+> 106 tests. Gate log: `coordination/W11A_BUILD.md`; results: `BUILD_RESULTS_W11A.md`.
+> **W11b ✅ shipped** (same branch): commitments + 👻 phantom logging (EM-079), reflections
+> (EM-080), overhearing (EM-081), min-width gate + a11y (EM-082), real blackouts + usage
+> alerts (EM-083), law RENEWAL semantics (EM-087), billboard + god replies (EM-091),
+> persona library (EM-092), procgen towns + housing (EM-098), readable rule names
+> (EM-100), run fork/resume (EM-101), commemorative-monument guard (EM-103), layout-stable
+> banners (EM-107). Backend 252 / frontend 150 tests. Gate log: `coordination/
+> W11B_BUILD.md`; results: `BUILD_RESULTS_W11B.md`. **W9–W11 complete. Open: EM-106 (compose
+> data/ volume), EM-108 (governance location gate) — both small, unscheduled.**
 
 ## Format & conventions
 
@@ -91,16 +103,16 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-076 | P2 | W10 | backend | audit §B9,D5 | Analytics correctness: active_rules formula/source of truth; speed label synced to server tick interval | done | — |
 | EM-077 | P2 | W10 | backend | audit §B10–B12,B14,B15 | Platform hardening: WS broadcast cleanup, Gemini key via header, decision-cache flush on reset, spawn input length caps, profile-color helper | done | — |
 | EM-078 | P2 | W10 | contracts | audit §E1–E5 | Docs/contracts sync: README screenshot/chaos-feed regression fix, `/api/animals` in OpenAPI, event-kind schema sync, V2_BUILD.md + FUTURE.md refresh | done | — |
-| EM-079 | P2 | W11 | backend | audit §F / research-v2 §rec | Active-commitments injection in turn prompt + ignored-commitment logging (clock-tower pressure) | open | — |
-| EM-080 | P2 | W11 | backend | audit §F / research-v2 §rec | Reflection/diary on importance threshold (~2–3×/day, Smallville pattern) | open | — |
-| EM-081 | P2 | W11 | backend | audit §F / FUTURE.md | Reactive overhearing chains, capped (1–2 listeners) + reflex-first responses (free-scale) | open | — |
-| EM-082 | P2 | W11 | frontend | audit §D1,D6 | Mobile decision (stacked read-only layout OR explicit min-width gate) + semantic headings / a11y pass | open | — |
-| EM-083 | P3 | W11 | backend | audit §B13 / research-v2 §bench | Make `blackout` event effect real; benchmark alerts on EM-067 usage data (>70% RPD/TPD → warn) | open | — |
+| EM-079 | P2 | W11 | backend | audit §F / research-v2 §rec | Active-commitments injection in turn prompt + ignored-commitment logging (clock-tower pressure) | done | — |
+| EM-080 | P2 | W11 | backend | audit §F / research-v2 §rec | Reflection/diary on importance threshold (~2–3×/day, Smallville pattern) | done | — |
+| EM-081 | P2 | W11 | backend | audit §F / FUTURE.md | Reactive overhearing chains, capped (1–2 listeners) + reflex-first responses (free-scale) | done | — |
+| EM-082 | P2 | W11 | frontend | audit §D1,D6 | Mobile decision (stacked read-only layout OR explicit min-width gate) + semantic headings / a11y pass | done | — |
+| EM-083 | P3 | W11 | backend | audit §B13 / research-v2 §bench | Make `blackout` event effect real; benchmark alerts on EM-067 usage data (>70% RPD/TPD → warn) | done | — |
 
 | EM-084 | P1 | W10 | frontend | user 2026-06-09 | Reset/new-run button in UI (extinction banner CTA + control panel) wired to existing `POST /api/control/reset` — no more service restarts | done | — |
 | EM-085 | P1 | W10 | infra | user 2026-06-09 | Persist runs by default: file `db_path` (`data/run.sqlite`) in config/world.yaml + gitignore `data/` — runs currently die with the process (`:memory:`) | done | — |
-| EM-086 | P2 | W11 | frontend | user 2026-06-09 | Run browser: list past runs (`GET /api/runs` + run_id-scoped reads), load any run into the inspector, cross-run AWI comparison ("what changed between sessions") | open | — |
-| EM-087 | P2 | W11 | backend | user 2026-06-09 | Duplicate-law semantics: engine allows re-proposing an already-ACTIVE effect → stacks of identical active laws (verified: only `proposed` status is guarded, world.py:473-476). Decide reject-vs-amend/renew + group repeats in governance UI | open | — |
+| EM-086 | P2 | W11 | frontend | user 2026-06-09 | Run browser: list past runs (`GET /api/runs` + run_id-scoped reads), load any run into the inspector, cross-run AWI comparison ("what changed between sessions") | done | — |
+| EM-087 | P2 | W11 | backend | user 2026-06-09 | Duplicate-law semantics: engine allows re-proposing an already-ACTIVE effect → stacks of identical active laws (verified: only `proposed` status is guarded, world.py:473-476). Decide reject-vs-amend/renew + group repeats in governance UI | done | — |
 
 | EM-088 | P1 | W10 | frontend | user 2026-06-09 | Live feed survives refresh: seed the `/` EventFeed from the EM-069 backfilled history (last N events) instead of starting empty at WS connect | done | — |
 
@@ -108,24 +120,36 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-090 | P2 | W10 | config | user 2026-06-09 | Expand model roster: +4 FreeLLMAPI profiles chosen for provider diversity (groq-llama, cerebras-glm, mistral-small, kimi) — one exhausted tier can't collapse the A/B; ids verified in live catalog | done | orch |
 
-| EM-091 | P2 | W11 | backend | user 2026-06-09 / research-v2 §tools | Village billboard: 🟢 reflex `post_billboard`/`read_billboard` tools (post text rides the same LLM turn — zero extra calls), `billboard_posted` events, physical notice board in the 3D village + panel/feed surface, god-panel "respond/grant" affordance for agent petitions to the watchers; counts toward Public Expression AWI | open | — |
+| EM-091 | P2 | W11 | backend | user 2026-06-09 / research-v2 §tools | Village billboard: 🟢 reflex `post_billboard`/`read_billboard` tools (post text rides the same LLM turn — zero extra calls), `billboard_posted` events, physical notice board in the 3D village + panel/feed surface, god-panel "respond/grant" affordance for agent petitions to the watchers; counts toward Public Expression AWI | done | — |
 
-| EM-092 | P2 | W11 | config | user 2026-06-09 | Persona library: config-defined character cards (name, personality, archetype, suggested profile) — god-panel spawn picker offers the roster alongside the freeform custom fields; seed mix configurable per run. Reusable casting pool for the multi-world plans (FUTURE.md) | open | — |
+| EM-092 | P2 | W11 | config | user 2026-06-09 | Persona library: config-defined character cards (name, personality, archetype, suggested profile) — god-panel spawn picker offers the roster alongside the freeform custom fields; seed mix configurable per run. Reusable casting pool for the multi-world plans (FUTURE.md) | done | — |
 
-| EM-093 | P1 | W11 | frontend | user 2026-06-09 | Feed scroll stability: new messages still jump the scroll position despite the "X new"/LIVE pin — anchor scroll when not pinned (prepend-safe, e.g. scrollTop compensation or overflow-anchor), never yank the user while reading | open | — |
-| EM-094 | P2 | W11 | frontend | user 2026-06-09 | Running "story so far" summary: computed zero-LLM digest (deaths, active rules, project status, current-drama heuristics) always on; optional Narrator mode = cheap-profile LLM 2-3 sentence recap every N ticks, off by default, rate-limited (free-scale) | open | — |
-| EM-095 | P2 | W11 | frontend | user 2026-06-09 | 3D camera navigation: currently orbit-only around town center — add pan, zoom-to-place (click a building), and follow-agent mode (track a villager), with a reset-view control | open | — |
-| EM-096 | P2 | W11 | frontend | user 2026-06-09 | Live layout redesign (user sketch): full-height feed + summary in a wider LEFT column, agents as a horizontally-scrollable card strip at the BOTTOM of the world view (badges stay visible), controls stay right, village gets ~2x the pixels. Sequence after EM-093 so the new layout starts scroll-stable | open | — |
+| EM-093 | P1 | W11 | frontend | user 2026-06-09 | Feed scroll stability: new messages still jump the scroll position despite the "X new"/LIVE pin — anchor scroll when not pinned (prepend-safe, e.g. scrollTop compensation or overflow-anchor), never yank the user while reading | done | — |
+| EM-094 | P2 | W11 | frontend | user 2026-06-09 | Running "story so far" summary: computed zero-LLM digest (deaths, active rules, project status, current-drama heuristics) always on; optional Narrator mode = cheap-profile LLM 2-3 sentence recap every N ticks, off by default, rate-limited (free-scale) | done | — |
+| EM-095 | P2 | W11 | frontend | user 2026-06-09 | 3D camera navigation: currently orbit-only around town center — add pan, zoom-to-place (click a building), and follow-agent mode (track a villager), with a reset-view control | done | — |
+| EM-096 | P2 | W11 | frontend | user 2026-06-09 | Live layout redesign (user sketch): full-height feed + summary in a wider LEFT column, agents as a horizontally-scrollable card strip at the BOTTOM of the world view (badges stay visible), controls stay right, village gets ~2x the pixels. Sequence after EM-093 so the new layout starts scroll-stable | done | — |
 
-| EM-097 | P3 | W11 | frontend | qa W10-QA-1 | SocialGraph unmount cleanup reads a React-18-detached ref (dead code; mitigated — force-graph's own destructor pauses the rAF loop). Replace with a captured-instance cleanup or delete the false safety net + its comment; un-xfail the pin in SocialGraph tests | open | — |
+| EM-097 | P3 | W11 | frontend | qa W10-QA-1 | SocialGraph unmount cleanup reads a React-18-detached ref (dead code; mitigated — force-graph's own destructor pauses the rAF loop). Replace with a captured-instance cleanup or delete the false safety net + its comment; un-xfail the pin in SocialGraph tests | done | — |
 
-| EM-098 | P2 | W11 | backend | user 2026-06-09 | Expanded building/place catalog + seeded procedural town generation: config `world.procgen {enabled, seed, n_places, kind_weights}` lays out a varied town (more place kinds + building types, road-aware positions); 3D already renders per-kind so visuals scale. Gate place count for prompt size (free-scale); per-run generated towns pair with EM-085 persistence + the FUTURE multi-city plan | open | — |
-| EM-099 | P2 | W11 | frontend | user 2026-06-09 | Pets join the agents sidebar: CRITTERS section under AGENTS with mood, model chip (they're LLM-powered), location, and chaos count; click focuses them like agents | open | — |
+| EM-098 | P2 | W11 | backend | user 2026-06-09 | Expanded building/place catalog + seeded procedural town generation: config `world.procgen {enabled, seed, n_places, kind_weights}` lays out a varied town (more place kinds + building types, road-aware positions); 3D already renders per-kind so visuals scale. Gate place count for prompt size (free-scale); per-run generated towns pair with EM-085 persistence + the FUTURE multi-city plan. **Housing (user 2026-06-09):** today there is ONE communal Hearth and zero per-agent homes — the expanded catalog must include `home` variants: per-agent cottages ("Ada's cottage") and/or a capacity-limited communal bunkhouse (beds < agents ⇒ scarcity drama); recharge wires to them; ownership/rent (credits sink) is a deliberate follow-on, not in-scope | done | — |
+| EM-099 | P2 | W11 | frontend | user 2026-06-09 | Pets join the agents sidebar: CRITTERS section under AGENTS with mood, model chip (they're LLM-powered), location, and chaos count; click focuses them like agents | done | — |
 
-| EM-100 | P3 | W11 | backend | user 2026-06-09 | Human-readable rule names in feed lines: `rule_vote`/`rule_passed` text uses the rule's text/effect ("'Everyone deserves a basic income' (ubi) PASSED"), not the bare rule_id hex; keep the id in payload | open | — |
-| EM-101 | P2 | W11 | backend | user 2026-06-09 | Run fork/resume: `World.from_snapshot()` (snapshot+delta → live world at tick T, the missing restore half of W9/B8) + `POST /api/runs/fork {run_id, tick, place_overrides?}` starting a NEW run with lineage (`forked_from`). `place_overrides` lets a forked society wake up in a different town (EM-098 procgen / FUTURE multi-city: "session from turn X meets a different city"). Surface in run browser (EM-086) | open | — |
+| EM-100 | P3 | W11 | backend | user 2026-06-09 | Human-readable rule names in feed lines: `rule_vote`/`rule_passed` text uses the rule's text/effect ("'Everyone deserves a basic income' (ubi) PASSED"), not the bare rule_id hex; keep the id in payload | done | — |
+| EM-101 | P2 | W11 | backend | user 2026-06-09 | Run fork/resume: `World.from_snapshot()` (snapshot+delta → live world at tick T, the missing restore half of W9/B8) + `POST /api/runs/fork {run_id, tick, place_overrides?}` starting a NEW run with lineage (`forked_from`). `place_overrides` lets a forked society wake up in a different town (EM-098 procgen / FUTURE multi-city: "session from turn X meets a different city"). Surface in run browser (EM-086) | done | — |
 
-_Next free ID: EM-102._
+| EM-102 | P2 | W11 | frontend | user 2026-06-09 | 3D building-label declutter: labels overlap each other and agent/critter chips (new buildings make it worse) — zoom/distance-gated visibility, fade or occlusion culling, and non-colliding placement for the in-canvas Html labels | done | — |
+| EM-103 | P2 | W11 | backend | user 2026-06-09 | Legislation-as-architecture guard: agents built a Monument named after a LAW ("Festival Fund Transparency Initiative") alongside a second monument — project/rule cross-contamination. Keep the emergent charm but add semantics: project proposals that duplicate an active/proposed rule's name get steered to governance (or flagged commemorative + linked to the rule); dedupe near-identical monuments. Pairs with EM-087 duplicate-law semantics | done | — |
+| EM-104 | P2 | W11 | frontend | user 2026-06-09 | Collapsible model legend in the controls column (8-profile roster eats vertical space) | done | — |
+
+| EM-105 | P2 | W11 | frontend | user 2026-06-09 | Expandable feed column: user-resizable width via drag handle on the feed/world boundary (persisted in localStorage), with sane min/max so the village never collapses; pairs with the EM-096 layout | done | — |
+
+| EM-106 | P3 | — | infra | docs-agent W11b | docker-compose: ship a named volume for `data/` on the backend service by default (runs persist to data/run.sqlite since W10; README documents the manual override, compose should just do it) | open | — |
+
+| EM-107 | P1 | W11 | frontend | user 2026-06-09 | Banner mount/unmount reflows the whole app ("zooms in and out", eye strain) — routing-degraded/recovered + usage-alert banners must not shift layout: overlay them (or reserve the row) with a reduced-motion-safe fade, so appearance/clearing never moves content | done | — |
+
+| EM-108 | P3 | — | backend | qa W11b | Governance location gate is prompt-only: `_validate_world` never location-checks `propose_rule`/`vote` despite the TOOL_REGISTRY comment claiming resolution-time enforcement — a prompt-ignoring model can legislate from anywhere. Enforce at resolution (match the billboard gate pattern) | open | — |
+
+_Next free ID: EM-109._
 
 ## Notes
 

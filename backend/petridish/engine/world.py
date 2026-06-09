@@ -3,9 +3,31 @@ World state: pure data model.  No I/O, no asyncio.  Testable in isolation.
 """
 from __future__ import annotations
 
+import math
+import random
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _block_get(block: Any, key: str, default: Any) -> Any:
+    """Read `key` from an optional config block that may be a dataclass, a plain
+    dict, or absent entirely (None). The W11b engine config blocks (commitments /
+    reflection / procgen / billboard) are OPTIONAL in WorldParams — the config
+    loader is owned by another agent — so every engine read goes through this
+    accessor and falls back to the documented default."""
+    if block is None:
+        return default
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _truncate(text: str, limit: int = 60) -> str:
+    """Truncate feed text on a budget, with an ellipsis (EM-100 rule labels)."""
+    text = str(text or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @dataclass
@@ -59,16 +81,27 @@ class PlaceState:
     y: int
     kind: str   # work|home|social|governance|wild
     description: str = ""
+    # W11b / EM-098 — optional bed capacity (the communal bunkhouse). None for
+    # ordinary places; serialized only when set, so pre-W11b snapshots and the
+    # hand-authored town are unchanged.
+    capacity: int | None = None
+    # W11b / EM-083 — real blackout: recharge is disabled at this place while
+    # world.tick < blackout_until_tick. 0 = powered.
+    blackout_until_tick: int = 0
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "name": self.name,
             "x": self.x,
             "y": self.y,
             "kind": self.kind,
             "description": self.description,
+            "blackout_until_tick": self.blackout_until_tick,
         }
+        if self.capacity is not None:
+            d["capacity"] = self.capacity
+        return d
 
 
 @dataclass
@@ -86,6 +119,13 @@ class RuleState:
     # guards against double-spawn if the rule is re-evaluated.
     payload: dict[str, Any] = field(default_factory=dict)
     applied: bool = False
+    # W11b / EM-087+103 — renewal semantics. A proposal whose effect matches an
+    # ACTIVE rule is a RENEWAL of that rule (renewal_of = the active rule's id);
+    # when it passes, the EXISTING rule is refreshed (renewed_at gains the tick)
+    # and this proposal lands in status "renewed" — the world never holds two
+    # simultaneously-active identical effects (the 3×UBI bug).
+    renewal_of: str | None = None
+    renewed_at: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -99,6 +139,10 @@ class RuleState:
         }
         if self.payload:
             d["payload"] = dict(self.payload)
+        if self.renewal_of:
+            d["renewal_of"] = self.renewal_of
+        if self.renewed_at:
+            d["renewed_at"] = list(self.renewed_at)
         return d
 
 
@@ -138,13 +182,17 @@ class Building:
     last_progress_tick: int = 0
     created_tick: int = 0
     updated_tick: int = 0
+    # W11b / EM-103 — legislation-as-architecture: the rule id this building
+    # commemorates (its name fuzzy-matched an active/proposed rule's text).
+    # At most ONE commemorative monument per rule. None for ordinary buildings.
+    commemorates: str | None = None
 
     @property
     def condition_label(self) -> str:
         return _condition_label(self.health)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "name": self.name,
             "kind": self.kind,
@@ -162,6 +210,9 @@ class Building:
             "created_tick": self.created_tick,
             "updated_tick": self.updated_tick,
         }
+        if self.commemorates:
+            d["commemorates"] = self.commemorates
+        return d
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -202,6 +253,140 @@ class Animal:
         }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# W11b / EM-098 — procedural town generation (seeded, existing kinds ONLY).
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Display-name pools per EXISTING place kind (no new kinds, no new art).
+_PROCGEN_NAMES: dict[str, list[str]] = {
+    "work":       ["Market", "Mill", "Forge", "Workshop Row"],
+    "social":     ["Tavern", "Bathhouse", "Amphitheatre", "Tea House"],
+    "governance": ["Town Hall", "Court of Records", "Moot Ring"],
+    "wild":       ["The Commons", "Dark Woods", "Riverbank", "Old Quarry"],
+    "home":       ["Boarding Row", "Quiet Lane"],
+}
+
+_PROCGEN_DESCRIPTIONS: dict[str, str] = {
+    "work": "Earn credits by working.",
+    "social": "Mingle, gossip, scheme.",
+    "governance": "Propose and vote on rules.",
+    "wild": "Forage for scraps.",
+    "home": "Rest and recharge.",
+}
+
+_PROCGEN_MAX_PLACES = 12  # hard cap on generated town places (prompt-size gate)
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "place"
+
+
+def generate_procgen_places(cfg: Any, agent_names: list[str]) -> list[PlaceState]:
+    """Generate a seeded town layout (EM-098) using EXISTING kinds only
+    (work/home/social/governance/wild).
+
+    Layout: a central plaza (id "plaza") with the town on a jittered ring around
+    it — road-aware-ish, every place faces the plaza. Guaranteed minimums: >=1
+    governance (id "townhall", so the billboard gate holds), >=1 work, >=1 wild,
+    >=1 social (the plaza). `n_places` (capped at 12 for prompt size) counts the
+    town proper; HOUSING is added on top: one cottage per seed agent
+    ("X's cottage", kind home) plus a communal bunkhouse (kind home, capacity =
+    agents - 1 so bed scarcity exists). Deterministic for a given seed."""
+    seed = int(_block_get(cfg, "seed", 42))
+    n_places = int(_block_get(cfg, "n_places", 9))
+    n_places = max(4, min(_PROCGEN_MAX_PLACES, n_places))
+    weights_raw = _block_get(cfg, "kind_weights", None) or {}
+    default_weights = {"work": 2.0, "social": 2.0, "governance": 1.0, "wild": 2.0, "home": 1.0}
+    weights: dict[str, float] = {}
+    for kind in default_weights:
+        try:
+            weights[kind] = max(0.0, float(_block_get(weights_raw, kind, default_weights[kind])))
+        except (TypeError, ValueError):
+            weights[kind] = default_weights[kind]
+    if not any(weights.values()):
+        weights = dict(default_weights)
+
+    rng = random.Random(seed)
+    cx, cy = 500, 500
+
+    # 1. The plaza (social anchor; the billboard lives here).
+    places: list[PlaceState] = [PlaceState(
+        id="plaza", name="Central Plaza", x=cx, y=cy, kind="social",
+        description="Open square where everyone mingles.",
+    )]
+
+    # 2. Guaranteed minimums first, then weighted picks for the remaining slots.
+    kinds: list[str] = ["governance", "work", "wild"]
+    pool = [k for k, w in weights.items() if w > 0]
+    while len(kinds) < n_places - 1:  # -1: the plaza fills one slot
+        kinds.append(rng.choices(pool, weights=[weights[k] for k in pool], k=1)[0])
+
+    used_names: set[str] = {"Central Plaza"}
+    used_ids: set[str] = {"plaza"}
+    counters: dict[str, int] = {}
+
+    def _pick_name(kind: str) -> str:
+        for cand in _PROCGEN_NAMES.get(kind, []):
+            if cand not in used_names:
+                used_names.add(cand)
+                return cand
+        counters[kind] = counters.get(kind, 1) + 1
+        name = f"{_PROCGEN_NAMES.get(kind, [kind.title()])[0]} {counters[kind]}"
+        used_names.add(name)
+        return name
+
+    def _place_id(name: str, kind: str) -> str:
+        # The first governance place is ALWAYS id "townhall" (billboard gate).
+        if kind == "governance" and "townhall" not in used_ids:
+            used_ids.add("townhall")
+            return "townhall"
+        base = _slug(name)
+        pid = base
+        n = 1
+        while pid in used_ids:
+            n += 1
+            pid = f"{base}_{n}"
+        used_ids.add(pid)
+        return pid
+
+    # 3. Ring layout with jitter around the plaza.
+    ring = kinds
+    radius = 280
+    for i, kind in enumerate(ring):
+        angle = (2 * math.pi * i) / max(1, len(ring)) + rng.uniform(-0.18, 0.18)
+        r = radius + rng.uniform(-50, 50)
+        x = int(cx + r * math.cos(angle))
+        y = int(cy + r * math.sin(angle))
+        name = _pick_name(kind)
+        places.append(PlaceState(
+            id=_place_id(name, kind), name=name, x=x, y=y, kind=kind,
+            description=_PROCGEN_DESCRIPTIONS.get(kind, ""),
+        ))
+
+    # 4. HOUSING (on top of n_places): per-agent cottages + a communal bunkhouse
+    #    with beds = agents - 1 (scarcity). Recharge works at ANY home kind —
+    #    cottage owner-only gating is out of scope for W11b.
+    outer = 430
+    n_houses = len(agent_names) + 1
+    for i, name in enumerate(agent_names):
+        angle = (2 * math.pi * i) / max(1, n_houses) + rng.uniform(-0.1, 0.1)
+        x = int(cx + outer * math.cos(angle))
+        y = int(cy + outer * math.sin(angle))
+        cname = f"{name}'s cottage"
+        places.append(PlaceState(
+            id=_place_id(cname, "home"), name=cname, x=x, y=y, kind="home",
+            description=f"{name}'s own small cottage. Rest and recharge.",
+        ))
+    angle = (2 * math.pi * len(agent_names)) / max(1, n_houses)
+    places.append(PlaceState(
+        id=_place_id("The Bunkhouse", "home"), name="The Bunkhouse",
+        x=int(cx + outer * math.cos(angle)), y=int(cy + outer * math.sin(angle)),
+        kind="home", description="Communal bunkhouse — not enough beds for everyone.",
+        capacity=max(1, len(agent_names) - 1),
+    ))
+    return places
+
+
 class World:
     """
     Holds the complete mutable world state.
@@ -225,6 +410,10 @@ class World:
         # emits it through the normal event pipeline. Keeps action_vote's signature
         # intact while letting the spawn happen world-side (single source of truth).
         self.pending_spawn_events: list[dict] = []
+        # W11b / EM-091 — the public billboard. List of {tick, actor_id,
+        # actor_type, text}, capped to the 20 newest (append order = oldest →
+        # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
+        self.billboard: list[dict] = []
 
         self.tick: int = 0
         self.day: int = 0
@@ -238,6 +427,30 @@ class World:
         self._turn_order: list[str] = sorted(self.agents.keys())
         self._turn_index: int = 0
         self._round_start: bool = True   # True at beginning of a new round
+
+        # W11b / EM-098 — procgen town (config world.procgen, default OFF). When
+        # enabled, REPLACES the hand-authored places with the seeded layout +
+        # housing. Disabled (default) leaves the hand-authored town untouched.
+        self.apply_procgen()
+
+    def apply_procgen(self) -> None:
+        """Apply the seeded procgen town layout when world.procgen.enabled
+        (EM-098). No-op (hand-authored town byte-identical) when the block is
+        absent or disabled. Idempotent for a fixed seed; clamps any agent or
+        animal standing on a now-unknown place back to the plaza."""
+        cfg = getattr(self.params, "procgen", None)
+        if not bool(_block_get(cfg, "enabled", False)):
+            return
+        names = [a.name for a in self.agents.values()]
+        places = generate_procgen_places(cfg, names)
+        self.places = {p.id: p for p in places}
+        fallback = "plaza" if "plaza" in self.places else next(iter(self.places), "")
+        for a in self.agents.values():
+            if a.location not in self.places:
+                a.location = fallback
+        for an in self.animals.values():
+            if an.location not in self.places:
+                an.location = fallback
 
     # ──────────────────────────────────────────────────────────────────────────
     # Scheduler
@@ -368,6 +581,9 @@ class World:
         return True, "ok", reward
 
     def action_recharge(self, agent: AgentState) -> tuple[bool, str, float]:
+        # W11b / EM-083 — a real blackout disables recharge at affected places.
+        if self.place_blacked_out(agent.location):
+            return False, "blackout: recharge is disabled here until power returns", 0.0
         cost = self.params.recharge_cost
         if self.has_active_rule("recharge_subsidy"):
             cost = max(1, cost // 2)
@@ -470,16 +686,22 @@ class World:
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
-        # Check for duplicate active or proposed rule with same effect
+        # Duplicate guard: only one OPEN proposal per effect at a time.
         for rule in self.rules.values():
             if rule.effect == effect and rule.status == "proposed":
                 return False, f"rule with effect {effect!r} already proposed", None
+        # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
+        # RENEWAL of that rule, not a new stackable law. The proposal is allowed
+        # (civic ritual is the charm) but tagged renewal_of; on passing it
+        # refreshes the existing rule instead of activating a duplicate.
+        active = self._active_rule(effect)
         rule = RuleState(
             id=str(uuid.uuid4())[:8],
             effect=effect,
             text=text,
             proposer_id=agent.id,
             created_tick=self.tick,
+            renewal_of=active.id if active is not None else None,
         )
         self.rules[rule.id] = rule
         return True, "ok", rule
@@ -497,9 +719,20 @@ class World:
         rule.votes[agent.id] = choice
         new_status = self._evaluate_rule(rule)
         if new_status and new_status != rule.status:
-            rule.status = new_status
             if new_status == "active":
+                # W11b / EM-087 — RENEWAL: if an identical effect is already
+                # active, refresh THAT rule (renewed_at gains the tick) instead
+                # of stacking a second active copy. Invariant: the world never
+                # holds two simultaneously-active identical effects.
+                existing = self._active_rule(rule.effect)
+                if existing is not None and existing.id != rule.id:
+                    rule.status = "renewed"
+                    existing.renewed_at.append(self.tick)
+                    return True, "ok", "renewed"
+                rule.status = "active"
                 self._on_rule_activated(rule)
+                return True, "ok", "active"
+            rule.status = new_status
             return True, "ok", new_status
         return True, "ok", None
 
@@ -640,6 +873,36 @@ class World:
             "payload": {"action": action, "error": reason},
         }
 
+    # W11b / EM-103 — legislation-as-architecture: fuzzy name↔rule-text match.
+    _COMMEMORATIVE_STOPWORDS = frozenset({
+        "the", "and", "for", "our", "all", "are", "not", "you", "your", "this",
+        "that", "with", "from", "have", "has", "will", "must", "should", "new",
+        "every", "everyone", "town", "village", "place", "project", "building",
+    })
+
+    @classmethod
+    def _significant_tokens(cls, text: str) -> set[str]:
+        return {
+            t for t in re.findall(r"[a-z0-9]+", str(text or "").lower())
+            if len(t) >= 3 and t not in cls._COMMEMORATIVE_STOPWORDS
+        }
+
+    def _commemorated_rule(self, project_name: str) -> RuleState | None:
+        """Return the active/proposed rule whose text the project name fuzzy-
+        matches (normalized substring or >=2 significant shared tokens), if any.
+        Kept deliberately simple per the contract."""
+        norm_name = re.sub(r"[^a-z0-9]+", " ", str(project_name or "").lower()).strip()
+        name_tokens = self._significant_tokens(project_name)
+        for rule in self.rules.values():
+            if rule.status not in ("active", "proposed"):
+                continue
+            norm_rule = re.sub(r"[^a-z0-9]+", " ", rule.text.lower()).strip()
+            if len(norm_name) >= 4 and (norm_name in norm_rule or norm_rule in norm_name):
+                return rule
+            if len(name_tokens & self._significant_tokens(rule.text)) >= 2:
+                return rule
+        return None
+
     def action_propose_project(
         self,
         agent: AgentState,
@@ -649,11 +912,28 @@ class World:
         function: str | None = None,
     ) -> dict:
         """Create a Building status=planned at the agent's place, owner=public.
-        Emits structure_state_changed{to:planned} + project_proposed."""
+        Emits structure_state_changed{to:planned} + project_proposed.
+
+        W11b / EM-103: a project whose name fuzzy-matches an active/proposed
+        rule's text is a COMMEMORATIVE monument to that rule (tagged
+        commemorative:true + rule_id). At most ONE monument per rule — a second
+        match is rejected at proposal with an explanatory feed line."""
         try:
             funds_required = max(0, int(funds_required))
         except (TypeError, ValueError):
             funds_required = 0
+        rule = self._commemorated_rule(name)
+        if rule is not None:
+            already = any(
+                b.commemorates == rule.id and b.status != "destroyed"
+                for b in self.buildings.values()
+            )
+            if already:
+                return self._fail_event(
+                    agent.id, "propose_project", "commemorative_duplicate",
+                    f"{agent.name}'s proposal {str(name)[:60]!r} honors the law "
+                    f"\"{_truncate(rule.text)}\" — but a monument to that rule "
+                    f"already stands. One monument per law; propose something new.")
         building = Building(
             id=f"bld_{str(uuid.uuid4())[:8]}",
             name=str(name)[:60],
@@ -666,13 +946,18 @@ class World:
             last_progress_tick=self.tick,
             created_tick=self.tick,
             updated_tick=self.tick,
+            commemorates=rule.id if rule is not None else None,
         )
         self.buildings[building.id] = building
+        commemorative_note = (
+            f" — commemorating the law \"{_truncate(rule.text)}\""
+            if rule is not None else ""
+        )
         proposed_evt = {
             "kind": "project_proposed",
             "actor_id": agent.id,
             "text": f"{agent.name} proposes a {building.kind}: {building.name} "
-                    f"(needs {funds_required} credits).",
+                    f"(needs {funds_required} credits){commemorative_note}.",
             "payload": {
                 "building_id": building.id,
                 "name": building.name,
@@ -682,6 +967,9 @@ class World:
                 "function": building.function,
             },
         }
+        if rule is not None:
+            proposed_evt["payload"]["commemorative"] = True
+            proposed_evt["payload"]["rule_id"] = rule.id
         state_evt = self._structure_state_changed_event(
             building, "none", "planned", "proposed", agent.id
         )
@@ -969,6 +1257,144 @@ class World:
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
+    # W11b / EM-091 — the public billboard (reflex tools, zero LLM calls).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    BILLBOARD_CAP = 20          # newest posts kept
+    BILLBOARD_PLACE_IDS = ("plaza", "townhall")  # where the board physically is
+    BILLBOARD_TEXT_CAP = 280
+
+    def billboard_here(self, place_id: str) -> bool:
+        """True when the billboard is reachable from this place (plaza/townhall)."""
+        return place_id in self.BILLBOARD_PLACE_IDS and place_id in self.places
+
+    def _append_billboard(self, actor_id: str, actor_type: str, text: str) -> dict:
+        entry = {
+            "tick": self.tick,
+            "actor_id": actor_id,
+            "actor_type": actor_type,
+            "text": str(text)[: self.BILLBOARD_TEXT_CAP],
+        }
+        self.billboard.append(entry)
+        del self.billboard[: -self.BILLBOARD_CAP]
+        return entry
+
+    def read_billboard_top(self, n: int = 3) -> list[dict]:
+        """The newest `n` posts, newest first (read_billboard context injection)."""
+        return list(reversed(self.billboard[-max(0, n):]))
+
+    def action_post_billboard(self, agent: AgentState, text: str) -> dict:
+        """Reflex tool: pin a note to the public billboard. Location-gated to
+        plaza/townhall (also enforced by the runtime validator). Returns a
+        ready-to-emit billboard_posted event dict."""
+        text = str(text or "").strip()
+        if not text:
+            return self._fail_event(
+                agent.id, "post_billboard", "text required",
+                f"{agent.name} stared at the billboard but wrote nothing.")
+        if not self.billboard_here(agent.location):
+            return self._fail_event(
+                agent.id, "post_billboard", "no billboard here",
+                f"{agent.name} looked for a billboard, but there is none here.")
+        entry = self._append_billboard(agent.id, "human_agent", text)
+        return {
+            "kind": "billboard_posted",
+            "actor_id": agent.id,
+            "text": f"📌 {agent.name} pins a note to the billboard: "
+                    f"\"{_truncate(entry['text'], 80)}\"",
+            "payload": {"place": agent.location, "text": entry["text"]},
+        }
+
+    def post_billboard_as_god(self, text: str, in_reply_to: Any = None) -> dict:
+        """God-mode billboard post/reply (EM-091). The api layer exposes the
+        endpoint and emits the returned billboard_posted event dict through the
+        normal pipeline (actor_type 'god'). The post lands on the board state
+        immediately."""
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        entry = self._append_billboard("god", "god", text)
+        place = next(
+            (pid for pid in self.BILLBOARD_PLACE_IDS if pid in self.places),
+            next(iter(self.places), ""),
+        )
+        payload: dict = {"place": place, "text": entry["text"]}
+        if in_reply_to is not None:
+            payload["in_reply_to"] = in_reply_to
+        return {
+            "kind": "billboard_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "turn_id": None,
+            "text": f"📌 GOD posts on the billboard: \"{_truncate(entry['text'], 80)}\"",
+            "payload": payload,
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # W11b / EM-083 — real blackout: recharge disabled at affected places.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def place_blacked_out(self, place_id: str) -> bool:
+        p = self.places.get(place_id)
+        return bool(p is not None and p.blackout_until_tick and self.tick < p.blackout_until_tick)
+
+    def apply_blackout(self, duration_ticks: int | None = None) -> tuple[list[str], int, list[dict]]:
+        """Black out the home-kind places (or, lacking any, the first two places)
+        for `duration_ticks` (config world.blackout_ticks, default 10). Returns
+        (affected_place_ids, until_tick, structure_state_changed event dicts) for
+        the loop to emit alongside the random_event."""
+        if duration_ticks is None:
+            duration_ticks = getattr(self.params, "blackout_ticks", 10)
+        try:
+            duration_ticks = max(1, int(duration_ticks))
+        except (TypeError, ValueError):
+            duration_ticks = 10
+        affected = [p for p in self.places.values() if p.kind == "home"]
+        if not affected:
+            affected = list(self.places.values())[:2]
+        until = self.tick + duration_ticks
+        events: list[dict] = []
+        for p in affected:
+            p.blackout_until_tick = until
+            events.append({
+                "kind": "structure_state_changed",
+                "actor_id": None,
+                "actor_type": "system",
+                "turn_id": None,
+                "text": f"⚡ The power is out at {p.name} — recharge disabled "
+                        f"until tick {until}.",
+                "payload": {
+                    "place_id": p.id,
+                    "from": "powered",
+                    "to": "blackout",
+                    "reason": "blackout",
+                    "until_tick": until,
+                },
+            })
+        return [p.id for p in affected], until, events
+
+    def expire_blackouts(self) -> list[dict]:
+        """Restore power at places whose blackout window has elapsed. Returns the
+        structure_state_changed event dicts to emit (empty when nothing expired).
+        Called from the tick loop each turn — cheap, no allocation when idle."""
+        events: list[dict] = []
+        for p in self.places.values():
+            if p.blackout_until_tick and self.tick >= p.blackout_until_tick:
+                p.blackout_until_tick = 0
+                events.append({
+                    "kind": "structure_state_changed",
+                    "actor_id": None,
+                    "actor_type": "system",
+                    "turn_id": None,
+                    "text": f"💡 Power is restored at {p.name} — recharge works again.",
+                    "payload": {
+                        "place_id": p.id,
+                        "from": "blackout",
+                        "to": "powered",
+                        "reason": "blackout_ended",
+                    },
+                })
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Utility
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1084,4 +1510,181 @@ class World:
             "buildings": [b.to_dict() for b in self.buildings.values()],
             # W8 — chaos-layer animals; the 3D village renders a roaming cat + dog.
             "animals": [a.to_dict() for a in self.animals.values()],
+            # W11b / EM-091 — the public billboard: list of {tick, actor_id,
+            # actor_type, text}, capped 20 newest (oldest → newest). THE seam the
+            # frontend's billboard panel/3D board builds against.
+            "billboard": [dict(e) for e in self.billboard],
         }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # W11b / EM-101 — snapshot restore (the missing half of to_snapshot).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        state: dict,
+        *,
+        place_overrides: list | None = None,
+        params: Any = None,
+    ) -> "World":
+        """Reconstruct a live World from a snapshot `state` dict (the
+        to_snapshot()/world_state shape). The contracted seam for the fork
+        endpoint (POST /api/runs/fork): `World.from_snapshot(replay(T))` is a
+        forked run's tick-0 world.
+
+        - `place_overrides` (optional) REPLACES the places wholesale: a list of
+          place dicts in the same shape as snapshot["places"].
+        - `params` (optional, additive) supplies WorldParams; defaults to a
+          fresh WorldParams() when omitted.
+
+        Restores tick/day/round, turn order + index, agents (incl. relationships,
+        mood, zero_energy_turns), rules (votes, payload, renewal bookkeeping),
+        buildings, animals, blackout state, and the billboard. Known limits:
+        agent beliefs are not serialized by to_snapshot (only beliefs_count), so
+        they restore empty; `running` always restores False (a fork starts
+        paused)."""
+        if params is None:
+            from ..config.loader import WorldParams  # lazy: keep world.py import-light
+            params = WorldParams()
+
+        def _int(v: Any, default: int = 0) -> int:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        place_dicts = place_overrides if place_overrides is not None else state.get("places", [])
+        places = [
+            PlaceState(
+                id=str(d["id"]),
+                name=str(d.get("name", d["id"])),
+                x=_int(d.get("x")),
+                y=_int(d.get("y")),
+                kind=str(d.get("kind", "social")),
+                description=str(d.get("description", "")),
+                capacity=(_int(d["capacity"]) if d.get("capacity") is not None else None),
+                blackout_until_tick=_int(d.get("blackout_until_tick")),
+            )
+            for d in (place_dicts or [])
+            if isinstance(d, dict) and d.get("id")
+        ]
+
+        agents: list[AgentState] = []
+        for d in state.get("agents", []) or []:
+            if not isinstance(d, dict) or not d.get("id"):
+                continue
+            a = AgentState(
+                id=str(d["id"]),
+                name=str(d.get("name", d["id"])),
+                personality=str(d.get("personality", "")),
+                profile=str(d.get("profile", "mock")),
+                location=str(d.get("location", "")),
+                energy=float(d.get("energy", 0.0) or 0.0),
+                credits=_int(d.get("credits")),
+                mood=str(d.get("mood", "neutral")),
+                alive=bool(d.get("alive", True)),
+                zero_energy_turns=_int(d.get("zero_energy_turns")),
+            )
+            a.relationships = {
+                str(aid): RelationshipState(
+                    type=str(_block_get(r, "type", "neutral")),
+                    trust=_int(_block_get(r, "trust", 0)),
+                    interactions=_int(_block_get(r, "interactions", 0)),
+                )
+                for aid, r in (d.get("relationships") or {}).items()
+            }
+            agents.append(a)
+
+        world = cls(params, places, agents)
+        # __init__ may have run procgen (params.procgen.enabled); a snapshot's
+        # geometry is authoritative — force the restored/overridden places back.
+        world.places = {p.id: p for p in places}
+
+        world.tick = _int(state.get("tick"))
+        world.day = _int(state.get("day"))
+        world.round = _int(state.get("round"))
+        world.running = False  # a restored/forked world starts paused
+        try:
+            world.tick_interval_seconds = float(
+                state.get("tick_interval_seconds", params.tick_interval_seconds)
+            )
+        except (TypeError, ValueError):
+            pass
+
+        # Scheduler state (event-log v1.1.0 §3): round/turn order/turn index.
+        turn_order = state.get("turn_order")
+        if isinstance(turn_order, list) and turn_order:
+            world._turn_order = [str(t) for t in turn_order if str(t) in world.agents]
+        world._turn_index = max(0, min(_int(state.get("turn_index")), len(world._turn_order)))
+        world._round_start = bool(state.get("round_start", world._turn_index == 0))
+
+        for d in state.get("rules", []) or []:
+            if not isinstance(d, dict) or not d.get("id"):
+                continue
+            status = str(d.get("status", "proposed"))
+            rule = RuleState(
+                id=str(d["id"]),
+                effect=str(d.get("effect", "")),
+                text=str(d.get("text", "")),
+                proposer_id=str(d.get("proposer_id", "")),
+                status=status,
+                votes={str(k): bool(v) for k, v in (d.get("votes") or {}).items()},
+                created_tick=_int(d.get("created_tick")),
+                payload=dict(d.get("payload") or {}),
+                # `applied` is not serialized; a non-proposed admit_agent rule
+                # already had its side effects — guard against a double spawn.
+                applied=status != "proposed",
+                renewal_of=d.get("renewal_of"),
+                renewed_at=[_int(t) for t in (d.get("renewed_at") or [])],
+            )
+            world.rules[rule.id] = rule
+
+        for d in state.get("buildings", []) or []:
+            if not isinstance(d, dict) or not d.get("id"):
+                continue
+            b = Building(
+                id=str(d["id"]),
+                name=str(d.get("name", d["id"])),
+                kind=str(d.get("kind", "")),
+                location=str(d.get("location", "")),
+                owner_id=d.get("owner_id", "public"),
+                status=str(d.get("status", "planned")),
+                health=_int(d.get("health"), 100),
+                progress=_int(d.get("progress")),
+                funds_committed=_int(d.get("funds_committed")),
+                funds_required=_int(d.get("funds_required")),
+                contributors=[str(c) for c in (d.get("contributors") or [])],
+                function=str(d.get("function", "")),
+                last_progress_tick=_int(d.get("last_progress_tick")),
+                created_tick=_int(d.get("created_tick")),
+                updated_tick=_int(d.get("updated_tick")),
+                commemorates=d.get("commemorates"),
+            )
+            world.buildings[b.id] = b
+
+        for d in state.get("animals", []) or []:
+            if not isinstance(d, dict) or not d.get("id"):
+                continue
+            an = Animal(
+                id=str(d["id"]),
+                species=str(d.get("species", "")),
+                name=str(d.get("name", d["id"])),
+                location=str(d.get("location", "")),
+                energy=_int(d.get("energy"), 100),
+                mood=str(d.get("mood", "content")),
+                alive=bool(d.get("alive", True)),
+                created_tick=_int(d.get("created_tick")),
+            )
+            world.animals[an.id] = an
+
+        world.billboard = [
+            {
+                "tick": _int(_block_get(e, "tick", 0)),
+                "actor_id": str(_block_get(e, "actor_id", "")),
+                "actor_type": str(_block_get(e, "actor_type", "human_agent")),
+                "text": str(_block_get(e, "text", ""))[: cls.BILLBOARD_TEXT_CAP],
+            }
+            for e in (state.get("billboard") or [])[-cls.BILLBOARD_CAP:]
+        ]
+        return world

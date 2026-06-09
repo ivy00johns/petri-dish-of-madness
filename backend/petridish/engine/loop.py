@@ -37,6 +37,17 @@ def _world_params_json(world_params: object) -> dict:
         out[k] = asdict(v) if is_dataclass(v) and not isinstance(v, type) else v
     return out
 
+
+def _run_config_json(config: WorldConfig) -> str:
+    """The runs.config_json blob for a new run row. W11a / EM-086: alongside the
+    world params it carries the seed agents' {name, profile} so RunRow's
+    config_summary can project them without the full config (pre-W11a runs lack
+    the agents key; the projection degrades to an empty list)."""
+    return json.dumps({
+        "world": _world_params_json(config.world),
+        "agents": [{"name": a.name, "profile": a.profile} for a in config.agents],
+    })
+
 # Random event templates
 RANDOM_EVENTS = {
     "windfall": {
@@ -53,10 +64,14 @@ RANDOM_EVENTS = {
             setattr(a, "energy", max(0.0, a.energy - 10)) for a in world.living_agents()
         ],
     },
+    # W11b / EM-083 — blackout is REAL: recharge is disabled at the affected
+    # places for world.blackout_ticks (default 10). Applied via
+    # world.apply_blackout in inject_random_event (it needs to emit the
+    # structure_state_changed events alongside the random_event).
     "blackout": {
         "kind": "random_event",
-        "text": "Blackout! Energy recharge costs double this round.",
-        "_effect": lambda world: None,  # Handled by noting event; TODO: apply temporarily
+        "text": "Blackout! The power fails — recharge is disabled at affected places.",
+        "_effect": lambda world: None,  # special-cased in inject_random_event
     },
     "festival": {
         "kind": "random_event",
@@ -132,6 +147,14 @@ class TickLoop:
         self._starving_warned: set[str] = set()
         # W9 / EM-071 — world_extinct has been emitted for this run (one-shot).
         self._extinct_emitted: bool = False
+
+        # W11a / EM-094 — Narrator mode. The in-flight narrator call, run OFF the
+        # agents' critical path (same pattern as the animal cadence) so a slow /
+        # failed narrator LLM call never stalls or delays a tick. _last_narrator
+        # _tick guards "at most once per every_n_ticks" — marked when scheduled,
+        # so a failed call is simply skipped (no retry) until the next window.
+        self._narrator_task: asyncio.Task | None = None
+        self._last_narrator_tick: int = -1
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -219,6 +242,18 @@ class TickLoop:
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("animal task raised during reset: %s", exc)
         self._animal_task = None
+        # W11a / EM-094 — drop any in-flight narrator call the same way: it
+        # summarizes the OLD run's window and must not emit into the fresh run.
+        if self._narrator_task is not None and not self._narrator_task.done():
+            self._narrator_task.cancel()
+            try:
+                await self._narrator_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("narrator task raised during reset: %s", exc)
+        self._narrator_task = None
+        self._last_narrator_tick = -1
         # W9 / EM-073 B2: properly await the cancelled tick task. A tick mid-LLM
         # call (30s timeout) could otherwise keep running and mutate the world we
         # are about to rebuild. (The old `asyncio.shield(asyncio.sleep(0.1))` was
@@ -267,6 +302,8 @@ class TickLoop:
         self._world.pending_spawn_events = []
         # W8 — clear animals; the seed critters are re-spawned below.
         self._world.animals = {}
+        # W11b — clear the billboard for the fresh run.
+        self._world.billboard = []
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0
@@ -277,8 +314,17 @@ class TickLoop:
         self._world._round_start = True
         self._last_building_round = 0
 
-        # Clear agent memories
-        self._runtime._memory.clear()
+        # W11b / EM-098 — regenerate the procgen town for the fresh run when
+        # world.procgen.enabled (no-op for the hand-authored town).
+        self._world.apply_procgen()
+
+        # Clear agent memories + W11b cognition state (commitments, importance
+        # accumulators, pending overheard lines).
+        reset_state = getattr(self._runtime, "reset_state", None)
+        if callable(reset_state):
+            reset_state()
+        else:  # pragma: no cover - legacy runtime
+            self._runtime._memory.clear()
 
         # W9 — reset per-run survival/extinction tracking (EM-070/071).
         self._starving_warned.clear()
@@ -291,7 +337,7 @@ class TickLoop:
             clear_cache()
 
         # New DB run
-        cfg_json = json.dumps({"world": _world_params_json(config.world)})
+        cfg_json = _run_config_json(config)
         if self._run_id:
             try:
                 self._repo.end_run(self._run_id)
@@ -315,7 +361,7 @@ class TickLoop:
 
     def init_run(self, config: WorldConfig) -> None:
         """One-time initialization (called at startup, not async)."""
-        cfg_json = json.dumps({"world": _world_params_json(config.world)})
+        cfg_json = _run_config_json(config)
         self._run_id = self._repo.start_run(cfg_json)
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
@@ -409,12 +455,26 @@ class TickLoop:
         # Emitted as standalone system events (no turn_id) before this turn's chain.
         self._advance_round_buildings()
 
+        # W11b / EM-083 — restore power at places whose blackout window elapsed
+        # (standalone system events, outside this turn's chain).
+        try:
+            for evt in self._world.expire_blackouts():
+                evt.setdefault("turn_id", None)
+                self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("blackout expiry failed: %s", exc)
+
         # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
         # each living animal takes ONE animal turn (mostly zero-LLM reflex). It is
         # SCHEDULED as a background task (not awaited) so a slow/unreachable animal
         # LLM call never blocks this agent turn. Its events land asynchronously,
         # stamped with the tick they actually resolve on.
         self._maybe_schedule_animals()
+
+        # W11a / EM-094 — Narrator mode (OFF by default): on an every_n_ticks-
+        # aligned tick, schedule ONE recap LLM call as a background task — same
+        # off-critical-path pattern as the animals. Disabled = zero calls.
+        self._maybe_schedule_narrator()
 
         try:
             # 1. turn_start (now persisted + carries turn_id)
@@ -640,6 +700,145 @@ class TickLoop:
         if acted:
             self._broadcast_world_state()
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # W11a / EM-094 — Narrator mode (event-log.md v1.2.0 note 1)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # The event kinds the narrator digest is built from: deaths, governance,
+    # projects/structures, conflicts, spawns, world events — NOT raw event dumps.
+    _NARRATOR_DIGEST_KINDS = (
+        "agent_died", "animal_died", "world_extinct", "agent_starving",
+        "rule_proposed", "rule_passed", "rule_rejected",
+        "project_proposed", "project_funded", "project_built",
+        "building_operational", "structure_state_changed",
+        "conflict", "agent_spawned", "animal_spawned", "random_event",
+    )
+
+    def _narrator_cfg(self) -> Any:
+        return getattr(self._world.params, "narrator", None)
+
+    def _maybe_schedule_narrator(self) -> None:
+        """Schedule the narrator recap OFF the agents' critical path (EM-094).
+
+        At most ONE call per `world.narrator.every_n_ticks` window, fired as a
+        background task on the aligned tick — exactly the animal-cadence pattern,
+        so a slow/failed narrator LLM call never stalls or delays a tick. The
+        window is marked consumed when SCHEDULED, so a failed call emits nothing
+        and is never retried. Disabled (default) / unavailable profile = zero
+        calls. NEVER raises (callable from the hot path)."""
+        cfg = self._narrator_cfg()
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return
+        tick = self._world.tick
+        every = max(1, int(getattr(cfg, "every_n_ticks", 50)))
+        if tick <= 0 or tick % every != 0:
+            return
+        if tick == self._last_narrator_tick:
+            return
+        if self._narrator_task is not None and not self._narrator_task.done():
+            return  # an earlier window's call is still in flight — skip, no queueing
+        profile_name = str(getattr(cfg, "model_profile", "") or "")
+        profile = self._router.get_profile(profile_name)
+        try:
+            available = bool(profile.available()) if profile is not None else False
+        except Exception:  # pragma: no cover - defensive
+            available = False
+        if not available:
+            return  # free-scale guarantee: never route to a missing/keyless profile
+        self._last_narrator_tick = tick
+        from_tick = max(0, tick - every)
+        self._narrator_task = asyncio.create_task(
+            self._run_narrator(from_tick, tick, profile_name)
+        )
+
+    def _narrator_digest(self, from_tick: int, to_tick: int) -> str:
+        """Compact digest of the window's notable events (deaths, rules, projects,
+        conflicts) for the narrator prompt — counts plus the last few feed lines,
+        never a raw event dump. Free-scale: the prompt stays tiny."""
+        run_id = self._run_id or 1
+        try:
+            rows = self._repo.get_events(
+                run_id,
+                from_tick=from_tick,
+                to_tick=to_tick,
+                kinds=list(self._NARRATOR_DIGEST_KINDS),
+                order="asc",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("narrator digest query failed: %s", exc)
+            rows = []
+        counts: dict[str, int] = {}
+        for ev in rows:
+            kind = ev.get("kind") or "?"
+            counts[kind] = counts.get(kind, 0) + 1
+        header = ", ".join(f"{k} x{n}" for k, n in sorted(counts.items())) or "a quiet stretch"
+        lines = []
+        for ev in rows[-20:]:  # the most recent notable moments, capped
+            text = (ev.get("text") or "").strip()
+            if text:
+                lines.append(f"[tick {ev.get('tick')}] {text[:140]}")
+        moments = "\n".join(lines) or "(nothing notable happened)"
+        alive = ", ".join(a.name for a in self._world.living_agents()) or "nobody"
+        return (
+            f"Window: ticks {from_tick}-{to_tick}. Living agents: {alive}.\n"
+            f"Event counts: {header}.\n"
+            f"Notable moments:\n{moments}"
+        )
+
+    async def _run_narrator(self, from_tick: int, to_tick: int, profile_name: str) -> None:
+        """Body of one narrator window (background task): build the digest, make
+        ONE LLM call, emit ONE `narrator_summary` event. A failed/timed-out call
+        emits NOTHING (no retry) and never propagates — the loop never stalls."""
+        try:
+            digest = self._narrator_digest(from_tick, to_tick)
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the narrator of a tiny simulated village of LLM "
+                        "agents. Given a digest of the last stretch of events, "
+                        "write a vivid 2-3 sentence recap in past tense. Mention "
+                        "deaths, laws passed, projects, and conflicts when present; "
+                        "if it was quiet, say so with charm. Reply with ONLY the "
+                        "2-3 sentences — no lists, no preamble, no markdown."
+                    ),
+                },
+                {"role": "user", "content": digest},
+            ]
+            profile = self._router.get_profile(profile_name)
+            text = await asyncio.wait_for(
+                self._router.chat(
+                    profile_name,
+                    messages,
+                    max_tokens=min(256, getattr(profile, "max_tokens", 256) or 256),
+                    temperature=0.7,
+                ),
+                timeout=30.0,
+            )
+            text = (text or "").strip()
+            if not text:
+                return  # an empty recap is a failed call: emit nothing
+            payload = {"from_tick": from_tick, "to_tick": to_tick, "profile": profile_name}
+            routed_via = self._router.last_routed_via(profile_name)
+            if routed_via:
+                payload["routed_via"] = routed_via
+            self._emit_event({
+                "kind": "narrator_summary",
+                "actor_id": "narrator",
+                "actor_type": "system",
+                "profile": profile_name,
+                # Standalone system event: this background task runs concurrently
+                # with agent turns, so never inherit the in-flight turn_id.
+                "turn_id": None,
+                "text": text[:600],
+                "payload": payload,
+            })
+        except asyncio.CancelledError:
+            raise  # reset() cancels us; propagate so the await completes
+        except Exception as exc:
+            # Contract: a failed/timed-out narrator call emits NOTHING, no retry.
+            log.debug("narrator call failed for ticks %s-%s: %s", from_tick, to_tick, exc)
+
     def _advance_round_buildings(self) -> None:
         """W7 per-round hook. Runs once per round (guarded by world.round):
           - advance building lifecycle (idle non-operational buildings past the
@@ -825,15 +1024,21 @@ class TickLoop:
             "profile_color": profile_color,
         }
 
+        perceived_payload = {
+            "visible_agents": perceived.get("visible_agents", []),
+            "nearby_places": perceived.get("nearby_places", []),
+            "overheard": perceived.get("overheard", []),
+            "perceived_summary": perceived.get("perceived_summary"),
+        }
+        # W11b / EM-081 — overheard speech consumed this turn rides the perceived
+        # chain event's payload, each line flagged overheard:true (additive key;
+        # the legacy `overheard` seq list is unchanged).
+        if perceived.get("overheard_speech"):
+            perceived_payload["overheard_speech"] = perceived["overheard_speech"]
         self._emit_event({
             **base, "kind": "perceived",
             "text": f"{agent.name} perceives the scene.",
-            "payload": {
-                "visible_agents": perceived.get("visible_agents", []),
-                "nearby_places": perceived.get("nearby_places", []),
-                "overheard": perceived.get("overheard", []),
-                "perceived_summary": perceived.get("perceived_summary"),
-            },
+            "payload": perceived_payload,
         })
         self._emit_event({
             **base, "kind": "memory_retrieved",
@@ -1081,21 +1286,43 @@ class TickLoop:
         if template is None:
             raise ValueError(f"Unknown event kind: {kind!r}")
 
-        effect_fn = template.get("_effect")
-        if effect_fn:
-            effect_fn(self._world)
+        text = template["text"]
+        payload: dict = {"event_kind": kind}
+        extra_events: list[dict] = []
+
+        if kind == "blackout":
+            # W11b / EM-083 — a REAL blackout: disable recharge at the affected
+            # places for world.blackout_ticks; surface per-place
+            # structure_state_changed events alongside the random_event.
+            place_ids, until, extra_events = self._world.apply_blackout()
+            names = ", ".join(
+                self._world.places[pid].name for pid in place_ids
+                if pid in self._world.places
+            ) or "nowhere"
+            text = (
+                f"Blackout! The power fails at {names} — recharge disabled "
+                f"until tick {until}."
+            )
+            payload.update({"places": place_ids, "until_tick": until})
+        else:
+            effect_fn = template.get("_effect")
+            if effect_fn:
+                effect_fn(self._world)
 
         evt = {
             "kind": template["kind"],
             "actor_id": None,
             "profile": None,
             "profile_color": None,
-            "text": template["text"],
-            "payload": {"event_kind": kind},
+            "text": text,
+            "payload": payload,
         }
         self._emit_event(evt)
+        for extra in extra_events:
+            extra.setdefault("turn_id", None)
+            self._emit_event(extra)
         self._broadcast_world_state()
-        return {"kind": kind, "text": template["text"]}
+        return {"kind": kind, "text": text}
 
     def current_snapshot(self) -> dict:
         """Return the current world_state dict (for /api/state)."""

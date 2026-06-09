@@ -10,10 +10,13 @@ import logging
 from collections import OrderedDict
 from typing import Any
 
+from typing import Callable
+
 from ..config.loader import ModelProfile
 from .adapters import OpenAICompatibleAdapter, AnthropicAdapter, GeminiAdapter
 from .base import Provider, ProviderError
 from .mock import MockProvider
+from .usage import UsageAlertTracker
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +110,46 @@ class Router:
         # profile_name -> {"routed_via": str|None, "usage": dict|None}
         self._pending_cached: dict[str, dict] = {}
 
+        # ── W11b / EM-083 (platform half) — usage-alert tracking ───────────────
+        # Day-window rpd/tpd caps come from the profile entries (profiles.yaml
+        # `rpd:`/`tpd:` keys, see providers/usage.py). Profiles without caps
+        # contribute no state and can never alert. Alerts are dispatched to the
+        # sink set via set_usage_alert_sink (the API layer routes them into the
+        # event log as `usage_alert` rows); no sink = alerts are dropped.
+        self._usage_alerts = UsageAlertTracker({
+            p.name: {"rpd": getattr(p, "rpd", None), "tpd": getattr(p, "tpd", None)}
+            for p in profiles
+        })
+        self._usage_alert_sink: Callable[[dict], None] | None = None
+
+    def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
+        """Register the callback that receives `usage_alert` payloads
+        ({provider, metric, pct, limit}) when a real adapter call crosses 70%
+        of a configured day cap (W11b EM-083). Called synchronously from
+        chat()'s MISS path; the sink must be cheap and never raise."""
+        self._usage_alert_sink = sink
+
+    def _note_usage_for_alerts(self, profile_name: str) -> None:
+        """Feed the alert tracker after a successful REAL adapter call (cache
+        HITs and mock calls never reach here / have no caps). Defensive: alert
+        plumbing must never break chat()."""
+        if not self._usage_alerts.has_caps:
+            return
+        try:
+            usage = getattr(self._adapters.get(profile_name), "last_usage", None) or {}
+            tokens = 0
+            for key in ("input_tokens", "output_tokens"):
+                v = usage.get(key) if isinstance(usage, dict) else None
+                if isinstance(v, (int, float)):
+                    tokens += int(v)
+            alerts = self._usage_alerts.note(profile_name, requests=1, tokens=tokens)
+            sink = self._usage_alert_sink
+            if sink is not None:
+                for alert in alerts:
+                    sink(alert)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("usage-alert tracking failed for %s: %s", profile_name, exc)
+
     # ──────────────────────────────────────────────────────────────────────────
 
     def reassign(self, agent_id: str, profile_name: str) -> None:
@@ -181,6 +224,10 @@ class Router:
         # surface unchanged for this profile.
         self._pending_cached.pop(profile_name, None)
         text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
+
+        # W11b / EM-083 — one REAL provider call completed: feed the day-window
+        # usage-alert tracker (no-op unless this profile has rpd/tpd caps).
+        self._note_usage_for_alerts(profile_name)
 
         if cacheable and key is not None:
             self._cache[key] = {

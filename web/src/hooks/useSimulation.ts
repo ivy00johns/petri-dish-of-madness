@@ -69,6 +69,13 @@ export interface SimulationControls {
    * locally and surface the agent_spawned event in the feed.
    */
   spawnAgent: (spec: SpawnSpec) => void;
+  /**
+   * W11b (EM-091d): god reply on the village billboard. Live: POST
+   * /api/billboard {text, in_reply_to?} with NO optimistic echo — the backend
+   * emits billboard_posted (actor_type:"god") over the WS and the feed/panel
+   * render that. Mock: the generator synthesizes the same event + state.
+   */
+  postBillboard: (text: string, inReplyTo?: string) => void;
   getProfiles: () => ModelProfile[];
   /**
    * Inspector scrub control (frontend-inspector.md §3). In MOCK mode the
@@ -504,6 +511,22 @@ export function useSimulation(): SimulationState & SimulationControls {
     }
   }, [mockMode, apiPost, pushHistory]);
 
+  // W11b (EM-091d): god reply on the billboard. Live mode is optimistic-FREE
+  // by contract — we wait for the WS billboard_posted event rather than
+  // synthesizing a local echo (a failed POST must not leave a ghost post).
+  const postBillboard = useCallback((text: string, inReplyTo?: string) => {
+    const trimmed = text.trim().slice(0, 280);
+    if (!trimmed) return;
+    if (mockMode) {
+      const { state, events: newEvents } = mockControls.postBillboard(trimmed, inReplyTo);
+      setWorld(state);
+      setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+      pushHistory(newEvents);
+    } else {
+      apiPost('/api/billboard', { text: trimmed, ...(inReplyTo ? { in_reply_to: inReplyTo } : {}) });
+    }
+  }, [mockMode, apiPost, pushHistory]);
+
   const getProfiles = useCallback((): ModelProfile[] => {
     return world?.profiles ?? mockControls.getProfiles();
   }, [world]);
@@ -551,6 +574,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     reassignModel,
     injectEvent,
     spawnAgent,
+    postBillboard,
     getProfiles,
     seekTick,
   };

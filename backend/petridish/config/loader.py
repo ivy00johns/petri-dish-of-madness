@@ -101,6 +101,12 @@ class ModelProfile:
     # USD cost per 1k tokens for the model, used only for display/analytics.
     is_free_tier: bool = False
     cost_per_1k: float | None = None
+    # W11b / EM-083 (platform half) — optional per-provider day caps for the
+    # usage_alert channel (providers/usage.py). rpd = requests/day, tpd =
+    # tokens/day; None = no cap = no alerts for that metric (today's behavior).
+    # ALERTS ONLY — these never throttle or block (EM-067 owns throttling).
+    rpd: int | None = None
+    tpd: int | None = None
 
     def api_key(self) -> str | None:
         if self.api_key_env:
@@ -214,6 +220,78 @@ class AnimalParams:
 
 
 @dataclass
+class NarratorParams:
+    """W11a / EM-094 — Narrator mode (config `world.narrator`).
+
+    DEFAULT OFF (`enabled=False`): zero cost, zero LLM calls. When enabled, the
+    tick loop makes at most ONE LLM call per `every_n_ticks` window (off the
+    agents' critical path, same pattern as the animal cadence) asking
+    `model_profile` for a 2–3 sentence recap of the window, emitted as ONE
+    `narrator_summary` event (event-log.md v1.2.0 note 1). A failed/timed-out
+    call emits nothing and is never retried.
+
+      enabled       — master toggle (default False = zero calls).
+      every_n_ticks — window size; at most one narrator call per window.
+      model_profile — the (cheap/free) profile the recap routes to; the loop
+                      skips the call entirely when it is unavailable.
+    """
+    enabled: bool = False
+    every_n_ticks: int = 50
+    model_profile: str = ""
+
+
+@dataclass
+class CommitmentParams:
+    """W11b / EM-079 — commitments (config `world.commitments`). Parsed here so
+    user edits to the yaml take effect; the engine reads via its defensive
+    _block_get accessors (agents/runtime.py) with IDENTICAL defaults, so an
+    absent block behaves exactly the same.
+
+      phantom_after_turns — talk-only turns before a promise lapses as phantom
+                            (`commitment_lapsed{reason:"phantom"}`).
+      max_active          — active commitments per agent (oldest evicted).
+    """
+    phantom_after_turns: int = 12
+    max_active: int = 5
+
+
+@dataclass
+class ReflectionParams:
+    """W11b / EM-080 — reflection/diary (config `world.reflection`). Same
+    defensive-accessor contract as CommitmentParams; engine default matches.
+
+      importance_threshold — accumulated importance that triggers an in-prompt
+                             reflection request on the agent's NEXT turn
+                             (same single response — never a separate call).
+    """
+    importance_threshold: float = 10.0
+
+
+@dataclass
+class ProcgenParams:
+    """W11b / EM-098 — procedural town generation (config `world.procgen`).
+    DEFAULT OFF: the hand-authored town stays byte-identical. When enabled, the
+    engine (world.apply_procgen) replaces the `places:` list with a seeded
+    layout: a central plaza, a ring of n_places using EXISTING kinds only, plus
+    housing (per-agent cottages + a communal bunkhouse) on top.
+
+      enabled      — master toggle (default False = hand-authored town).
+      seed         — RNG seed for the layout.
+      n_places     — town places incl. the plaza (the engine clamps to 4..12;
+                     housing is on top of this count).
+      kind_weights — weighted picks for the non-guaranteed slots; kept a plain
+                     dict (the engine's _block_get reads keys off it directly).
+                     Defaults mirror engine/world.py generate_procgen_places.
+    """
+    enabled: bool = False
+    seed: int = 42
+    n_places: int = 9
+    kind_weights: dict = field(default_factory=lambda: {
+        "work": 2.0, "social": 2.0, "governance": 1.0, "wild": 2.0, "home": 1.0,
+    })
+
+
+@dataclass
 class AnimalSeed:
     """W8 / EM-064 — a seed critter from the top-level `animals:` list. Spawned at
     world init when `world.animals.enabled`. `personality` is optional flavour fed
@@ -267,6 +345,17 @@ class WorldParams:
     # W8 — LLM-driven chaos animals. Additive; default-disabled so a world.yaml
     # without an `animals` block behaves exactly as before.
     animals: AnimalParams = field(default_factory=AnimalParams)
+    # W11a / EM-094 — Narrator mode. Additive; default-disabled (zero LLM calls)
+    # so a world.yaml without a `narrator` block behaves exactly as before.
+    narrator: NarratorParams = field(default_factory=NarratorParams)
+    # W11b — engine config blocks (EM-079/080/083/098), parsed so yaml edits
+    # take effect. The engine reads all four via defensive accessors (dataclass
+    # OR dict OR absent) with defaults identical to these, so behavior without
+    # the yaml blocks is unchanged.
+    blackout_ticks: int = 10
+    commitments: CommitmentParams = field(default_factory=CommitmentParams)
+    reflection: ReflectionParams = field(default_factory=ReflectionParams)
+    procgen: ProcgenParams = field(default_factory=ProcgenParams)
 
 
 @dataclass
@@ -336,6 +425,18 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
             cost_per_1k = float(cost_raw) if cost_raw is not None else None
         except (TypeError, ValueError):
             cost_per_1k = None
+
+        def _opt_cap(key: str) -> int | None:
+            # W11b / EM-083 — optional rpd/tpd day caps; malformed/absent → None.
+            v = p.get(key)
+            if v is None:
+                return None
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                return None
+            return iv if iv > 0 else None
+
         profiles.append(ModelProfile(
             name=p["name"],
             adapter=p["adapter"],
@@ -347,6 +448,8 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
             api_key_env=p.get("api_key_env", ""),
             is_free_tier=bool(p.get("is_free_tier", False)),
             cost_per_1k=cost_per_1k,
+            rpd=_opt_cap("rpd"),
+            tpd=_opt_cap("tpd"),
         ))
     return profiles
 
@@ -428,6 +531,85 @@ def _parse_animals(raw: dict | None) -> AnimalParams:
     )
 
 
+def _parse_narrator(raw: dict | None) -> NarratorParams:
+    """Parse the optional `world.narrator` block (W11a / EM-094). Absent/empty ->
+    disabled defaults (backward-compatible, zero LLM calls). `model_profile`
+    stays "" when unset; the loop then skips the narrator call entirely."""
+    if not isinstance(raw, dict):
+        return NarratorParams()
+    d = NarratorParams()
+    return NarratorParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        every_n_ticks=max(1, int(raw.get("every_n_ticks", d.every_n_ticks))),
+        model_profile=str(raw.get("model_profile", d.model_profile) or ""),
+    )
+
+
+def _parse_commitments(raw: dict | None) -> CommitmentParams:
+    """Parse the optional `world.commitments` block (W11b / EM-079).
+    Absent/empty/malformed values -> engine-matching defaults; the engine
+    clamps both to >=1, mirrored here."""
+    if not isinstance(raw, dict):
+        return CommitmentParams()
+    d = CommitmentParams()
+
+    def _pos_int(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return CommitmentParams(
+        phantom_after_turns=_pos_int("phantom_after_turns", d.phantom_after_turns),
+        max_active=_pos_int("max_active", d.max_active),
+    )
+
+
+def _parse_reflection(raw: dict | None) -> ReflectionParams:
+    """Parse the optional `world.reflection` block (W11b / EM-080).
+    Absent/empty/malformed -> engine-matching default threshold."""
+    if not isinstance(raw, dict):
+        return ReflectionParams()
+    d = ReflectionParams()
+    try:
+        threshold = float(raw.get("importance_threshold", d.importance_threshold))
+    except (TypeError, ValueError):
+        threshold = d.importance_threshold
+    return ReflectionParams(importance_threshold=threshold)
+
+
+def _parse_procgen(raw: dict | None) -> ProcgenParams:
+    """Parse the optional `world.procgen` block (W11b / EM-098). Absent/empty ->
+    disabled defaults (the hand-authored town stays). `kind_weights` merges the
+    yaml's entries over the engine-matching defaults; non-numeric weights fall
+    back per-key (the engine re-validates with the same defaults anyway)."""
+    if not isinstance(raw, dict):
+        return ProcgenParams()
+    d = ProcgenParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    weights = dict(d.kind_weights)
+    raw_weights = raw.get("kind_weights")
+    if isinstance(raw_weights, dict):
+        for kind, default in list(weights.items()):
+            try:
+                weights[kind] = max(0.0, float(raw_weights.get(kind, default)))
+            except (TypeError, ValueError):
+                weights[kind] = default
+
+    return ProcgenParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        seed=_int("seed", d.seed),
+        n_places=_int("n_places", d.n_places),
+        kind_weights=weights,
+    )
+
+
 def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
     """Parse the top-level `animals:` seed list (the cat & dog). Absent -> [].
     Each entry needs species + name; location defaults to the first place."""
@@ -479,6 +661,11 @@ def _parse_world(
         spawn=_parse_spawn(w.get("spawn")),
         cache=_parse_cache(w.get("cache")),
         animals=_parse_animals(w.get("animals")),
+        narrator=_parse_narrator(w.get("narrator")),
+        blackout_ticks=int(w.get("blackout_ticks", 10)),
+        commitments=_parse_commitments(w.get("commitments")),
+        reflection=_parse_reflection(w.get("reflection")),
+        procgen=_parse_procgen(w.get("procgen")),
     )
 
     places = [
@@ -571,3 +758,46 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
         profiles=profiles,
         animals=animal_seeds,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# W11b / EM-092 — persona library (config/personas.yaml)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_personas() -> list[dict]:
+    """Load the persona cards from config/personas.yaml (api.openapi.yaml 1.4.0
+    GET /api/personas). Each card: {name, archetype, personality,
+    suggested_profile}.
+
+    FAIL-SOFT BY CONTRACT: a missing file, unreadable file, malformed YAML, or
+    a wrong top-level shape all return [] — the endpoint must never 500. Cards
+    missing a `name` are dropped; the other fields degrade to ''."""
+    cfg_dir = _find_config_dir()
+    if cfg_dir is None:
+        return []
+    path = cfg_dir / "personas.yaml"
+    if not path.exists():
+        return []
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    cards = raw.get("personas")
+    if not isinstance(cards, list):
+        return []
+    out: list[dict] = []
+    for c in cards:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "archetype": str(c.get("archetype") or ""),
+            "personality": str(c.get("personality") or ""),
+            "suggested_profile": str(c.get("suggested_profile") or ""),
+        })
+    return out

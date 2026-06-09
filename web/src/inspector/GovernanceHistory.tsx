@@ -25,12 +25,76 @@
  * design-token-guard clean (the established pattern in ReplayScrubber).
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { PanelProps } from './types';
 import type { GovTimelineEntry, GovDownstream } from './types';
 import type { WorldEvent } from '../types';
 import { governanceTimeline } from './selectors';
 import './inspector-tokens.css';
+
+// ── W11b (EM-087) — renewals + identical-effect stacking ─────────────────────
+
+/** One observed renewal of an active law (rule_passed with payload.renewed). */
+export interface RuleRenewal {
+  tick: number;
+  seq: number;
+}
+
+/**
+ * Pure: renewal events per rule_id. The backend's EM-087 semantics make a
+ * re-proposal of an identical ACTIVE effect a RENEWAL — `rule_passed` carries
+ * `renewed: true` (+ the rule_id in payload). Computed from raw events so the
+ * shared governanceTimeline selector (and its pinned tests) stay untouched.
+ */
+export function renewalsByRule(events: WorldEvent[]): Map<string, RuleRenewal[]> {
+  const out = new Map<string, RuleRenewal[]>();
+  for (const e of events) {
+    if (e.kind !== 'rule_passed' || e.payload?.renewed !== true) continue;
+    const ruleId = typeof e.payload?.rule_id === 'string' ? e.payload.rule_id : null;
+    if (!ruleId) continue;
+    const list = out.get(ruleId) ?? [];
+    list.push({ tick: e.tick, seq: e.seq });
+    out.set(ruleId, list);
+  }
+  for (const list of out.values()) list.sort((a, b) => a.tick - b.tick);
+  return out;
+}
+
+/** A timeline item: one rule card, optionally carrying an identical-effect
+ *  stack (EM-087 — ACTIVE rules with the same effect collapse to one row). */
+interface TimelineItem {
+  entry: GovTimelineEntry;
+  /** All identical-effect ACTIVE instances (length ≥ 2 ⇒ render the ×N stack). */
+  stack: GovTimelineEntry[];
+}
+
+/**
+ * Pure: collapse identical-effect ACTIVE entries into one item (the earliest
+ * instance leads; the rest fold into its stack). Non-active entries — and
+ * actives with a null effect — render individually, in original order.
+ * Handles historical data (the 3×UBI runs on disk) with no backend support.
+ */
+export function groupTimeline(timeline: GovTimelineEntry[]): TimelineItem[] {
+  const stacks = new Map<string, GovTimelineEntry[]>();
+  for (const e of timeline) {
+    if (e.status !== 'active' || !e.effect) continue;
+    const list = stacks.get(e.effect) ?? [];
+    list.push(e);
+    stacks.set(e.effect, list);
+  }
+  const folded = new Set<string>(); // ruleIds absorbed into a leading stack
+  for (const list of stacks.values()) {
+    if (list.length < 2) continue;
+    for (const e of list.slice(1)) folded.add(e.ruleId);
+  }
+  const items: TimelineItem[] = [];
+  for (const e of timeline) {
+    if (folded.has(e.ruleId)) continue;
+    const stack = e.status === 'active' && e.effect ? stacks.get(e.effect) ?? [e] : [e];
+    items.push({ entry: e, stack });
+  }
+  return items;
+}
 
 // The contract's blue governance accent (event-log color-code, §4). Referenced
 // as a CSS custom property so it stays in lockstep with the marker legend —
@@ -92,6 +156,11 @@ export default function GovernanceHistory(props: PanelProps) {
 
   const timeline = useMemo(() => governanceTimeline(scoped), [scoped]);
 
+  // W11b (EM-087): identical-effect ACTIVE rules collapse into one ×N row;
+  // renewals (rule_passed{renewed:true}) render RENEWED, distinct from PASSED.
+  const items = useMemo(() => groupTimeline(timeline), [timeline]);
+  const renewals = useMemo(() => renewalsByRule(scoped), [scoped]);
+
   // id → display name for proposers / the consequence narration.
   const nameOf = useMemo(() => {
     const m = new Map<string, string>();
@@ -107,14 +176,14 @@ export default function GovernanceHistory(props: PanelProps) {
       aria-label="Governance & laws history (EM-057)"
     >
       <div className="lab-header flex items-center justify-between gap-2">
-        <span className="flex items-center gap-2">
+        <h2 className="m-0 flex items-center gap-2 font-mono text-xs font-semibold tracking-widest uppercase">
           <i
             className="inline-block w-2 h-2 rounded-sm"
             style={{ backgroundColor: GOV_ACCENT }}
             aria-hidden="true"
           />
           Governance · Laws
-        </span>
+        </h2>
         <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">
           EM-057
         </span>
@@ -141,10 +210,12 @@ export default function GovernanceHistory(props: PanelProps) {
         <EmptyState loading={historyLoading === true && events.length === 0} />
       ) : (
         <ol className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-3">
-          {timeline.map((entry) => (
+          {items.map(({ entry, stack }) => (
             <RuleCard
               key={entry.ruleId}
               entry={entry}
+              stack={stack}
+              renewals={renewals.get(entry.ruleId) ?? []}
               nameOf={nameOf}
               currentTick={currentTick}
             />
@@ -159,10 +230,16 @@ export default function GovernanceHistory(props: PanelProps) {
 
 function RuleCard({
   entry,
+  stack = [entry],
+  renewals = [],
   nameOf,
   currentTick,
 }: {
   entry: GovTimelineEntry;
+  /** EM-087: all identical-effect ACTIVE instances (≥2 ⇒ the ×N stack row). */
+  stack?: GovTimelineEntry[];
+  /** EM-087: observed renewals of this rule (rule_passed{renewed:true}). */
+  renewals?: RuleRenewal[];
   nameOf: Map<string, string>;
   currentTick: number;
 }) {
@@ -171,6 +248,8 @@ function RuleCard({
   const proposer = entry.proposerId
     ? nameOf.get(entry.proposerId) ?? entry.proposerId
     : 'Unknown';
+  const stacked = stack.length > 1;
+  const [stackOpen, setStackOpen] = useState(false);
 
   return (
     <li
@@ -185,11 +264,24 @@ function RuleCard({
       />
 
       <div className="flex flex-col gap-1.5 bg-lab-chrome border border-lab-border rounded-sm p-2.5">
-        {/* Title row: effect + status pill */}
+        {/* Title row: effect + (×N stack badge) + status pill */}
         <div className="flex items-start justify-between gap-2">
           <div className="flex flex-col gap-0.5 min-w-0">
-            <span className="font-mono text-xs font-bold text-lab-text truncate">
-              {effectLabel(entry.effect)}
+            <span className="flex items-center gap-1.5 font-mono text-xs font-bold text-lab-text min-w-0">
+              <span className="truncate">{effectLabel(entry.effect)}</span>
+              {stacked && (
+                <button
+                  type="button"
+                  onClick={() => setStackOpen((v) => !v)}
+                  aria-expanded={stackOpen}
+                  aria-label={`${stack.length} identical-effect active rules — ${stackOpen ? 'collapse' : 'expand'} the instances`}
+                  title={`${stack.length} identical-effect rules are ACTIVE — collapsed into this row (EM-087). Click for each instance's tick + proposer.`}
+                  className="shrink-0 font-mono text-[9px] font-bold px-1 py-px border rounded-sm cursor-pointer transition-colors"
+                  style={{ color: GOV_ACCENT, borderColor: GOV_ACCENT }}
+                >
+                  ×{stack.length} {stackOpen ? '▾' : '▸'}
+                </button>
+              )}
             </span>
             {entry.text && (
               <span className="font-mono text-[10px] text-lab-muted leading-snug line-clamp-2">
@@ -197,8 +289,35 @@ function RuleCard({
               </span>
             )}
           </div>
-          <StatusPill status={entry.status} outcome={entry.outcome} />
+          <span className="flex items-center gap-1 shrink-0">
+            {renewals.length > 0 && (
+              <span
+                className="font-mono text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm border"
+                style={{ color: GOV_ACCENT, borderColor: GOV_ACCENT }}
+                title={`Renewed ${renewals.length}× (latest @ tick ${renewals[renewals.length - 1].tick}) — re-proposing an identical active law extends it instead of stacking.`}
+              >
+                ↻ renewed{renewals.length > 1 ? ` ×${renewals.length}` : ''}
+              </span>
+            )}
+            <StatusPill status={entry.status} outcome={entry.outcome} />
+          </span>
         </div>
+
+        {/* EM-087: the expanded instance list — tick + proposer per instance. */}
+        {stacked && stackOpen && (
+          <ul className="m-0 p-0 list-none flex flex-col gap-0.5 border border-lab-border rounded-sm px-2 py-1.5 bg-lab-bg">
+            {stack.map((inst) => (
+              <li key={inst.ruleId} className="font-mono text-[10px] text-lab-muted leading-snug">
+                <span className="text-lab-dim">└─</span>{' '}
+                <span className="tabular-nums">@ tick {inst.createdTick}</span> · by{' '}
+                <span className="text-lab-text">
+                  {inst.proposerId ? nameOf.get(inst.proposerId) ?? inst.proposerId : 'Unknown'}
+                </span>{' '}
+                <span className="text-lab-dim/80 break-all">{inst.ruleId}</span>
+              </li>
+            ))}
+          </ul>
+        )}
 
         {/* Provenance: proposer + the rule_id + tick */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[10px] text-lab-dim">

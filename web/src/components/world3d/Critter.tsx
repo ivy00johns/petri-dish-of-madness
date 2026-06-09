@@ -21,9 +21,10 @@
  * GPU scene owns its warm palette; design-token-guard governs DOM/CSS only).
  */
 
-import { useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Billboard, Html, RoundedBox } from '@react-three/drei';
+import type { ThreeEvent } from '@react-three/fiber';
+import { Billboard, Html, RoundedBox, useCursor } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Animal } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
@@ -33,6 +34,7 @@ import {
   type AnimalStyle,
   ANIMAL_CHAOS_MAGENTA,
 } from './worldSpace';
+import { useProximity, ENTITY_LABEL_DIST } from './useProximity';
 
 export interface CritterPos {
   x: number;
@@ -53,6 +55,10 @@ interface CritterProps {
    * null/absent ⇒ the label omits the model chip (reflex-only so far).
    */
   model?: AnimalModelId | null;
+  /** EM-095/099: true while the camera is following this critter. */
+  focused?: boolean;
+  /** EM-095/099: clicked → follow this critter (same mechanism as agents). */
+  onPick?: () => void;
 }
 
 const LABEL_Y = 1.5;
@@ -309,9 +315,25 @@ function ChaosCollar() {
   );
 }
 
-export function Critter({ animal, center, animRef, chaotic, model }: CritterProps) {
+export function Critter({ animal, center, animRef, chaotic, model, focused, onPick }: CritterProps) {
   const groupRef = useRef<THREE.Group>(null);
   const tailRef = useRef<THREE.Group>(null);
+  const [hovered, setHovered] = useState(false);
+  useCursor(hovered && Boolean(onPick));
+
+  // EM-102: the info card collapses when the camera is far away, unless the
+  // critter is hovered or being followed (EM-095/099) — those always reveal it.
+  const near = useProximity(
+    useCallback(() => ({ x: animRef.x, z: animRef.z }), [animRef]),
+    ENTITY_LABEL_DIST,
+  );
+  const showLabel = near || hovered || Boolean(focused);
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    if (!onPick) return;
+    e.stopPropagation();
+    onPick();
+  };
   const bobPhase = useRef(hashUnit(animal.id) * Math.PI * 2);
   // A stable phase offset + speed for the wander loop, seeded from the id so
   // each critter roams its own path (deterministic, no per-frame allocation).
@@ -373,7 +395,12 @@ export function Critter({ animal, center, animRef, chaotic, model }: CritterProp
   });
 
   return (
-    <group ref={groupRef}>
+    <group
+      ref={groupRef}
+      onClick={handleClick}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+      onPointerOut={() => setHovered(false)}
+    >
       {animal.species === 'cat' ? (
         <CatBody style={style} accent={accent} />
       ) : (
@@ -382,7 +409,16 @@ export function Critter({ animal, center, animRef, chaotic, model }: CritterProp
 
       {chaotic && animal.alive && <ChaosCollar />}
 
-      <CritterLabel animal={animal} chaotic={chaotic} model={model} />
+      {/* EM-095/099: follow indicator — flat acid ring (in-canvas GPU palette,
+          mirroring --lab-acid). */}
+      {focused && (
+        <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.45, 0.6, 24]} />
+          <meshBasicMaterial color="#c8ff00" transparent opacity={0.75} />
+        </mesh>
+      )}
+
+      {showLabel && <CritterLabel animal={animal} chaotic={chaotic} model={model} />}
     </group>
   );
 }

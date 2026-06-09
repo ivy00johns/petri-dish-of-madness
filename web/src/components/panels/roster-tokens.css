@@ -1,0 +1,18 @@
+/*
+ * Roster-strip design tokens (W11a EM-096/EM-099).
+ *
+ * The relationship registers (ally/friend/neutral/rival/enemy) predate the
+ * token system — AgentPanels carries them as literals. The strip declares
+ * them as CSS custom properties instead (same values, token-only diff;
+ * design-token-guard clean) so every new surface reads the registry via
+ * var(--rel-*). The neutral register intentionally matches --lab-muted, and
+ * rival/enemy mirror --lab-warn/--lab-danger.
+ */
+
+:root {
+  --rel-ally: #27ae60;
+  --rel-friend: #3498db;
+  --rel-neutral: #5a5a72;
+  --rel-rival: #ff9900;
+  --rel-enemy: #ff3333;
+}

@@ -2,16 +2,29 @@
  * Building — a cute, rounded low-poly structure for one place, distinct per
  * kind, with a floating name label billboarded above it.
  *
+ * EM-102 declutter: the full name label only renders while the camera is near
+ * (useProximity), the building is hovered, or it's the camera-focus target
+ * (EM-095 zoom-to-place reveals the focused building's full label). Otherwise
+ * a minimal accent marker keeps the place locatable without burying villager
+ * chips. EM-095: clicking the building zooms the orbit target to it.
+ *
  * All geometry is procedural (drei <RoundedBox>, cones, cylinders) — no
  * external assets. Warm WebGL colors (not bound by the CSS token system).
  */
 
-import { Billboard, RoundedBox, Text } from '@react-three/drei';
+import { useCallback, useState } from 'react';
+import { Billboard, RoundedBox, Text, useCursor } from '@react-three/drei';
+import type { ThreeEvent } from '@react-three/fiber';
 import type { Place } from '../../types';
 import { PLACE_STYLES, placeToWorld } from './worldSpace';
+import { useProximity, PLACE_LABEL_DIST } from './useProximity';
 
 interface BuildingProps {
   place: Place;
+  /** EM-095/102: the current focus id (a place or building id), or null. */
+  focusedId?: string | null;
+  /** EM-095: clicked → zoom-to-place. */
+  onPick?: (placeId: string) => void;
 }
 
 /** Floating name label above a structure. */
@@ -35,6 +48,16 @@ function NameLabel({ text, y, color }: { text: string; y: number; color: string 
         {text}
       </Text>
     </Billboard>
+  );
+}
+
+/** EM-102: the minimal far-away marker — a small floating accent diamond. */
+export function MiniMarker({ y, color }: { y: number; color: string }) {
+  return (
+    <mesh position={[0, y, 0]}>
+      <octahedronGeometry args={[0.22]} />
+      <meshBasicMaterial color={color} transparent opacity={0.85} />
+    </mesh>
   );
 }
 
@@ -272,16 +295,33 @@ function CommonsStructure() {
   );
 }
 
-export function Building({ place }: BuildingProps) {
+export function Building({ place, focusedId, onPick }: BuildingProps) {
   const { x, z } = placeToWorld(place);
   const style = PLACE_STYLES[place.kind];
+  const [hovered, setHovered] = useState(false);
+  useCursor(hovered && Boolean(onPick));
+
+  // EM-102: full label only when near / hovered / the camera-focus target.
+  const near = useProximity(useCallback(() => ({ x, z }), [x, z]), PLACE_LABEL_DIST);
+  const showFull = near || hovered || focusedId === place.id;
 
   // label height tuned per structure footprint
   const labelY =
     place.kind === 'governance' ? 6.2 : place.kind === 'social' ? 2.6 : 3.4;
 
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    if (!onPick) return;
+    e.stopPropagation();
+    onPick(place.id);
+  };
+
   return (
-    <group position={[x, 0, z]}>
+    <group
+      position={[x, 0, z]}
+      onClick={handleClick}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+      onPointerOut={() => setHovered(false)}
+    >
       {place.kind === 'social' && <PlazaStructure accent={style.accent} />}
       {place.kind === 'work' && (
         <MarketStructure body={style.body} accent={style.accent} />
@@ -294,7 +334,11 @@ export function Building({ place }: BuildingProps) {
       )}
       {place.kind === 'wild' && <CommonsStructure />}
 
-      <NameLabel text={place.name} y={labelY} color="#fff3e0" />
+      {showFull ? (
+        <NameLabel text={place.name} y={labelY} color="#fff3e0" />
+      ) : (
+        <MiniMarker y={labelY} color={style.accent} />
+      )}
     </group>
   );
 }

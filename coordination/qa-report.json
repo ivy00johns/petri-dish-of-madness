@@ -1,81 +1,108 @@
 {
   "schema_version": "1.1",
-  "_schema_note": "1.1 = test_results split into backend/frontend sub-objects now that frontend unit tests exist (EM-043); everything else mirrors the W9 1.0 shape.",
+  "_schema_note": "1.1 = test_results split into backend/frontend sub-objects (established W10); everything else mirrors the W9 1.0 shape.",
   "status": "complete",
-  "wave": "W10",
+  "wave": "W11b",
   "resolution": {
-    "summary": "Wave-2 QA scope was EM-043: stand up frontend unit-test infrastructure and regression-proof the four W9-audit frontend bugs (C2 play/pause ref-in-render, C4 strict-left fold boundary, C5 cleanup-captured ref, C6 gov-column attribution) plus the W10 wave-1 selector additions. Delivered: vitest 3.2.6 + jsdom + @testing-library in web/ (standalone vitest.config.ts — the production vite build pipeline is untouched), `npm test` / `npm run test:watch` scripts, and 63 tests across 11 files: 49 pure-logic tests (replayStateAt incl. the C7 building projection, agentEconomyAt, governanceTimeline + awiSummary, computeRoutingHealthSmoothed + the useRoutingHealth recovered transient, extinction lib, animalIdentity) and 14 component smokes (ReplayScrubber, AgentPanels, ExtinctionBanner, EventFeed, SocialGraph). C2, C4, C6 and W9-QA-1 are now natively pinned. The C5 test FOUND A NEW BUG (W10-QA-1, see issues): the shipped C5 fix is provably dead code — pinned with a strict `it.fails` xfail (the project's pytest-xfail convention) that flips loudly when fixed. All three validation gates re-run green.",
+    "summary": "Wave-2 QA for the W11b 'sim texture' batch (EM-079 commitments, EM-080 reflection, EM-081 overhearing, EM-083 real blackout + usage alerts, EM-087/103 renewal + commemorative monuments, EM-091 billboard, EM-092 personas, EM-098 procgen, EM-100 readable rule text, EM-101 from_snapshot + fork). Delivered: (1) backend/tests/test_w11b.py — 46 new tests pinning the full v1.3.0/v1.4.0 contract surface with scripted per-agent providers and prompt capture (the EM-079/080/081 context-injection seams are asserted on the literal system prompt, so 'zero extra LLM calls' is verified by construction); (2) 44 new frontend tests in 7 files: groupTimeline/renewalsByRule (incl. historical 3xUBI-shaped data), PersonaPicker states + pick semantics, the SpawnForm persona prefill/edit-wins flow through ControlPanel, UsageAlertBanner latest-per-provider+metric + seq-keyed dismissal re-arm, RunBrowser fork affordance + lineage chips, BillboardPanel sources/god-ink/empty state, and the W11b feed-idiom smoke (phantom 👻, ⚑, ✎, ✦ god, ↻ renewed, ⑂). All validation gates re-run green; zero src files modified; existing tests untouched; findings below are observations only (1 cosmetic dead-code item, 1 pre-existing LOW gate gap, 3 in-contract behavior notes).",
     "verified": true
   },
   "scores": {
     "contract_conformance": {
       "score": 5,
-      "notes": "The frontend selectors now have native pins on every contract point the last two waves' bugs touched: snapshot-at-S = post-tick-S state with a STRICT-LEFT fold (event-log.md v1.1.0 §3 / audit C4 — event AT base.tick excluded, base.tick+1 included, no-snapshot base of -1 applies tick-0 events); agent_moved destination read place → to → location → target_id with place winning over a disagreeing `to` (W9-QA-1, pinned at BOTH consumer sites: the replay fold and the awiSummary space-exploration cut); C7 building state at T is a pure event fold where the live roster never supplies status (only display metadata), born-after-T live buildings are dropped, and pre-window buildings rewind through structure_state_changed.from; C6 governance pass/reject attribution goes to the PROPOSER's model even when the resolution event carries a different profile; agentEconomyAt anchors on turn_start samples and folds only the agent's own state_deltas (EM-075). The W10-QA-1 finding is a dead app-level safety net, not a contract violation — the rAF/battery behavior the contract cares about is delivered by force-graph's own _destructor."
+      "notes": "Verified against event-log.md v1.3.0 + api.openapi.yaml v1.4.0 + frontend-inspector.md v1.3.0 §10 + the W11B_BUILD.md gate-log deviations, with native pins on every sharp edge. Commitments: commitment_made carries {commitment_id, text} and the promise rides the NEXT prompt's YOUR ACTIVE COMMITMENTS block (asserted on the captured system prompt, absent on the first turn); a promise lapses commitment_lapsed{reason:'phantom'} after exactly phantom_after_turns talk-only turns; a real resolution tool call keeps it SILENTLY (no event, store drained); cap 5 evicts the oldest with no lapse event. Reflection: the in-prompt request appears ONLY when the importance accumulator trips (weights from the same single response), the event carries {text, importance}, the accumulator resets, and the diary entry enters the agent's memory buffer; below threshold = no request line + no event. Overhearing adds NO kinds: the spoken line lands in exactly the 2 lowest-id co-located listeners' next perceived payload as overheard_speech[{...overheard:true}], the 3rd bystander and the speaker get nothing, a whisper's addressee is excluded, pending lines cap at 2 newest. Renewal: re-proposing an identical ACTIVE effect tags renewal_of, passes as proposal status 'renewed', refreshes the original (renewed_at), emits rule_passed{renewed:true, rule_id:<original>, renewal_proposal_id} — and the world NEVER holds two active identical effects (the 3xUBI invariant pinned directly), while different effects still stack. Commemorative: name-matched projects carry payload {commemorative:true, rule_id} + Building.commemorates; the second monument is rejected (commemorative_duplicate); unrelated projects are untagged. EM-100: rule_proposed/rule_vote/rule_rejected (and both rule_passed variants) lead with the quoted rule text + effect tag, the uuid appears in payload only — asserted id-not-in-text per row. Billboard: post gated to plaza/townhall by BOTH the validator and the world action; cap 20 newest; snapshot/world_state shape [{tick, actor_id, actor_type, text}]; POST /api/billboard 201 emits actor_type 'god' with in_reply_to, 422 on empty/whitespace/281+; read_billboard injects '[billboard, by X]' lines into the memory buffer. Procgen: default OFF leaves the hand-authored town byte-identical (json-compared); enabled is deterministic per seed, guarantees gov('townhall' id, the billboard gate)/work/wild/social, builds per-agent cottages + The Bunkhouse with capacity agents-1, clamps stranded agents to the plaza, caps the town proper at 12 even for n_places=999. Blackout: home places dark for blackout_ticks, recharge rejected (no credit charge) by world AND validator, restored at expiry with structure_state_changed blackout->powered emitted via both inject_random_event and the loop's per-turn expiry. from_snapshot: full to->from->to dict equality on a textured world (rules incl. renewal bookkeeping, commemorative building, animal, billboard, blackout, scheduler state, relationships), running always restores False, place_overrides replace wholesale, and the documented beliefs limit (count serialized, contents not) is pinned explicitly. Fork: 201 with honest snapshot-grain forked_at_tick (5 for a requested 9, with the note; no note when exact), the forked run is live-paused at the snapshot tick with billboard intact, RunRow lineage columns populate, is_active moves to the fork, first event is run_forked{parent_run_id, tick}; 404 unknown run; 400 for negative/over-max ticks, malformed place_overrides (str/ints/dict), and a snapshotless run. Personas: GET serves the 10-card library with the exact 4-key shape; loader returns [] for missing/malformed/wrong-shape yaml and drops nameless cards; spawn prefills name/personality/suggested_profile from the card, explicit fields win, and the deviation-accepted 400s (unknown persona, missing name/profile, unknown profile) are parametrized. Usage alerts: 70% crossing emits exactly once per provider/metric/window for rpd AND tpd, UTC-day rollover re-arms, no caps = no alerts + no state, malformed caps dropped, and the app sink lands a system-actor usage_alert row with the contract payload."
     },
     "test_coverage": {
       "score": 4,
-      "notes": "Frontend: 63 tests / 11 files, first frontend suite in the repo (EM-043 closes). Pure-logic core (49): selectors.replay 15, selectors.governance+AWI 6, selectors.economy 5, routing-health hysteresis 10 (incl. the exact implementer smoke scenarios: 4-don't-trip/5th-trips, 1-diverse-doesn't-clear/2nd-clears, fresh-full-run-to-re-show, animal exclusion, single-profile immunity, and the transient `recovered` flag via renderHook + fake timers), extinction 6, animalIdentity 7. Component smokes (14): ReplayScrubber play/pause render state (C2) + play-advances-tick + speed aria-pressed, AgentPanels dying badge presence/absence/singular, ExtinctionBanner alert/CTA/fallback/hidden, EventFeed starving-warn + extinct-danger registers, SocialGraph mount + the W10-QA-1 strict xfail pin. Gaps, documented not dodged: useSimulation's synthetic-seq scheme (audit C10) and reconnect/backoff (C3) are closures inside the hook — mounting it opens a real WebSocket + paged /api/events backfill, so unit-testing them needs either a pure extraction or heavy network mocking; verified by source inspection only (useSimulation.ts:102-103, 464-466). Backend suite unchanged this wave (re-run only)."
+      "notes": "Backend +46 (252 total): commitments 4, reflection 2, overhearing 3 (2 loop-integration + 1 unit for the pending cap, which round-robin scheduling cannot reach end-to-end), renewal 2, EM-100 1, commemorative 3, billboard 5, procgen 3, blackout 2, from_snapshot 3, fork 5, personas 8 (incl. the 4-case 400 parametrize), usage alerts 5. The cognition tests use a per-agent scripted provider that captures every system prompt, so the EM-079/080/081 prompt seams are asserted literally rather than inferred. Frontend +44 (150 total / 23 files): GovernanceHistory helpers 7, PersonaPicker 7, ControlPanel persona prefill/edit-wins 3, UsageAlertBanner 5, RunBrowser fork+lineage 7 (new file — the W11a RunBrowser.test.tsx kept read-only), BillboardPanel 7, EventFeed W11b idioms 8. Honest gaps: (a) blackout's no-home-places fallback (first two places go dark) is untested; (b) procgen kind_weights skew and the duplicate-name counter paths are untested (determinism + minimums + caps are); (c) the commitment 'expired' lapse reason exists in the contract union but the engine only emits 'phantom' — the feed's expired idiom is tested against a synthetic event; (d) BillboardPanel's localStorage collapse persistence and the 3D board are untested (jsdom; gate-3 Playwright territory); (e) frontend mock-generator parity for the new kinds is covered only via the feed accepting the shapes, not via generator-output assertions; (f) carried from W10/W11a: useSimulation internals remain hook-internal and untested."
     },
     "security": {
       "score": 4,
-      "notes": "This wave-2 adds devDependencies and test files only — no new runtime surface, no production-bundle change (vite build output verified; vitest config is standalone and not imported by the build). W10 wave 1 already landed the deferred audit items B11 (Gemini key via x-goog-api-key header) and B15 (spawn field length caps) per the wave-1 gate log, and the re-run backend suite (188 green) covers them. Local-lab posture (no auth on god endpoints) unchanged and accepted by design."
+      "notes": "No new runtime surface from wave 2 (test files only; tsc -b + vite build re-verified clean). Wave-1 surface reviewed while testing: POST /api/billboard caps text at 280 via pydantic (422 before the handler) and the engine re-caps at BILLBOARD_TEXT_CAP on every append/restore path; fork validates run existence (parameterized SELECT) and tick range before touching the engine, place_overrides are shape-checked to a list of dicts (400, never a 500), and World.from_snapshot coerces every field defensively (TypeError/ValueError/KeyError -> 400); persona spawn keeps the B15 length caps and resolves cards server-side by exact name (unknown -> 400, no path/file input); load_personas is fail-soft (never 500) and serves only the 4 whitelisted string fields; UsageAlertTracker drops malformed caps at construction and the sink is exception-swallowing (alerting can never break a turn). No real API keys anywhere (scripted fakes; conftest pins EM_DB_PATH=':memory:'). Local-lab posture (unauthenticated god endpoints incl. /api/billboard and /api/runs/fork — fork swaps the LIVE world) unchanged and accepted by design; noted that fork is a destructive-ish live-session swap reachable without auth, consistent with the existing reset/spawn/kill surface."
     },
     "regression_risk": {
       "score": 5,
-      "notes": "Zero non-test source files were modified (ownership honored; the W10-QA-1 bug found by the C5 test was documented + xfail-pinned instead of fixed). Validations all green after the test infra landed: vitest 63/63; `npx tsc -b` clean (test files are type-checked under the strict app tsconfig); `npm run build` clean (pre-existing >500kB chunk warning only); eslint clean on all new files; backend `python -m pytest -q` 188 passed / 0 failed (the W9 strict xfail was flipped to a passing assertion by wave 1 and stays green). The new tests are deterministic: fake timers for the play loop + recovered transient, no network, no real canvas (jsdom canvas stubbed to null, which every component under test already guards)."
+      "notes": "Zero src files modified and zero existing test files modified (W11a's RunBrowser/EventFeed suites extended via NEW sibling files instead). All 206 pre-existing backend tests pass alongside the 46 new (252/252); all 106 pre-existing frontend tests pass alongside the 44 new (150/150, 23 files). Validations: pytest 252/252; vitest 150/150; npx tsc -b clean; npm run build clean (pre-existing >500kB chunk warning only); eslint clean on all 7 new frontend test files. New tests are deterministic and offline: scripted per-agent providers (no network, no timers), background animal/narrator tasks drained per turn, seeded procgen asserted by construction, the usage-alert day window driven by an injected clock, and TestClient lifespans isolated per test (each fork/spawn test gets a fresh in-memory world)."
     }
   },
   "test_results": {
     "backend": {
-      "total": 188,
-      "passed": 188,
+      "total": 252,
+      "passed": 252,
       "failed": 0,
       "xfailed": 0,
-      "command": "cd backend && python -m pytest -q",
-      "notes": "Re-run only (no backend edits this wave-2). W9's strict xfail (W9-QA-1b, repository.py space_exploration) was fixed and flipped in W10 wave 1 — the suite now passes it as a real assertion."
+      "new_tests": 46,
+      "baseline_before_wave": 206,
+      "command": "cd backend && source ../.venv/bin/activate && python -m pytest -q",
+      "new_file": "backend/tests/test_w11b.py",
+      "by_area": {
+        "commitments (made→event+prompt block, phantom lapse after N talk turns, kept-silently on real tool call, cap 5)": 4,
+        "reflection (accumulator trip → in-prompt request + event + memory + reset; below threshold → nothing)": 2,
+        "overhearing (2 lowest-id co-located listeners in next perceived payload, whisper-target excluded, pending cap 2)": 3,
+        "renewal (identical-active → renewed:true + ONE active instance ever; different effects stack)": 2,
+        "EM-100 readable rule text (quoted text + effect tag in every rule_* row, uuid payload-only)": 1,
+        "commemorative monuments (tagged payload+building, second rejected, unrelated untagged)": 3,
+        "billboard (location gate, cap 20 newest, snapshot/world_state shape, god API 201/422s, read injects memory)": 5,
+        "procgen (disabled byte-identical, seeded determinism + minimums + cottages/bunkhouse + clamp, ≤12 town places)": 3,
+        "blackout (recharge rejected during / restored after, inject + loop-expiry events)": 2,
+        "from_snapshot (to→from→to round trip, documented beliefs limit, place_overrides wholesale)": 3,
+        "fork API (201+lineage+paused+run_forked+honest tick/note, exact-tick no-note, 404, 400 tick/overrides, 400 no-snapshot)": 5,
+        "personas (GET 10-card shape, fail-soft loader, prefill, explicit-wins, 4×400 parametrize)": 8,
+        "usage alerts (rpd crossing once, tpd tokens, rollover re-arm, no-caps/malformed-caps silent, app sink event)": 5
+      }
     },
     "frontend": {
-      "total": 63,
-      "passed": 63,
+      "total": 150,
+      "passed": 150,
       "failed": 0,
-      "xfail_pins": 1,
-      "files": 11,
-      "new_tests": 63,
-      "baseline_before_wave": 0,
+      "xfail_pins": 0,
+      "files": 23,
+      "new_tests": 44,
+      "baseline_before_wave": 106,
       "command": "cd web && npm test (vitest run)",
-      "infra": "vitest ^3.2.6 + jsdom ^26.1.0 + @testing-library/react ^16.3.2 + @testing-library/jest-dom ^6.9.1 + @testing-library/user-event ^14.6.1 (devDeps); web/vitest.config.ts (jsdom, globals, src/**/*.test.*, setup stubs ResizeObserver + canvas getContext); scripts: test / test:watch",
-      "by_area": {
-        "selectors.replayStateAt (C4 + W9-QA-1 + C7)": 15,
-        "selectors.governanceTimeline + awiSummary (C6 + W9-QA-1)": 6,
-        "selectors.agentEconomyAt (EM-075)": 5,
-        "routing-health hysteresis + recovered transient (EM-072)": 10,
-        "extinction lib (EM-071)": 6,
-        "animalIdentity (EM-089)": 7,
-        "ReplayScrubber smoke (C2)": 3,
-        "AgentPanels dying badge (EM-070)": 4,
-        "ExtinctionBanner (EM-071/084)": 3,
-        "EventFeed warn/danger registers (EM-070/071)": 2,
-        "SocialGraph pause-on-unmount (C5, incl. W10-QA-1 xfail pin)": 2
-      },
-      "xfail_note": "The 1 xfail pin uses vitest `it.fails` (strict: it turns RED the moment the underlying W10-QA-1 bug is fixed, exactly like the project's pytest strict-xfail convention)."
+      "changed_existing": "none — all W11a/W10 test files are byte-identical; new coverage lives in sibling files",
+      "new_files": {
+        "src/inspector/GovernanceHistory.helpers.test.ts (groupTimeline ×N stacking incl. historical 3×UBI data + renewalsByRule)": 7,
+        "src/components/controls/PersonaPicker.test.tsx (4 labeled states + cards + pick/deselect)": 7,
+        "src/components/controls/ControlPanel.persona.test.tsx (prefill, edit-wins drops persona, missing-profile no-preselect)": 3,
+        "src/components/UsageAlertBanner.test.tsx (latest per provider+metric, seq-keyed dismissal re-arm)": 5,
+        "src/inspector/RunBrowser.fork.test.tsx (archived-only fork, max_tick default, range validation, success notice+refresh, inline failure, lineage chips)": 7,
+        "src/components/feed/BillboardPanel.test.tsx (state newest-first, history fallback + 20 cap, god ink, labeled empty)": 7,
+        "src/components/feed/EventFeed.idioms.test.tsx (👻 phantom vs ⌛ expired, ⚑, ✎ diary, ✦ god ink, ↻ renewed, ⚠ usage, ⑂ fork)": 8
+      }
     },
-    "frontend_verification": "cd web && npx tsc -b — clean (test files included under the strict app tsconfig); npm run build — clean (pre-existing >500kB chunk-size warning only, bundle unchanged by the test infra); npx eslint on all new test files — clean"
+    "frontend_verification": "cd web && npx tsc -b — clean; npm run build — clean (pre-existing >500kB chunk warning only); npx eslint on all 7 new test files — clean"
   },
   "blockers": [],
   "issues": [
     {
       "severity": "LOW",
-      "title": "W10-QA-1: the audit-C5 fix in SocialGraph is dead code — the cleanup reads a ref React has already detached (found by the new unit test, xfail-pinned, NOT fixed per ownership rules)",
-      "detail": "web/src/inspector/SocialGraph.tsx:136-143 pauses the force-graph on unmount via `fgRef.current?.pauseAnimation()` inside a useEffect cleanup, with a comment asserting 'reading it at teardown IS the fix'. Empirically false on react@18.3.1: React detaches forwarded refs (useImperativeHandle sets ref.current = null) during the commit mutation phase, BEFORE passive effect cleanups run — a scratch harness confirmed a parent cleanup sees null, and react-force-graph-2d forwards its handle via the same useImperativeHandle mechanism (react-kapsule). So pauseAnimation is never called from the component. SEVERITY IS LOW because the battery goal still holds through a different path: react-kapsule invokes the kapsule `_destructor` on unmount, and force-graph's _destructor calls this.pauseAnimation() itself (node_modules/force-graph/dist/force-graph.mjs:1354) — the rAF loop does stop. The defect is false confidence: an app-level safety net that provably never fires, plus a source comment claiming the opposite. Pinned by src/inspector/SocialGraph.test.tsx with a strict `it.fails` xfail that flips RED when someone makes the pause actually fire (e.g. capture the instance via the ref-callback/onEngineStop path, or drop the effect and rely explicitly on the lib destructor with a comment). File into the ledger via plan-intake; suggested wave: W11 hygiene."
+      "title": "Governance location gate is prompt-only: propose_rule/vote are not location-checked at resolution time (pre-existing, not W11b)",
+      "detail": "TOOL_REGISTRY (agents/runtime.py) declares location_gate:'governance' for propose_rule/vote and its header comment says '_validate_world enforces the same gates at resolution time', but _validate_world's propose_rule branch checks only the effect and the vote branch only rule existence/status — a model that ignores the shrunken valid_actions list can legislate from anywhere. Discovered while building the renewal tests (they pass with agents at the townhall either way). Pre-existing W7-era behavior, out of W11b scope and unowned by wave 2 (src is findings-only); routed as a finding for plan-intake."
     },
     {
       "severity": "LOW",
-      "title": "useSimulation internals (audit C10 synthetic-seq, C3 reconnect/backoff) remain unit-untested — not cleanly extractable without src changes",
-      "detail": "The collision-free synthetic-seq counter (negative decrementing; useSimulation.ts:102-103, used at :464-466) and the reconnect logic are closures inside the hook; mounting it opens a real WebSocket plus a paged /api/events backfill fetch loop, so a unit test would need to mock the network world — explicitly discouraged by the EM-043 brief ('prefer extracting testable pieces over mocking the world'), and extraction is a src change outside qe ownership. Verified by source inspection only this wave: the counter starts at -1 and only decrements, so it cannot collide with positive server/mock seqs. If a future wave touches useSimulation.ts, extract `nextSyntheticSeq` (and ideally the merge/dedupe reducers at :109-150, which are pure) into a lib module and add the trivial tests then."
+      "title": "BillboardPanel computes a 'THE WATCHERS' display name for god posts that is never rendered (dead value)",
+      "detail": "PostRow (web/src/components/feed/BillboardPanel.tsx:155) sets name = 'THE WATCHERS' when post.actor_type==='god', but the god render branch shows only the ✦ god chip — the name is rendered exclusively on the non-god path. Cosmetic dead code; either render the name in the god row or drop the computation. The test pins the ACTUAL contract (chip-only attribution) so a future change is visible."
+    },
+    {
+      "severity": "INFO",
+      "title": "Commitment 'kept' matching is positional, not semantic (in-contract)",
+      "detail": "Any successful resolution-class tool call (work/forage/give/recharge/propose_project/contribute_funds/build_step/repair) marks the OLDEST commitment kept, regardless of whether the action relates to the promise — a forage 'keeps' 'I will repair the mill'. This is exactly EM-079's specified semantics (free-scale: no LLM judging of follow-through), recorded so nobody mistakes an unrelated keep for a bug. The phantom path (the headline failure mode) is unaffected."
+    },
+    {
+      "severity": "INFO",
+      "title": "Overhearing listener selection is deterministic lowest-id (in-contract)",
+      "detail": "With 3+ co-located bystanders the SAME two lowest-id agents always overhear (runtime._distribute_overheard sorts by id and slices 2). Deterministic and contract-conformant ('≤2 co-located listeners, hard cap'), but it biases who develops social context in crowded places. If texture matters later, a seeded shuffle would spread it without cost."
+    },
+    {
+      "severity": "INFO",
+      "title": "commitment_lapsed reason 'expired' is contract-reachable but engine-unreachable",
+      "detail": "event-log.md v1.3.0 types reason as 'phantom'|'expired', and the feed has a ⌛ idiom for the expired case, but _advance_commitments only ever emits reason:'phantom' (kept promises drop silently; there is no age-based expiry distinct from staleness). The feed's expired rendering is therefore tested against a synthetic event. Harmless forward-compat; noted so a future expiry feature knows the consumer is already ready."
     }
   ],
   "gate_decision": {
     "proceed": true,
-    "reason": "EM-043 is delivered: the repo's first frontend unit-test suite (63 tests, 11 files) is green and natively regression-pins all four named W9-audit bugs (C2 play/pause render state, C4 strict-left fold boundary, C6 proposer-model gov attribution, and C5 — whose test immediately earned its keep by exposing W10-QA-1) plus W9-QA-1's place-first chain at both consumer sites and the W10 wave-1 selector additions (C7 building projection, EM-075 economy re-projection, EM-072 hysteresis). All three validation gates pass: vitest 63/63, tsc -b + vite build clean (production pipeline untouched by the test infra), backend 188/188 re-confirmed. The one new finding (W10-QA-1) is LOW severity — the library's own destructor delivers the pause the dead app-level cleanup was meant to guarantee — and is strict-xfail-pinned so it cannot rot silently. No blockers: GREEN to proceed to gate 3 (orchestrator live verification), with W10-QA-1 and the useSimulation-extraction note carried as tracked follow-ups."
+    "reason": "All W11b wave-2 QA objectives delivered and every gate is green: backend 252/252 (46 new tests pinning commitments/reflection/overhearing prompt seams literally via captured system prompts, the 3×UBI renewal invariant, commemorative one-per-rule, EM-100 uuid-free feed text, billboard gating/cap/god surface, seeded procgen with the ≤12 cap, real blackout lifecycle, from_snapshot round-trip incl. the documented beliefs limit, snapshot-grain fork with honest tick + full 404/400 matrix, the 10-card persona library with the accepted 400 deviations, and once-per-window usage alerts with rollover re-arm), frontend 150/150 across 23 files (44 new tests for the ×N grouping + renewal helpers, persona picker + prefill/edit-wins, usage banner re-arm, fork affordance + lineage chips, billboard panel, and the new feed idioms), tsc -b + vite build + eslint clean, zero src and zero existing-test modifications. No contract violations found; the five recorded items are two LOW observations (a pre-existing prompt-only governance gate and a cosmetic dead value in BillboardPanel) and three in-contract behavior notes. GREEN to proceed to gate 3 (orchestrator live Playwright verification)."
   }
 }

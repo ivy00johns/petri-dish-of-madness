@@ -4,21 +4,20 @@
  * mounts after), so `pauseAnimation()` never ran. The W9 fix reads the ref
  * INSIDE the cleanup.
  *
- * ── W10-QA-1 (found by this test, pinned with `it.fails`) ────────────────────
- * The fix is STILL a no-op on unmount: React detaches forwarded refs
- * (useImperativeHandle clears `ref.current` to null) in the mutation phase,
- * BEFORE passive useEffect cleanups run — verified empirically against
- * react@18.3.1 (a parent cleanup reading a child's imperative handle sees
- * null). So `fgRef.current?.pauseAnimation()` in SocialGraph.tsx:136-143
- * reads null at teardown and never calls pauseAnimation.
+ * ── W10-QA-1 → FIXED in W11a (EM-097) ────────────────────────────────────────
+ * History: the W9 read-inside-cleanup "fix" was a no-op — React detaches
+ * forwarded refs (useImperativeHandle clears `ref.current` to null) in the
+ * commit mutation phase, BEFORE passive useEffect cleanups run, so the
+ * teardown read always saw null. That dead path was pinned here with a strict
+ * `it.fails` xfail through W10.
  *
- * MITIGATION (why severity is low): react-kapsule invokes the kapsule's
- * `_destructor` on unmount, and force-graph's `_destructor` itself calls
- * `pauseAnimation()` (force-graph.mjs:1354) — so the rAF loop does stop and
- * the battery goal holds. The app-level safety net is just dead code giving
- * false confidence. `it.fails` = strict xfail: this flips loudly when the
- * component pauses via a mechanism that actually fires (e.g. keeping the
- * instance in a layout-effect-captured local, or pausing on `ready` → false).
+ * W11a's EM-097 fix is a CAPTURED-INSTANCE cleanup keyed on `ready`
+ * (SocialGraph.tsx): when `ready` flips true the graph mounts in the same
+ * commit and its ref is attached before passive effects fire, so the effect
+ * captures the real instance into a closure-held local — which survives
+ * React's ref detach — and the cleanup's `fg?.pauseAnimation()` actually
+ * runs at unmount (and whenever `ready` drops). The xfail pin flipped RED on
+ * that commit, exactly as designed, and is now a plain passing `it`.
  */
 import { describe, expect, it, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { forwardRef, useImperativeHandle } from 'react';
@@ -73,12 +72,11 @@ describe('SocialGraph — pause-on-unmount (audit C5)', () => {
     expect(screen.getByTestId('force-graph-stub')).toBeInTheDocument();
   });
 
-  // Strict xfail pin for W10-QA-1 (see the header comment): the desired
-  // behavior — pauseAnimation called via the component's own cleanup — does
-  // NOT happen, because React nulls the forwarded ref before the passive
-  // cleanup runs. When someone fixes the cleanup mechanism, this test starts
-  // passing, `it.fails` turns RED, and the pin should become a plain `it`.
-  it.fails('calls pauseAnimation from its own cleanup at unmount (W10-QA-1 xfail pin)', () => {
+  // W10-QA-1, fixed by W11a EM-097 (captured-instance cleanup keyed on
+  // `ready` — see the header comment). Formerly a strict `it.fails` xfail pin;
+  // it flipped RED when the fix landed and is now the real regression test:
+  // the component's OWN cleanup must call pauseAnimation exactly once.
+  it('calls pauseAnimation from its own cleanup at unmount (W10-QA-1, fixed by EM-097)', () => {
     const { unmount } = render(<SocialGraph {...PROPS} />);
     expect(screen.getByTestId('force-graph-stub')).toBeInTheDocument();
     unmount();

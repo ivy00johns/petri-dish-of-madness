@@ -87,6 +87,60 @@ world:
     llm_chance: 0.6           # P(LLM decision) on an acted tick; else a reflex micro-behavior
     model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
 
+  # W11b / EM-083 — real blackout: the `blackout` random event disables recharge
+  # at the affected places (home-kind places) for this many ticks; expiry
+  # restores power (both surfaced as structure_state_changed). Engine default
+  # is 10 when this key is absent.
+  blackout_ticks: 10
+
+  # W11b / EM-079 — commitments. Agents may attach an optional `commitment`
+  # field to the SAME single turn response (zero extra LLM calls); it is tracked
+  # per agent (max_active, oldest evicted) and a commitment whose agent makes no
+  # non-talk tool call for phantom_after_turns turns lapses publicly as a
+  # phantom (`commitment_lapsed{reason:"phantom"}`). Engine defaults match these
+  # values when the block is absent.
+  commitments:
+    phantom_after_turns: 12   # talk-only turns before a promise lapses as phantom
+    max_active: 5             # active commitments per agent (oldest evicted)
+
+  # W11b / EM-080 — reflection/diary. Each agent accrues importance from salient
+  # witnessed events (deaths, conflicts, rule outcomes, big economy swings);
+  # when the accumulator crosses the threshold, the NEXT turn's prompt requests
+  # an optional `reflection` (same single response — never a separate call),
+  # emitted as a `reflection` event and fed back into the agent's memory.
+  # Engine default threshold is 10 when the block is absent (~2-3/day/agent).
+  reflection:
+    importance_threshold: 10
+
+  # W11b / EM-098 — procedural town generation (DEFAULT OFF — the hand-authored
+  # town below stays byte-identical). When enabled, a seeded layout replaces the
+  # `places:` list: a central plaza, a jittered ring of n_places (≤12, existing
+  # kinds ONLY, guaranteed ≥1 governance/work/wild/social), PLUS housing — one
+  # cottage per seed agent ("X's cottage", kind home) and a communal bunkhouse
+  # (kind home, capacity = agents - 1, so bed scarcity exists). Recharge works
+  # at any home kind; cottage owner-only gating is out of scope for W11b.
+  procgen:
+    enabled: false
+    seed: 42
+    n_places: 9               # town places incl. the plaza (housing on top), cap 12
+    kind_weights:             # weighted picks for the non-guaranteed slots
+      work: 2
+      social: 2
+      governance: 1
+      wild: 2
+      home: 1
+
+  # W11a / EM-094 — Narrator mode (event-log.md v1.2.0 note 1). DEFAULT OFF:
+  # zero cost, zero LLM calls. When enabled, at most once per every_n_ticks the
+  # loop makes ONE LLM call on model_profile (off the agents' critical path,
+  # same pattern as the animal cadence) recapping the last window of events as
+  # a single `narrator_summary` event. A failed/timed-out call emits nothing
+  # and is never retried — the tick loop never stalls on the narrator.
+  narrator:
+    enabled: false
+    every_n_ticks: 50
+    model_profile: gemini-flash  # cheapest free profile (FreeLLMAPI); never a paid lane
+
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
   - { species: dog, name: Biscuit, location: commons, personality: "Loyal, excitable, food-motivated, impulsive; chases anything that moves and means well even mid-disaster." }

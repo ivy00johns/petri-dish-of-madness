@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from typing import Any
 
 import jsonschema
@@ -50,6 +51,13 @@ ACTION_SCHEMA = {
             "items": {"type": "string", "maxLength": 160},
         },
         "reasoning": {"type": "string", "maxLength": 1200},
+        # W11b / EM-079 — OPTIONAL commitment, parsed from the SAME single
+        # response (EM-066 pattern, zero extra calls): a short concrete promise
+        # the agent is making ("I will build a garden at the commons").
+        "commitment": {"type": "string", "maxLength": 200},
+        # W11b / EM-080 — OPTIONAL reflection/diary entry, requested in-prompt
+        # only when the importance accumulator trips; same single response.
+        "reflection": {"type": "string", "maxLength": 400},
         "action": {
             "type": "string",
             "enum": [
@@ -59,6 +67,8 @@ ACTION_SCHEMA = {
                 # W7 / EM-060+062 construction actions (action-protocol v1.1.0).
                 "propose_project", "contribute_funds", "build_step",
                 "repair", "arson", "take_offline",
+                # W11b / EM-091 — billboard reflex tools (plaza/townhall only).
+                "post_billboard", "read_billboard",
             ],
         },
         "args": {"type": "object", "default": {}},
@@ -95,6 +105,10 @@ ACTION_SCHEMA = {
         {"if": {"properties": {"action": {"const": "take_offline"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "post_billboard"}}},
+         "then": {"properties": {"args": {"required": ["text"], "properties": {
+             "text": {"type": "string", "maxLength": 280},
          }}}}},
     ],
 }
@@ -141,7 +155,67 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "repair":           {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
     "arson":            {"tier": "reflex", "location_gate": "@building",     "agreement_gate": "ban_arson"},
     "take_offline":     {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+    # W11b / EM-091 — billboard reflex tools 🟢: location-gated to the plaza /
+    # townhall (where the physical board stands); the post text rides the SAME
+    # turn's response args (zero extra LLM calls).
+    "post_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
+    "read_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
 }
+
+
+# W11b / EM-079 — commitment lifecycle action sets.
+#   _TALK_ACTIONS: pure-talk turns; commitments go STALE during these (a phantom
+#   commitment is one claimed in speech and never enacted).
+#   _COMMIT_RESOLUTION_ACTIONS: project/build/economy follow-through; resolving
+#   one of these marks the OLDEST commitment kept (dropped silently — only true
+#   phantoms emit commitment_lapsed).
+_TALK_ACTIONS = frozenset({"say", "whisper", "idle"})
+_COMMIT_RESOLUTION_ACTIONS = frozenset({
+    "propose_project", "contribute_funds", "build_step", "repair",
+    "work", "forage", "give", "recharge",
+})
+
+# W11b / EM-080 — importance weights for the reflection accumulator. Salient
+# event kinds only; everything else weighs 0. Big economy swings are scored in
+# push_event from the payload amount.
+_IMPORTANCE_WEIGHTS: dict[str, float] = {
+    "agent_died": 5.0,
+    "world_extinct": 5.0,
+    "animal_died": 2.0,
+    "conflict": 3.0,
+    "rule_passed": 2.0,
+    "rule_rejected": 2.0,
+    "rule_proposed": 1.0,
+    "agent_starving": 2.0,
+    "structure_state_changed": 1.0,
+    "building_operational": 2.0,
+}
+_IMPORTANCE_ECONOMY_SWING = 8      # |credits moved| at/above this scores...
+_IMPORTANCE_ECONOMY_WEIGHT = 2.0   # ...this much
+
+_DEFAULT_PHANTOM_AFTER_TURNS = 12
+_DEFAULT_MAX_ACTIVE_COMMITMENTS = 5
+_DEFAULT_IMPORTANCE_THRESHOLD = 10.0
+_OVERHEARD_PENDING_CAP = 2         # an agent holds at most 2 pending overheard lines
+_OVERHEARD_LISTENERS_CAP = 2       # at most 2 co-located listeners per spoken line
+
+
+def _world_block_get(params: Any, block: str, key: str, default: Any) -> Any:
+    """Read `world.<block>.<key>` defensively: the block may be a dataclass, a
+    plain dict, or absent (the config loader is owned elsewhere)."""
+    blk = getattr(params, block, None)
+    if blk is None:
+        return default
+    if isinstance(blk, dict):
+        return blk.get(key, default)
+    return getattr(blk, key, default)
+
+
+def _rule_label(text: str, limit: int = 60) -> str:
+    """EM-100 — the human-readable rule label for feed text (quoted by callers,
+    truncated to ~60 chars). Never the bare uuid."""
+    text = str(text or "").strip() or "(untitled rule)"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _action_tier(action: str) -> str:
@@ -287,7 +361,12 @@ def _validate_schema(action_dict: dict) -> str | None:
 # one of these caps must NOT lose its whole turn to an idle fallback — we TRUNCATE
 # them in place before schema validation rather than reject the action. (Behavioral
 # args — target/place/amount — are still validated strictly.)
-_TRACE_TEXT_CAPS = {"thought": 500, "mood": 40, "perceived_summary": 600, "reasoning": 1200}
+_TRACE_TEXT_CAPS = {
+    "thought": 500, "mood": 40, "perceived_summary": 600, "reasoning": 1200,
+    # W11b — optional cognition fields ride the same leniency: truncate, never
+    # fail the turn over an overflowing commitment/reflection.
+    "commitment": 200, "reflection": 400,
+}
 _MEMORIES_ITEM_CAP = 160
 _MEMORIES_MAX = 12
 
@@ -383,6 +462,10 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return f"work requires a 'work' place; you are at '{agent.location}' ({place.kind if place else 'unknown'})"
 
     elif action == "recharge":
+        # W11b / EM-083 — real blackout: recharge is disabled at affected places.
+        blacked_out = getattr(world, "place_blacked_out", None)
+        if callable(blacked_out) and blacked_out(agent.location):
+            return "blackout: recharge is disabled here until power returns — move elsewhere"
         # W9 / EM-070 (audit B5): recharging at full energy is rejected here so
         # the agent gets feedback (and is never charged for a no-op).
         if agent.energy >= 100:
@@ -534,6 +617,14 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if status != "operational":
             return f"building '{building_id}' is {status}, not operational"
 
+    # ── W11b / EM-091 billboard reflex tools (plaza/townhall only) ─────────────
+    elif action in ("post_billboard", "read_billboard"):
+        billboard_here = getattr(world, "billboard_here", None)
+        if not (callable(billboard_here) and billboard_here(agent.location)):
+            return "the billboard stands at the plaza / town hall — move there first"
+        if action == "post_billboard" and not str(args.get("text") or "").strip():
+            return "post_billboard requires text"
+
     return None
 
 
@@ -546,8 +637,17 @@ def _assemble_context(
     world: World,
     recent_events: list[dict],
     params: Any,
+    *,
+    commitments: list[dict] | None = None,
+    overheard: list[dict] | None = None,
+    request_reflection: bool = False,
 ) -> list[dict]:
-    """Build the OpenAI-style messages list for this agent's turn."""
+    """Build the OpenAI-style messages list for this agent's turn.
+
+    W11b additions (all keyword-only, default-off, so existing callers are
+    unchanged): `commitments` renders the YOUR ACTIVE COMMITMENTS block (EM-079),
+    `overheard` injects pending overheard speech (EM-081), `request_reflection`
+    asks for the optional `reflection` field this turn only (EM-080)."""
     place = world.places.get(agent.location)
     place_name = place.name if place else agent.location
     place_kind = place.kind if place else "unknown"
@@ -590,6 +690,9 @@ def _assemble_context(
             return True
         if loc == "@building":
             return bool(here_buildings)  # only offer when a building is here
+        if loc == "@billboard":
+            billboard_here = getattr(world, "billboard_here", None)
+            return bool(callable(billboard_here) and billboard_here(agent.location))
         return place_kind == loc
 
     valid_actions: list[str] = []
@@ -636,6 +739,15 @@ def _assemble_context(
             valid_actions.append(f"arson (building_id={bid}) - burn this building (a crime; witnesses lose trust)")
         if status == "operational" and _building_field(b, "owner_id") == agent.id and _gate_ok("take_offline"):
             valid_actions.append(f"take_offline (building_id={bid}) - you own this; take it offline")
+
+    # ── W11b / EM-091 billboard reflex tools (offered at plaza/townhall) ───────
+    if _gate_ok("post_billboard"):
+        board = getattr(world, "billboard", []) or []
+        valid_actions.append(
+            "post_billboard (text) - pin a public note to the village billboard "
+            "(everyone, and the watchers, can read it)")
+        valid_actions.append(
+            f"read_billboard - read the latest billboard posts ({len(board)} on the board)")
 
     # Recent events summary
     event_lines = []
@@ -707,6 +819,41 @@ def _assemble_context(
         )
     needs_text = "\n".join(f"  {line}" for line in needs_lines)
 
+    # ── W11b / EM-079 — active commitments (compact: text + age in ticks) ─────
+    commitments_block = ""
+    if commitments:
+        commit_lines = "\n".join(
+            f"  - \"{c.get('text', '')}\" (made {max(0, world.tick - int(c.get('made_tick', world.tick)))} ticks ago)"
+            for c in commitments
+        )
+        commitments_block = f"""
+=== YOUR ACTIVE COMMITMENTS ===
+{commit_lines}
+  Follow through with real tool calls or these lapse publicly as broken promises.
+"""
+
+    # ── W11b / EM-081 — overheard speech (context injection only, no calls) ───
+    overheard_block = ""
+    if overheard:
+        heard_lines = "\n".join(
+            f"  [tick {o.get('tick', '?')}] you overheard {o.get('speaker', 'someone')}: "
+            f"\"{o.get('text', '')}\""
+            for o in overheard
+        )
+        overheard_block = f"""
+=== OVERHEARD (not addressed to you) ===
+{heard_lines}
+"""
+
+    # ── W11b / EM-080 — reflection request (only when importance tripped) ─────
+    reflection_line = ""
+    if request_reflection:
+        reflection_line = (
+            '\nMuch has happened around you lately. ALSO include "reflection": '
+            "1-2 sentences on what you have learned and how you feel (in the SAME "
+            "JSON object — never a separate reply)."
+        )
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
 Tick: {world.tick}
@@ -726,7 +873,7 @@ Mood: {agent.mood}
 
 === RECENT EVENTS ===
 {chr(10).join(event_lines) or "  (none)"}
-
+{overheard_block}{commitments_block}
 === YOUR BELIEFS ===
 {belief_lines}
 
@@ -745,11 +892,14 @@ Mood: {agent.mood}
 === VALID ACTIONS ===
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
+⚠ SAYING you will build/fund/work on something does NOT do it — words change nothing. Use propose_project / contribute_funds / build_step (or work / forage / give) to actually act. Your action THIS TURN is the only thing that happens.
+
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
 {{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}}
 
 The "action" field is required and must come first. "args" must match the action.
 ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
+If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
     # A final user turn that restates the format demand is the last thing weak
@@ -818,6 +968,65 @@ class AgentRuntime:
         self.router = router
         # Rolling per-agent event buffers
         self._memory: dict[str, list[dict]] = {}
+        # W11b / EM-079 — per-agent active commitments:
+        # [{id, text, made_tick, stale_turns}], capped at max_active (oldest
+        # evicted silently). stale_turns counts the agent's consecutive turns
+        # WITHOUT a non-talk tool call since the commitment was made/refreshed.
+        self._commitments: dict[str, list[dict]] = {}
+        # W11b / EM-080 — per-agent importance accumulator (reflection trigger).
+        self._importance: dict[str, float] = {}
+        # W11b / EM-081 — pending overheard lines awaiting an agent's NEXT turn:
+        # [{speaker_id, speaker, text, tick, overheard:true}], capped at 2.
+        self._overheard: dict[str, list[dict]] = {}
+
+    def reset_state(self) -> None:
+        """Clear ALL per-run cognition state (memories, commitments, importance
+        accumulators, pending overheard lines). Called by the loop on reset."""
+        self._memory.clear()
+        self._commitments.clear()
+        self._importance.clear()
+        self._overheard.clear()
+
+    # ── W11b config accessors (defensive: the loader is owned elsewhere) ──────
+
+    def _phantom_after_turns(self) -> int:
+        try:
+            return max(1, int(_world_block_get(
+                self.world.params, "commitments", "phantom_after_turns",
+                _DEFAULT_PHANTOM_AFTER_TURNS)))
+        except (TypeError, ValueError):
+            return _DEFAULT_PHANTOM_AFTER_TURNS
+
+    def _max_active_commitments(self) -> int:
+        try:
+            return max(1, int(_world_block_get(
+                self.world.params, "commitments", "max_active",
+                _DEFAULT_MAX_ACTIVE_COMMITMENTS)))
+        except (TypeError, ValueError):
+            return _DEFAULT_MAX_ACTIVE_COMMITMENTS
+
+    def _importance_threshold(self) -> float:
+        try:
+            return float(_world_block_get(
+                self.world.params, "reflection", "importance_threshold",
+                _DEFAULT_IMPORTANCE_THRESHOLD))
+        except (TypeError, ValueError):
+            return _DEFAULT_IMPORTANCE_THRESHOLD
+
+    @staticmethod
+    def _event_importance(event: dict) -> float:
+        """Salience weight of one event for the reflection accumulator (EM-080)."""
+        kind = event.get("kind")
+        weight = _IMPORTANCE_WEIGHTS.get(kind, 0.0)
+        if kind == "economy":
+            payload = event.get("payload") or {}
+            moved = payload.get("amount", payload.get("credits_delta", 0)) or 0
+            try:
+                if abs(int(moved)) >= _IMPORTANCE_ECONOMY_SWING:
+                    weight = max(weight, _IMPORTANCE_ECONOMY_WEIGHT)
+            except (TypeError, ValueError):
+                pass
+        return weight
 
     def push_event(self, event: dict) -> None:
         """Add an event to the memory of all agents who witnessed it."""
@@ -829,6 +1038,9 @@ class AgentRuntime:
 
         # Determine which location this event occurred at (best-effort from payload)
         evt_location = event.get("payload", {}).get("place") or None
+
+        # W11b / EM-080 — salience weight, accumulated per WITNESS below.
+        importance = self._event_importance(event)
 
         for agent in self.world.living_agents():
             # Agent witnesses event if: they are the actor/target, OR event is at their location
@@ -844,6 +1056,10 @@ class AgentRuntime:
                 max_buf = self.world.params.memory_window * 2
                 if len(buf) > max_buf:
                     del buf[:-max_buf]
+                if importance > 0:
+                    self._importance[agent.id] = (
+                        self._importance.get(agent.id, 0.0) + importance
+                    )
 
     def push_location_event(self, location: str, event: dict) -> None:
         """Push event to all agents at a location."""
@@ -860,6 +1076,119 @@ class AgentRuntime:
                 if len(buf) > max_buf:
                     del buf[:-max_buf]
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # W11b / EM-079 — commitment lifecycle (made / kept / phantom-lapsed)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _advance_commitments(
+        self,
+        agent: AgentState,
+        action: str | None,
+        outcome_ok: bool,
+        new_commitment_text: Any,
+        profile_name: str,
+        profile_color: str,
+    ) -> list[dict]:
+        """Advance the agent's commitment store for THIS turn and return the
+        commitment_made / commitment_lapsed events to emit.
+
+        Semantics (EM-079): a successful project/build/economy tool call marks
+        the OLDEST commitment kept (dropped silently — kept promises emit
+        nothing); any successful non-talk tool call resets the staleness clock;
+        talk-only / idle / failed turns age every commitment, and one that goes
+        `phantom_after_turns` turns without follow-through lapses publicly."""
+        commitments = self._commitments.setdefault(agent.id, [])
+        events: list[dict] = []
+        base = {
+            "actor_id": agent.id,
+            "profile": profile_name,
+            "profile_color": profile_color,
+        }
+
+        # 1. Follow-through: a real project/build/economy call keeps the oldest.
+        if outcome_ok and action in _COMMIT_RESOLUTION_ACTIONS and commitments:
+            commitments.pop(0)  # kept — silent drop, no event
+
+        # 2. Staleness clock: any successful non-talk tool call resets it; pure
+        #    talk (say/whisper/idle) or a failed turn ages every commitment.
+        if outcome_ok and action not in _TALK_ACTIONS:
+            for c in commitments:
+                c["stale_turns"] = 0
+        else:
+            for c in commitments:
+                c["stale_turns"] = int(c.get("stale_turns", 0)) + 1
+
+        # 3. Phantom lapse: claimed in speech, never enacted.
+        threshold = self._phantom_after_turns()
+        kept: list[dict] = []
+        for c in commitments:
+            if int(c.get("stale_turns", 0)) >= threshold:
+                events.append({
+                    **base,
+                    "kind": "commitment_lapsed",
+                    "text": f"{agent.name}'s promise \"{c.get('text', '')}\" lapsed "
+                            f"— all talk, no follow-through.",
+                    "payload": {
+                        "commitment_id": c.get("id"),
+                        "text": c.get("text", ""),
+                        "reason": "phantom",
+                    },
+                })
+            else:
+                kept.append(c)
+        commitments[:] = kept
+
+        # 4. A new commitment parsed from THIS turn's response (EM-066 pattern).
+        if isinstance(new_commitment_text, str) and new_commitment_text.strip():
+            entry = {
+                "id": uuid.uuid4().hex,
+                "text": new_commitment_text.strip()[:200],
+                "made_tick": self.world.tick,
+                "stale_turns": 0,
+            }
+            commitments.append(entry)
+            del commitments[: -self._max_active_commitments()]  # oldest evicted
+            events.append({
+                **base,
+                "kind": "commitment_made",
+                "text": f"{agent.name} commits: \"{entry['text']}\"",
+                "payload": {"commitment_id": entry["id"], "text": entry["text"]},
+            })
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # W11b / EM-081 — overhearing (context injection only; zero LLM calls)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _distribute_overheard(self, agent: AgentState, action: str | None, args: dict) -> None:
+        """When `agent` spoke this turn, queue the line for up to 2 OTHER
+        co-located agents' NEXT-turn perceived context (deterministic pick:
+        lowest id first, excluding the target of a directed talk). Each listener
+        holds at most 2 pending lines (newest win)."""
+        if action not in ("say", "whisper"):
+            return
+        said = str(args.get("text") or "").strip()
+        if not said:
+            return
+        target_id = args.get("target") if action == "whisper" else None
+        listeners = sorted(
+            (
+                a for a in self.world.living_agents()
+                if a.location == agent.location and a.id not in (agent.id, target_id)
+            ),
+            key=lambda a: a.id,
+        )[:_OVERHEARD_LISTENERS_CAP]
+        for listener in listeners:
+            buf = self._overheard.setdefault(listener.id, [])
+            buf.append({
+                "speaker_id": agent.id,
+                "speaker": agent.name,
+                "text": said[:200],
+                "tick": self.world.tick,
+                "overheard": True,
+            })
+            del buf[:-_OVERHEARD_PENDING_CAP]
+
     async def run_turn(self, agent: AgentState) -> dict:
         """
         Execute one agent turn. Returns an event dict describing what happened.
@@ -872,12 +1201,30 @@ class AgentRuntime:
         temperature = profile.temperature if profile else 0.8
 
         recent_events = self._memory.get(agent.id, [])
-        messages = _assemble_context(agent, self.world, recent_events, self.world.params)
+
+        # W11b — pending overheard lines are consumed by THIS turn (EM-081), the
+        # commitments block rides the prompt when non-empty (EM-079), and the
+        # reflection field is requested only when the importance accumulator has
+        # tripped (EM-080). All context-injection: zero extra LLM calls.
+        pending_overheard = self._overheard.pop(agent.id, [])
+        request_reflection = (
+            self._importance.get(agent.id, 0.0) >= self._importance_threshold()
+        )
+        messages = _assemble_context(
+            agent, self.world, recent_events, self.world.params,
+            commitments=self._commitments.get(agent.id, []),
+            overheard=pending_overheard,
+            request_reflection=request_reflection,
+        )
 
         # Decision-trace perception/memory derived from the SAME context (EM-066).
         perceived, memory = _perceived_context(
             agent, self.world, recent_events, self.world.params
         )
+        if pending_overheard:
+            # EM-081 — overheard speech lands in the perceived chain event's
+            # payload, each line flagged overheard:true.
+            perceived["overheard_speech"] = pending_overheard
 
         # Per-attempt llm metadata, collected in attempt order (EM-067). Each
         # entry becomes ONE `llm_call` row in the loop, all sharing this turn_id.
@@ -927,15 +1274,22 @@ class AgentRuntime:
                 "action_chosen": {"chosen_tool": "idle", "args": {}, "tier": "llm"},
                 "resolved": {"outcome": "failed", "state_deltas": {}},
             }
-            return {
+            fail_evt = {
                 "kind": "parse_failure",
                 "actor_id": agent.id,
                 "profile": profile_name,
                 "profile_color": profile_color,
                 "text": f"{agent.name} failed to produce a valid action (idle fallback): {parse_error}",
                 "payload": payload,
-                "_trace": trace,
             }
+            # EM-079 — a failed turn is no follow-through: age the agent's
+            # commitments (may lapse phantoms even on dead-air turns).
+            lapsed = self._advance_commitments(
+                agent, "idle", False, None, profile_name, profile_color
+            )
+            if lapsed:
+                return {"_multi": [fail_evt] + lapsed, "_trace": trace}
+            return {**fail_evt, "_trace": trace}
 
         # Update mood if provided
         if action_dict.get("mood"):
@@ -987,6 +1341,45 @@ class AgentRuntime:
             },
             "resolved": {"outcome": outcome, "state_deltas": state_deltas},
         }
+
+        # ── W11b cognition, all parsed from the SAME single response ──────────
+        chosen_action = action_dict.get("action")
+        outcome_ok = outcome == "ok"
+        extra_events: list[dict] = []
+
+        # EM-079 — commitments: record/keep/lapse.
+        extra_events.extend(self._advance_commitments(
+            agent, chosen_action, outcome_ok, action_dict.get("commitment"),
+            profile_name, profile_color,
+        ))
+
+        # EM-080 — reflection/diary entry (emitted whenever present; resets the
+        # importance accumulator; the loop pushes it into the memory buffer).
+        reflection_text = action_dict.get("reflection")
+        if isinstance(reflection_text, str) and reflection_text.strip():
+            importance = round(self._importance.get(agent.id, 0.0), 2)
+            self._importance[agent.id] = 0.0
+            extra_events.append({
+                "kind": "reflection",
+                "actor_id": agent.id,
+                "profile": profile_name,
+                "profile_color": profile_color,
+                "text": f"{agent.name} reflects: \"{reflection_text.strip()}\"",
+                "payload": {"text": reflection_text.strip(), "importance": importance},
+            })
+
+        # EM-081 — distribute this turn's speech to co-located overhearers.
+        if outcome_ok:
+            self._distribute_overheard(
+                agent, chosen_action, action_dict.get("args") or {}
+            )
+
+        if extra_events:
+            if "_multi" in result_event:
+                result_event["_multi"].extend(extra_events)
+            else:
+                result_event = {"_multi": [result_event] + extra_events}
+
         result_event["_trace"] = trace
 
         return result_event
@@ -1267,10 +1660,18 @@ class AgentRuntime:
             text = args.get("text", "")
             ok, reason, rule = self.world.action_propose_rule(agent, effect, text)
             if ok and rule:
+                # EM-100 — feed text leads with the rule's text + effect tag.
+                label = _rule_label(text)
+                renewal = getattr(rule, "renewal_of", None)
+                feed = f"{agent.name} proposes \"{label}\" ({effect})"
+                payload = {"rule_id": rule.id, "effect": effect,
+                           "text": text, "thought": thought}
+                if renewal:
+                    feed += " — a RENEWAL of the law already in force"
+                    payload["renewal_of"] = renewal
                 return {**base, "kind": "rule_proposed",
-                        "text": f"{agent.name} proposes rule: {text} (effect={effect})",
-                        "payload": {"rule_id": rule.id, "effect": effect,
-                                    "text": text, "thought": thought}}
+                        "text": feed + ".",
+                        "payload": payload}
             else:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to propose rule but: {reason}",
@@ -1281,17 +1682,39 @@ class AgentRuntime:
             choice = args.get("choice", False)
             ok, reason, new_status = self.world.action_vote(agent, rule_id, choice)
             if ok:
+                # EM-100 — every rule_* feed line leads with the rule's text +
+                # effect tag (never the bare uuid; the id stays in payload).
+                rule = self.world.rules.get(rule_id)
+                label = _rule_label(rule.text if rule else "")
+                effect = rule.effect if rule else "?"
                 events = [{**base, "kind": "rule_vote",
-                           "text": f"{agent.name} votes {'YES' if choice else 'NO'} on rule {rule_id}.",
-                           "payload": {"rule_id": rule_id, "choice": choice, "thought": thought}}]
+                           "text": f"{agent.name} votes {'YES' if choice else 'NO'} "
+                                   f"on \"{label}\" ({effect}).",
+                           "payload": {"rule_id": rule_id, "choice": choice,
+                                       "effect": effect, "thought": thought}}]
                 if new_status == "active":
                     events.append({**base, "kind": "rule_passed",
-                                   "text": f"Rule {rule_id} PASSED and is now active!",
-                                   "payload": {"rule_id": rule_id, "new_status": "active"}})
+                                   "text": f"\"{label}\" ({effect}) PASSED and is now active!",
+                                   "payload": {"rule_id": rule_id, "effect": effect,
+                                               "new_status": "active"}})
+                elif new_status == "renewed":
+                    # EM-087 — an identical-effect law was already active: the
+                    # existing rule is RENEWED (refreshed), never stacked.
+                    original = getattr(rule, "renewal_of", None) if rule else None
+                    active = self.world._active_rule(effect) if rule else None
+                    original_id = original or (active.id if active else rule_id)
+                    events.append({**base, "kind": "rule_passed",
+                                   "text": f"\"{label}\" ({effect}) RENEWED — the law "
+                                           f"already in force is refreshed, not stacked.",
+                                   "payload": {"rule_id": original_id, "effect": effect,
+                                               "renewed": True,
+                                               "renewal_proposal_id": rule_id,
+                                               "new_status": "active"}})
                 elif new_status == "rejected":
                     events.append({**base, "kind": "rule_rejected",
-                                   "text": f"Rule {rule_id} was rejected.",
-                                   "payload": {"rule_id": rule_id, "new_status": "rejected"}})
+                                   "text": f"\"{label}\" ({effect}) was rejected.",
+                                   "payload": {"rule_id": rule_id, "effect": effect,
+                                               "new_status": "rejected"}})
                 # Return as a list marker so loop can emit multiple events
                 return {"_multi": events}
             else:
@@ -1341,6 +1764,38 @@ class AgentRuntime:
             # take_offline returns a SINGLE structure_state_changed event dict (no _multi).
             result = self.world.action_take_offline(agent, building_id)
             return _emit_world_result(result, base, thought)
+
+        # ── W11b / EM-091 billboard reflex tools ───────────────────────────────
+        elif action == "post_billboard":
+            result = self.world.action_post_billboard(agent, args.get("text", ""))
+            return _emit_world_result(result, base, thought)
+
+        elif action == "read_billboard":
+            posts = self.world.read_billboard_top(3)
+            # Inject the top posts straight into the agent's memory buffer so
+            # they ride the next turns' RECENT EVENTS context (no event kind
+            # needed for the read itself — a generic agent_action suffices).
+            buf = self._memory.setdefault(agent.id, [])
+            for p in posts:
+                author = p.get("actor_id", "?")
+                if author == "god":
+                    author = "GOD"
+                else:
+                    known = self.world.agents.get(author)
+                    author = known.name if known else author
+                buf.append({
+                    "tick": p.get("tick", tick),
+                    "kind": "billboard_posted",
+                    "text": f"[billboard, by {author}] {p.get('text', '')}",
+                })
+            max_buf = self.world.params.memory_window * 2
+            if len(buf) > max_buf:
+                del buf[:-max_buf]
+            return {**base, "kind": "agent_action",
+                    "text": f"{agent.name} reads the billboard "
+                            f"({len(posts)} recent post{'s' if len(posts) != 1 else ''}).",
+                    "payload": {"action": "read_billboard",
+                                "posts": posts, "thought": thought}}
 
         else:
             return {**base, "kind": "agent_action",

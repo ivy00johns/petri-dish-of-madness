@@ -36,6 +36,11 @@
   --marker-trace: #3a3a50;
   --marker-other: #5a5a72;
 
+  /* God-mode ink (mirrors the Tailwind lab.god pair) — W11b billboard god
+     replies + any god-actor surfacing read in this violet register. */
+  --lab-god: #7b6cf6;
+  --lab-god-bright: #a99bff;
+
   /* Neutral fallback for an agent with no model color yet. */
   --inspector-node-neutral: #5a5a72;
 

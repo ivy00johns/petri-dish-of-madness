@@ -15,7 +15,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Quer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from ..config.loader import load_config, WorldConfig
+from ..config.loader import load_config, load_personas, WorldConfig
 from ..engine.world import World, AgentState, PlaceState
 from ..engine.loop import TickLoop
 from ..agents.runtime import AgentRuntime
@@ -128,6 +128,35 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     return world, router, runtime, repo
 
 
+def _emit_usage_alert(alert: dict) -> None:
+    """Sink for Router usage-cap alerts (W11b EM-083, event-log.md v1.3.0 note 1).
+
+    Persists + broadcasts ONE `usage_alert {provider, metric, pct, limit}` row
+    per provider/metric/day-window (the once-per-window de-dupe lives in
+    providers/usage.py). Defensive: alerting must never break a turn."""
+    if _loop is None:
+        return
+    try:
+        _loop._emit_event({
+            "kind": "usage_alert",
+            "actor_type": "system",
+            "actor_id": None,
+            "profile": alert.get("provider"),
+            "text": (
+                f"{alert.get('provider')} usage crossed {alert.get('pct')}% of "
+                f"its {alert.get('metric')} day cap ({alert.get('limit')})."
+            ),
+            "payload": {
+                "provider": alert.get("provider"),
+                "metric": alert.get("metric"),
+                "pct": alert.get("pct"),
+                "limit": alert.get("limit"),
+            },
+        })
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("usage_alert emission failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _world, _router, _runtime, _repo, _loop, _config
@@ -144,6 +173,10 @@ async def lifespan(app: FastAPI):
     _loop.init_run(_config)
     # Inject world reference into mock providers for dynamic voting
     _router.inject_world(_world)
+    # W11b / EM-083 (platform half) — route usage_alert payloads from the
+    # Router's day-cap tracker into the event log. The sink reads the CURRENT
+    # _loop global, so alerts keep landing in the right run after reset/fork.
+    _router.set_usage_alert_sink(_emit_usage_alert)
 
     log.info("PetriDishOfMadness backend started (tick_interval=%.2fs)",
              _config.world.tick_interval_seconds)
@@ -328,14 +361,48 @@ async def reassign_model(agent_id: str, body: ReassignBody):
 class SpawnBody(BaseModel):
     # Audit B15: length caps — these strings flow into system prompts (token
     # bloat / prompt-injection surface). Over-limit bodies get FastAPI's 422.
-    name: str = Field(max_length=40)
-    profile: str
-    personality: str = Field(default="A generic agent.", max_length=280)
+    # W11b / EM-092: name/profile/personality are now OPTIONAL at the schema
+    # level so a `persona` card can prefill them; the handler still requires an
+    # effective name + profile (400 when neither the body nor a persona supplies
+    # them), so plain spawns behave exactly as before.
+    name: str | None = Field(default=None, max_length=40)
+    profile: str | None = None
+    personality: str | None = Field(default=None, max_length=280)
     location: str = Field(default="plaza", max_length=40)
     # W7 / EM-063 — spawn mode. god = immediate (default, as today); governance =
     # enqueue an admit_agent proposed rule carrying the agent spec; the agent is
     # admitted only if the vote passes threshold.
     mode: str | None = None
+    # W11b / EM-092 — optional persona card name (config/personas.yaml): the
+    # server prefills name/personality/profile (suggested_profile) from the
+    # card; explicit body fields override. Unknown persona -> 400.
+    persona: str | None = Field(default=None, max_length=40)
+
+
+def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str]:
+    """Effective (name, personality, profile) for a spawn (W11b EM-092).
+
+    Explicit body fields always win; a `persona` card fills the gaps; what is
+    still missing after that is a 400 (unknown persona is a 400 too). The
+    pre-W11b default personality ('A generic agent.') is preserved when neither
+    the body nor a card supplies one."""
+    name, personality, profile = body.name, body.personality, body.profile
+    if body.persona:
+        wanted = body.persona.strip().lower()
+        card = next(
+            (c for c in load_personas() if c["name"].strip().lower() == wanted),
+            None,
+        )
+        if card is None:
+            raise HTTPException(400, f"Unknown persona: {body.persona!r}")
+        name = name or card["name"]
+        personality = personality or card["personality"]
+        profile = profile or card["suggested_profile"] or None
+    if not name:
+        raise HTTPException(400, "name is required (directly or via persona)")
+    if not profile:
+        raise HTTPException(400, "profile is required (directly or via persona)")
+    return name, (personality or "A generic agent."), profile
 
 
 def _spawn_mode(body: SpawnBody) -> str:
@@ -351,8 +418,11 @@ def _spawn_mode(body: SpawnBody) -> str:
 async def spawn_agent(body: SpawnBody, response: Response):
     if _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
-    if _router.get_profile(body.profile) is None:
-        raise HTTPException(400, f"Unknown profile: {body.profile}")
+    # W11b / EM-092 — persona prefill: explicit fields win, the card fills gaps,
+    # unknown persona / still-missing name|profile -> 400.
+    name, personality, profile = _resolve_spawn_fields(body)
+    if _router.get_profile(profile) is None:
+        raise HTTPException(400, f"Unknown profile: {profile}")
 
     mode = _spawn_mode(body)
 
@@ -363,16 +433,16 @@ async def spawn_agent(body: SpawnBody, response: Response):
         # SYSTEM-initiated proposal (no human actor), so proposer_id is "system".
         rule = _world.enqueue_admit_agent(
             proposer_id="system",
-            name=body.name,
-            personality=body.personality,
-            profile=body.profile,
+            name=name,
+            personality=personality,
+            profile=profile,
             location=body.location,
         )
         proposal_id = rule.id
         spec = {
-            "name": body.name,
-            "profile": body.profile,
-            "personality": body.personality,
+            "name": name,
+            "profile": profile,
+            "personality": personality,
             "location": body.location,
         }
         if _loop:
@@ -380,9 +450,9 @@ async def spawn_agent(body: SpawnBody, response: Response):
                 "kind": "agent_spawned",
                 "actor_id": None,
                 "actor_type": "system",
-                "profile": body.profile,
-                "profile_color": _loop._get_profile_color_for_profile(body.profile),
-                "text": f"Admission of {body.name} proposed (governance vote pending).",
+                "profile": profile,
+                "profile_color": _loop._get_profile_color_for_profile(profile),
+                "text": f"Admission of {name} proposed (governance vote pending).",
                 "payload": {"method": "governance", "proposal_id": proposal_id, "spec": spec},
             })
             _loop._broadcast_world_state()
@@ -391,12 +461,12 @@ async def spawn_agent(body: SpawnBody, response: Response):
 
     # god (default): immediate spawn as today.
     agent = _world.spawn_agent(
-        name=body.name,
-        personality=body.personality,
-        profile=body.profile,
+        name=name,
+        personality=personality,
+        profile=profile,
         location=body.location,
     )
-    _router.reassign(agent.id, body.profile)
+    _router.reassign(agent.id, profile)
     if _loop and _repo:
         run_id = _loop._run_id or 1
         _repo.save_agent(run_id, agent, _world.tick)
@@ -404,7 +474,7 @@ async def spawn_agent(body: SpawnBody, response: Response):
             "kind": "agent_spawned",
             "actor_id": agent.id,
             "actor_type": "god",
-            "profile": body.profile,
+            "profile": profile,
             "profile_color": _loop._get_profile_color(agent),
             "text": f"{agent.name} spawned.",
             "payload": {"agent_id": agent.id, "name": agent.name, "method": "god"},
@@ -412,6 +482,14 @@ async def spawn_agent(body: SpawnBody, response: Response):
         _loop._broadcast_world_state()
     response.status_code = 201
     return {"status": "ok", "agent_id": agent.id, "mode": "god"}
+
+
+@app.get("/api/personas")
+async def get_personas():
+    """Persona library — config-defined character cards (W11b EM-092,
+    api.openapi.yaml 1.4.0). Empty array when config/personas.yaml is missing
+    or malformed — never 500 (load_personas is fail-soft by contract)."""
+    return load_personas()
 
 
 @app.get("/api/buildings")
@@ -547,6 +625,59 @@ async def inject_event(body: InjectBody = InjectBody()):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# W11b — god billboard reply (powers the UI's "REPLY ON BILLBOARD").
+# ──────────────────────────────────────────────────────────────────────────────
+
+class BillboardBody(BaseModel):
+    # min_length/max_length make FastAPI 422 empty/oversized text before the
+    # handler runs (the contract's 422 path); whitespace-only is checked below.
+    text: str = Field(min_length=1, max_length=280)
+    in_reply_to: str | None = Field(default=None, max_length=120)
+
+
+@app.post("/api/billboard", status_code=201)
+async def post_billboard(body: BillboardBody):
+    """God posts/replies on the town billboard (W11b EM-091 god surface).
+
+    Calls the engine seam `world.post_billboard_as_god(text, in_reply_to)`
+    (backend-engine implements it alongside world.billboard; 503 with a clear
+    message until it lands) and emits `billboard_posted` with actor_type 'god'
+    (event-log.md v1.3.0 note 1). 503 world not initialized; 422 empty/too-long."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "text must be non-empty")
+    post_fn = getattr(_world, "post_billboard_as_god", None)
+    if post_fn is None:
+        # Cross-boundary seam (coordination/W11B_BUILD.md): engine half pending.
+        raise HTTPException(
+            503, "engine billboard support (world.post_billboard_as_god) not available yet"
+        )
+    entry = post_fn(text, body.in_reply_to)
+    if isinstance(entry, dict) and entry.get("kind") == "billboard_posted":
+        # The engine returns the ready event dict (its docstring delegates the
+        # emission to this layer); emit it through the normal pipeline.
+        evt = dict(entry)
+        evt.setdefault("actor_type", "god")
+        _loop._emit_event(evt)
+    else:
+        # Defensive fallback if the seam's return shape shifts.
+        payload: dict = {"place": "plaza", "text": text}
+        if body.in_reply_to:
+            payload["in_reply_to"] = body.in_reply_to
+        _loop._emit_event({
+            "kind": "billboard_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "text": f"God posts on the billboard: “{text}”",
+            "payload": payload,
+        })
+    _loop._broadcast_world_state()
+    return {"status": "ok"}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # W6 read-only event-log endpoints (api.openapi.yaml v1.1.0 / event-log.md §7).
 # These surface the repository §7 query methods over the active run
 # (_loop._run_id). With no active run/repo they return empty arrays / empty
@@ -560,8 +691,211 @@ def _active_run_id() -> int | None:
     return _loop._run_id
 
 
+def _resolve_run_id(run_id: int | None) -> int | None:
+    """Effective run scope for a read endpoint (W11a EM-086, api v1.3.0).
+
+    Omitted (None) → the active run, byte-identical to pre-W11a behavior.
+    Provided → validated against the runs table (SELECT 1 FROM runs WHERE id=?);
+    an unknown id raises 404 {"detail": "unknown run"}. NEVER inferred from the
+    `status` column — liveness is the loop's _run_id, nothing else."""
+    if run_id is None:
+        return _active_run_id()
+    if _repo is None or not _repo.run_exists(run_id):
+        raise HTTPException(404, "unknown run")
+    return run_id
+
+
+@app.get("/api/runs")
+async def list_runs():
+    """List all persisted runs, newest first (W11a EM-086 — the run browser).
+    `is_active` is true ONLY for the run the live loop holds; `status` is
+    reported as stored but is unreliable for liveness (crashes/hot-reloads
+    leave dead runs 'running'). Empty-200 when no repo — never 500."""
+    if _repo is None:
+        return []
+    return _repo.list_runs(active_run_id=_active_run_id())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# W11b / EM-101 — fork a past run at tick T into a NEW run (api.openapi 1.4.0).
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ForkBody(BaseModel):
+    run_id: int
+    tick: int
+    # Typed as Any so malformed overrides get the contract's 400 (validated in
+    # the handler), not pydantic's 422.
+    place_overrides: Any = None
+
+
+async def _retire_loop(loop: TickLoop) -> None:
+    """Tear down a TickLoop we are about to replace: pause it and cancel+await
+    its background tasks (the same teardown TickLoop.reset performs on itself)
+    so nothing mutates the old world or emits into the old run after the swap."""
+    loop.pause()
+    for attr in ("_task", "_animal_task", "_narrator_task"):
+        task = getattr(loop, attr, None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("%s raised during fork teardown: %s", attr, exc)
+        setattr(loop, attr, None)
+    # Release any step_and_wait() callers blocked on the old loop.
+    waiters = getattr(loop, "_step_waiters", [])
+    while waiters:
+        fut = waiters.pop(0)
+        if not fut.done():
+            fut.set_result(loop._world.tick)
+
+
+@app.post("/api/runs/fork", status_code=201)
+async def fork_run(body: ForkBody):
+    """Fork a past run at tick T into a NEW run (W11b EM-101).
+
+    FORK SEMANTICS (honest approximation, documented in the response): the fork
+    restores the NEAREST SNAPSHOT <= T via `World.from_snapshot` — the
+    fold-forward delta (snapshot..T events) is NOT applied server-side (the
+    projection fold lives client-side in the replay consumers; duplicating it
+    here would be a second, drift-prone implementation). When the snapshot tick
+    differs from the requested tick, the response carries the ACTUAL tick in
+    `forked_at_tick` plus a `note` saying so. Lineage (`forked_from` +
+    `forked_at_tick`) is stamped on the new runs row; the forked run starts
+    PAUSED (the user presses play) and its first event is
+    `run_forked {parent_run_id, tick}` (open kind registry, event-log.md §4).
+    """
+    global _world, _runtime, _loop
+
+    if _loop is None or _repo is None or _router is None:
+        raise HTTPException(503, "Not initialized")
+
+    # ── Validation: 404 unknown run; 400 tick out of range / bad overrides ──
+    parent = _repo.get_run(body.run_id)
+    if parent is None:
+        raise HTTPException(404, "unknown run")
+    max_tick = _repo.run_max_tick(body.run_id)
+    if body.tick < 0 or body.tick > max_tick:
+        raise HTTPException(400, f"tick out of range (0..{max_tick})")
+    overrides = body.place_overrides
+    if overrides is not None:
+        if not isinstance(overrides, list) or not all(isinstance(p, dict) for p in overrides):
+            raise HTTPException(400, "place_overrides must be a list of place objects")
+
+    # ── Replay materials: nearest snapshot <= T (same source as /api/replay) ──
+    base = _repo.nearest_snapshot(body.run_id, body.tick)
+    if base is None:
+        raise HTTPException(
+            400, "run has no snapshot at or before that tick — cannot fork"
+        )
+    actual_tick = int(base["tick"])
+
+    # Parent config (parsed early: the child run row carries it, and the world
+    # params inside it make the fork faithful to the parent's physics).
+    try:
+        child_cfg = json.loads(parent.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        child_cfg = {}
+    if not isinstance(child_cfg, dict):
+        child_cfg = {}
+
+    # ── Engine seam (coordination/W11B_BUILD.md): World.from_snapshot ──
+    if getattr(World, "from_snapshot", None) is None:
+        raise HTTPException(
+            503, "engine fork support (World.from_snapshot) not available yet"
+        )
+    kwargs: dict = {"place_overrides": overrides}
+    # ADDITIVE to the contracted seam: when the engine accepts `params`, carry
+    # the parent run's world params into the fork (else it defaults to fresh
+    # WorldParams). Signature-sniffed so the contracted 2-arg form keeps working.
+    try:
+        import inspect
+        if "params" in inspect.signature(World.from_snapshot).parameters and \
+                isinstance(child_cfg.get("world"), dict):
+            from ..config.loader import _parse_world
+            parent_params, _, _ = _parse_world({"world": child_cfg["world"]})
+            kwargs["params"] = parent_params
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("could not derive parent world params for fork: %s", exc)
+        kwargs.pop("params", None)
+    try:
+        new_world = World.from_snapshot(base["state"], **kwargs)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise HTTPException(400, f"invalid fork state/overrides: {exc}")
+
+    # ── Swap: fork is "reset to a computed state". Retire the old loop, keep
+    # the SAME repo (one DB = one runs table) and the SAME router (profiles +
+    # usage-alert tracker survive); rebuild runtime + loop around the new world.
+    old_loop = _loop
+    await _retire_loop(old_loop)
+
+    for agent in new_world.agents.values():
+        try:
+            _router.reassign(agent.id, agent.profile)
+        except ValueError:
+            # Profile vanished from the registry since the parent run: degrade
+            # to mock (always present) rather than failing the fork.
+            _router.reassign(agent.id, "mock")
+            agent.profile = "mock"
+    _router.inject_world(new_world)
+    clear_cache = getattr(_router, "clear_cache", None)
+    if callable(clear_cache):
+        clear_cache()  # audit B12: parent-run cached decisions must not serve here
+
+    new_runtime = AgentRuntime(new_world, _router)
+    new_loop = TickLoop(
+        world=new_world,
+        runtime=new_runtime,
+        repo=_repo,
+        router=_router,
+        broadcaster=_broadcast,
+    )
+
+    # ── New run row: config carried from the parent + a forked_from marker,
+    # lineage stamped in the dedicated columns (event-log.md v1.3.0 note 4). ──
+    child_cfg["forked_from"] = body.run_id
+    child_cfg["forked_at_tick"] = actual_tick
+    new_run_id = _repo.start_run(
+        json.dumps(child_cfg), forked_from=body.run_id, forked_at_tick=actual_tick
+    )
+    new_loop._run_id = new_run_id
+    _repo.save_places(new_run_id, list(new_world.places.values()))
+    for agent in new_world.agents.values():
+        _repo.save_agent(new_run_id, agent, new_world.tick)
+
+    # Swap the module singletons; the forked run is now "the" world, PAUSED.
+    new_world.running = False
+    _world, _runtime, _loop = new_world, new_runtime, new_loop
+
+    # First event of the forked run records the lineage (open kind registry —
+    # consumers tolerate unknown kinds per event-log.md §4).
+    new_loop._emit_event({
+        "kind": "run_forked",
+        "actor_id": None,
+        "actor_type": "system",
+        "text": f"forked from run #{body.run_id} @ tick {actual_tick}",
+        "payload": {"parent_run_id": body.run_id, "tick": actual_tick},
+    })
+    # Snapshot the forked base (after the event: a snapshot at tick t includes
+    # all tick-t events, event-log.md §boundary), then show everyone the world.
+    new_loop._save_snapshot(new_world.tick)
+    new_loop._broadcast_world_state()
+
+    result: dict = {"status": "ok", "run_id": new_run_id, "forked_at_tick": actual_tick}
+    if actual_tick != body.tick:
+        result["note"] = (
+            f"forked from the nearest snapshot at tick {actual_tick} "
+            f"(requested {body.tick}); the {actual_tick + 1}..{body.tick} event "
+            "delta is not folded server-side"
+        )
+    return result
+
+
 @app.get("/api/events")
 async def get_events(
+    run_id: int | None = None,  # query param: scope to a past run (default: active run)
     from_tick: int | None = Query(default=None),
     to_tick: int | None = Query(default=None),
     kinds: str | None = Query(default=None, description="comma-separated kinds"),
@@ -571,7 +905,7 @@ async def get_events(
     limit: int | None = Query(default=None),
     order: str = Query(default="asc"),
 ):
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     kind_list = [k for k in kinds.split(",") if k] if kinds else None
@@ -589,16 +923,16 @@ async def get_events(
 
 
 @app.get("/api/turns/{turn_id}")
-async def get_turn_trace(turn_id: str):
-    run_id = _active_run_id()
+async def get_turn_trace(turn_id: str, run_id: int | None = None):
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_turn_trace(run_id, turn_id)
 
 
 @app.get("/api/rules/history")
-async def get_rule_history():
-    run_id = _active_run_id()
+async def get_rule_history(run_id: int | None = None):
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_rule_history(run_id)
@@ -606,11 +940,12 @@ async def get_rule_history():
 
 @app.get("/api/relationships")
 async def get_relationships(
+    run_id: int | None = None,
     agent_id: str | None = Query(default=None),
     from_tick: int | None = Query(default=None),
     to_tick: int | None = Query(default=None),
 ):
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_relationship_timeline(
@@ -619,15 +954,15 @@ async def get_relationships(
 
 
 @app.get("/api/snapshots")
-async def get_snapshots():
-    run_id = _active_run_id()
+async def get_snapshots(run_id: int | None = None):
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return []
     return _repo.get_snapshots(run_id)
 
 
 @app.get("/api/replay")
-async def get_replay(tick: int = Query(...)):
+async def get_replay(tick: int = Query(...), run_id: int | None = None):
     """Replay materials for tick T (api.openapi.yaml v1.2.0, audit B7).
 
     `events` contains ONLY the fold-forward delta: rows with
@@ -635,8 +970,13 @@ async def get_replay(tick: int = Query(...)):
     already includes all tick-base.tick events, per event-log.md v1.1.0 §3).
     If no snapshot exists, base is null and events cover 0 <= e.tick <= T.
     Clients fold `events` onto `base.state` without further filtering.
+
+    W11a EM-086: with an explicit ?run_id this serves a PAST run unchanged —
+    snapshots + events are both run-scoped, and world geometry (places) comes
+    from base.state (that run's snapshot state_json), never the live-owned
+    `places` table (which the active run rewrites via INSERT OR REPLACE).
     """
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return {"base": None, "events": []}
     base = _repo.nearest_snapshot(run_id, tick)
@@ -647,10 +987,11 @@ async def get_replay(tick: int = Query(...)):
 
 @app.get("/api/analytics")
 async def get_analytics(
+    run_id: int | None = None,
     from_tick: int | None = Query(default=None),
     to_tick: int | None = Query(default=None),
 ):
-    run_id = _active_run_id()
+    run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return {}
     return _repo.get_analytics(run_id, from_tick=from_tick, to_tick=to_tick)

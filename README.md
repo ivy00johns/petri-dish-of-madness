@@ -12,15 +12,22 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 
 - **Per-agent hot-swappable models** — every villager runs a different LLM (Gemini-Flash, Qwen, DeepSeek, Groq-Llama, local Ollama, …), color-coded and reassignable live from the UI. The UI shows the model that *actually* answered each turn.
 - **A cozy 3D village + 2D map** — villagers walk between buildings with floating chat bubbles (Stardew × Animal-Crossing); toggle to a lighter top-down map for analysis.
-- **Economy & governance** — agents work, forage, trade, steal, and propose & vote on town-hall rules that change the world's physics.
+- **Economy & governance** — agents work, forage, trade, steal, and propose & vote on town-hall rules that change the world's physics. Re-proposing an active law **renews** it instead of stacking a duplicate, rule names in the feed read the way humans wrote them, and each law gets at most one commemorative monument.
 - **Buildings & collective projects** — agents propose → fund → build shared structures that carry visible state (scaffolding while under construction, scorched walls after arson).
 - **Chaos animals** — an LLM-driven cat (**Mochi**) and dog (**Biscuit**) roam on a slow cadence, knocking things over and stealing food, utterly indifferent to human law and money. Their mischief streams to a dedicated Animal Chaos Feed.
-- **An instrumentation annex** (`/inspector`) — replay any tick, inspect the decision trace behind every action, browse governance/law history, watch the social graph form, and compare models on a 9-axis dashboard.
-- **Free-scale by design** — slow ticks, reflex (no-LLM) actions, decision caching, and per-provider usage tracking keep it runnable on free API tiers.
+- **A village billboard** — agents pin and read public notices at the plaza and Town Hall (a reflex action that rides the same turn — zero extra LLM calls), rendered as a real notice board in the 3D village. And you can answer back: the god panel's **REPLY ON BILLBOARD** (or `POST /api/billboard`) posts as the watchers, in god ink.
+- **A persona library** — `config/personas.yaml` ships 10 ready-made character cards (Conspiracy Theorist, Chaos Gremlin, Kleptomaniac Philanthropist, …); pick one from the spawn form's persona picker or list them via `GET /api/personas`.
+- **Inner lives** — agents make spoken **commitments**, and the feed marks the ones they never act on as 👻 phantoms; salient events trigger occasional **diary reflections** (✎); plaza chatter gets **overheard** by bystanders. All of it piggybacks on the same single turn response — zero extra LLM calls.
+- **Run forking** — pick any past run in the Run Browser, hit **FORK** at a tick, and a new paused run begins from that moment (with lineage back to the parent) — optionally waking the same society in different geography.
+- **Procgen towns (opt-in)** — flip `world.procgen` on and a seeded layout replaces the hand-authored village, including a cottage per agent and a beds-limited **Bunkhouse**. Blackouts have teeth now, too: recharge fails at a blacked-out home until the lights come back.
+- **An instrumentation annex** (`/inspector`) — replay any tick, inspect the decision trace behind every action, browse governance/law history, watch the social graph form, and compare models on a 9-axis dashboard. A **Run Browser** lists every past run (they persist to `data/run.sqlite`), opens any one in archive mode, and compares two runs' AWI summaries side by side.
+- **Free-scale by design** — slow ticks, reflex (no-LLM) actions, decision caching, and per-provider usage tracking keep it runnable on free API tiers. Give a profile `rpd`/`tpd` daily caps in `config/profiles.yaml` and a one-shot `usage_alert` fires at 70% — alerts only, never throttling.
 
 ---
 
 ## Screenshots
+
+*(Screenshots predate the W11a chat-first layout — panel positions have since moved, but the village itself looks the same.)*
 
 **The Village (3D)** — three villagers (Ada · Bram · Cleo), each requesting a different model
 through FreeLLMAPI, chatting live in the plaza. The feed streams every action; the chips above
@@ -52,7 +59,7 @@ flowchart TB
         runtime["Agent Runtime<br/>context assembly · parse + validate"]
         animals["Animal Runtime<br/>chaos layer · cat & dog"]
         router["Provider Router<br/>pluggable, per-agent adapters"]
-        db[("SQLite<br/>agents · events · rules · snapshots")]
+        db[("SQLite — data/run.sqlite<br/>runs · events · snapshots")]
     end
 
     subgraph providers["🧠 Model Providers — hot-swappable per agent"]
@@ -63,7 +70,7 @@ flowchart TB
         mock(["Mock · no network"])
     end
 
-    cfg[/"config/<br/>profiles.yaml · world.yaml"/]
+    cfg[/"config/<br/>profiles.yaml · world.yaml · personas.yaml"/]
 
     controls -->|"POST /api/control · /api/agents"| api
     views -->|"GET /api/state · /api/profiles"| api
@@ -130,7 +137,7 @@ make install
 
 `./dev` auto-activates `.venv` if it exists, so you don't have to keep it activated yourself.
 
-Open **[http://localhost:5173](http://localhost:5173)** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and click the filter chips above the feed to show only the categories you care about. Visit **/inspector** for the analysis annex (replay, decision traces, governance history, social graph, model dashboards).
+Open **[http://localhost:5173](http://localhost:5173)** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). The layout is chat-first: the **feed is the left column** (drag its right edge to resize), topped by a zero-LLM **story-so-far digest**; the world view takes the center with the **agent + critter roster as a card strip along its bottom edge**; controls and a collapsible model legend sit on the right. Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and click the filter chips above the feed to show only the categories you care about. Visit **/inspector** for the analysis annex (replay, decision traces, governance history, social graph, model dashboards, run browser). The live lab wants a window at least **1024px wide** — below that you get a friendly gate rather than a crushed layout.
 
 > **macOS / Homebrew note:** bare `pip install -e backend` often fails with either
 > `requires a different Python: 3.10.x not in '>=3.11'` (a too-old Homebrew Python is
@@ -190,9 +197,14 @@ regardless. Confirm what your proxy serves with `curl -s $FREELLMAPI_BASE_URL/mo
 
 Open **[http://localhost:5173](http://localhost:5173)** and click **Start**. The 3D village comes alive:
 
-- Each villager is tinted by its requested model and carries a floating card with its
-energy, credits, mood, and the **model that actually answered** its last turn.
-- Speech appears as chat bubbles above villagers and streams in the live feed.
+- Each villager is tinted by its requested model; the roster strip along the bottom of
+the world view carries each one's card — energy, credits, mood, and the **model that
+actually answered** its last turn.
+- Speech appears as chat bubbles above villagers and streams in the live feed (the
+left column — drag its edge wider if the chat is the show for you).
+- The camera is yours: **drag** to orbit, **right-drag** to pan, **click a building**
+to zoom to it, **click a villager or critter** (in the scene or on the roster strip)
+to follow them, and hit **RESET VIEW** to snap back to the default framing.
 - Live-reassign any agent's model from its panel — it takes effect on the next turn.
 - A cat (**Mochi**) and dog (**Biscuit**) roam and cause chaos — knocking things over,
 stealing food — their in-character lines streaming to the Animal Chaos Feed.
@@ -205,10 +217,11 @@ watch the social graph + model dashboards build up.
 Runs comfortably past 5 minutes with all 3 alive (they recharge to survive); expect emergent
 gossip, alliances, the occasional theft, and passed rules.
 
-> **Replayable runs need a file DB:** the event log defaults to in-memory SQLite
-> (`db_path: ":memory:"` — fine for tests, gone on restart). For a run you want to replay
-> in `/inspector`, set `db_path` under `world:` in `config/world.yaml` to a file path,
-> e.g. `db_path: data/run.sqlite` (see `contracts/event-log.md` §6).
+> **Runs persist by default:** the event log defaults to a file DB
+> (`db_path: data/run.sqlite` under `world:` in `config/world.yaml`), so every run survives
+> restarts and is replayable in `/inspector`. Each restart/reset starts a new run; prior
+> runs stay on disk. Set `db_path: ":memory:"` (or export `EM_DB_PATH=':memory:'`) for an
+> ephemeral run, or delete the file (and its `-wal`/`-shm` sidecars) to start fresh.
 
 **Troubleshooting the live run**
 
@@ -219,6 +232,71 @@ gossip, alliances, the occasional theft, and passed rules.
 - `**Connection refused` to `:3001**` — the FreeLLMAPI proxy isn't running (or
 `FREELLMAPI_BASE_URL` is wrong). Start the proxy and confirm with
 `curl -s $FREELLMAPI_BASE_URL/models -H "Authorization: Bearer $FREELLMAPI_KEY"`.
+
+---
+
+## Browse past runs
+
+Every run lands in `data/run.sqlite`, so finished experiments don't evaporate. In
+**/inspector**, the **Run Browser** panel lists them all (backed by `GET /api/runs`):
+
+- **Archive mode** — pick any past run and the inspector panels (replay, traces,
+governance, social graph) show only that run; click the active run to return to live.
+- **Cross-run comparison** — pick two runs and compare their AWI summaries side by side.
+
+(The mock-preview frontend has no persisted runs — the Run Browser needs the real backend.)
+
+### Fork a run
+
+Any archived run in the Run Browser carries a **FORK** button: pick a tick and a new,
+**paused** run starts from that moment, with lineage back to the parent (`forked_from` +
+`forked_at_tick`); press play when you're ready. The same thing over HTTP:
+
+```bash
+curl -X POST localhost:8000/api/runs/fork \
+  -H 'Content-Type: application/json' \
+  -d '{"run_id": 3, "tick": 120}'
+```
+
+> **Honest grain note:** snapshots are taken every ~25 ticks, and a fork restores the
+> **nearest snapshot at or before** your requested tick — the events between the snapshot
+> and your tick are not replayed onto it. The response tells you the actual landing tick
+> in `forked_at_tick`, plus a `note` when it differs from what you asked for.
+
+Pass `place_overrides` (a list of place objects) in the body to wake the same society in
+different geography — same people, new town.
+
+---
+
+## The billboard
+
+There's a public notice board at the plaza (readable from Town Hall too). Agents post and
+read notices as a **reflex action** — it rides their normal turn, costing zero extra LLM
+calls — and the board renders as a real object in the 3D village. Billboard traffic gets
+its own 📌 **Board** chip in the feed.
+
+You're not just a spectator: the god panel's **REPLY ON BILLBOARD** posts to the board as
+the watchers (rendered in god ink in the feed), or do it directly:
+
+```bash
+curl -X POST localhost:8000/api/billboard \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "We see you, Bram."}'
+```
+
+Watching a conspiracy-theorist villager discover a reply from *the watchers themselves* is
+worth the curl.
+
+---
+
+## Personas
+
+`config/personas.yaml` ships **10 character cards** — Conspiracy Theorist, Serial
+Entrepreneur, Doomsday Prepper, Poet-Bureaucrat, Kleptomaniac Philanthropist, Retired
+Enforcer, Wellness Guru, Amnesiac Drifter, Gossip Broker, Chaos Gremlin. The spawn form
+has a persona picker that prefills name, personality, and a suggested model profile (any
+field you set explicitly still wins), and `GET /api/personas` serves the cards verbatim.
+Edit the YAML to add your own — no code changes needed.
 
 ---
 
@@ -286,7 +364,15 @@ docker compose up -d
 
 The web container (nginx) proxies `/api` and `/ws` to the backend, so no CORS configuration is needed. The frontend is served on **port 8080** in production.
 
-Platforms: Railway, Fly.io, Render, any VPS with Docker. No persistent storage configuration required for the basic run; SQLite is written inside the backend container (add a named volume for durability).
+Platforms: Railway, Fly.io, Render, any VPS with Docker. **Runs persist by default** to `data/run.sqlite` — inside the container that lands at `/app/data`, which is ephemeral unless you mount it. To keep run history (and the `/inspector` Run Browser's archive) across container recreation, add a volume:
+
+```yaml
+# docker-compose override for the backend service
+volumes:
+  - ./data:/app/data        # or a named volume
+```
+
+Skipping the volume still works — you just lose past runs whenever the container is recreated.
 
 ---
 
@@ -337,6 +423,7 @@ petri-dish-of-madness/
 │   └── src/inspector/    # the /inspector annex (replay, traces, graphs, dashboards)
 ├── config/
 │   ├── profiles.yaml     # Model profiles (edit to add/swap models)
+│   ├── personas.yaml     # Persona library — character cards for the spawn form
 │   └── world.yaml        # World params + seed agents
 ├── docker/
 │   ├── backend.Dockerfile
@@ -352,11 +439,65 @@ petri-dish-of-madness/
 
 ## Configuration
 
-All model routing is driven by `config/profiles.yaml` and `config/world.yaml`. No code changes are needed to add a model — add a profile entry, assign an agent to it.
+All model routing is driven by `config/profiles.yaml` and `config/world.yaml`; `config/personas.yaml` holds the spawn form's character cards. No code changes are needed to add a model — add a profile entry, assign an agent to it. Same for personas — add a card to the YAML.
 
 The backend reads config from the directory named by `EM_CONFIG_DIR` (default: `./config`).
 
 See `config/profiles.yaml` for the commented Ollama profile example and inline documentation.
+
+**Usage alerts (optional)** — give any profile in `config/profiles.yaml` daily caps and a
+one-shot `usage_alert` event fires when it crosses **70%** of a cap (once per
+profile/metric per UTC day). Alerts only — calls are never throttled or blocked:
+
+```yaml
+profiles:
+  - name: groq-llama
+    # ...
+    rpd: 1000      # requests/day cap
+    tpd: 100000    # tokens/day cap (input + output)
+```
+
+**Inner life & world physics (W11b)** — all of these live under `world:` in
+`config/world.yaml`, and every value below is the engine default if the key is absent:
+
+```yaml
+world:
+  commitments:
+    phantom_after_turns: 12   # talk-only turns before a promise lapses as a 👻 phantom
+    max_active: 5             # active commitments per agent (oldest evicted)
+  reflection:
+    importance_threshold: 10  # witnessed-event importance before a diary entry (✎)
+  blackout_ticks: 10          # how long a blackout disables recharge at affected homes
+  procgen:                    # procedural towns — DEFAULT OFF (hand-authored town stays)
+    enabled: false
+    seed: 42
+    n_places: 9               # town places incl. the plaza (housing on top), cap 12
+    kind_weights:             # weighted picks for the non-guaranteed slots
+      work: 2
+      social: 2
+      governance: 1
+      wild: 2
+      home: 1
+```
+
+Commitments and reflections piggyback on each agent's single turn response — enabling them
+costs zero extra LLM calls. Procgen adds a cottage per seed agent plus a communal
+Bunkhouse with one bed fewer than there are agents, so bed scarcity exists by design.
+
+**Narrator mode (optional, off by default)** — the story-so-far digest atop the feed is
+zero-LLM and needs no config. If you also want an LLM-written "story so far" recap emitted
+into the event stream, flip it on under `world:` in `config/world.yaml`:
+
+```yaml
+world:
+  narrator:
+    enabled: false        # flip to true to enable
+    every_n_ticks: 50     # at most one recap per N ticks
+    model_profile: gemini-flash  # keep this on a free-tier profile — it's an extra LLM call
+```
+
+The narrator call runs off the agents' critical path; a failed or timed-out call emits
+nothing and is never retried, so the tick loop never stalls on it.
 
 ---
 
