@@ -1,11 +1,12 @@
 /**
  * EventFeed — live terminal-style event log.
  * Newest entries on top. Left-bordered with profile_color.
- * agent_action entries show thought on hover.
+ * agent_action entries show thought on hover; animal lines read inline.
  *
- * Filtering: events are bucketed into categories; each can be muted via the
- * filter bar (persisted to localStorage). Muting "Errors" hides the noisy
- * parse_failure / idle-fallback lines.
+ * Filtering is inclusive: click a category chip to show ONLY that category,
+ * click more to stack two or three, click an active chip to drop it. With none
+ * focused, everything shows except the default-muted trace chain. The focus set
+ * is persisted to localStorage.
  */
 
 import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react';
@@ -115,16 +116,18 @@ const DEFAULT_MUTED: string[] = ['trace'];
 const KIND_TO_CATEGORY: Partial<Record<EventKind, string>> = {};
 CATEGORIES.forEach((c) => c.kinds.forEach((k) => { KIND_TO_CATEGORY[k] = c.key; }));
 
-const STORAGE_KEY = 'em.feed.mutedCategories';
+// Inclusion filter: the set of categories to SHOW. Empty = the default view
+// (every category except the noisy DEFAULT_MUTED trace chain). Clicking a chip
+// adds it here, so "click a filter" shows FOR that category (and you can stack
+// two or three) instead of muting it out.
+const STORAGE_KEY = 'em.feed.focusCategories';
 
-function loadMuted(): Set<string> {
+function loadFocus(): Set<string> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    // Only honor DEFAULT_MUTED when the user has no saved preference yet, so we
-    // never re-mute a category a returning user deliberately un-muted.
     if (raw) return new Set(JSON.parse(raw) as string[]);
   } catch { /* ignore */ }
-  return new Set(DEFAULT_MUTED);
+  return new Set();
 }
 
 function formatTime(ts: string | undefined): string {
@@ -180,10 +183,18 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
           {event.text ?? `[${event.kind}]`}
         </span>
 
-        {/* Thought tooltip (agent reasoning, or an animal's in-character thought) */}
-        {hasTip && (
+        {/* An animal's in-character line reads INLINE (the chaos dialogue is the
+            point) rather than being buried in a hover tooltip. */}
+        {animal && hasTip && (
+          <span className="block font-mono text-xs text-lab-muted italic leading-relaxed break-words mt-0.5">
+            “{tip}”
+          </span>
+        )}
+
+        {/* Agent reasoning stays on hover so the live feed isn't flooded. */}
+        {!animal && hasTip && (
           <div className="lab-tooltip bottom-full left-0 mb-1 w-56">
-            <span className="text-lab-muted">{animal ? 'critter: ' : 'thought: '}</span>
+            <span className="text-lab-muted">thought: </span>
             <span className="text-lab-text">{tip}</span>
           </div>
         )}
@@ -225,19 +236,20 @@ export function EventFeed({ events }: EventFeedProps) {
 
   const [scrolledAway, setScrolledAway] = useState(false);
   const [unseen, setUnseen] = useState(0);
-  const [muted, setMuted] = useState<Set<string>>(loadMuted);
+  const [focus, setFocus] = useState<Set<string>>(loadFocus);
 
-  // Persist muted categories.
+  // Persist focused categories.
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify([...muted])); } catch { /* ignore */ }
-  }, [muted]);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify([...focus])); } catch { /* ignore */ }
+  }, [focus]);
 
-  // Apply category filter. Unmapped kinds (none, by construction) stay visible.
+  // Inclusion filter: with categories focused, show ONLY those; with none
+  // focused, show everything except the default-muted trace chain.
   const visibleEvents = useMemo(
-    () => (muted.size === 0
-      ? events
-      : events.filter((e) => !muted.has(KIND_TO_CATEGORY[e.kind] ?? ''))),
-    [events, muted],
+    () => (focus.size === 0
+      ? events.filter((e) => !DEFAULT_MUTED.includes(KIND_TO_CATEGORY[e.kind] ?? ''))
+      : events.filter((e) => focus.has(KIND_TO_CATEGORY[e.kind] ?? ''))),
+    [events, focus],
   );
 
   // Highlight freshly-arrived entries briefly. Tracked with its own length ref so
@@ -292,8 +304,10 @@ export function EventFeed({ events }: EventFeedProps) {
     el.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const toggleCategory = (key: string) => {
-    setMuted((prev) => {
+  // Click a chip to focus that category (show only it). Click more to stack two
+  // or three; click an active one to drop it. Empty focus → default view.
+  const toggleFocus = (key: string) => {
+    setFocus((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
@@ -304,9 +318,8 @@ export function EventFeed({ events }: EventFeedProps) {
     setUnseen(0);
   };
 
-  // Shift-click a chip to "solo" it: mute everything else.
-  const soloCategory = (key: string) => {
-    setMuted(new Set(CATEGORIES.map((c) => c.key).filter((k) => k !== key)));
+  const clearFocus = () => {
+    setFocus(new Set());
     pinnedRef.current = true;
     setScrolledAway(false);
     setUnseen(0);
@@ -339,28 +352,33 @@ export function EventFeed({ events }: EventFeedProps) {
         </div>
       </div>
 
-      {/* Filter bar — click to mute/unmute a category, shift-click to focus one */}
+      {/* Filter bar — click a chip to show ONLY that category; click more to stack
+          two or three; click an active one to drop it. Empty = default view. */}
       <div className="flex flex-wrap items-center gap-1 px-2 py-1 border-b border-lab-border/40 bg-lab-chrome/20">
         {CATEGORIES.map((cat) => {
-          const isMuted = muted.has(cat.key);
+          // Active = currently shown. With no focus, that's everything except the
+          // default-muted trace chain; with a focus set, only the focused chips.
+          const isActive = focus.size === 0
+            ? !DEFAULT_MUTED.includes(cat.key)
+            : focus.has(cat.key);
           return (
             <button
               key={cat.key}
-              onClick={(e) => (e.shiftKey ? soloCategory(cat.key) : toggleCategory(cat.key))}
-              title={isMuted ? `Show ${cat.label} (shift-click: focus)` : `Mute ${cat.label} (shift-click: focus)`}
+              onClick={() => toggleFocus(cat.key)}
+              title={isActive ? `Showing ${cat.label} — click to hide` : `Click to show only ${cat.label}`}
               className={`font-mono text-[10px] px-1.5 py-0.5 rounded-sm border cursor-pointer transition-colors duration-100
-                          ${isMuted
-                            ? 'border-lab-border/40 text-lab-dim opacity-50 line-through'
-                            : 'border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid'}`}
+                          ${isActive
+                            ? 'border-lab-acid text-lab-acid'
+                            : 'border-lab-border/40 text-lab-dim opacity-50 hover:border-lab-acid hover:text-lab-acid hover:opacity-100'}`}
             >
               <span aria-hidden="true">{cat.icon}</span> {cat.label}
             </button>
           );
         })}
-        {muted.size > 0 && (
+        {focus.size > 0 && (
           <button
-            onClick={() => { setMuted(new Set()); pinnedRef.current = true; setScrolledAway(false); setUnseen(0); }}
-            title="Show all categories"
+            onClick={clearFocus}
+            title="Clear filters (show all)"
             className="font-mono text-[10px] px-1.5 py-0.5 rounded-sm border border-lab-acid/60
                        text-lab-acid hover:bg-lab-acid/15 cursor-pointer transition-colors duration-100"
           >
@@ -380,7 +398,7 @@ export function EventFeed({ events }: EventFeedProps) {
             <div className="flex items-center justify-center h-16 font-mono text-xs text-lab-dim text-center px-4">
               {events.length === 0
                 ? 'WAITING FOR EVENTS…'
-                : 'ALL CATEGORIES MUTED — click a filter to show events'}
+                : 'No events in the selected filters yet — click ✕ clear to show all'}
             </div>
           ) : (
             visibleEvents.map((event) => (
