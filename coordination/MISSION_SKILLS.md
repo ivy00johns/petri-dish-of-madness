@@ -62,3 +62,13 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] render-level verification — orchestrator Playwright pass on `/` + `/inspector`: smell scan (no lone `?`/undefined), click-through (run rows, archive, comparison, pill, legend, reset view), console 0 errors; screenshots `.playwright/2026-06-09-w11a/`. Single-user local app — no signed-out/in matrix applies.
 - [x] `git-commit` conventions — all commits.
 - [ ] `ux-review` full-skill subjective pass — deferred: W11b will re-run it once the sim-texture wave lands so the report covers the finished W11 surface (manual verification above covered the objective checks).
+
+## W11b — Sim texture (source: ledger W11 items + user session 2026-06-09)
+- [x] `orchestrator` — full wave; contracts api 1.4.0 / event-log v1.3.0 / frontend-inspector v1.3.0; `coordination/W11B_BUILD.md`.
+- [x] `frontend-design` + `ui-ux-pro-max` — invoked by the W11b frontend agent (billboard/persona/banner work).
+- [x] QE gate — qa-report proceed=true (252 backend / 150 frontend; prompt-capture proof of the free-scale law).
+- [x] design-token check — diff-scoped, clean (god-ink hexes live in the token declaration file).
+- [x] render-level verification — orchestrator Playwright pass: god post + reply form, fork + lineage chip, banner 0.0px shift, min-width gate, console 0 errors.
+- [x] `git-commit` conventions — all commits.
+- [x] `git-pr` — PR to main carrying W9–W11 (see closeout).
+- [ ] `ux-review` full-skill subjective pass — deferred from W11a+W11b together: recommend running it on the merged main after the PR, as a fresh-eyes pass over the finished W11 surface.
