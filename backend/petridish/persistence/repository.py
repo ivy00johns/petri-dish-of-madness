@@ -33,11 +33,13 @@ SCHEMA = """
 PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS runs (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  started_at    TEXT NOT NULL,
-  ended_at      TEXT,                                -- W11a EM-086: null while running
-  config_json   TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'running'
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at     TEXT NOT NULL,
+  ended_at       TEXT,                               -- W11a EM-086: null while running
+  config_json    TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'running',
+  forked_from    INTEGER,                            -- W11b EM-101: parent run id (null = root run)
+  forked_at_tick INTEGER                             -- W11b EM-101: parent tick the fork was taken at
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -122,6 +124,7 @@ class SQLiteRepository:
         self._conn.execute("PRAGMA wal_autocheckpoint = 1000")
         self._migrate_events_v1_1_0()
         self._migrate_runs_v1_3_0()
+        self._migrate_runs_v1_4_0()
         self._conn.commit()
 
     def _migrate_events_v1_1_0(self) -> None:
@@ -163,10 +166,31 @@ class SQLiteRepository:
         if "ended_at" not in cols:
             self._conn.execute("ALTER TABLE runs ADD COLUMN ended_at TEXT")
 
-    def start_run(self, config_json: str) -> int:
+    def _migrate_runs_v1_4_0(self) -> None:
+        """Idempotent runs-table upgrade for pre-W11b file DBs (EM-101 fork
+        lineage): add nullable `forked_from` (parent run id) + `forked_at_tick`
+        (the parent tick the fork was taken at). Fresh DBs get both from
+        SCHEMA's CREATE; the guard skips them. Root (un-forked) runs keep NULLs."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)")}
+        if "forked_from" not in cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN forked_from INTEGER")
+        if "forked_at_tick" not in cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN forked_at_tick INTEGER")
+
+    def start_run(
+        self,
+        config_json: str,
+        *,
+        forked_from: int | None = None,
+        forked_at_tick: int | None = None,
+    ) -> int:
+        """Insert a new run row. W11b EM-101: keyword-only lineage stamps for
+        forked runs (both None for root runs — byte-identical to pre-W11b)."""
         cur = self._conn.execute(
-            "INSERT INTO runs (started_at, config_json) VALUES (?, ?)",
-            (datetime.now(timezone.utc).isoformat(), config_json),
+            "INSERT INTO runs (started_at, config_json, forked_from, forked_at_tick) "
+            "VALUES (?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), config_json,
+             forked_from, forked_at_tick),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -349,6 +373,7 @@ class SQLiteRepository:
         'running' forever."""
         cur = self._conn.execute(
             """SELECT r.id, r.started_at, r.ended_at, r.status, r.config_json,
+                      r.forked_from, r.forked_at_tick,
                       COALESCE(MAX(e.tick), 0) AS max_tick,
                       COUNT(e.seq)             AS event_count
                FROM runs r
@@ -357,7 +382,8 @@ class SQLiteRepository:
                ORDER BY r.id DESC"""
         )
         out: list[dict] = []
-        for rid, started_at, ended_at, status, config_json, max_tick, count in cur.fetchall():
+        for (rid, started_at, ended_at, status, config_json,
+             forked_from, forked_at_tick, max_tick, count) in cur.fetchall():
             out.append({
                 "id": rid,
                 "started_at": started_at,
@@ -366,9 +392,45 @@ class SQLiteRepository:
                 "is_active": active_run_id is not None and rid == active_run_id,
                 "max_tick": int(max_tick or 0),
                 "event_count": int(count or 0),
+                # W11b EM-101 — fork lineage (api.openapi.yaml 1.4.0 RunRow).
+                # Null for root runs; the W11a frontend tolerates the extra keys.
+                "forked_from": forked_from,
+                "forked_at_tick": forked_at_tick,
                 "config_summary": self._config_summary(config_json),
             })
         return out
+
+    def get_run(self, run_id: int) -> dict | None:
+        """One run row (W11b EM-101 — the fork endpoint needs the parent's
+        config_json to carry into the child): {id, started_at, ended_at, status,
+        config_json, forked_from, forked_at_tick} | None."""
+        row = self._conn.execute(
+            "SELECT id, started_at, ended_at, status, config_json, "
+            "forked_from, forked_at_tick FROM runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        rid, started_at, ended_at, status, config_json, forked_from, forked_at_tick = row
+        return {
+            "id": rid,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "status": status,
+            "config_json": config_json,
+            "forked_from": forked_from,
+            "forked_at_tick": forked_at_tick,
+        }
+
+    def run_max_tick(self, run_id: int) -> int:
+        """MAX(events.tick) for a run, 0 when it has no events (W11b EM-101 —
+        the fork endpoint's tick-range validation, same definition as RunRow
+        max_tick in list_runs)."""
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(tick), 0) FROM events WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return int(row[0] or 0)
 
     def get_events(
         self,

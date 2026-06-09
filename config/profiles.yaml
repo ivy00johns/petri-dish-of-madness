@@ -2,6 +2,16 @@
 # Each profile defines an adapter + endpoint + model.
 # Secrets are referenced by env-var name (api_key_env), never stored here.
 # ${VAR:-default} interpolation is supported for base_url and model_id.
+#
+# W11b / EM-083 — optional per-profile DAY caps for the usage_alert channel:
+#   rpd: <int>   # requests/day cap
+#   tpd: <int>   # tokens/day cap (input+output)
+# A profile is a provider lane (groq/cerebras/... upstreams), so caps live here.
+# Crossing 70% of a cap emits ONE `usage_alert {provider, metric, pct, limit}`
+# per profile/metric per UTC day (providers/usage.py). ALERTS ONLY — caps never
+# throttle or block calls (world.usage_caps / EM-067 owns throttling). Omitting
+# both keys = no caps = zero alerts (pre-W11b behavior). The values below are
+# approximate published free-tier daily quotas; tune them to your accounts.
 
 profiles:
   # ── FreeLLMAPI profiles (default; routed through OpenAI-compatible proxy) ──
@@ -18,6 +28,7 @@ profiles:
     max_tokens: 512
     temperature: 0.8
     color: "#36c5a8"
+    rpd: 1500                  # ~Gemini API free-tier daily request quota (flash)
 
   - name: qwen-next
     adapter: openai           # routed through FreeLLMAPI's OpenAI-compatible interface
@@ -27,6 +38,7 @@ profiles:
     max_tokens: 512
     temperature: 0.8
     color: "#f5a623"
+    rpd: 50                    # ~OpenRouter :free daily request quota (no credits)
 
   - name: deepseek-pro
     adapter: openai
@@ -51,6 +63,8 @@ profiles:
     max_tokens: 512
     temperature: 0.8
     color: "#4a9eda"
+    rpd: 1000                  # ~Groq free-tier daily quotas (llama-3.3-70b-versatile)
+    tpd: 100000
 
   - name: cerebras-glm
     adapter: openai
@@ -60,6 +74,8 @@ profiles:
     max_tokens: 512
     temperature: 0.8
     color: "#e85d75"
+    rpd: 14400                 # ~Cerebras free-tier daily quotas
+    tpd: 1000000
 
   - name: mistral-small
     adapter: openai
