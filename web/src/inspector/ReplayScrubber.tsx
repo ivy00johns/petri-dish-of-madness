@@ -17,9 +17,10 @@
  */
 
 import { useEffect, useMemo, useRef, useCallback, useState } from 'react';
-import type { Agent, Building, BuildingStatus, ModelProfile, WorldEvent } from '../types';
+import type { Agent, Animal, BuildingStatus, ModelProfile, WorldEvent } from '../types';
 import { replayStateAt, markerCategory } from './selectors';
 import type { MarkerCategory, ReplaySnapshot } from './selectors';
+import type { ReplayBuildingState } from './types';
 import './inspector-tokens.css';
 
 interface ReplayScrubberProps {
@@ -27,8 +28,15 @@ interface ReplayScrubberProps {
   agents: Agent[];
   profiles: ModelProfile[];
   places: Array<{ id: string; x: number; y: number; name?: string }>;
-  /** W7 buildings — surfaced as status markers on the mini-map + readout. */
-  buildings?: Building[];
+  /**
+   * W7 buildings — surfaced as status markers on the mini-map + readout.
+   * W10 / audit C7: while scrubbed, InspectorLayout passes the TIME-PROJECTED
+   * building state at the scrub tick (folded by replayStateAt) instead of the
+   * live roster, so the map/readout show each structure as it WAS at tick T.
+   */
+  buildings?: ReplayBuildingState[];
+  /** W10 / audit D4: live animal roster — the replay fold's position fallback. */
+  animals?: Animal[];
   currentTick: number;
   maxTick: number;
   /** Optional deep-replay snapshots (live mode); empty in mock. */
@@ -88,6 +96,7 @@ export function ReplayScrubber({
   profiles,
   places,
   buildings = [],
+  animals = [],
   currentTick,
   maxTick,
   snapshots = [],
@@ -113,10 +122,20 @@ export function ReplayScrubber({
   maxRef.current = maxTick;
 
   // The replay frame at the current scrub tick (positions for the mini-map).
-  const frame = useMemo(
-    () => replayStateAt(events, snapshots, currentTick, agents, places),
-    [events, snapshots, currentTick, agents, places],
-  );
+  // The animal roster rides along so frame.animals can fall back to live
+  // positions when no snapshot covers the tick (D4 — best-effort, labeled "~").
+  const frame = useMemo(() => {
+    const f = replayStateAt(events, snapshots, currentTick, agents, places, [], animals);
+    // Pinned to the live edge: the live roster IS the tick-T truth, so the
+    // roster-fallback positions are exact — clear the approximation flag.
+    if (currentTick >= maxTick && f.animals.some((a) => a.approximate)) {
+      return {
+        ...f,
+        animals: f.animals.map((a) => (a.approximate ? { ...a, approximate: false } : a)),
+      };
+    }
+    return f;
+  }, [events, snapshots, currentTick, maxTick, agents, places, animals]);
 
   // Marker buckets per tick (for the timeline rail). Newest data wins.
   const markers = useMemo(() => {
@@ -237,8 +256,9 @@ export function ReplayScrubber({
 
     // W7: building markers — a small diamond per building at its place, colored
     // by status. A stable per-building angle offsets it from the place center so
-    // co-located structures don't stack. (Status reflects the live world; the
-    // mini-map shows where things stand "now".)
+    // co-located structures don't stack. (W10/C7: while scrubbed the `buildings`
+    // prop is the TIME-PROJECTED state at the scrub tick, so the diamond color
+    // is the status the structure had at tick T — not the live edge.)
     const placeById = new Map(places.map((p) => [p.id, p]));
     for (const b of buildings) {
       const place = placeById.get(b.location);
@@ -300,6 +320,37 @@ export function ReplayScrubber({
       ctx.fillStyle = brightInk;
       const name = nameOf.get(a.id) ?? a.id;
       ctx.fillText(`${a.alive ? '' : '† '}${name.slice(0, 10)}`, ax, ay - r - 1);
+      ctx.restore();
+    }
+
+    // W10 / audit D4: animals — small magenta-accented triangles (distinct from
+    // the round agent dots and the diamond buildings), with the SAME name-label
+    // treatment agents got in W9 (D3). Positions are best-effort (see
+    // replayStateAt): a "~" prefix marks a live-roster approximation.
+    const animalInk = cssVar('--marker-animal') || neutral;
+    const ar = Math.max(3, Math.min(W, H) * 0.014);
+    for (const a of frame.animals) {
+      const px = sx(a.x);
+      // Sit animals slightly below the place footprint so they never stack on
+      // the agent fan above it.
+      const py = sy(a.y) + ar * 3;
+      ctx.save();
+      if (!a.alive) ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.moveTo(px, py - ar);
+      ctx.lineTo(px + ar, py + ar);
+      ctx.lineTo(px - ar, py + ar);
+      ctx.closePath();
+      ctx.fillStyle = animalInk;
+      ctx.fill();
+      ctx.font = '9px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(
+        `${a.approximate ? '~' : ''}${a.alive ? '' : '† '}${a.name.slice(0, 10)}`,
+        px,
+        py + ar + 1,
+      );
       ctx.restore();
     }
 

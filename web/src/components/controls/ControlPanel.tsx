@@ -3,7 +3,7 @@
  * and the marquee per-agent model reassign feature.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { WorldState, ModelProfile, SpawnSpec, SpawnMode } from '../../types';
 
 interface ControlPanelProps {
@@ -11,6 +11,8 @@ interface ControlPanelProps {
   onStart: () => void;
   onPause: () => void;
   onStep: () => void;
+  /** EM-084: destructive — rebuilds the world from config (a NEW RUN). */
+  onReset: () => void;
   onSpeed: (seconds: number) => void;
   onReassign: (agentId: string, profile: string) => void;
   onInject: (kind?: string) => void;
@@ -21,7 +23,18 @@ interface ControlPanelProps {
 
 const INJECT_KINDS = ['windfall', 'famine', 'blackout', 'festival'] as const;
 
-function SpeedSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+function SpeedSlider({
+  value,
+  onChange,
+  onDragStart,
+  onDragEnd,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  /** D5: the parent suspends server re-sync while the user is mid-drag. */
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
+}) {
   // Tick interval: 0.5s → 10s mapped to slider 0→100
   const toSlider = (v: number) => {
     const logMin = Math.log(0.5);
@@ -50,6 +63,10 @@ function SpeedSlider({ value, onChange }: { value: number; onChange: (v: number)
           max={100}
           value={toSlider(value)}
           onChange={e => onChange(parseFloat(fromSlider(Number(e.target.value)).toFixed(1)))}
+          onPointerDown={onDragStart}
+          onPointerUp={onDragEnd}
+          onPointerCancel={onDragEnd}
+          onBlur={onDragEnd}
           className="flex-1 h-1 appearance-none bg-lab-chrome rounded cursor-pointer
                      [&::-webkit-slider-thumb]:appearance-none
                      [&::-webkit-slider-thumb]:w-3
@@ -350,6 +367,7 @@ export function ControlPanel({
   onStart,
   onPause,
   onStep,
+  onReset,
   onSpeed,
   onReassign,
   onInject,
@@ -358,6 +376,39 @@ export function ControlPanel({
 }: ControlPanelProps) {
   const [speed, setSpeed] = useState(world?.tick_interval_seconds ?? 2);
   const [injectKind, setInjectKind] = useState<string>('');
+
+  // EM-084: two-click destructive confirm for RESET WORLD (no browser
+  // confirm()): the first click arms it ("⚠ CONFIRM RESET"), a second click
+  // within the window fires onReset, and the arm auto-cancels after 3s.
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleReset = useCallback(() => {
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    if (!confirmingReset) {
+      setConfirmingReset(true);
+      confirmTimerRef.current = setTimeout(() => setConfirmingReset(false), 3000);
+      return;
+    }
+    confirmTimerRef.current = null;
+    setConfirmingReset(false);
+    onReset();
+  }, [confirmingReset, onReset]);
+  useEffect(() => () => {
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+  }, []);
+
+  // D5: the speed label/slider DERIVE from the server's tick_interval_seconds
+  // (the world_state broadcast is the source of truth) — they re-sync whenever
+  // a fresh world_state changes it (another client, auto-throttle, a reset).
+  // While the user is actively dragging, local intent wins; on release the
+  // next server broadcast (the ack) is truth again.
+  const serverInterval = world?.tick_interval_seconds;
+  const draggingRef = useRef(false);
+  useEffect(() => {
+    if (serverInterval !== undefined && !draggingRef.current) {
+      setSpeed(serverInterval);
+    }
+  }, [serverInterval]);
 
   const handleSpeed = (v: number) => {
     setSpeed(v);
@@ -400,8 +451,23 @@ export function ControlPanel({
 
         {/* Speed */}
         <div className="pt-1">
-          <SpeedSlider value={speed} onChange={handleSpeed} />
+          <SpeedSlider
+            value={speed}
+            onChange={handleSpeed}
+            onDragStart={() => { draggingRef.current = true; }}
+            onDragEnd={() => { draggingRef.current = false; }}
+          />
         </div>
+
+        {/* EM-084: NEW RUN — destructive, two-click confirm (auto-cancels). */}
+        <button
+          className={`lab-btn lab-btn-danger w-full ${confirmingReset ? 'bg-lab-danger/20' : ''}`}
+          onClick={handleReset}
+          aria-label={confirmingReset ? 'Confirm: reset the world' : 'Reset the world (new run)'}
+          title="Rebuild the world from config — current run ends. Click twice to confirm."
+        >
+          {confirmingReset ? '⚠ CONFIRM RESET' : '⟲ RESET WORLD'}
+        </button>
       </div>
 
       {/* ── Model Reassign — THE MARQUEE FEATURE ─────────────── */}

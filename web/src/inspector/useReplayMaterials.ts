@@ -90,6 +90,49 @@ export function materialsToSnapshot(m: ReplayMaterials): ReplaySnapshot | null {
     if (places.length > 0) snapshot.places = places;
   }
 
+  // W10 / audit C7: building state rides the snapshot (world.to_snapshot
+  // serializes `buildings`), giving the replay fold an authoritative base for
+  // status/progress at base.tick. Every field is optional-tolerant.
+  const buildingsRaw = state['buildings'];
+  if (Array.isArray(buildingsRaw)) {
+    const buildings: NonNullable<ReplaySnapshot['buildings']> = [];
+    for (const raw of buildingsRaw) {
+      if (!isObj(raw)) continue;
+      const id = str(raw['id']);
+      if (!id) continue;
+      buildings.push({
+        id,
+        name: str(raw['name']) ?? undefined,
+        kind: str(raw['kind']) ?? undefined,
+        location: str(raw['location']) ?? undefined,
+        status: str(raw['status']) ?? undefined,
+        progress: num(raw['progress']) ?? undefined,
+      });
+    }
+    if (buildings.length > 0) snapshot.buildings = buildings;
+  }
+
+  // W10 / audit D4: the animal roster rides the snapshot too — the only
+  // tick-faithful position source (animal moves are not evented with a place).
+  const animalsRaw = state['animals'];
+  if (Array.isArray(animalsRaw)) {
+    const animals: NonNullable<ReplaySnapshot['animals']> = [];
+    for (const raw of animalsRaw) {
+      if (!isObj(raw)) continue;
+      const id = str(raw['id']);
+      const location = str(raw['location']);
+      if (!id || !location) continue;
+      animals.push({
+        id,
+        location,
+        name: str(raw['name']) ?? undefined,
+        species: str(raw['species']) ?? undefined,
+        alive: typeof raw['alive'] === 'boolean' ? raw['alive'] : undefined,
+      });
+    }
+    if (animals.length > 0) snapshot.animals = animals;
+  }
+
   return snapshot;
 }
 

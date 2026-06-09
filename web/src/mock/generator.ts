@@ -102,10 +102,18 @@ let buildingCounter = 0;
 // emit a stream of animal_action events — including at least one chaotic one (the
 // cat commits arson / the dog chases an agent) — so the chaos feed + 3D + replay
 // timeline all show animals offline with no backend.
-let animals: Animal[] = [
-  { id: 'mochi',   species: 'cat', name: 'Mochi',   location: 'plaza',   energy: 88, mood: 'aloof',     alive: true },
-  { id: 'biscuit', species: 'dog', name: 'Biscuit', location: 'commons', energy: 92, mood: 'excitable', alive: true },
-];
+function seedAnimals(): Animal[] {
+  return [
+    { id: 'mochi',   species: 'cat', name: 'Mochi',   location: 'plaza',   energy: 88, mood: 'aloof',     alive: true },
+    { id: 'biscuit', species: 'dog', name: 'Biscuit', location: 'commons', energy: 92, mood: 'excitable', alive: true },
+  ];
+}
+let animals: Animal[] = seedAnimals();
+
+// EM-089: the model profile the critters consult on an LLM-decision tick —
+// mirrors config/world.yaml animals.model_profile so the mock's animal
+// llm_call events (and the model chip derived from them) match a live run.
+const ANIMAL_MODEL_PROFILE = 'gemini-flash';
 
 // A small library of buildable projects (kind + funds + function + cost).
 const PROJECT_BLUEPRINTS: Array<{ name: string; kind: string; funds: number; fn: string }> = [
@@ -254,6 +262,10 @@ const MOODS = ['curious', 'anxious', 'triumphant', 'wary', 'hungry', 'scheming',
 // ── Event-row builder (stamps turn_id / actor_type / sim_time per §2/§3) ──────
 
 const TICK_INTERVAL = 2;
+// W10/D5: the mock "server's" current tick interval. mockControls.setSpeed
+// updates it so mock world_state broadcasts reflect speed changes exactly like
+// the live backend does (the control panel derives its label from this).
+let tickIntervalSeconds = TICK_INTERVAL;
 
 interface EmitOpts {
   kind: EventKind;
@@ -753,6 +765,8 @@ function emitAnimal(o: {
   chaotic?: boolean;
   payload?: Record<string, unknown>;
   turnId: string;
+  /** EM-089: set on llm_call rows so the consulted model is identifiable. */
+  profile?: string | null;
 }): WorldEvent {
   return {
     type: 'event',
@@ -761,7 +775,7 @@ function emitAnimal(o: {
     kind: o.kind,
     actor_id: o.animal.id,
     target_id: o.target?.id ?? null,
-    profile: null,
+    profile: o.profile ?? null,
     profile_color: null,
     text: o.text,
     payload: {
@@ -812,12 +826,17 @@ const DOG_THOUGHTS = [
  * Advance the animals for one (acted) tick. Returns the events emitted. Slow
  * cadence + roll-for-activity is enforced by the caller (generateTick).
  */
-function advanceAnimals(turnId: string): WorldEvent[] {
+function advanceAnimals(): WorldEvent[] {
   const out: WorldEvent[] = [];
   const liveAgents = agents.filter((a) => a.alive);
 
   for (const animal of animals) {
     if (!animal.alive) continue;
+
+    // W9/B1 parity (EM-089): every animal turn gets its OWN turn_id — never
+    // the in-flight agent's — so an animal_action correlates only with the
+    // animal's own llm_call (the 🧠 LLM-decision marker reads off this).
+    const turnId = newTurnId();
 
     // Roam: occasionally drift to a new place so the critters cover the map.
     if (rnd() < 0.25) {
@@ -831,6 +850,22 @@ function advanceAnimals(turnId: string): WorldEvent[] {
     // Roll-for-activity: mostly reflex, occasionally an "LLM decision".
     if (rnd() < ANIMAL_LLM_CHANCE) {
       // ── LLM-decision tick: in-character thought + (maybe chaotic) action ──
+      // EM-089: mirror the backend — an LLM-decision tick emits an llm_call
+      // (actor_type:"animal", OTel keys, same turn_id as the action) so the
+      // model chip + 🧠 marker work offline exactly like a live run.
+      out.push(emitAnimal({
+        kind: 'llm_call', animal, turnId, profile: ANIMAL_MODEL_PROFILE,
+        text: `${animal.name} (the ${animal.species}) consults ${ANIMAL_MODEL_PROFILE}.`,
+        payload: {
+          'gen_ai.request.model': ANIMAL_MODEL_PROFILE,
+          'gen_ai.response.model': ANIMAL_MODEL_PROFILE,
+          'gen_ai.usage.input_tokens': null,
+          'gen_ai.usage.output_tokens': null,
+          latency_ms: 40 + Math.floor(rnd() * 300),
+          cached: false,
+          attempt: 1,
+        },
+      }));
       const thought = pick(isCat ? CAT_THOUGHTS : DOG_THOUGHTS);
 
       // The under-constrained escalations the LLM may choose for absurd effect.
@@ -931,7 +966,7 @@ export function buildInitialWorldState(): WorldState {
     type: 'world_state',
     seq: nextSeq(),
     tick, day, running,
-    tick_interval_seconds: TICK_INTERVAL,
+    tick_interval_seconds: tickIntervalSeconds,
     places: PLACES,
     agents: agents.map(a => ({ ...a })),
     rules: [...rules],
@@ -1011,7 +1046,7 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
   // ── Animal chaos layer (W8): the cat & dog act on a SLOW cadence (every Nth
   //    tick), most ticks reflex, occasionally a chaotic in-character escalation.
   if (tick % ANIMAL_ACT_EVERY_N_TICKS === 0) {
-    events.push(...advanceAnimals(turnId));
+    events.push(...advanceAnimals());
   }
 
   // ── Death check ─────────────────────────────────────────────────────────────
@@ -1037,7 +1072,7 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     type: 'world_state',
     seq: nextSeq(),
     tick, day, running,
-    tick_interval_seconds: TICK_INTERVAL,
+    tick_interval_seconds: tickIntervalSeconds,
     places: PLACES,
     agents: agents.map(a => ({ ...a })),
     rules: rules.map(r => ({ ...r })),
@@ -1112,7 +1147,7 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
     type: 'world_state',
     seq: nextSeq(),
     tick, day, running,
-    tick_interval_seconds: TICK_INTERVAL,
+    tick_interval_seconds: tickIntervalSeconds,
     places: PLACES,
     agents: agents.map(a => ({ ...a })),
     rules: rules.map(r => ({ ...r })),
@@ -1139,4 +1174,32 @@ export const mockControls = {
   spawn: (spec: SpawnSpec) => spawnAgentMock(spec),
   isRunning: () => running,
   getProfiles: () => PROFILES,
+  /** W10/D5: mirror the live backend — speed changes land in world_state. */
+  setSpeed: (seconds: number) => { tickIntervalSeconds = seconds; },
+  /**
+   * EM-084: NEW RUN — rebuild the generator's seed world (mirrors the
+   * backend's POST /api/control/reset, which resets from config). Returns the
+   * fresh initial world_state. Seq restarts at 0; the caller clears its
+   * feed/history first so old seqs can't collide. Note: SEED_AGENTS share
+   * nested objects with the live roster (shallow clones), so beliefs/
+   * relationships are re-created fresh here.
+   */
+  reset: (): WorldState => {
+    tick = 0;
+    day = 0;
+    seq = 0;
+    running = true;
+    agents = SEED_AGENTS.map(a => ({ ...a, beliefs: [...a.beliefs], relationships: {} }));
+    rules = [];
+    openRuleId = null;
+    ruleCounter = 0;
+    buildings = [];
+    buildingCounter = 0;
+    lastActivityTick.clear();
+    animals = seedAnimals();
+    spawnCounter = 0;
+    tickIntervalSeconds = TICK_INTERVAL; // config value, like a backend reset
+    seedRng(0);
+    return buildInitialWorldState();
+  },
 };

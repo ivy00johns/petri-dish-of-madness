@@ -159,7 +159,7 @@ export default function AWIDashboard(props: PanelProps) {
               <GovernanceCard summary={summary} />
               <ExpressionCard summary={summary} />
               <SocialFabricCard summary={summary} />
-              <EconomyCard summary={summary} />
+              <EconomyCard summary={summary} approximate={props.agentsApproximate === true} />
               <ConstitutionCard summary={summary} />
               <UsageCard summary={summary} />
             </div>
@@ -355,14 +355,23 @@ function SocialFabricCard({ summary }: { summary: AwiSummary }) {
   );
 }
 
-function EconomyCard({ summary }: { summary: AwiSummary }) {
+function EconomyCard({ summary, approximate = false }: { summary: AwiSummary; approximate?: boolean }) {
   const e = summary.economy;
+  // W10 / EM-075: while scrubbed, per-agent credits are re-projected from
+  // turn_start samples; agents with no sample in the window keep live values,
+  // so the credit-derived figures are flagged with a subtle "~".
   return (
     <IndicatorCard
       label="Economy"
-      value={e.gini.toFixed(2)}
+      value={`${approximate ? '~' : ''}${e.gini.toFixed(2)}`}
       detail={
-        <span>
+        <span
+          title={
+            approximate
+              ? 'Approximate at the scrub tick: some agents have no turn_start sample in the scoped window, so their credits are live-edge values.'
+              : undefined
+          }
+        >
           <span className="text-lab-muted">gini</span> ·{' '}
           <span className="text-lab-muted">throughput</span>{' '}
           <span className="text-lab-text">{compact(e.throughput)}</span>

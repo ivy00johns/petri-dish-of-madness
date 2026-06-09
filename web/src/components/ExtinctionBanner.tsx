@@ -22,9 +22,16 @@ import { computeExtinction, computeRunSummary } from '../lib/extinction';
 export function ExtinctionBanner({
   world,
   events,
+  onReset,
 }: {
   world: WorldState | null;
   events: WorldEvent[];
+  /**
+   * EM-084: start a NEW RUN (POST /api/control/reset via useSimulation.reset).
+   * The run is already over here, so this CTA is one-click — no confirm. The
+   * reset clears the local history, which dismisses this banner.
+   */
+  onReset?: () => void;
 }) {
   const extinction = useMemo(() => computeExtinction(world, events), [world, events]);
   const summary = useMemo(
@@ -60,6 +67,18 @@ export function ExtinctionBanner({
         >
           {showSummary ? 'hide summary' : 'end-of-run summary'}
         </button>
+        {/* EM-084: the prominent restart CTA — no more restarting the service
+            to get a fresh run. Acid register so it reads as THE next action. */}
+        {onReset && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="shrink-0 font-mono text-[11px] font-bold uppercase tracking-widest px-3 py-1 border border-lab-acid text-lab-acid bg-lab-acid/10 hover:bg-lab-acid/25 transition-colors rounded-sm"
+            title="Rebuild the world from config and start a fresh run"
+          >
+            ⟲ NEW RUN
+          </button>
+        )}
       </div>
 
       {/* End-of-run summary card. */}

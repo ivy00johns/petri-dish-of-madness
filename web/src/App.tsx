@@ -13,9 +13,10 @@
  *                  hidden). See frontend-inspector.md §2.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { useSimulation } from './hooks/useSimulation';
+import { animalModelMap } from './lib/animalIdentity';
 import type { SimulationState, SimulationControls } from './hooks/useSimulation';
 import { useRoutingHealth } from './hooks/useRoutingHealth';
 import type { RoutingHealth } from './hooks/useRoutingHealth';
@@ -91,14 +92,25 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
   const { world, events } = sim;
   const [view, setView] = useState<WorldView>('village');
 
+  // EM-089: which model each critter consults. world_state animals do NOT
+  // carry the profile (backend Animal.to_dict omits it), so it's derived from
+  // the latest animal llm_call in the DEEP history (the 200-cap feed would
+  // lose it between slow animal cadences). Empty until an animal has consulted
+  // the LLM — the labels omit the chip until then (graceful degradation).
+  const animalModels = useMemo(
+    () => animalModelMap(sim.history, world?.animals ?? [], world?.profiles ?? []),
+    [sim.history, world],
+  );
+
   return (
     <>
       {/* EM-072: dismissible warning when every profile routes to one model. */}
       <RoutingDegradedBanner health={routingHealth} />
 
       {/* EM-071: extinction banner + end-of-run summary (computed from the
-          deeper history so deaths/rules/crimes survive the 200-cap feed). */}
-      <ExtinctionBanner world={world} events={sim.history} />
+          deeper history so deaths/rules/crimes survive the 200-cap feed).
+          EM-084: its NEW RUN CTA restarts the run via /api/control/reset. */}
+      <ExtinctionBanner world={world} events={sim.history} onReset={sim.reset} />
 
       {/* ── Three-column body ──────────────────────────────────── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -138,9 +150,9 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
             </div>
             <div style={{ height: 'calc(100% - 28px)' }}>
               {view === 'village' ? (
-                <CozyWorld world={world} events={events} />
+                <CozyWorld world={world} events={events} animalModels={animalModels} />
               ) : (
-                <WorldMap world={world} events={events} />
+                <WorldMap world={world} events={events} animalModels={animalModels} />
               )}
             </div>
           </div>
@@ -164,6 +176,7 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
             onStart={sim.start}
             onPause={sim.pause}
             onStep={sim.step}
+            onReset={sim.reset}
             onSpeed={sim.setSpeed}
             onReassign={sim.reassignModel}
             onInject={sim.injectEvent}

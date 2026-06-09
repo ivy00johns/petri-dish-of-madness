@@ -31,6 +31,7 @@
 import { useMemo } from 'react';
 import type { PanelProps } from './types';
 import type { WorldEvent } from '../types';
+import { llmDecidedAnimalTurns, isLlmDecidedAction } from '../lib/animalIdentity';
 import './inspector-tokens.css';
 
 // The magenta chaos register, pulled from the shared marker token so it stays in
@@ -89,9 +90,15 @@ function thoughtOf(e: WorldEvent): string | null {
 
 interface ChaosEntryProps {
   event: WorldEvent;
+  /**
+   * EM-089: true when this animal_action was an LLM decision (shares a
+   * turn_id with an animal llm_call); reflex actions carry no marker. False
+   * too when the data isn't there (sparse mock histories, pre-W8 backends).
+   */
+  llmDecided?: boolean;
 }
 
-function ChaosEntry({ event }: ChaosEntryProps) {
+function ChaosEntry({ event, llmDecided = false }: ChaosEntryProps) {
   const action = actionOf(event);
   const icon = ACTION_ICON[action] ?? '🐾';
   const thought = thoughtOf(event);
@@ -124,6 +131,16 @@ function ChaosEntry({ event }: ChaosEntryProps) {
             title="A crime / structure-targeting / low-prior escalation — the headline chaos."
           >
             chaos
+          </span>
+        )}
+        {/* EM-089: LLM-decided action (vs a zero-cost reflex micro-behavior). */}
+        {llmDecided && (
+          <span
+            className="font-mono text-[10px] shrink-0 cursor-default"
+            title="LLM decision — the animal's model chose this action (reflex actions carry no marker)"
+            aria-label="LLM decision"
+          >
+            🧠
           </span>
         )}
         <span className="ml-auto font-mono text-[10px] text-lab-muted tabular-nums shrink-0">
@@ -161,6 +178,11 @@ export default function AnimalChaosFeed(props: PanelProps) {
   );
 
   const chaoticCount = useMemo(() => chaos.filter((e) => e.is_chaotic === true).length, [chaos]);
+
+  // EM-089: turn_ids of animal LLM decisions — scanned over the UNFILTERED
+  // panel events (the llm_call rows are animal-channel entries themselves, but
+  // scanning `events` keeps this robust to future filter changes).
+  const llmAnimalTurns = useMemo(() => llmDecidedAnimalTurns(events), [events]);
 
   return (
     <section
@@ -202,7 +224,7 @@ export default function AnimalChaosFeed(props: PanelProps) {
         ) : (
           <ul className="flex flex-col">
             {chaos.map((e) => (
-              <ChaosEntry key={e.seq} event={e} />
+              <ChaosEntry key={e.seq} event={e} llmDecided={isLlmDecidedAction(e, llmAnimalTurns)} />
             ))}
           </ul>
         )}

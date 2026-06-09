@@ -31,7 +31,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { WorldState, WorldEvent } from '../types';
 import type { PanelProps } from './types';
-import { maxTick as selectMaxTick } from './selectors';
+import {
+  maxTick as selectMaxTick,
+  replayStateAt,
+  activeRuleCount,
+  dayAt,
+  agentEconomyAt,
+} from './selectors';
 import type { ReplaySnapshot } from './selectors';
 import { useReplayMaterials } from './useReplayMaterials';
 import type { RoutingHealth } from '../hooks/useRoutingHealth';
@@ -79,6 +85,8 @@ export function InspectorLayout({
   );
   // W7: buildings surface as small status markers on the replay mini-map.
   const buildings = useMemo(() => world?.buildings ?? [], [world]);
+  // W8/D4: the animal roster — the replay fold's position fallback.
+  const animals = useMemo(() => world?.animals ?? [], [world]);
 
   const maxTick = useMemo(() => Math.max(selectMaxTick(history), world?.tick ?? 0), [history, world]);
 
@@ -132,8 +140,36 @@ export function InspectorLayout({
     [mergedEvents, scrubbed, currentTick],
   );
 
-  // C8: agents re-projected at the scrub tick (alive recomputed from deaths)
-  // so a death after the scrub position doesn't read back into the past.
+  // W10 / audit C7: the time-projected replay frame at the scrub tick. The
+  // scrubber's `buildings` prop was live-only (the C7 bug: a scrubbed map drew
+  // TODAY's building status); while scrubbed it now receives the building
+  // state folded from snapshot + construction events at tick T (replayStateAt
+  // owns the fold; the live roster contributes display metadata only).
+  const scrubFrame = useMemo(
+    () =>
+      scrubbed
+        ? replayStateAt(mergedEvents, replaySnapshots, currentTick, agents, places, buildings, animals)
+        : null,
+    [scrubbed, mergedEvents, replaySnapshots, currentTick, agents, places, buildings, animals],
+  );
+  const scrubberBuildings = scrubFrame ? scrubFrame.buildings : buildings;
+
+  // W10 / EM-075: per-agent energy/credits re-projected at the scrub tick.
+  // Approach (see agentEconomyAt): the latest `turn_start` ≤ T carries an
+  // authoritative {energy, credits} sample for its agent (event-log.md §3);
+  // later `action_resolved.state_deltas` by the same agent fold on top. That
+  // is exact at turn granularity — engine-internal energy decay and
+  // target-side economy transfers are not per-agent evented, so agents WITHOUT
+  // a turn_start in the scoped window keep their live values and the panels
+  // mark the economy figures approximate ("~", with an explanatory title).
+  const economyAtTick = useMemo(
+    () => (scrubbed ? agentEconomyAt(panelEvents) : null),
+    [scrubbed, panelEvents],
+  );
+
+  // C8: agents re-projected at the scrub tick (alive recomputed from deaths,
+  // energy/credits from turn samples) so live-edge state doesn't read back
+  // into the past.
   const panelAgents = useMemo(() => {
     if (!scrubbed) return agents;
     const deathTick = new Map<string, number>();
@@ -143,9 +179,20 @@ export function InspectorLayout({
     return agents.map((a) => {
       const died = deathTick.get(a.id);
       const alive = died === undefined ? a.alive : currentTick < died;
-      return alive === a.alive ? a : { ...a, alive };
+      const eco = economyAtTick?.get(a.id);
+      if (!eco && alive === a.alive) return a;
+      return {
+        ...a,
+        alive,
+        energy: eco ? eco.energy : a.energy,
+        credits: eco ? eco.credits : a.credits,
+      };
     });
-  }, [agents, mergedEvents, scrubbed, currentTick]);
+  }, [agents, mergedEvents, scrubbed, currentTick, economyAtTick]);
+
+  // True when ≥1 agent's scrubbed energy/credits fell back to live values.
+  const agentsApproximate =
+    scrubbed && agents.some((a) => !(economyAtTick?.get(a.id)?.sampled ?? false));
 
   const panelProps: PanelProps = {
     events: panelEvents,
@@ -154,10 +201,20 @@ export function InspectorLayout({
     currentTick,
     maxTick,
     historyLoading,
+    agentsApproximate,
   };
 
-  const aliveAgents = agents.filter((a) => a.alive).length;
+  // W10: the status strip follows the SCRUB tick while replaying (audit:
+  // "strip mixes scrub tick with live agent count"). Agents alive at T come
+  // from the re-projected panel agents; DAY from the latest turn_start ≤ T;
+  // RULES = rules ACTIVE at T from the scoped governance lifecycle. HISTORY
+  // stays live (it describes the in-memory window, not the projection).
+  const aliveAgents = (scrubbed ? panelAgents : agents).filter((a) => a.alive).length;
   const totalAgents = agents.length;
+  const stripDay = scrubbed ? dayAt(panelEvents, world?.day ?? 0) : world?.day ?? 0;
+  const stripRules = scrubbed
+    ? activeRuleCount(panelEvents)
+    : (world?.rules ?? []).filter((r) => r.status === 'active').length;
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
@@ -169,12 +226,30 @@ export function InspectorLayout({
         </span>
       </div>
 
-      {/* Run summary strip */}
+      {/* Run summary strip. While scrubbed every projected stat (TICK/DAY/
+          AGENTS/RULES) reflects the SCRUB tick and takes the same acid accent
+          as the REPLAY badge — one glance separates a replayed projection from
+          the live edge. HISTORY stays live (it describes the event window). */}
       <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2 border-b border-lab-border bg-lab-surface shrink-0">
-        <SummaryStat label="TICK" value={String(currentTick).padStart(4, '0')} />
-        <SummaryStat label="DAY" value={String(world?.day ?? 0)} />
-        <SummaryStat label="AGENTS" value={`${aliveAgents}/${totalAgents}`} />
-        <SummaryStat label="RULES" value={String(world?.rules.length ?? 0)} />
+        <SummaryStat label="TICK" value={String(currentTick).padStart(4, '0')} accent={scrubbed} />
+        <SummaryStat
+          label="DAY"
+          value={String(stripDay)}
+          accent={scrubbed}
+          title={scrubbed ? 'Sim day at the scrub tick (latest turn_start ≤ T).' : undefined}
+        />
+        <SummaryStat
+          label="AGENTS"
+          value={`${aliveAgents}/${totalAgents}`}
+          accent={scrubbed}
+          title={scrubbed ? 'Agents alive at the scrub tick.' : 'Agents alive now.'}
+        />
+        <SummaryStat
+          label="RULES"
+          value={String(stripRules)}
+          accent={scrubbed}
+          title={scrubbed ? 'Rules active at the scrub tick.' : 'Rules active now.'}
+        />
         <SummaryStat label="HISTORY" value={`${history.length} events`} />
         {scrubbed && (
           <span className="font-mono text-[10px] font-bold px-2 py-0.5 border border-lab-acid text-lab-acid bg-lab-acid/10">
@@ -224,7 +299,8 @@ export function InspectorLayout({
           agents={agents}
           profiles={profiles}
           places={places}
-          buildings={buildings}
+          buildings={scrubberBuildings}
+          animals={animals}
           currentTick={currentTick}
           maxTick={maxTick}
           snapshots={replaySnapshots}
@@ -250,11 +326,26 @@ export function InspectorLayout({
   );
 }
 
-function SummaryStat({ label, value }: { label: string; value: string }) {
+function SummaryStat({
+  label,
+  value,
+  accent = false,
+  title,
+}: {
+  label: string;
+  value: string;
+  /** W10: acid-tinted while the stat reflects a scrubbed (REPLAY) projection. */
+  accent?: boolean;
+  title?: string;
+}) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5" title={title}>
       <span className="font-mono text-[10px] text-lab-muted">{label}</span>
-      <span className="font-mono text-xs font-bold tabular-nums text-lab-text">{value}</span>
+      <span
+        className={`font-mono text-xs font-bold tabular-nums ${accent ? 'text-lab-acid' : 'text-lab-text'}`}
+      >
+        {value}
+      </span>
     </div>
   );
 }

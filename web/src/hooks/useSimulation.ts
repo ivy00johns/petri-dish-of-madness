@@ -52,6 +52,14 @@ export interface SimulationControls {
   start: () => void;
   pause: () => void;
   step: () => void;
+  /**
+   * EM-084: start a NEW RUN. Live: POST /api/control/reset (the backend
+   * rebuilds the world from config and broadcasts the fresh world_state).
+   * Mock: mockControls.reset() rebuilds the generator's seed world. Both paths
+   * clear the local feed/history so the new run starts clean (and anything
+   * derived from them — e.g. the extinction banner — dismisses).
+   */
+  reset: () => void;
   setSpeed: (tickIntervalSeconds: number) => void;
   reassignModel: (agentId: string, profile: string) => void;
   injectEvent: (kind?: string) => void;
@@ -118,6 +126,30 @@ export function useSimulation(): SimulationState & SimulationControls {
     });
   }, []);
 
+  // ── Live-feed seeding (EM-088) ─────────────────────────────────────────────
+  // A page refresh mid-run used to start the `/` feed empty (it only
+  // accumulated from WS connect). The backfill below now ALSO seeds the feed:
+  // merge incoming events deduped on seq against live WS arrivals, keep the
+  // newest MAX_EVENTS by seq. Every kind is pushed — exactly like the live WS
+  // path — because feed kind-filtering is render-time: EventFeed's category
+  // filter keeps the decision-trace chain default-muted (events.schema
+  // x-feed-rendering), so seeding never floods the feed with perceived/memory
+  // rows. The WS path's payload.thought lift is applied here too.
+  const pushFeed = useCallback((incoming: WorldEvent[]) => {
+    if (incoming.length === 0) return;
+    setEvents(prev => {
+      const seen = new Set(prev.map(e => e.seq));
+      const fresh = incoming.filter(e => !seen.has(e.seq));
+      if (fresh.length === 0) return prev;
+      for (const evt of fresh) {
+        if (evt.thought === undefined && typeof evt.payload?.thought === 'string') {
+          evt.thought = evt.payload.thought;
+        }
+      }
+      return [...fresh, ...prev].sort((a, b) => b.seq - a.seq).slice(0, MAX_EVENTS);
+    });
+  }, []);
+
   // ── Backfill on mount (EM-069 / frontend-inspector.md v1.1.0 §1) ───────────
   // Live mode seeds the history from GET /api/events, keyset-paginated via
   // after_seq ascending until exhausted (or the memory cap), merged with the WS
@@ -138,7 +170,10 @@ export function useSimulation(): SimulationState & SimulationControls {
           });
           if (cancelled) return;
           if (rows.length === 0) break;
-          pushHistory(rows.map(eventRowToWorldEvent));
+          const mapped = rows.map(eventRowToWorldEvent);
+          pushHistory(mapped);
+          // EM-088: the same pages seed the live feed (newest 200 by seq win).
+          pushFeed(mapped);
           afterSeq = rows[rows.length - 1].seq;
           fetched += rows.length;
           if (fetched >= MAX_HISTORY) {
@@ -155,7 +190,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     return () => {
       cancelled = true;
     };
-  }, [pushHistory]);
+  }, [pushHistory, pushFeed]);
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
 
@@ -362,12 +397,42 @@ export function useSimulation(): SimulationState & SimulationControls {
     }
   }, [mockMode, apiPost, pushHistory]);
 
+  // EM-084: start a NEW RUN. Clears the run-scoped local state first (feed,
+  // history, truncation flag) so the new run renders clean — the extinction
+  // banner derives from these and dismisses immediately. Live: the backend
+  // rebuilds the world from config and broadcasts the fresh world_state (the
+  // old `world` stays on screen for the broadcast round-trip only). Mock: the
+  // generator rebuilds its seed world synchronously.
+  const reset = useCallback(() => {
+    setEvents([]);
+    setHistory([]);
+    setHistoryTruncated(false);
+    if (mockMode) {
+      stopMockLoop();
+      const fresh = mockControls.reset();
+      // Mirror the backend: a reset restores the config tick interval too.
+      mockSpeedRef.current = fresh.tick_interval_seconds * 1000;
+      setWorld(fresh);
+      // Restart the loop against the rebuilt generator state (running=true).
+      startMockLoop();
+    } else {
+      apiPost('/api/control/reset');
+    }
+  }, [mockMode, apiPost, stopMockLoop, startMockLoop]);
+
   const setSpeed = useCallback((tickIntervalSeconds: number) => {
     if (mockMode) {
       mockSpeedRef.current = tickIntervalSeconds * 1000;
+      // W10/D5: record it in the mock "server" too, so the next world_state
+      // broadcast carries the new tick_interval_seconds (the control panel
+      // derives its speed label from world_state — server is truth).
+      mockControls.setSpeed(tickIntervalSeconds);
       // Restart loop with new speed
       stopMockLoop();
       if (mockControls.isRunning()) startMockLoop();
+      // Optimistic local echo (mirrors the live broadcast) so the label
+      // reflects the change immediately even while paused.
+      setWorld(prev => (prev ? { ...prev, tick_interval_seconds: tickIntervalSeconds } : prev));
     } else {
       apiPost('/api/control/speed', { tick_interval_seconds: tickIntervalSeconds });
     }
@@ -481,6 +546,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     start,
     pause,
     step,
+    reset,
     setSpeed,
     reassignModel,
     injectEvent,

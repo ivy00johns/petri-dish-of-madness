@@ -11,6 +11,7 @@
 
 import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import type { WorldEvent, EventKind } from '../../types';
+import { llmDecidedAnimalTurns, isLlmDecidedAction } from '../../lib/animalIdentity';
 
 interface EventFeedProps {
   events: WorldEvent[];
@@ -147,9 +148,15 @@ function formatTime(ts: string | undefined): string {
 interface FeedEntryProps {
   event: WorldEvent;
   isNew: boolean;
+  /**
+   * EM-089: true when this animal_action was an LLM decision (it shares a
+   * turn_id with an animal llm_call). Reflex actions — and histories where the
+   * llm_call fell out of the window — get no marker (graceful degradation).
+   */
+  llmDecided?: boolean;
 }
 
-function FeedEntry({ event, isNew }: FeedEntryProps) {
+function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
   // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
   // no model profile_color, and we want them to pop out of the human-agent feed).
   const animal = isAnimalEvent(event);
@@ -207,6 +214,17 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
         >
           {event.text ?? `[${event.kind}]`}
         </span>
+
+        {/* EM-089: LLM-decided animal action (vs a zero-cost reflex). */}
+        {llmDecided && (
+          <span
+            className="ml-1.5 font-mono text-[10px] cursor-default"
+            title="LLM decision — the animal's model chose this action (reflex actions carry no marker)"
+            aria-label="LLM decision"
+          >
+            🧠
+          </span>
+        )}
 
         {/* An animal's in-character line reads INLINE (the chaos dialogue is the
             point) rather than being buried in a hover tooltip. */}
@@ -271,6 +289,11 @@ export function EventFeed({ events }: EventFeedProps) {
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify([...focus])); } catch { /* ignore */ }
   }, [focus]);
+
+  // EM-089: turn_ids of animal LLM decisions, scanned over the FULL feed pool
+  // (the llm_call rows themselves are trace-category and default-muted, but
+  // they still inform the 🧠 marker on the visible animal_action lines).
+  const llmAnimalTurns = useMemo(() => llmDecidedAnimalTurns(events), [events]);
 
   // Inclusion filter: with categories focused, show ONLY those; with none
   // focused, show everything except the default-muted trace chain.
@@ -435,6 +458,7 @@ export function EventFeed({ events }: EventFeedProps) {
                 key={event.seq}
                 event={event}
                 isNew={newEventIdsRef.current.has(event.seq)}
+                llmDecided={isLlmDecidedAction(event, llmAnimalTurns)}
               />
             ))
           )}
