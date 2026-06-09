@@ -8,6 +8,18 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 
 ---
 
+## What's inside
+
+- **Per-agent hot-swappable models** — every villager runs a different LLM (Gemini-Flash, Qwen, DeepSeek, Groq-Llama, local Ollama, …), color-coded and reassignable live from the UI. The UI shows the model that *actually* answered each turn.
+- **A cozy 3D village + 2D map** — villagers walk between buildings with floating chat bubbles (Stardew × Animal-Crossing); toggle to a lighter top-down map for analysis.
+- **Economy & governance** — agents work, forage, trade, steal, and propose & vote on town-hall rules that change the world's physics.
+- **Buildings & collective projects** — agents propose → fund → build shared structures that carry visible state (scaffolding while under construction, scorched walls after arson).
+- **Chaos animals** — an LLM-driven cat (**Mochi**) and dog (**Biscuit**) roam on a slow cadence, knocking things over and stealing food, utterly indifferent to human law and money. Their mischief streams to a dedicated Animal Chaos Feed.
+- **An instrumentation annex** (`/inspector`) — replay any tick, inspect the decision trace behind every action, browse governance/law history, watch the social graph form, and compare models on a 9-axis dashboard.
+- **Free-scale by design** — slow ticks, reflex (no-LLM) actions, decision caching, and per-provider usage tracking keep it runnable on free API tiers.
+
+---
+
 ## Screenshots
 
 **The Village (3D)** — three villagers (Ada · Bram · Cleo), each requesting a different model
@@ -29,7 +41,7 @@ from the panel header. Agents are tinted by model, clustered by location, and pu
 flowchart TB
     subgraph browser["🖥️ Browser — :5173 dev / :8080 prod"]
         direction LR
-        views["3D Village · 2D Map<br/>Live Feed · Agent Panels"]
+        views["3D Village · 2D Map · /inspector<br/>Live Feed · Agent Panels"]
         controls["Control Panel"]
     end
 
@@ -38,6 +50,7 @@ flowchart TB
         api["REST /api · WebSocket /ws"]
         engine["Tick Loop & Scheduler"]
         runtime["Agent Runtime<br/>context assembly · parse + validate"]
+        animals["Animal Runtime<br/>chaos layer · cat & dog"]
         router["Provider Router<br/>pluggable, per-agent adapters"]
         db[("SQLite<br/>agents · events · rules · snapshots")]
     end
@@ -58,6 +71,7 @@ flowchart TB
     cfg -.->|"EM_CONFIG_DIR"| router
 
     api --> engine --> runtime --> router
+    engine -->|"slow cadence (off the turn path)"| animals --> router
     engine --> db
     runtime --> db
     router --> openai & anthropic & gemini & mock
@@ -70,7 +84,7 @@ flowchart TB
     classDef dbNode fill:#5a3010,stroke:#3a1e08,color:#fff
 
     class views,controls ui
-    class api,engine,runtime core
+    class api,engine,runtime,animals core
     class router routerNode
     class openai,anthropic,gemini,mock provider
     class cfg configFile
@@ -114,7 +128,7 @@ make install
 
 `./dev` auto-activates `.venv` if it exists, so you don't have to keep it activated yourself.
 
-Open **http://localhost:5173** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and use the filter chips above the feed to mute/focus event categories.
+Open **http://localhost:5173** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and click the filter chips above the feed to show only the categories you care about. Visit **/inspector** for the analysis annex (replay, decision traces, governance history, social graph, model dashboards).
 
 > **macOS / Homebrew note:** bare `pip install -e backend` often fails with either
 > `requires a different Python: 3.10.x not in '>=3.11'` (a too-old Homebrew Python is
@@ -127,7 +141,8 @@ Open **http://localhost:5173** — the cozy 3D village and live feed load right 
 ## Run the 5-minute live demo — 3 agents in the 3D village (FreeLLMAPI)
 
 The default world is **3 cozy villagers** (Ada, Bram, Cleo) who start together in the
-plaza and chat, trade, forage, and pass town-hall rules. Each requests a different model;
+plaza and chat, trade, forage, fund community projects, and pass town-hall rules — while a
+cat and dog cause chaos underfoot. Each requests a different model;
 all are routed through a local [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)
 OpenAI-compatible proxy. The center view is a **cozy 3D village** (Stardew × Animal-Crossing
 vibe) — villagers walk between buildings with floating chat bubbles. A toggle in the panel
@@ -175,8 +190,13 @@ Open **http://localhost:5173** and click **Start**. The 3D village comes alive:
   energy, credits, mood, and the **model that actually answered** its last turn.
 - Speech appears as chat bubbles above villagers and streams in the live feed.
 - Live-reassign any agent's model from its panel — it takes effect on the next turn.
-- Filter the live feed with the category chips (click to mute, shift-click to focus) —
-  e.g. mute **⚠ Errors** or focus **◉ Chat**.
+- A cat (**Mochi**) and dog (**Biscuit**) roam and cause chaos — knocking things over,
+  stealing food — their in-character lines streaming to the Animal Chaos Feed.
+- Filter the live feed with the category chips: click a chip to show **only** that
+  category, click more to stack two or three (e.g. **◉ Chat** + **🐾 Animals**), and
+  click **✕ clear** to reset.
+- Open **/inspector** to replay ticks, read the decision trace behind any action, and
+  watch the social graph + model dashboards build up.
 
 Runs comfortably past 5 minutes with all 3 alive (they recharge to survive); expect emergent
 gossip, alliances, the occasional theft, and passed rules.
@@ -295,13 +315,15 @@ docker compose down
 petri-dish-of-madness/
 ├── backend/              # Python package `petridish` — engine, providers, API
 │   ├── petridish/
-│   │   ├── engine/       # tick loop, world state, scheduler
-│   │   ├── agents/       # context assembly, action parsing
+│   │   ├── engine/       # tick loop, world state (agents, buildings, rules), scheduler
+│   │   ├── agents/       # context assembly, action parsing + validation
+│   │   ├── animals/      # W8 chaos-animal runtime (cat & dog)
 │   │   ├── providers/    # router + openai/anthropic/gemini/mock adapters
-│   │   ├── persistence/  # SQLite repository
+│   │   ├── persistence/  # SQLite repository + append-only event log
 │   │   └── api/          # FastAPI routes + WebSocket broadcaster
 │   └── pyproject.toml
 ├── web/                  # React + Vite + TypeScript + Tailwind frontend
+│   └── src/inspector/    # the /inspector annex (replay, traces, graphs, dashboards)
 ├── config/
 │   ├── profiles.yaml     # Model profiles (edit to add/swap models)
 │   └── world.yaml        # World params + seed agents
