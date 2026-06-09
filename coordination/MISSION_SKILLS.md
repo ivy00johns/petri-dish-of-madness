@@ -30,10 +30,14 @@ Every box ends ✅ (invoked, artifact path) or with a one-line deferral reason.
 
 The W9 mission text names no external skills explicitly; orchestrator defaults apply.
 
-- [ ] `contract-author` — contract DELTAS to four existing W5/W6 contracts authored inline
-      by orchestrator (small amendments to locked contracts, not greenfield authoring).
-- [ ] `render-sanity` / live-browser pass — orchestrator runs Playwright verification
-      against the W9 exit criteria post-QA-gate (this wave's changes are conduct +
-      panels, no new routes).
-- [ ] `design-token-guard` — diff-scoped source check at the wave gate (UI files touched).
-- [ ] `git-commit` — per-milestone commits on `build/w9-make-v2-true`.
+- [x] `contract-author` — contract DELTAS authored inline by orchestrator (event-log
+      v1.1.0, api 1.2.0, frontend-inspector v1.1.0, events.schema kinds) — `0f26901`.
+      Full skill deferred: small amendments to locked contracts, not greenfield authoring.
+- [x] `render-sanity` / live-browser pass — Playwright verification vs W9 exit criteria:
+      fresh-load scrub @t10/t60 of a 98-tick run, starvation countdown, extinction
+      banner + auto-pause, console 0 errors; routing banner field-verified by user.
+      Screenshots: `.playwright/2026-06-09_12-46-13/screenshots/verify-*.png`.
+- [x] `design-token-guard` — diff-scoped check at wave gate: hex only in token
+      declarations; added inline styles are var()/data-driven. Full skill deferred to a
+      repo-wide pass (tracked under EM-082 a11y/W11).
+- [x] `git-commit` — 0f26901, f23b1df, 35cd186, a8dba06 + closeout commit.
