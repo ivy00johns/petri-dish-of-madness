@@ -56,6 +56,20 @@ world:
     enabled: true
     max_entries: 512
 
+  # W8 / EM-064 — LLM-driven chaos animals (actor_type:"animal"). Free-scale is the
+  # whole game here: animals act on a SLOW cadence and only SOMETIMES use the LLM —
+  # most ticks are a zero-LLM reflex micro-behavior (roll-for-activity). The LLM
+  # decision routes to the cheapest profile and is intentionally under-constrained.
+  animals:
+    enabled: true
+    act_every_n_ticks: 3      # an animal gets a turn every Nth tick (slower than agents)
+    llm_chance: 0.25          # P(LLM decision) on an acted tick; else a reflex micro-behavior
+    model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
+
+animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
+  - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
+  - { species: dog, name: Biscuit, location: commons, personality: "Loyal, excitable, food-motivated, impulsive; chases anything that moves and means well even mid-disaster." }
+
 places:
   - { id: plaza,    name: Central Plaza, x: 500, y: 500, kind: social,     description: "Open square where everyone mingles." }
   - { id: market,   name: Market,        x: 750, y: 400, kind: work,       description: "Earn credits by working." }

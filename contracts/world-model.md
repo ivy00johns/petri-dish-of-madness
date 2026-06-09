@@ -176,3 +176,64 @@ Router-level cache keyed on `hash(messages + profile)`; a hit returns the prior 
 `llm_call.cached=true` (no network). Config `cache.enabled` (default true), small LRU. Saves
 repeated identical-context turns (free-scale). Never caches across different world state (the
 messages embed the world state, so identical-key ⇒ identical situation).
+
+---
+
+## §W8 — The chaos layer (v1.2.0): LLM-driven animals
+
+Animals are a **distinct entity type** (`actor_type:"animal"`), NOT human agents — own persona,
+own (looser) action set, own scheduling, own logging channel. They share the world mechanically
+(places, buildings, can damage structures) but are framed to the LLM as critters that act
+**impulsively and in-character, not to optimize**.
+
+### Animal (entity)
+```
+Animal {
+  id: str, species: "cat"|"dog", name: str,
+  location: str,                 # place id
+  energy: int (0..100), mood: str,
+  alive: bool, created_tick: int
+}
+```
+Animals have NO credits account (a "bank robbery" by the cat is comedic but logged). They live
+in `world.animals: dict[str, Animal]`; `to_snapshot()` gains `animals: [Animal]` and the WS
+`world_state` carries them. The 3D village renders a roaming cat + dog (tinted, species-shaped).
+
+### Scheduling (free-scale — this is the biggest cost risk)
+Animals act on a **slower cadence**, NOT every round. Config `animals.act_every_n_ticks` (default
+3). On an animal's tick, **roll-for-activity**:
+- **Most of the time → a REFLEX micro-behavior** (NO LLM call): pick from a cheap weighted table
+  (`wander`, `nap`, `knock_over`, `scratch`, `mark_territory`, `pounce`, `chase`). Pure engine.
+- **Occasionally (prob `animals.llm_chance`, default 0.25) → an LLM decision** routed to the
+  **cheapest/fastest free model** (`animals.model_profile`), producing an in-character
+  `animal_thought` + an action. This is where "the LLM decided the cat should commit arson" comes
+  from — the toolset is UNDER-CONSTRAINED.
+
+### Animal action set (animal-action protocol — see below)
+Reflex/in-character: `wander`, `nap`, `knock_over(target?)`, `scratch(target?)`,
+`mark_territory`, `pounce(target?)`, `chase(target?)`, `idle`. Under-constrained escalations the
+LLM MAY choose for absurd effect: `steal_food(target)`, `arson(building_id)` (a cat that "starts a
+fire" flips a building → `damaged`/`destroyed`, reusing the W7 arson resolution). Animals can't
+`vote`/`propose_rule` (no standing) — but their actions become **subjects** of governance (agents
+may `propose_rule` "ban the cat", a visible try/fail).
+
+### Chaos surfacing (EM-065)
+Every animal event carries `actor_type:"animal"` and an `is_chaotic: bool` heuristic — true when
+the animal invokes a crime/economy/structure-targeting tool (`arson`, `steal_food`, `knock_over`
+on a building) or an otherwise low-prior action. Events: `animal_spawned`, `animal_action`,
+`animal_died`. The **Animal Chaos Feed** (frontend) is a filtered magenta stream of animal
+decisions — `animal_thought` + the action + the consequence — and animal markers are **magenta**
+on the replay timeline (the legend slot already exists).
+
+### Free-scale guarantees (QE asserts)
+- An animal makes **at most one** LLM call per *acted* tick, and only with probability
+  `llm_chance`; reflex ticks make **zero** LLM calls.
+- Animals never escalate to a paid profile; if `animals.model_profile` is unavailable, they fall
+  back to reflex-only (no crash).
+- Animal decisions are cacheable (router cache) like agents.
+
+### Invariants (QE asserts)
+7. Animals never gain/spend credits (no economy account); an animal "theft" moves goods/❤️ not
+   credits, and total agent credits are unchanged by animal actions.
+8. Animal damage to a building obeys the W7 building state machine (operational→damaged→destroyed);
+   an animal can't push a building below 0 health or above 100.

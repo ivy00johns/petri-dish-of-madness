@@ -48,7 +48,16 @@ NOT a demotion. W7/W8 world features render *in* the 3D village. Encoded in
 - `providers.md` — EM-068 router decision cache (sha1(profile+messages), default on).
 - `config/world.yaml` — world.buildings/spawn/cache defaults.
 
-W8 extends config + a new Animal entity — authored at the W8 gate.
+## Contracts (W8 — LOCKED)
+
+- `world-model.md` §W8 — Animal entity (`actor_type:"animal"`); slow cadence + roll-for-activity
+  (mostly zero-LLM reflex, occasional cheap under-constrained LLM decision = the chaos); is_chaotic;
+  free-scale guarantees (≤1 LLM call/acted tick, reflex=0); invariants 7-8 (no animal credits;
+  animal building-damage obeys the W7 state machine).
+- `animal-action.schema.json` (NEW) — the animal action protocol (wander/nap/knock_over/.../arson,
+  under-constrained on purpose, `animal_thought`).
+- `events.schema.json` — +animal_spawned/animal_action/animal_died + `is_chaotic` flag.
+- `config/world.yaml` — world.animals (cadence/llm_chance/model) + seed cat **Mochi** / dog **Biscuit**.
 
 ## File ownership (parallel-safe — see contracts/README.md)
 
