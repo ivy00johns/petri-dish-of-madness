@@ -75,3 +75,6 @@ End state: PR (user-requested) after gates.
 
 | Date | Gate | Result |
 |---|---|---|
+| 2026-06-09 | Wave-1 gate | GREEN — pytest 188/188 (xfail flipped); `tsc -b` + `vite build` clean; token check clean (one hex = pre-existing WebGL-overlay ink idiom). Scope grew mid-wave by user request: EM-084/085/088/089/090 + banner hysteresis all landed in-wave; EM-086/087/091 filed to W11 |
+| 2026-06-09 | QA gate (wave 2) | GREEN proceed=true — EM-043 closed: vitest infra + 63 tests (all four historical regressions natively pinned); backend 188 still green. One new LOW finding W10-QA-1 (SocialGraph dead-code cleanup, mitigated by lib destructor) xfail-pinned + filed as EM-097 |
+| 2026-06-09 | Live verification | GREEN — feed seeded on fresh load (50/300 mid-run), 8 profiles in legend/reassign/spawn, animals on 2D map with gemini-flash chips, 🧠 markers on LLM-decided animal actions only, speed label = server truth (0.3s), RESET WORLD two-click → run 4 `ended` with 445 events preserved on disk + run 5 started at tick 0; console 0 errors. Bonus: EM-087 duplicate-law stacking reproduced in mock (UBI active 3x) — evidence now persists |

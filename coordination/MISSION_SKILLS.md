@@ -41,3 +41,15 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
       declarations; added inline styles are var()/data-driven. Full skill deferred to a
       repo-wide pass (tracked under EM-082 a11y/W11).
 - [x] `git-commit` — 0f26901, f23b1df, 35cd186, a8dba06 + closeout commit.
+
+## W10 — "Trust & hygiene" (source: BUILD-PLAN.md §Wave 10, scanned 2026-06-09)
+
+- [x] `contract-author` — deltas authored inline by orchestrator (/api/animals, schema kind
+      cleanup) — `0912b12`. Full skill deferred: small amendments, not greenfield.
+- [x] `render-sanity` / live-browser pass — feed-seeding on refresh, 8-profile legend,
+      animals + chips on 2D map, 🧠 markers, RESET WORLD end-to-end (run preserved on disk),
+      console 0 errors. Screenshots: `.playwright/2026-06-09_12-46-13/screenshots/verify-w10-*`.
+- [x] `design-token-guard` — diff-scoped check at wave-1 gate (one hex = pre-existing
+      WebGL-overlay ink idiom).
+- [x] `git-commit` — 0912b12, 61e9d29, 82984f0, 86a5c8e, 80ea7dc, 5f42d15 + closeout.
+- [x] `git-pr` — PR opened build/w10-trust-hygiene → main (user-requested).

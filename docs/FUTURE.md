@@ -12,7 +12,8 @@ Deferred from the design spec (§1 non-goals) and brainstorming:
 - **Agent-authored tools** — agents proposing and adding new tools via governance.
 - **Real weather / news integrations** — live external data feeding the world.
 - **Image generation** — agents producing images.
-- **Multi-world parallel runs** — the original ran 5 worlds (one per provider) simultaneously. v1 is single-world with mixed models inside it.
+- **Multi-world parallel runs** — the original ran 5 worlds (one per provider) simultaneously. v1 is single-world with mixed models inside it. (The EM-092 persona library is the shared casting pool for this.)
+- **Multiple cities + transport** *(user, 2026-06-09)* — several settlements in one world with travel between them (roads/carts/gates; travel costs time/energy, so distance becomes a real social force). Opens: regional governance divergence, trade routes, migration when a city's economy or laws sour, "news from afar" arriving with delay. Pairs with multi-world runs as the within-world sibling. Big lift: the place model is flat today (no districts/regions, no travel time), and free-scale pressure grows with every populated city — wants the EM-067/083 usage alerting mature first.
 
 Promoted to `docs/REMAINING-WORK.md` (and removed above per the convention):
 replay viewer → EM-055 (shipped, W6) · head-to-head analytics dashboard → EM-059
