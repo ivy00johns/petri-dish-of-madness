@@ -65,8 +65,11 @@ Ordered chain (kinds + `payload` shapes):
       "gen_ai.usage.input_tokens": int|null, "gen_ai.usage.output_tokens": int|null,
       "latency_ms": number|null, "gen_ai.response.finish_reasons": [str]|null,
       "cached": bool, "attempt": int }`
-   One per turn (the single structured call). `cached:true` ⇒ no network call (EM-068).
-   On a `parse_failure`/retry, a second `llm_call` row may share the turn_id with `attempt:2`.
+   `cached:true` ⇒ no network call (EM-068). **W5 emits one `llm_call` per turn carrying the
+   FINAL attempt** (`attempt` = the attempt that produced the result, 1 or 2). On a retry the
+   earlier attempt's row is NOT emitted in W5; **per-attempt rows (attempt 1 + 2 sharing the
+   turn_id) land in W6 with EM-067**, whose token capture rewrites this emission anyway. Tokens
+   are `null` until EM-067.
 5. **`reasoning`** — `{reasoning?, perceived_summary?, memories_used?}` from the EM-066
    structured output. Fields are OPTIONAL (Mock/deterministic agents omit them).
 6. **`action_chosen`** — `{chosen_tool, args, tier:"reflex"|"llm"}` — the validated action.
@@ -77,8 +80,12 @@ Plus: any **domain events** the action produces (`economy`, `conflict`, `relatio
 `turn_id`. So the inspector can show "this `give` (action_resolved) caused this `economy`
 transfer and this `relationship` trust bump", all under one turn.
 
-`parse_failure` / `idle` turns still emit `turn_start` → `llm_call` (with finish/error) →
-`action_resolved{outcome:"failed"}` so dead-air turns remain inspectable.
+**Failure turns keep the same shape.** A `parse_failure` / `idle` turn emits the SAME ordered
+chain, not a truncated one: `perceived` and `memory_retrieved` are still real (context was
+assembled before the call), `llm_call` carries the error/finish, `reasoning` and `action_chosen`
+carry empty/fallback content (the action falls back to `idle`), and `action_resolved.outcome =
+"failed"`. A uniform per-turn chain keeps the decision-trace inspector simple and makes failed
+turns just as inspectable as successful ones.
 
 ### EM-066 capture rule (zero extra LLM calls)
 The structured fields (`perceived_summary`, `memories_used`, `reasoning`) come from the

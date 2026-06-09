@@ -66,6 +66,10 @@ class TickLoop:
         self._broadcaster = broadcaster or (lambda _: None)
 
         self._run_id: int | None = None
+        # Correlation id for the turn currently executing. Stamped on every event
+        # emitted during a turn so the whole chain shares one turn_id (EM-054).
+        # None outside a turn (e.g. API-driven events, random injections).
+        self._current_turn_id: str | None = None
         self._task: asyncio.Task | None = None
         self._step_event: asyncio.Event = asyncio.Event()
         self._paused: bool = True
@@ -183,6 +187,9 @@ class TickLoop:
         for agent in agents:
             self._repo.save_agent(self._run_id, agent, 0)
 
+        # Snapshot at tick 0 of the fresh run (structural change: reset).
+        self._save_snapshot(0)
+
         # Broadcast new state
         self._broadcast_world_state()
 
@@ -199,6 +206,9 @@ class TickLoop:
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)
+
+        # Snapshot at tick 0 so replay has a base for the very first ticks.
+        self._save_snapshot(0)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Main loop
@@ -244,81 +254,217 @@ class TickLoop:
                 await asyncio.sleep(max(0.01, interval))
 
     async def _execute_turn(self, agent: AgentState) -> None:
-        """Execute one agent turn: energy decay → model call → apply → persist → broadcast."""
+        """Execute one agent turn: energy decay → model call → apply → persist → broadcast.
+
+        Emits the linked decision-trace chain (EM-054): every event this turn —
+        turn_start, the perceived/memory/llm/reasoning/action_chosen spans, the
+        domain action event(s), action_resolved, and any death — shares one
+        turn_id minted here.
+        """
         world = self._world
         tick = world.tick
-
-        # Emit turn_start event
-        turn_start_evt = {
-            "type": "event",
-            "seq": self._next_seq(),
-            "tick": tick,
-            "kind": "turn_start",
-            "actor_id": agent.id,
-            "profile": self._router.profile_name_for(agent.id, agent.profile),
-            "profile_color": self._get_profile_color(agent),
-            "text": f"Turn {tick}: {agent.name}'s turn.",
-            "payload": {},
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        self._broadcaster(turn_start_evt)
-
-        # Energy decay
-        world.apply_energy_decay(agent)
-
-        # Run model turn
-        raw_result = await self._runtime.run_turn(agent)
-
-        # Handle multi-event results (e.g., vote + rule_passed)
-        if "_multi" in raw_result:
-            events_to_emit = raw_result["_multi"]
-        else:
-            events_to_emit = [raw_result]
-
-        for evt in events_to_emit:
-            self._emit_event(evt)
-
-        # Update mood from last event if set
-        if raw_result.get("mood"):
-            agent.mood = raw_result["mood"][:40]
-
-        # Persist agent state
         run_id = self._run_id or 1
-        self._repo.save_agent(run_id, agent, tick)
 
-        # Save rules if any changed
-        for rule in world.rules.values():
-            self._repo.save_rule(run_id, rule)
+        # Mint the turn correlation id; _emit_event stamps it on ALL events below.
+        import uuid
+        turn_id = uuid.uuid4().hex
+        self._current_turn_id = turn_id
 
-        # Death check
-        died = world.check_death(agent)
-        if died:
-            death_evt = {
-                "kind": "agent_died",
+        profile_name = self._router.profile_name_for(agent.id, agent.profile)
+        profile_color = self._get_profile_color(agent)
+
+        try:
+            # 1. turn_start (now persisted + carries turn_id)
+            self._emit_event({
+                "kind": "turn_start",
                 "actor_id": agent.id,
-                "profile": self._router.profile_name_for(agent.id, agent.profile),
-                "profile_color": self._get_profile_color(agent),
-                "text": f"{agent.name} has died (energy exhausted).",
-                "payload": {"energy": agent.energy, "tick": tick},
-            }
-            self._emit_event(death_evt)
+                "profile": profile_name,
+                "profile_color": profile_color,
+                "text": f"Turn {tick}: {agent.name}'s turn.",
+                "payload": {
+                    "turn_id": turn_id,
+                    "agent_id": agent.id,
+                    "profile": profile_name,
+                    "location": agent.location,
+                    "energy": round(agent.energy, 2),
+                    "credits": agent.credits,
+                    "day": world.day,
+                },
+            })
+
+            # Energy decay
+            world.apply_energy_decay(agent)
+
+            # Run model turn (returns domain event(s) + a `_trace` structure)
+            raw_result = await self._runtime.run_turn(agent)
+            trace = raw_result.get("_trace", {}) if isinstance(raw_result, dict) else {}
+
+            # 2-6. Decision-trace spans, in order, all under this turn_id.
+            self._emit_trace_chain(agent, profile_name, profile_color, trace)
+
+            # Handle multi-event results (e.g., vote + rule_passed)
+            if "_multi" in raw_result:
+                events_to_emit = raw_result["_multi"]
+            else:
+                events_to_emit = [raw_result]
+
+            # 7 (domain action events) — emitted between action_chosen and action_resolved.
+            for evt in events_to_emit:
+                self._emit_event(evt)
+
+            # 8. action_resolved span
+            resolved = trace.get("resolved", {}) if isinstance(trace, dict) else {}
+            self._emit_event({
+                "kind": "action_resolved",
+                "actor_id": agent.id,
+                "profile": profile_name,
+                "profile_color": profile_color,
+                "text": f"{agent.name}'s action resolved ({resolved.get('outcome', 'ok')}).",
+                "payload": {
+                    "outcome": resolved.get("outcome", "ok"),
+                    "state_deltas": resolved.get("state_deltas", {}),
+                    "routed_via": self._router.last_routed_via(profile_name),
+                },
+            })
+
+            # Update mood from last event if set
+            if raw_result.get("mood"):
+                agent.mood = raw_result["mood"][:40]
+
+            # Persist agent state
             self._repo.save_agent(run_id, agent, tick)
 
-        # Push events to agent memories
-        for evt in events_to_emit:
-            self._runtime.push_event({**evt, "tick": tick})
+            # Save rules if any changed
+            for rule in world.rules.values():
+                self._repo.save_rule(run_id, rule)
 
-        # Advance tick
-        world.tick += 1
-        world.day = world.tick // world.params.turns_per_day
+            # Death check
+            died = world.check_death(agent)
+            if died:
+                death_evt = {
+                    "kind": "agent_died",
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "text": f"{agent.name} has died (energy exhausted).",
+                    "payload": {"energy": agent.energy, "tick": tick},
+                }
+                self._emit_event(death_evt)
+                self._repo.save_agent(run_id, agent, tick)
 
-        # Broadcast updated world state
-        self._broadcast_world_state()
+            # Push events to agent memories
+            for evt in events_to_emit:
+                self._runtime.push_event({**evt, "tick": tick})
+
+            # Advance tick
+            world.tick += 1
+            world.day = world.tick // world.params.turns_per_day
+
+            # Periodic snapshot to bound replay cost (EM-054 §5).
+            interval = getattr(world.params, "snapshot_interval_ticks", 25)
+            if interval and world.tick % interval == 0:
+                self._save_snapshot(world.tick)
+
+            # Broadcast updated world state
+            self._broadcast_world_state()
+        finally:
+            self._current_turn_id = None
+
+    def _emit_trace_chain(
+        self, agent: AgentState, profile_name: str, profile_color: str, trace: dict
+    ) -> None:
+        """Emit the ordered decision-trace spans (perceived → memory_retrieved →
+        llm_call → reasoning → action_chosen) for the turn. All inherit the
+        current turn_id via _emit_event. Payload shapes per event-log.md §3.
+        """
+        if not isinstance(trace, dict):
+            trace = {}
+        perceived = trace.get("perceived", {}) or {}
+        memory = trace.get("memory", {}) or {}
+        llm = trace.get("llm", {}) or {}
+        reasoning = trace.get("reasoning", {}) or {}
+        chosen = trace.get("action_chosen", {}) or {}
+
+        base = {
+            "actor_id": agent.id,
+            "profile": profile_name,
+            "profile_color": profile_color,
+        }
+
+        self._emit_event({
+            **base, "kind": "perceived",
+            "text": f"{agent.name} perceives the scene.",
+            "payload": {
+                "visible_agents": perceived.get("visible_agents", []),
+                "nearby_places": perceived.get("nearby_places", []),
+                "overheard": perceived.get("overheard", []),
+                "perceived_summary": perceived.get("perceived_summary"),
+            },
+        })
+        self._emit_event({
+            **base, "kind": "memory_retrieved",
+            "text": f"{agent.name} recalls recent events.",
+            "payload": {
+                "memories": memory.get("memories", []),
+                "window": memory.get("window"),
+            },
+        })
+        self._emit_event({
+            **base, "kind": "llm_call",
+            "text": f"{agent.name} consults {profile_name}.",
+            "payload": {
+                "gen_ai.request.model": llm.get("gen_ai.request.model", profile_name),
+                "gen_ai.response.model": llm.get("gen_ai.response.model"),
+                "gen_ai.usage.input_tokens": (llm.get("usage") or {}).get("input_tokens")
+                if isinstance(llm.get("usage"), dict) else None,
+                "gen_ai.usage.output_tokens": (llm.get("usage") or {}).get("output_tokens")
+                if isinstance(llm.get("usage"), dict) else None,
+                "latency_ms": llm.get("latency_ms"),
+                "gen_ai.response.finish_reasons": (
+                    [llm["finish_reason"]] if llm.get("finish_reason") else None
+                ),
+                "cached": llm.get("cached", False),
+                "attempt": llm.get("attempt", 1),
+            },
+        })
+        self._emit_event({
+            **base, "kind": "reasoning",
+            "text": f"{agent.name} reasons about what to do.",
+            "payload": {
+                "reasoning": reasoning.get("reasoning"),
+                "perceived_summary": reasoning.get("perceived_summary"),
+                "memories_used": reasoning.get("memories_used"),
+            },
+        })
+        self._emit_event({
+            **base, "kind": "action_chosen",
+            "text": f"{agent.name} chooses {chosen.get('chosen_tool', 'idle')}.",
+            "payload": {
+                "chosen_tool": chosen.get("chosen_tool"),
+                "args": chosen.get("args", {}),
+                "tier": chosen.get("tier", "llm"),
+            },
+        })
+
+    def _sim_time(self, tick: int) -> float:
+        """Simulation seconds for a tick (event-log.md §2)."""
+        interval = getattr(self._world.params, "tick_interval_seconds", 0.0)
+        return round(tick * interval, 3)
 
     def _emit_event(self, evt: dict) -> None:
-        """Stamp and broadcast an event; persist to DB."""
+        """Stamp and broadcast an event; persist to DB.
+
+        Stamps turn_id (the current turn's correlation id), actor_type, and
+        sim_time alongside the existing seq/tick/kind/ts (EM-054). actor_type
+        defaults to 'system' for actor-less engine/random events and
+        'human_agent' for agent-driven events, unless the event sets it.
+        """
         tick = self._world.tick
         run_id = self._run_id or 1
+
+        actor_type = evt.get("actor_type")
+        if actor_type is None:
+            actor_type = "human_agent" if evt.get("actor_id") else "system"
 
         stamped = {
             "type": "event",
@@ -326,9 +472,12 @@ class TickLoop:
             "tick": tick,
             "kind": evt.get("kind", "agent_action"),
             "actor_id": evt.get("actor_id"),
+            "actor_type": actor_type,
             "target_id": evt.get("target_id"),
             "profile": evt.get("profile"),
             "profile_color": evt.get("profile_color"),
+            "turn_id": evt.get("turn_id", self._current_turn_id),
+            "sim_time": self._sim_time(tick),
             "text": evt.get("text", ""),
             "payload": evt.get("payload", {}),
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -354,6 +503,21 @@ class TickLoop:
         profile_name = self._router.profile_name_for(agent.id, agent.profile)
         p = self._router.get_profile(profile_name)
         return p.color if p else "#888888"
+
+    def _save_snapshot(self, tick: int) -> None:
+        """Persist a world snapshot to bound replay cost (EM-054 §5). Reuses
+        world.to_snapshot exactly as _broadcast_world_state does. Defensive: a
+        real run wants snapshots, but a missing/mid-flight persistence method must
+        never break the tick loop (snapshots are additive to live behavior)."""
+        run_id = self._run_id or 1
+        try:
+            profile_colors = {p["name"]: p["color"] for p in self._router.legend()}
+            state_json = json.dumps(self._world.to_snapshot(profile_colors))
+            save = getattr(self._repo, "save_world_snapshot", None)
+            if save is not None:
+                save(run_id, tick, state_json)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("snapshot save failed at tick %s: %s", tick, exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Chaos: random event injection

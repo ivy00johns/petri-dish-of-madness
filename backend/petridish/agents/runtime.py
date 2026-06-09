@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import jsonschema
@@ -38,6 +39,17 @@ ACTION_SCHEMA = {
     "properties": {
         "thought": {"type": "string", "maxLength": 500},
         "mood": {"type": "string", "maxLength": 40},
+        # W5 / EM-066: OPTIONAL decision-trace fields (action-protocol v1.1.0).
+        # Captured in the SAME single call → zero extra LLM calls. Optional so
+        # deterministic/Mock agents stay valid; additionalProperties is False, so
+        # they MUST be declared here for the model to be allowed to return them.
+        "perceived_summary": {"type": "string", "maxLength": 600},
+        "memories_used": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {"type": "string", "maxLength": 160},
+        },
+        "reasoning": {"type": "string", "maxLength": 1200},
         "action": {
             "type": "string",
             "enum": [
@@ -342,11 +354,54 @@ Mood: {agent.mood}
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
-{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence"}}
+{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "the chain of thought that led to this action"}}
 
-The "action" field is required and must come first. "args" must match the action. If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
+The "action" field is required and must come first. "args" must match the action.
+ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
+If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
     return [{"role": "system", "content": system_prompt}]
+
+
+def _perceived_context(
+    agent: AgentState, world: World, recent_events: list[dict], params: Any
+) -> tuple[dict, dict]:
+    """Derive the `perceived` + `memory_retrieved` payload bodies for the decision
+    trace from the SAME context fed to the model (no extra work, no LLM calls).
+
+    Returns (perceived, memory) where:
+      perceived = {visible_agents:[id], nearby_places:[id], overheard:[seq], ...}
+      memory    = {memories:[{ref?, tick, kind, text}], window}
+    """
+    visible_agents = [
+        a.id for a in world.living_agents()
+        if a.location == agent.location and a.id != agent.id
+    ]
+    # Co-located places: the agent's own place + any place sharing its kind is
+    # over-broad; v1 perception is "where I am", so nearby = current place only.
+    nearby_places = [agent.location] if agent.location in world.places else []
+
+    window = params.memory_window
+    fed = recent_events[-window:]
+    # overheard: seqs of the events the agent witnessed this window (best-effort;
+    # the per-agent memory buffer stores text/tick/kind, seq may be absent).
+    overheard = [e.get("seq") for e in fed if e.get("seq") is not None]
+    memories = [
+        {
+            "ref": e.get("seq"),
+            "tick": e.get("tick"),
+            "kind": e.get("kind"),
+            "text": e.get("text", ""),
+        }
+        for e in fed
+    ]
+    perceived = {
+        "visible_agents": visible_agents,
+        "nearby_places": nearby_places,
+        "overheard": overheard,
+    }
+    memory = {"memories": memories, "window": window}
+    return perceived, memory
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -415,9 +470,14 @@ class AgentRuntime:
         recent_events = self._memory.get(agent.id, [])
         messages = _assemble_context(agent, self.world, recent_events, self.world.params)
 
+        # Decision-trace perception/memory derived from the SAME context (EM-066).
+        perceived, memory = _perceived_context(
+            agent, self.world, recent_events, self.world.params
+        )
+
         # First attempt
-        action_dict, parse_error = await self._call_and_parse(
-            profile_name, messages, max_tokens, temperature, agent
+        action_dict, parse_error, llm_meta = await self._call_and_parse(
+            profile_name, messages, max_tokens, temperature, agent, attempt=1
         )
 
         if parse_error and action_dict is None:
@@ -433,16 +493,42 @@ class AgentRuntime:
                     ),
                 },
             ]
-            action_dict, parse_error = await self._call_and_parse(
-                profile_name, retry_messages, max_tokens, temperature, agent
+            action_dict, parse_error, llm_meta = await self._call_and_parse(
+                profile_name, retry_messages, max_tokens, temperature, agent, attempt=2
             )
 
+        routed = self.router.last_routed_via(profile_name)
+
+        # Build the llm_call trace span (OTel GenAI attribute names). usage stays
+        # null in W5 — providers don't capture tokens until W6.
+        llm_trace = {
+            "gen_ai.request.model": profile_name,
+            "gen_ai.response.model": routed,
+            "usage": None,
+            "latency_ms": llm_meta.get("latency_ms"),
+            "finish_reason": None,
+            "cached": False,
+            "attempt": llm_meta.get("attempt", 1),
+        }
+
         if action_dict is None:
-            # Second failure or ProviderError: idle + log
-            routed = self.router.last_routed_via(profile_name)
+            # Second failure or ProviderError: idle + log. Still return a trace so
+            # the dead-air turn remains inspectable (resolved.outcome == "failed").
             payload: dict = {"reason": parse_error or "parse_failure"}
             if routed is not None:
                 payload["routed_via"] = routed
+            trace = {
+                "perceived": {**perceived, "perceived_summary": None},
+                "memory": memory,
+                "llm": llm_trace,
+                "reasoning": {
+                    "reasoning": None,
+                    "perceived_summary": None,
+                    "memories_used": None,
+                },
+                "action_chosen": {"chosen_tool": "idle", "args": {}, "tier": "llm"},
+                "resolved": {"outcome": "failed", "state_deltas": {}},
+            }
             return {
                 "kind": "parse_failure",
                 "actor_id": agent.id,
@@ -450,11 +536,17 @@ class AgentRuntime:
                 "profile_color": profile_color,
                 "text": f"{agent.name} failed to produce a valid action (idle fallback): {parse_error}",
                 "payload": payload,
+                "_trace": trace,
             }
 
         # Update mood if provided
         if action_dict.get("mood"):
             agent.mood = action_dict["mood"][:40]
+
+        # EM-066 structured fields, captured from the SAME parsed response.
+        perceived_summary = action_dict.get("perceived_summary")
+        memories_used = action_dict.get("memories_used")
+        reasoning = action_dict.get("reasoning")
 
         # Apply the action
         result_event = self._apply_action(agent, action_dict, profile_name, profile_color)
@@ -462,12 +554,42 @@ class AgentRuntime:
         # Surface the model the proxy actually routed this turn to as an
         # ADDITIVE, OPTIONAL field inside each emitted event's payload.
         # (contracts/events.schema.json treats payload as an open object.)
-        routed = self.router.last_routed_via(profile_name)
         if "_multi" in result_event:
             for evt in result_event["_multi"]:
                 evt.setdefault("payload", {})["routed_via"] = routed
         else:
             result_event.setdefault("payload", {})["routed_via"] = routed
+
+        # Assemble the decision-trace chain for loop._execute_turn to emit. The
+        # `resolved` outcome reads the applied event(s): a parse_failure kind from
+        # _apply_action means the action was gated/failed at resolution time.
+        resolved_evt = (
+            result_event["_multi"][0] if "_multi" in result_event else result_event
+        )
+        outcome = "failed" if resolved_evt.get("kind") == "parse_failure" else "ok"
+        state_deltas = {}
+        rpayload = resolved_evt.get("payload", {})
+        for k in ("credits_delta", "energy_delta", "amount"):
+            if k in rpayload:
+                state_deltas[k] = rpayload[k]
+
+        trace = {
+            "perceived": {**perceived, "perceived_summary": perceived_summary},
+            "memory": memory,
+            "llm": llm_trace,
+            "reasoning": {
+                "reasoning": reasoning,
+                "perceived_summary": perceived_summary,
+                "memories_used": memories_used,
+            },
+            "action_chosen": {
+                "chosen_tool": action_dict.get("action"),
+                "args": action_dict.get("args") or {},
+                "tier": "llm",
+            },
+            "resolved": {"outcome": outcome, "state_deltas": state_deltas},
+        }
+        result_event["_trace"] = trace
 
         return result_event
 
@@ -478,37 +600,45 @@ class AgentRuntime:
         max_tokens: int,
         temperature: float,
         agent: AgentState,
-    ) -> tuple[dict | None, str | None]:
+        attempt: int = 1,
+    ) -> tuple[dict | None, str | None, dict]:
         """
         Call the model and parse+validate the response.
-        Returns (action_dict, error_string).
-        action_dict is None on failure.
+        Returns (action_dict, error_string, llm_meta).
+        action_dict is None on failure. llm_meta carries decision-trace metadata
+        for the `llm_call` span: {"attempt": int, "latency_ms": float|None}.
         """
+        meta: dict = {"attempt": attempt, "latency_ms": None}
+        started = time.perf_counter()
         try:
             text = await self.router.chat(
                 profile_name, messages,
                 max_tokens=max_tokens, temperature=temperature,
             )
         except ProviderError as exc:
+            meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
             log.warning("ProviderError for %s: %s", agent.name, exc)
-            return None, f"provider_error: {exc.detail}"
+            return None, f"provider_error: {exc.detail}", meta
         except Exception as exc:
+            meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
             log.error("Unexpected error calling %s: %s", profile_name, exc)
-            return None, f"unexpected_error: {exc}"
+            return None, f"unexpected_error: {exc}", meta
+
+        meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
         action_dict = _extract_first_json(text)
         if action_dict is None:
-            return None, f"no valid JSON object in response: {text[:200]!r}"
+            return None, f"no valid JSON object in response: {text[:200]!r}", meta
 
         schema_error = _validate_schema(action_dict)
         if schema_error:
-            return None, f"schema error: {schema_error}"
+            return None, f"schema error: {schema_error}", meta
 
         world_error = _validate_world(action_dict, agent, self.world)
         if world_error:
-            return None, f"world error: {world_error}"
+            return None, f"world error: {world_error}", meta
 
-        return action_dict, None
+        return action_dict, None, meta
 
     def _apply_action(
         self,

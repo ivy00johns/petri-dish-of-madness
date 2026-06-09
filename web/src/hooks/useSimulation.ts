@@ -9,10 +9,20 @@ import { buildInitialWorldState, generateTick, mockControls } from '../mock/gene
 
 const MOCK_MODE = import.meta.env.VITE_MOCK === '1';
 const MAX_EVENTS = 200;
+// Rolling event-history window for the inspector annex (frontend-inspector.md
+// §3). Much deeper than the 200-capped live feed; older ticks beyond this are
+// reachable only via the backend replay API (W6). Configurable.
+const MAX_HISTORY = 5000;
 
 export interface SimulationState {
   world: WorldState | null;
   events: WorldEvent[];
+  /**
+   * Rolling history (up to MAX_HISTORY) fed from the SAME WS onmessage path as
+   * `events`. The live feed stays capped at 200; the inspector consumes this
+   * deeper window for replay/trace/graph/dashboard (wired at W6).
+   */
+  history: WorldEvent[];
   connected: boolean;
   mockMode: boolean;
 }
@@ -30,6 +40,9 @@ export interface SimulationControls {
 export function useSimulation(): SimulationState & SimulationControls {
   const [world, setWorld] = useState<WorldState | null>(null);
   const [events, setEvents] = useState<WorldEvent[]>([]);
+  // Deeper rolling history for the inspector; fed alongside `events` from the
+  // same sources, capped at MAX_HISTORY. Newest-first, matching `events`.
+  const [history, setHistory] = useState<WorldEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [mockMode, setMockMode] = useState(MOCK_MODE);
   const wsRef = useRef<WebSocket | null>(null);
@@ -39,6 +52,19 @@ export function useSimulation(): SimulationState & SimulationControls {
   // After this many failed reconnects, fall back to mock so the UI is never
   // dead. A recovered live socket still tears the mock loop down on open/msg.
   const MAX_RECONNECTS_BEFORE_MOCK = 3;
+
+  // ── Rolling history (inspector annex) ──────────────────────────────────────
+  // Prepend newly-arrived events (newest-first), de-duped on seq, capped at
+  // MAX_HISTORY. Same input as the live feed; does not affect feed behavior.
+  const pushHistory = useCallback((incoming: WorldEvent[]) => {
+    if (incoming.length === 0) return;
+    setHistory(prev => {
+      const seen = new Set(prev.map(e => e.seq));
+      const fresh = incoming.filter(e => !seen.has(e.seq));
+      if (fresh.length === 0) return prev;
+      return [...fresh, ...prev].slice(0, MAX_HISTORY);
+    });
+  }, []);
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
 
@@ -56,8 +82,9 @@ export function useSimulation(): SimulationState & SimulationControls {
         const combined = [...newEvents, ...prev];
         return combined.slice(0, MAX_EVENTS);
       });
+      pushHistory(newEvents);
     }, mockSpeedRef.current);
-  }, []);
+  }, [pushHistory]);
 
   const stopMockLoop = useCallback(() => {
     if (mockTimerRef.current) {
@@ -119,6 +146,8 @@ export function useSimulation(): SimulationState & SimulationControls {
             }
             return [evt, ...prev].slice(0, MAX_EVENTS);
           });
+          // Same source feeds the deeper inspector history (de-duped on seq).
+          pushHistory([evt]);
         }
       } catch {
         // ignore parse errors
@@ -159,7 +188,7 @@ export function useSimulation(): SimulationState & SimulationControls {
       }
       ws.close();
     };
-  }, [startMockLoop, stopMockLoop]);
+  }, [startMockLoop, stopMockLoop, pushHistory]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
@@ -217,11 +246,12 @@ export function useSimulation(): SimulationState & SimulationControls {
       if (result) {
         setWorld(result.state);
         setEvents(prev => [...result.events, ...prev].slice(0, MAX_EVENTS));
+        pushHistory(result.events);
       }
     } else {
       apiPost('/api/control/step');
     }
-  }, [mockMode, apiPost]);
+  }, [mockMode, apiPost, pushHistory]);
 
   const setSpeed = useCallback((tickIntervalSeconds: number) => {
     if (mockMode) {
@@ -267,21 +297,23 @@ export function useSimulation(): SimulationState & SimulationControls {
           ts: new Date().toISOString(),
         };
         setEvents(prev => [evt, ...prev].slice(0, MAX_EVENTS));
+        pushHistory([evt]);
       }
     } else {
       apiPost(`/api/agents/${agentId}/model`, { profile });
     }
-  }, [mockMode, apiPost, world]);
+  }, [mockMode, apiPost, world, pushHistory]);
 
   const injectEvent = useCallback((kind?: string) => {
     if (mockMode) {
       const result = generateTick();
       setWorld(result.state);
       setEvents(prev => [...result.events, ...prev].slice(0, MAX_EVENTS));
+      pushHistory(result.events);
     } else {
       apiPost('/api/events/inject', kind ? { kind } : {});
     }
-  }, [mockMode, apiPost]);
+  }, [mockMode, apiPost, pushHistory]);
 
   const getProfiles = useCallback((): ModelProfile[] => {
     return world?.profiles ?? mockControls.getProfiles();
@@ -290,6 +322,7 @@ export function useSimulation(): SimulationState & SimulationControls {
   return {
     world,
     events,
+    history,
     connected,
     mockMode,
     start,

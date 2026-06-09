@@ -1,39 +1,39 @@
 {
   "schema_version": "1.0",
-  "status": "PASS",
+  "status": "pass",
   "scores": {
     "contract_conformance": {
       "score": 5,
-      "notes": "Adapters match providers.md (OpenAI-compatible verified against a stub mimicking FreeLLMAPI). WS messages match events.schema.json (world_state list-of-agents + tagged events confirmed via live WS client). REST routes match api.openapi.yaml. Action validation matches action-protocol.schema.json. SQLite per db-schema.sql."
+      "notes": "Backend implementation conforms to contracts/event-log.md (v1.0.0), db-schema.sql (v1.1.0), and action-protocol.schema.json (v1.1.0). Verified by behavior on MockProvider: (1) events table is append-only -- seq is AUTOINCREMENT, strictly increasing, dense per run; the only INSERT INTO events is save_event's append, and there is NO 'UPDATE events' / 'DELETE FROM events' anywhere in repository.py (asserted statically with a passing negative control). (2) The section 3 decision-trace chain is emitted in exact order turn_start->perceived->memory_retrieved->llm_call->reasoning->action_chosen->(domain event[s])->action_resolved, all under one turn_id, ordered by seq via get_turn_trace; multi-event actions (vote->rule_passed) and domain events inherit the turn_id. (3) llm_call payload carries the exact OTel GenAI key set (gen_ai.request.model, gen_ai.response.model, gen_ai.usage.input_tokens, gen_ai.usage.output_tokens, latency_ms, gen_ai.response.finish_reasons, cached, attempt). (4) EM-066 fields (perceived_summary/memories_used/reasoning) surface in perceived/memory_retrieved/reasoning rows, and are optional-safe (absent => null, valid chain). (5) Read API get_events filters (kinds, actor_id, turn_id, from/to_tick, after_seq, limit, order asc|desc, default asc), get_rule_history (proposed->passed with votes + all documented keys), and get_analytics (all 11 documented top-level keys incl. by_model + usage.by_profile) behave per section 7."
+    },
+    "invariants": {
+      "score": 5,
+      "notes": "All W5 gate invariants hold under deterministic MockProvider runs. APPEND-ONLY: seq strictly increasing with no gaps reused; re-reading an earlier seq range after more turns returns byte-identical rows (no mutation path). STAMPING: every row has sim_time == round(tick*tick_interval_seconds,3) and a non-null actor_type, correctly human_agent for agent turns and system for actor-less engine/random injections. SNAPSHOTS+REPLAY (headline): snapshots written at tick 0 and exactly at every snapshot_interval_ticks (no off-cadence rows); with interval=1 the independently-written nearest_snapshot(T).state reproduces the live world.to_snapshot() positions/energy/credits at T across 15+ ticks (real equality on divergent state -- distinct locations + energy across agents); fold-forward variant seeds from a coarser snapshot@10 and folds economy{credits_delta} rows over get_events forward to T=13 to match live per-agent credits exactly (boundary verified: snapshot at tick K precedes events stamped tick K, so fold window is [base_tick, T-1])."
     },
     "test_coverage": {
-      "score": 4,
-      "notes": "55 backend tests: world-model invariants 1-5, economy (give/steal/work/recharge/UBI), governance proposal->vote->active->effect, death, loop step/start/pause asyncio lifecycle (regression for the wave-gate bug), OpenAI-compatible adapter end-to-end against a stub incl. 500->ProviderError->idle failure path, and FastAPI route coverage (health/state/profiles/reassign/step/inject). Frontend has no unit tests; covered by tsc + vite build + Playwright reassign check + manual render. WS stream verified manually by orchestrator."
+      "score": 5,
+      "notes": "Added backend/tests/test_event_log.py: 16 new pytest cases, deterministic and offline (MockProvider + TickLoop._execute_turn), one per W5 gate invariant family -- append-only (3), turn chain (2), stamping (1), OTel llm_call keys (1), decision trace incl. optional-safe (2), snapshots+replay determinism incl. fold-forward (3), read API get_events/get_rule_history/get_analytics (4). Mirrors existing tests/*.py harness patterns (World/Router/Runtime/loop wiring). Full suite: 79 passed (63 prior + 16 new), 0 failed. Frontend event-log consumers are W6 and out of scope for this gate."
     },
     "security": {
       "score": 4,
-      "notes": "Low surface: local-first, no auth, no PII. Strong points: model output is JSON-schema + world-rule validated (no crash on adversarial/garbage model output -> parse_failure->idle, verified); provider API keys read from env (api_key_env), never stored in YAML or serialized; bad model profile / unknown agent return 400/404 not 500. No injection surface (no SQL string-building exposed to model output; parameterized repo). Not hardened for public internet exposure (documented as local-first)."
-    },
-    "reliability": {
-      "score": 4,
-      "notes": "ProviderError (network/HTTP) is caught and degrades to idle without crashing the loop (verified: 1 parse_failure in a live mock run handled gracefully). Adapter retries once on 5xx/429 with backoff. Loop pause/step/start lifecycle correct after fix (independently re-verified at API level: 5 steps->tick5, timed run->tick37 running=true, pause holds). Note: with real profiles unconfigured, turns incur slow failing retries -- expected, resolved by providing a token."
+      "notes": "Low surface, local-first, no auth/PII. Strong points relevant to this contract: all event reads are parameterized SQL (kinds IN-clause and every filter use bound '?' params -- no string-built SQL exposed to model/user output); model output remains JSON-schema + world-rule validated before any event is written; the append-only design means a compromised consumer cannot tamper with the source-of-truth log (no UPDATE/DELETE path exists). No new attack surface introduced by the test additions. Not hardened for public-internet exposure (documented as local-first)."
     }
   },
   "test_results": {
-    "total": 55,
-    "passed": 55,
+    "command": "cd backend && ./.venv/bin/python -m pytest tests/ -q",
+    "total": 79,
+    "passed": 79,
     "failed": 0,
-    "command": "cd backend && python -m pytest -q"
+    "new_tests": 16
   },
   "blockers": [],
   "issues": [
-    "Real model profiles (groq-llama, gemini-flash) report available=false and fall back to idle until FREELLMAPI_KEY + base_url are set -- expected; this is the user's final step for the live run.",
-    "Frontend has no component unit tests; relies on tsc typecheck, production build, a Playwright reassign verification, and manual render. Acceptable for v1.",
-    "loop.py 'blackout' random-event effect is a no-op stub (TODO marker) -- the other three random events (windfall/famine/festival) apply real effects. Minor, non-blocking.",
-    "QE was completed by the orchestrator after the QE sub-agent stalled on a watchdog timeout; the stalled agent's leftover test files had 6 harness bugs (agents-as-dict assumption; synchronous step assertion) which were fixed -- product code was correct and untouched."
+    "llm_call usage tokens (gen_ai.usage.input_tokens / output_tokens) are null under W5 -- providers do not capture token counts until W6 (EM-067). The KEYS are present and asserted; only the values are null. This matches the contract (usage int|null) and is not a defect.",
+    "The fold-forward replay assertion required pinning the snapshot/tick boundary: a snapshot written at tick K reflects state BEFORE events stamped tick==K (the snapshot is taken by the turn that incremented world.tick to K). Tests encode this boundary explicitly so future cadence changes stay correct.",
+    "Engine-side replay is verified via the snapshot+fold equivalence the contract guarantees (nearest_snapshot+get_events == live projection); there is no public repo.replay(T) convenience method, so the fold is performed in-test. Adding repo.replay(T) would be a nice-to-have but is not required by event-log.md section 7."
   ],
   "gate_decision": {
     "proceed": true,
-    "reason": "All 55 tests pass with zero failures and zero blockers. contract_conformance=5 and security=4 clear the gate thresholds (both >=3). The critical live-LLM path (OpenAI-compatible adapter -> FreeLLMAPI) is verified end-to-end against a stub including the failure/idle path, so the user's real 2-model run is de-risked. Engine, economy, governance, and the full WS spectacle pipeline are proven on the deterministic MockProvider."
+    "reason": "All 79 tests pass (16 new W5 gate tests + 63 existing regressions), zero failures, zero blockers. No CRITICAL blocker. contract_conformance=5 and security=4 both clear the >=3 thresholds; no new or existing test fails. The headline replay-determinism guarantee (snapshot + fold-forward == live world projection at T) is asserted as a real equality on divergent agent state, append-only is enforced both behaviorally and statically (no UPDATE/DELETE path on events), the OTel llm_call key set is exact, and the read API (get_events filters, get_rule_history, get_analytics) conforms to event-log.md section 7. W5 gate is GREEN."
   }
 }

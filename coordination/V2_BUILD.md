@@ -13,8 +13,8 @@ NOT a demotion. W7/W8 world features render *in* the 3D village. Encoded in
 
 | Wave | Items | Status |
 |---|---|---|
-| **W5 Foundations (gate)** | EM-053 `/inspector` annex + WebGL unmount · EM-054 event-log spine · EM-066 decision-trace output | contracts locked → implementing |
-| **W6 Instrumentation** | EM-055 replay · EM-056 trace inspector · EM-057 governance history · EM-058 social graph · EM-059 AWI dashboard · EM-067 usage tracking | blocked on W5 gate |
+| **W5 Foundations (gate)** | EM-053 `/inspector` annex + WebGL unmount · EM-054 event-log spine · EM-066 decision-trace output | ✅ DONE — gate GREEN |
+| **W6 Instrumentation** | EM-055 replay · EM-056 trace inspector · EM-057 governance history · EM-058 social graph · EM-059 AWI dashboard · EM-067 usage tracking | unblocked → next |
 | **W7 World** | EM-060 tiered tools · EM-061 building state · EM-062 collective projects · EM-063 ad-hoc spawn · EM-068 caching | blocked on W5/W6 |
 | **W8 Chaos** | EM-064 cat & dog · EM-065 Animal Chaos Feed | blocked on W7 |
 
@@ -52,3 +52,6 @@ persistence → `persistence/**` · backend → `engine,agents,api,run.py` · pr
 | Date | Wave | Result |
 |---|---|---|
 | 2026-06-08 | W5 contracts | 6 contracts authored/extended; JSON valid; framing corrected (3D primary) |
+| 2026-06-08 | W5 implement | 3 agents (persistence/backend/frontend), disjoint ownership, all `done` |
+| 2026-06-08 | W5 wave gate | PASS — backend 63 tests, `tsc -b`+`vite build` clean, 0 new token violations (pre-existing Header status-color debt logged) |
+| 2026-06-08 | W5 verify | GREEN — QE 79/79 (16 new event-log tests), conformance 5 / invariants 5 / security 4, replay-determinism asserted as real equality. Adversarial panel (5 skeptics): replay ✅, one-call-per-turn ✅, WebGL-unmount ✅, OTel-keys ✅, append-only ✅. 3 contract-consistency findings reconciled: opened events.schema `kind` (was closed enum), aligned event-log parse-failure language to uniform-chain reality, deferred per-attempt `llm_call` rows → EM-067/W6. |

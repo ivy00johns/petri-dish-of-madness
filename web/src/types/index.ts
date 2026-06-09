@@ -75,6 +75,10 @@ export interface WorldState {
   profiles: ModelProfile[];
 }
 
+// Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
+// (event-log.md §4) with no schema migration. The literal union documents the
+// kinds the UI knows about; `string & {}` keeps the type open without losing
+// autocomplete on the known members.
 export type EventKind =
   | 'turn_start'
   | 'agent_action'
@@ -93,7 +97,20 @@ export type EventKind =
   | 'parse_failure'
   | 'model_reassigned'
   | 'random_event'
-  | 'control';
+  | 'control'
+  // Decision-trace chain (event-log.md §3) — one linked chain per agent turn.
+  | 'perceived'
+  | 'memory_retrieved'
+  | 'llm_call'
+  | 'reasoning'
+  | 'action_chosen'
+  | 'action_resolved'
+  // Open union: keeps autocomplete on the known members while tolerating the
+  // unknown kinds W6–W8 add (event-log.md §4). The feed default-renders them.
+  | (string & {});
+
+// Non-agent actor classes (event-log.md §2). Absent ⇒ human_agent.
+export type ActorType = 'human_agent' | 'system' | 'god' | 'animal';
 
 export interface WorldEvent {
   type: 'event';
@@ -107,6 +124,11 @@ export interface WorldEvent {
   text?: string | null;
   payload?: Record<string, unknown>;
   ts?: string;
+  // Decision-trace correlation + actor classification (event-log.md §2/§3).
+  // Carried on live events so the inspector (W6) can group a turn's chain.
+  turn_id?: string | null;
+  actor_type?: ActorType | null;
+  sim_time?: number | null;
   // UI-only: thought from payload
   thought?: string;
 }

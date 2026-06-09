@@ -142,6 +142,11 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # W5 / EM-054: snapshot cadence + DB destination (additive, backward-compatible).
+    # snapshot_interval_ticks bounds replay cost; db_path ':memory:' is fine for
+    # tests, but a real run that wants replay must point at a file (config world.db_path).
+    snapshot_interval_ticks: int = 25
+    db_path: str = ":memory:"
 
 
 @dataclass
@@ -211,6 +216,8 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
+        db_path=str(_interpolate(w.get("db_path", ":memory:"))),
     )
 
     places = [

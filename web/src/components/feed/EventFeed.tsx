@@ -15,8 +15,9 @@ interface EventFeedProps {
   events: WorldEvent[];
 }
 
-// Icon per event kind
-const KIND_ICON: Record<EventKind, string> = {
+// Icon per event kind. EventKind is permissive (open string union); FeedEntry
+// falls back to '·' for kinds not listed here, so this stays a partial map.
+const KIND_ICON: Partial<Record<EventKind, string>> = {
   turn_start:       '▷',
   agent_action:     '◆',
   agent_speech:     '◉',
@@ -35,6 +36,14 @@ const KIND_ICON: Record<EventKind, string> = {
   model_reassigned: '⇄',
   random_event:     '⊕',
   control:          '⏏',
+  // Decision-trace chain (event-log.md §3) — default-muted via the Trace
+  // category so these don't flood the live feed.
+  perceived:        '◌',
+  memory_retrieved: '◈',
+  llm_call:         '⌁',
+  reasoning:        '∴',
+  action_chosen:    '◇',
+  action_resolved:  '◆',
 };
 
 // Color tint for event kinds without a profile color
@@ -66,7 +75,15 @@ const CATEGORIES: FeedCategory[] = [
   { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
   { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory'] },
   { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure'] },
+  // Decision-trace chain (event-log.md §3). DEFAULT-MUTED: these are the
+  // inspector's substrate, not live-feed reading material. Dissect them in the
+  // /inspector annex; here they're collapsed so the feed isn't flooded.
+  { key: 'trace',   label: 'Trace',   icon: '⌁', kinds: ['perceived', 'memory_retrieved', 'llm_call', 'reasoning', 'action_chosen', 'action_resolved'] },
 ];
+
+// Categories muted on first load (no saved preference). The trace chain is
+// noisy and belongs to the inspector, so it starts collapsed in the live feed.
+const DEFAULT_MUTED: string[] = ['trace'];
 
 const KIND_TO_CATEGORY: Partial<Record<EventKind, string>> = {};
 CATEGORIES.forEach((c) => c.kinds.forEach((k) => { KIND_TO_CATEGORY[k] = c.key; }));
@@ -76,9 +93,11 @@ const STORAGE_KEY = 'em.feed.mutedCategories';
 function loadMuted(): Set<string> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+    // Only honor DEFAULT_MUTED when the user has no saved preference yet, so we
+    // never re-mute a category a returning user deliberately un-muted.
     if (raw) return new Set(JSON.parse(raw) as string[]);
   } catch { /* ignore */ }
-  return new Set();
+  return new Set(DEFAULT_MUTED);
 }
 
 function formatTime(ts: string | undefined): string {

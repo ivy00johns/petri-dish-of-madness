@@ -103,7 +103,9 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     for agent in agents:
         router.reassign(agent.id, agent.profile)
 
-    repo = SQLiteRepository(":memory:")
+    # Thread the configured DB path so a real run can persist for replay; default
+    # ':memory:' keeps tests and ad-hoc launches ephemeral (EM-054 §6).
+    repo = SQLiteRepository(getattr(cfg.world, "db_path", ":memory:") or ":memory:")
     runtime = AgentRuntime(world, router)
     return world, router, runtime, repo
 
