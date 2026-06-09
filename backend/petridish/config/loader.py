@@ -194,6 +194,37 @@ class CacheParams:
 
 
 @dataclass
+class AnimalParams:
+    """W8 / EM-064 — LLM-driven chaos animals (config `world.animals`).
+
+    Free-scale is the whole point: animals act on a SLOW cadence and only
+    SOMETIMES use the LLM. Additive, backward-compatible defaults so W5-W7
+    worlds (which lack the block) are unchanged.
+
+      enabled            — master toggle for the animal subsystem.
+      act_every_n_ticks  — an animal gets a turn every Nth tick (slower than agents).
+      llm_chance         — P(LLM decision) on an acted tick; else a zero-LLM reflex.
+      model_profile      — cheapest/fastest free profile for the LLM decision; the
+                           runtime falls back to reflex-only if it is unavailable.
+    """
+    enabled: bool = False
+    act_every_n_ticks: int = 3
+    llm_chance: float = 0.25
+    model_profile: str = ""
+
+
+@dataclass
+class AnimalSeed:
+    """W8 / EM-064 — a seed critter from the top-level `animals:` list. Spawned at
+    world init when `world.animals.enabled`. `personality` is optional flavour fed
+    into the animal's role card (the persona's drives stay species-driven)."""
+    species: str            # cat | dog
+    name: str
+    location: str
+    personality: str = ""
+
+
+@dataclass
 class WorldParams:
     agent_count: int = 5
     tick_interval_seconds: float = 0.5
@@ -223,6 +254,9 @@ class WorldParams:
     buildings: BuildingParams = field(default_factory=BuildingParams)
     spawn: SpawnParams = field(default_factory=SpawnParams)
     cache: CacheParams = field(default_factory=CacheParams)
+    # W8 — LLM-driven chaos animals. Additive; default-disabled so a world.yaml
+    # without an `animals` block behaves exactly as before.
+    animals: AnimalParams = field(default_factory=AnimalParams)
 
 
 @dataclass
@@ -231,6 +265,9 @@ class WorldConfig:
     places: list[PlaceConfig] = field(default_factory=list)
     agents: list[AgentConfig] = field(default_factory=list)
     profiles: list[ModelProfile] = field(default_factory=list)
+    # W8 — seed critters (the cat & dog) from the top-level `animals:` list.
+    # Empty for W5-W7 configs; the loop spawns these at init when animals.enabled.
+    animals: list[AnimalSeed] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -344,6 +381,43 @@ def _parse_cache(raw: dict | None) -> CacheParams:
     )
 
 
+def _parse_animals(raw: dict | None) -> AnimalParams:
+    """Parse the optional `world.animals` block. Absent/empty -> disabled defaults
+    (backward-compatible). `model_profile` stays "" when unset; the runtime then
+    falls back to reflex-only (free-scale guarantee)."""
+    if not isinstance(raw, dict):
+        return AnimalParams()
+    d = AnimalParams()
+    return AnimalParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        act_every_n_ticks=max(1, int(raw.get("act_every_n_ticks", d.act_every_n_ticks))),
+        llm_chance=float(raw.get("llm_chance", d.llm_chance)),
+        model_profile=str(raw.get("model_profile", d.model_profile) or ""),
+    )
+
+
+def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
+    """Parse the top-level `animals:` seed list (the cat & dog). Absent -> [].
+    Each entry needs species + name; location defaults to the first place."""
+    out: list[AnimalSeed] = []
+    places = raw.get("places", []) or []
+    default_loc = places[0]["id"] if places and isinstance(places[0], dict) else "plaza"
+    for a in raw.get("animals", []) or []:
+        if not isinstance(a, dict):
+            continue
+        species = str(a.get("species", "")).strip()
+        name = str(a.get("name", "")).strip()
+        if not species or not name:
+            continue
+        out.append(AnimalSeed(
+            species=species,
+            name=name,
+            location=str(a.get("location", default_loc) or default_loc),
+            personality=str(a.get("personality", "")),
+        ))
+    return out
+
+
 def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
     w = raw.get("world", {})
     params = WorldParams(
@@ -368,6 +442,7 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         buildings=_parse_buildings(w.get("buildings")),
         spawn=_parse_spawn(w.get("spawn")),
         cache=_parse_cache(w.get("cache")),
+        animals=_parse_animals(w.get("animals")),
     )
 
     places = [
@@ -431,6 +506,8 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
 
     profiles = _parse_profiles(profiles_raw)
     world_params, places, agents = _parse_world(world_raw)
+    # W8 — top-level `animals:` seed list (separate from world.animals params).
+    animal_seeds = _parse_animal_seeds(world_raw)
 
     # Ensure mock profile always present
     if not any(p.name == "mock" for p in profiles):
@@ -456,4 +533,5 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
         places=places,
         agents=agents,
         profiles=profiles,
+        animals=animal_seeds,
     )

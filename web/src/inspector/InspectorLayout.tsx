@@ -30,6 +30,7 @@ import DecisionTrace from './DecisionTrace';
 import GovernanceHistory from './GovernanceHistory';
 import SocialGraph from './SocialGraph';
 import AWIDashboard from './AWIDashboard';
+import AnimalChaosFeed from './AnimalChaosFeed';
 
 interface InspectorLayoutProps {
   /** Live world projection (run summary strip + agents/profiles/places). */
@@ -120,12 +121,14 @@ export function InspectorLayout({ world, history, mockMode, onSeekTick }: Inspec
           onSeek={handleSeek}
         />
 
-        {/* Four data panels — each re-projects AT currentTick. */}
+        {/* Data panels — each re-projects AT currentTick. The 6th panel (W8) is
+            the Animal Chaos Feed: the magenta critter-mischief stream. */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 auto-rows-fr">
           <DecisionTrace {...panelProps} />
           <GovernanceHistory {...panelProps} />
           <SocialGraph {...panelProps} />
           <AWIDashboard {...panelProps} />
+          <AnimalChaosFeed {...panelProps} />
         </div>
 
         <p className="font-mono text-[10px] text-lab-dim leading-relaxed">

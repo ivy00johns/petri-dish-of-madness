@@ -15,6 +15,7 @@ from dataclasses import asdict, is_dataclass
 
 from .world import World, AgentState
 from ..agents.runtime import AgentRuntime
+from ..animals.runtime import AnimalRuntime
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
 from ..config.loader import WorldConfig
@@ -75,12 +76,22 @@ class TickLoop:
         repo: SQLiteRepository,
         router: Router,
         broadcaster: Callable[[dict], None] | None = None,
+        animal_runtime: AnimalRuntime | None = None,
     ):
         self._world = world
         self._runtime = runtime
         self._repo = repo
         self._router = router
         self._broadcaster = broadcaster or (lambda _: None)
+        # W8 / EM-064 — the chaos layer. Built from the same world+router if not
+        # injected, so existing callers (and the 135 tests) construct unchanged.
+        self._animal_runtime = animal_runtime or AnimalRuntime(world, router)
+        # Tracks the last tick we ran the animal cadence for, so each animal acts
+        # exactly once per `act_every_n_ticks`-aligned tick (idempotent per tick).
+        self._last_animal_tick: int = -1
+        # True once seed animals have been spawned for the current run, so init_run
+        # / the first turn spawn them exactly once.
+        self._animals_spawned: bool = False
 
         self._run_id: int | None = None
         # Correlation id for the turn currently executing. Stamped on every event
@@ -193,6 +204,8 @@ class TickLoop:
         # W7 — clear buildings + governance-spawn outbox on reset.
         self._world.buildings = {}
         self._world.pending_spawn_events = []
+        # W8 — clear animals; the seed critters are re-spawned below.
+        self._world.animals = {}
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0
@@ -218,6 +231,11 @@ class TickLoop:
         for agent in agents:
             self._repo.save_agent(self._run_id, agent, 0)
 
+        # W8 — re-spawn the seed critters for the fresh run (emits animal_spawned).
+        self._animals_spawned = False
+        self._last_animal_tick = -1
+        self._spawn_seed_animals(config)
+
         # Snapshot at tick 0 of the fresh run (structural change: reset).
         self._save_snapshot(0)
 
@@ -231,6 +249,12 @@ class TickLoop:
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)
+
+        # W8 — spawn the seed critters (cat + dog) when animals.enabled, emitting
+        # animal_spawned. Before the tick-0 snapshot so they ride the replay base.
+        self._animals_spawned = False
+        self._last_animal_tick = -1
+        self._spawn_seed_animals(config)
 
         # Snapshot at tick 0 so replay has a base for the very first ticks.
         self._save_snapshot(0)
@@ -304,6 +328,12 @@ class TickLoop:
         # governance-spawn events queued by an admit_agent rule that just passed.
         # Emitted as standalone system events (no turn_id) before this turn's chain.
         self._advance_round_buildings()
+
+        # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
+        # each living animal takes ONE animal turn (mostly zero-LLM reflex). These
+        # are emitted as standalone animal events (no turn_id), separate from the
+        # agent round-robin, before this turn's decision-trace chain.
+        await self._act_animals()
 
         try:
             # 1. turn_start (now persisted + carries turn_id)
@@ -405,6 +435,90 @@ class TickLoop:
             self._broadcast_world_state()
         finally:
             self._current_turn_id = None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # W8 / EM-064 — animal spawning + slow-cadence scheduling
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _animals_cfg(self) -> Any:
+        return getattr(self._world.params, "animals", None)
+
+    def _spawn_seed_animals(self, config: WorldConfig) -> None:
+        """Spawn the seed critters (top-level `animals:` list) when
+        world.params.animals.enabled. Emits an `animal_spawned`
+        (actor_type 'animal') per critter through the normal pipeline + broadcasts a
+        fresh world_state so the cat + dog appear immediately. Idempotent: guarded
+        by `_animals_spawned` so init + the first round don't double-spawn."""
+        cfg = self._animals_cfg()
+        if cfg is None or not getattr(cfg, "enabled", False):
+            self._animals_spawned = True
+            return
+        seeds = getattr(config, "animals", None) or []
+        spawned_any = False
+        for seed in seeds:
+            try:
+                animal = self._world.spawn_animal(
+                    species=seed.species,
+                    name=seed.name,
+                    location=seed.location,
+                    personality=getattr(seed, "personality", ""),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("animal spawn failed for %r: %s", getattr(seed, "name", "?"), exc)
+                continue
+            spawned_any = True
+            self._emit_event({
+                "kind": "animal_spawned",
+                "actor_id": animal.id,
+                "actor_type": "animal",
+                "text": f"{animal.name} the {animal.species} roams into the world.",
+                "payload": {
+                    "animal_id": animal.id,
+                    "species": animal.species,
+                    "name": animal.name,
+                    "location": animal.location,
+                },
+            })
+        self._animals_spawned = True
+        if spawned_any:
+            self._broadcast_world_state()
+
+    async def _act_animals(self) -> None:
+        """Slow-cadence animal scheduling (separate from the agent round-robin).
+        Every world.params.animals.act_every_n_ticks ticks, each LIVING animal takes
+        ONE animal turn via AnimalRuntime.act; its event(s) are emitted through the
+        existing _emit_event path (already stamped actor_type 'animal' + is_chaotic)
+        and pushed to agent memories so nearby agents witness the chaos. Runs at
+        most once per tick (idempotent via _last_animal_tick). NEVER crashes the
+        loop — a per-animal failure is logged and skipped."""
+        cfg = self._animals_cfg()
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return
+        tick = self._world.tick
+        if tick == self._last_animal_tick:
+            return
+        every = max(1, int(getattr(cfg, "act_every_n_ticks", 3)))
+        if tick % every != 0:
+            return
+        self._last_animal_tick = tick
+
+        animals = self._world.living_animals()
+        if not animals:
+            return
+        acted = False
+        # Stable order so replay is reproducible.
+        for animal in sorted(animals, key=lambda a: a.id):
+            try:
+                events = await self._animal_runtime.act(animal, self._world, tick)
+            except Exception as exc:  # pragma: no cover - defensive; act() shouldn't raise
+                log.warning("animal act failed for %s: %s", animal.id, exc)
+                continue
+            for evt in events or []:
+                self._emit_event(evt)
+                self._runtime.push_event({**evt, "tick": tick})
+            acted = True
+        if acted:
+            self._broadcast_world_state()
 
     def _advance_round_buildings(self) -> None:
         """W7 per-round hook. Runs once per round (guarded by world.round):
@@ -577,6 +691,10 @@ class TickLoop:
             "profile_color": evt.get("profile_color"),
             "turn_id": evt.get("turn_id", self._current_turn_id),
             "sim_time": self._sim_time(tick),
+            # W8 — the chaos flag (events.schema.json `is_chaotic`). Carried only
+            # when the event set it (animal events), null otherwise — additive, so
+            # agent/system events are unchanged.
+            "is_chaotic": evt.get("is_chaotic"),
             "text": evt.get("text", ""),
             "payload": evt.get("payload", {}),
             "ts": datetime.now(timezone.utc).isoformat(),

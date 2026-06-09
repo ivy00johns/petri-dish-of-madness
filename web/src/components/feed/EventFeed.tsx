@@ -36,6 +36,10 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   model_reassigned: '⇄',
   random_event:     '⊕',
   control:          '⏏',
+  // Animal chaos layer (W8) — critter glyphs so the cat/dog read at a glance.
+  animal_spawned:   '🐾',
+  animal_action:    '🐾',
+  animal_died:      '🐾',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
   // category so these don't flood the live feed.
   perceived:        '◌',
@@ -58,6 +62,26 @@ const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   control:          '#5a5a72',
 };
 
+// W8 — the animal chaos magenta, referenced as the shared --marker-animal token
+// (declared in inspector-tokens.css; the SAME magenta the chaos panel + replay
+// timeline + 3D critter accent use), so an animal event reads as one color
+// everywhere. Animal events ALWAYS use this border regardless of any model
+// profile_color, so the critters pop out. It's a dynamic var() reference (the
+// established ReplayScrubber/GovernanceHistory pattern) → design-token-guard
+// clean. Animal events carry profile:null, so this never hits the hex-only
+// alpha-append profile-badge path below.
+const ANIMAL_MAGENTA = 'var(--marker-animal)';
+
+/** True when an event belongs to the animal chaos channel (W8). */
+function isAnimalEvent(e: WorldEvent): boolean {
+  return (
+    e.actor_type === 'animal' ||
+    e.kind === 'animal_spawned' ||
+    e.kind === 'animal_action' ||
+    e.kind === 'animal_died'
+  );
+}
+
 // ── Filter categories ─────────────────────────────────────────────────────────
 // Every EventKind maps to exactly one category so nothing is orphaned.
 interface FeedCategory {
@@ -74,6 +98,9 @@ const CATEGORIES: FeedCategory[] = [
   { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'conflict', 'agent_died', 'agent_spawned'] },
   { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
   { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory'] },
+  // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
+  // into Trace, so the default-muted trace chain never hides the critters.
+  { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
   { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure'] },
   // Decision-trace chain (event-log.md §3). DEFAULT-MUTED: these are the
   // inspector's substrate, not live-feed reading material. Dissect them in the
@@ -116,9 +143,20 @@ interface FeedEntryProps {
 }
 
 function FeedEntry({ event, isNew }: FeedEntryProps) {
-  const color = event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? '#3a3a50';
-  const icon = KIND_ICON[event.kind] ?? '·';
-  const hasTip = event.kind === 'agent_action' && event.thought;
+  // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
+  // no model profile_color, and we want them to pop out of the human-agent feed).
+  const animal = isAnimalEvent(event);
+  const color = animal
+    ? ANIMAL_MAGENTA
+    : event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? '#3a3a50';
+  const icon = animal ? '🐾' : KIND_ICON[event.kind] ?? '·';
+  // Surface the animal's in-character thought (or any agent_action thought) on hover.
+  const tip = animal
+    ? (typeof event.payload?.animal_thought === 'string' ? event.payload.animal_thought : event.thought)
+    : event.kind === 'agent_action'
+      ? event.thought
+      : undefined;
+  const hasTip = Boolean(tip);
 
   return (
     <div
@@ -142,11 +180,11 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
           {event.text ?? `[${event.kind}]`}
         </span>
 
-        {/* Thought tooltip */}
+        {/* Thought tooltip (agent reasoning, or an animal's in-character thought) */}
         {hasTip && (
           <div className="lab-tooltip bottom-full left-0 mb-1 w-56">
-            <span className="text-lab-muted">thought: </span>
-            <span className="text-lab-text">{event.thought}</span>
+            <span className="text-lab-muted">{animal ? 'critter: ' : 'thought: '}</span>
+            <span className="text-lab-text">{tip}</span>
           </div>
         )}
       </div>

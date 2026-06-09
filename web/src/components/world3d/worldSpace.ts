@@ -119,6 +119,42 @@ export function buildingStyle(kind: string): BuildingStyle {
 }
 
 /**
+ * Material palette for a W8 Animal, keyed by `species`. Warm low-poly tints —
+ * like BUILDING_STYLES these are WebGL material colors (THREE.Color), explicitly
+ * OUTSIDE the CSS design-token system (the GPU scene owns its warm palette;
+ * design-token-guard governs DOM/CSS only). A chaotic animal additionally gets a
+ * magenta accent glow applied in the Critter component (the chaos-feed magenta,
+ * mirrored from --marker-animal so the registers agree).
+ *
+ * `body`/`belly`/`accent` finish the critter; `tag` is the floating-label suffix.
+ */
+export interface AnimalStyle {
+  body: string;
+  belly: string;
+  accent: string;
+  tag: string;
+}
+
+export const ANIMAL_STYLES: Record<string, AnimalStyle> = {
+  cat: { body: '#9a8c7a', belly: '#f1e6d4', accent: '#5b4a36', tag: 'cat' },
+  dog: { body: '#c79a5b', belly: '#f3e2c0', accent: '#8a6b3a', tag: 'dog' },
+};
+
+/** Resolve an Animal style by species, defaulting to the cat tint. */
+export function animalStyle(species: string): AnimalStyle {
+  return ANIMAL_STYLES[species] ?? ANIMAL_STYLES.cat;
+}
+
+/**
+ * The chaos magenta for an animal accent (chaotic critters + chaos-feed
+ * register). Mirrors --marker-animal in inspector-tokens.css so the 3D accent
+ * and the 2D feed/timeline read as the SAME magenta. This is a WebGL material
+ * color (the 3D scene's own palette), kept in lockstep with the DOM token by
+ * intent rather than by import.
+ */
+export const ANIMAL_CHAOS_MAGENTA = '#d957d9';
+
+/**
  * A satellite world position for a structure that sits NEAR (not on top of) a
  * place's structure. Buildings ring the place center on a stable angle derived
  * from the building id, so two structures at the same place don't overlap.

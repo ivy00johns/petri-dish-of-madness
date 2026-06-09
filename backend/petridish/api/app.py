@@ -419,6 +419,72 @@ async def get_buildings():
     return out
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# W8 / EM-064 — animals (chaos layer). GET lists the cat + dog (also present in
+# world_state.animals); POST spawns one ad-hoc (god-mode), W6 spawn-style.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/animals")
+async def get_animals():
+    """List animals with state (W8 EM-064). Also present in world_state.animals.
+    Empty-200 when there is no active run / no animals — never 500 (matches the
+    W6/W7 read-endpoint style)."""
+    if _world is None:
+        return []
+    store = getattr(_world, "animals", None)
+    if not isinstance(store, dict):
+        return []
+    out = []
+    for a in store.values():
+        to_dict = getattr(a, "to_dict", None)
+        if callable(to_dict):
+            out.append(to_dict())
+        elif isinstance(a, dict):
+            out.append(a)
+    return out
+
+
+class SpawnAnimalBody(BaseModel):
+    species: str            # cat | dog
+    name: str
+    location: str = "plaza"
+    personality: str = ""
+
+
+@app.post("/api/animals")
+async def spawn_animal_endpoint(body: SpawnAnimalBody, response: Response):
+    """Spawn an animal immediately (god-mode), emitting animal_spawned. Animals
+    have no credits (invariant 7) and are NOT in the agent round-robin — they act
+    on the slow animal cadence."""
+    if _world is None:
+        raise HTTPException(503, "Not initialized")
+    if body.species not in ("cat", "dog"):
+        raise HTTPException(400, f"Unknown species: {body.species!r} (cat|dog)")
+    animal = _world.spawn_animal(
+        species=body.species,
+        name=body.name,
+        location=body.location,
+        personality=body.personality,
+    )
+    if _loop:
+        _loop._emit_event({
+            "kind": "animal_spawned",
+            "actor_id": animal.id,
+            "actor_type": "animal",
+            "text": f"{animal.name} the {animal.species} appears.",
+            "payload": {
+                "animal_id": animal.id,
+                "species": animal.species,
+                "name": animal.name,
+                "location": animal.location,
+                "method": "god",
+            },
+        })
+        _loop._broadcast_world_state()
+    response.status_code = 201
+    return {"status": "ok", "animal_id": animal.id}
+
+
 @app.delete("/api/agents/{agent_id}")
 async def kill_agent(agent_id: str):
     if _world is None:

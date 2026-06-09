@@ -71,6 +71,27 @@ export interface Building {
   function: string;             // utility while operational, e.g. "+forage" | "+energy" | "voting"
 }
 
+// ============================================================
+// Animal (W8) — match contracts/world-model.md §W8. Animals are a DISTINCT
+// entity type (actor_type:"animal"), NOT human agents: own persona, looser
+// action set, slow cadence, own logging channel. They share the world
+// mechanically (places, can damage buildings) but have NO credits account
+// (invariant 7). They live in world.animals; world_state gains `animals: [Animal]`.
+// Rendered as a roaming cat + dog in the 3D village (species-shaped, tinted).
+// ============================================================
+
+export type AnimalSpecies = 'cat' | 'dog';
+
+export interface Animal {
+  id: string;
+  species: AnimalSpecies;
+  name: string;
+  location: string;             // place id
+  energy: number;               // 0..100
+  mood: string;                 // short free text
+  alive: boolean;
+}
+
 export type RuleEffect = 'ban_stealing' | 'ubi' | 'recharge_subsidy' | 'work_bonus';
 export type RuleStatus = 'proposed' | 'active' | 'rejected';
 
@@ -110,6 +131,9 @@ export interface WorldState {
   // W7: structures/projects rendered in the 3D village by `status`. Optional so
   // a W5/W6 backend (or a snapshot predating buildings) stays valid.
   buildings?: Building[];
+  // W8: the roaming chaos critters (cat + dog). Optional so a pre-W8 backend (or
+  // a snapshot predating animals) stays valid; the 3D village renders each one.
+  animals?: Animal[];
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -135,6 +159,11 @@ export type EventKind =
   | 'model_reassigned'
   | 'random_event'
   | 'control'
+  // Animal chaos layer (W8 / EM-064-065). Distinct actor_type:"animal" events;
+  // surfaced MAGENTA in the Animal Chaos Feed + the main feed + replay markers.
+  | 'animal_spawned'
+  | 'animal_action'
+  | 'animal_died'
   // Decision-trace chain (event-log.md §3) — one linked chain per agent turn.
   | 'perceived'
   | 'memory_retrieved'
@@ -166,6 +195,9 @@ export interface WorldEvent {
   turn_id?: string | null;
   actor_type?: ActorType | null;
   sim_time?: number | null;
+  // W8 (EM-065) — true when an animal invoked a crime/economy/structure-targeting
+  // or otherwise low-prior action. Drives the magenta Animal Chaos Feed surfacing.
+  is_chaotic?: boolean | null;
   // UI-only: thought from payload
   thought?: string;
 }

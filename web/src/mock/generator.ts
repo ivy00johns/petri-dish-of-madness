@@ -23,6 +23,7 @@ import type {
   WorldState,
   WorldEvent,
   Agent,
+  Animal,
   Place,
   ModelProfile,
   Rule,
@@ -94,6 +95,17 @@ const ABANDON_AFTER_TICKS = 40;   // no fund/build activity while not operationa
 
 let buildings: Building[] = [];
 let buildingCounter = 0;
+
+// ── Animals (W8) — the seed cat (Mochi) + dog (Biscuit) from config/world.yaml ─
+// Animals are a distinct actor_type:"animal" entity: NO credits account (invariant
+// 7), slow cadence, an under-constrained action set. In mock mode they roam and
+// emit a stream of animal_action events — including at least one chaotic one (the
+// cat commits arson / the dog chases an agent) — so the chaos feed + 3D + replay
+// timeline all show animals offline with no backend.
+let animals: Animal[] = [
+  { id: 'mochi',   species: 'cat', name: 'Mochi',   location: 'plaza',   energy: 88, mood: 'aloof',     alive: true },
+  { id: 'biscuit', species: 'dog', name: 'Biscuit', location: 'commons', energy: 92, mood: 'excitable', alive: true },
+];
 
 // A small library of buildable projects (kind + funds + function + cost).
 const PROJECT_BLUEPRINTS: Array<{ name: string; kind: string; funds: number; fn: string }> = [
@@ -716,6 +728,194 @@ function seedBuildings() {
   buildings.push(house);
 }
 
+// ── Animal lifecycle (W8) ─────────────────────────────────────────────────────
+//
+// The cat & dog act on a SLOW cadence (every ACT_EVERY_N_TICKS, mirroring
+// animals.act_every_n_ticks). On an acted tick we roll-for-activity: most ticks
+// are a cheap reflex micro-behavior, occasionally (LLM_CHANCE) an in-character
+// "LLM decision" with an animal_thought + an under-constrained escalation. A
+// CHAOTIC action (arson / steal_food / knocking a building over) flips
+// is_chaotic so it lights up magenta in the chaos feed + 3D + replay timeline.
+// Animals NEVER touch credits (invariant 7) and reuse the W7 building state
+// machine for arson (invariant 8).
+
+const ANIMAL_ACT_EVERY_N_TICKS = 3;   // config animals.act_every_n_ticks
+const ANIMAL_LLM_CHANCE = 0.25;       // config animals.llm_chance
+
+/** Build an animal event row (actor_type:"animal", with the is_chaotic flag). */
+function emitAnimal(o: {
+  kind: EventKind;
+  animal: Animal;
+  target?: Agent | Animal | null;
+  text: string;
+  thought?: string;
+  action?: string;
+  chaotic?: boolean;
+  payload?: Record<string, unknown>;
+  turnId: string;
+}): WorldEvent {
+  return {
+    type: 'event',
+    seq: nextSeq(),
+    tick,
+    kind: o.kind,
+    actor_id: o.animal.id,
+    target_id: o.target?.id ?? null,
+    profile: null,
+    profile_color: null,
+    text: o.text,
+    payload: {
+      species: o.animal.species,
+      ...(o.action ? { action: o.action } : {}),
+      ...(o.thought ? { animal_thought: o.thought } : {}),
+      ...(o.payload ?? {}),
+    },
+    ts: new Date().toISOString(),
+    turn_id: o.turnId,
+    actor_type: 'animal',
+    sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+    is_chaotic: o.chaotic ?? false,
+    thought: o.thought,
+  };
+}
+
+// In-character reflex micro-behaviors (NO escalation; not chaotic). Weighted by
+// being listed multiple times implicitly via random pick.
+interface AnimalReflex {
+  action: string;
+  cat: string;   // line for the cat
+  dog: string;   // line for the dog
+}
+
+const ANIMAL_REFLEXES: AnimalReflex[] = [
+  { action: 'wander',         cat: 'Mochi pads silently across the cobbles.',        dog: 'Biscuit trots in a happy loop, sniffing everything.' },
+  { action: 'nap',            cat: 'Mochi finds a sunbeam and melts into it.',       dog: 'Biscuit flops over for an impromptu nap.' },
+  { action: 'scratch',        cat: 'Mochi sharpens claws on a fencepost.',           dog: 'Biscuit scratches an itch with great enthusiasm.' },
+  { action: 'mark_territory', cat: 'Mochi rubs a corner, claiming it forever.',      dog: 'Biscuit marks the nearest post as Officially His.' },
+  { action: 'pounce',         cat: 'Mochi pounces on a leaf with lethal focus.',     dog: 'Biscuit pounces at a butterfly and misses.' },
+];
+
+// In-character LLM-decision lines (with an animal_thought). Most are harmless;
+// a couple are CHAOTIC escalations (the under-constrained toolset at work).
+const CAT_THOUGHTS = [
+  'A warm sunbeam. Nothing else matters.',
+  'That human left their lunch unattended. Foolish.',
+  'I shall sit precisely where I am least wanted.',
+];
+const DOG_THOUGHTS = [
+  'BALL? STICK? PERSON? everything is the best thing!',
+  'I will protect the village from that suspicious squirrel.',
+  'Someone said my name. I must find them and love them.',
+];
+
+/**
+ * Advance the animals for one (acted) tick. Returns the events emitted. Slow
+ * cadence + roll-for-activity is enforced by the caller (generateTick).
+ */
+function advanceAnimals(turnId: string): WorldEvent[] {
+  const out: WorldEvent[] = [];
+  const liveAgents = agents.filter((a) => a.alive);
+
+  for (const animal of animals) {
+    if (!animal.alive) continue;
+
+    // Roam: occasionally drift to a new place so the critters cover the map.
+    if (rnd() < 0.25) {
+      animal.location = pick(PLACES).id;
+    }
+    // Animals lose a little energy; they don't recharge via credits.
+    animal.energy = Math.max(0, animal.energy - 1);
+
+    const isCat = animal.species === 'cat';
+
+    // Roll-for-activity: mostly reflex, occasionally an "LLM decision".
+    if (rnd() < ANIMAL_LLM_CHANCE) {
+      // ── LLM-decision tick: in-character thought + (maybe chaotic) action ──
+      const thought = pick(isCat ? CAT_THOUGHTS : DOG_THOUGHTS);
+
+      // The under-constrained escalations the LLM may choose for absurd effect.
+      // The cat leans toward arson / knocking the garden over; the dog chases an
+      // agent or steals a snack. These are the headline chaotic moments.
+      const buildingHere = buildings.find(
+        (b) => b.location === animal.location &&
+          (b.status === 'operational' || b.status === 'under_construction' || b.status === 'damaged'),
+      );
+      const agentHere = liveAgents.find((a) => a.location === animal.location);
+
+      if (isCat && buildingHere && rnd() < 0.5) {
+        // ARSON — reuse the W7 building state machine (invariant 8): health drops,
+        // operational/under_construction → damaged, damaged → destroyed.
+        const from = buildingHere.status;
+        buildingHere.health = Math.max(0, buildingHere.health - 50);
+        buildingHere.status = buildingHere.health <= 0 ? 'destroyed' : 'damaged';
+        buildingHere.condition_label = buildingHere.health <= 0 ? 'ruined' : 'damaged';
+        out.push(emitAnimal({
+          kind: 'animal_action', animal, action: 'arson', chaotic: true, turnId,
+          thought: 'FIRE? no — but the clock tower would look better as kindling.',
+          text: `${animal.name} sets ${buildingHere.name} ablaze! It is now ${buildingHere.status}.`,
+          payload: { building_id: buildingHere.id, crime_kind: 'arson', health: buildingHere.health },
+        }));
+        // Mirror the W7 structure transition so the inspector/3D update too.
+        out.push(emitStructureChange(buildingHere, from, buildingHere.status, 'animal_arson', null, turnId));
+        continue;
+      }
+
+      if (isCat && buildingHere) {
+        // KNOCK_OVER a building — chaotic (structure-targeting), small damage.
+        buildingHere.health = Math.max(0, buildingHere.health - 10);
+        out.push(emitAnimal({
+          kind: 'animal_action', animal, action: 'knock_over', target: null, chaotic: true, turnId,
+          thought: 'That tall wooden thing offends me. I shall knock it over.',
+          text: `${animal.name} knocks part of ${buildingHere.name} clean over.`,
+          payload: { target: buildingHere.id, crime_kind: 'vandalize', health: buildingHere.health },
+        }));
+        continue;
+      }
+
+      if (!isCat && agentHere) {
+        // CHASE an agent — chaotic (low-prior, targets an agent), harmless but funny.
+        out.push(emitAnimal({
+          kind: 'animal_action', animal, action: 'chase', target: agentHere, chaotic: true, turnId,
+          thought: 'BALL? STICK? PERSON? everything is the best thing!',
+          text: `${animal.name} joyfully chases ${agentHere.name} around ${PLACES.find((p) => p.id === animal.location)?.name ?? 'the square'}!`,
+          payload: { target: agentHere.id },
+        }));
+        continue;
+      }
+
+      if (agentHere && rnd() < 0.5) {
+        // STEAL_FOOD from an agent — chaotic, moves NO credits (invariant 7).
+        out.push(emitAnimal({
+          kind: 'animal_action', animal, action: 'steal_food', target: agentHere, chaotic: true, turnId,
+          thought: isCat ? 'That snack is mine now. It was always mine.' : 'SNACK! the floor is lava and the snack is treasure!',
+          text: `${animal.name} snatches a snack right out of ${agentHere.name}'s hand!`,
+          payload: { target: agentHere.id, moves_credits: false },
+        }));
+        continue;
+      }
+
+      // A harmless in-character LLM decision (no escalation): a thoughtful nap.
+      out.push(emitAnimal({
+        kind: 'animal_action', animal, action: isCat ? 'nap' : 'wander', turnId,
+        thought,
+        text: isCat
+          ? `${animal.name} considers the universe, then decides to nap.`
+          : `${animal.name} bounds off to investigate a fascinating smell.`,
+      }));
+      continue;
+    }
+
+    // ── Reflex tick (zero "LLM" cost): a cheap micro-behavior, not chaotic ──
+    const reflex = pick(ANIMAL_REFLEXES);
+    out.push(emitAnimal({
+      kind: 'animal_action', animal, action: reflex.action, turnId,
+      text: isCat ? reflex.cat : reflex.dog,
+    }));
+  }
+
+  return out;
+}
+
 // ── Generator ─────────────────────────────────────────────────────────────────
 
 export function buildInitialWorldState(): WorldState {
@@ -737,6 +937,7 @@ export function buildInitialWorldState(): WorldState {
     rules: [...rules],
     profiles: PROFILES,
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
+    animals: animals.map(a => ({ ...a })),
   };
 }
 
@@ -807,6 +1008,12 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     events.push(...sweepAbandoned(turnId));
   }
 
+  // ── Animal chaos layer (W8): the cat & dog act on a SLOW cadence (every Nth
+  //    tick), most ticks reflex, occasionally a chaotic in-character escalation.
+  if (tick % ANIMAL_ACT_EVERY_N_TICKS === 0) {
+    events.push(...advanceAnimals(turnId));
+  }
+
   // ── Death check ─────────────────────────────────────────────────────────────
   if (actor.energy <= 0) {
     actor.zero_energy_turns++;
@@ -836,6 +1043,7 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     rules: rules.map(r => ({ ...r })),
     profiles: PROFILES,
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
+    animals: animals.map(a => ({ ...a })),
   };
 
   return { state, events };
@@ -910,6 +1118,7 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
     rules: rules.map(r => ({ ...r })),
     profiles: PROFILES,
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
+    animals: animals.map(a => ({ ...a })),
   };
   return { state, events };
 }

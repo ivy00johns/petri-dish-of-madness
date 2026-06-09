@@ -164,6 +164,44 @@ class Building:
         }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# W8 / EM-064 — Animal (chaos-layer entity; actor_type "animal")
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Animal:
+    """A critter (cat | dog) that shares the world mechanically but is framed to
+    the LLM as acting impulsively and IN-CHARACTER, not to optimize. Animals have
+    NO credits account (invariant 7) — a "theft" by the cat moves a snack/❤️, never
+    money. They live in `world.animals`; `to_snapshot()` carries them so the 3D
+    village can render a roaming cat + dog. Acted on a slow cadence by the loop via
+    AnimalRuntime (mostly zero-LLM reflex, occasionally a cheap LLM decision)."""
+    id: str
+    species: str                  # cat | dog
+    name: str
+    location: str                 # place id
+    energy: int = 100             # 0..100
+    mood: str = "content"
+    alive: bool = True
+    created_tick: int = 0
+    # Optional flavour from the seed config, fed into the animal's role card. NOT
+    # part of the contract Animal shape but harmless additive metadata.
+    personality: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "species": self.species,
+            "name": self.name,
+            "location": self.location,
+            "energy": self.energy,
+            "mood": self.mood,
+            "alive": self.alive,
+            "created_tick": self.created_tick,
+        }
+
+
 class World:
     """
     Holds the complete mutable world state.
@@ -177,6 +215,10 @@ class World:
         self.rules: dict[str, RuleState] = {}
         # W7 / EM-061 — buildings (== collective projects). Keyed by building id.
         self.buildings: dict[str, Building] = {}
+        # W8 / EM-064 — chaos-layer animals (actor_type "animal"). Keyed by animal
+        # id. Separate from agents: own persona, own cadence, own (looser) action
+        # set, NO credits account (invariant 7). Not in the agent round-robin.
+        self.animals: dict[str, Animal] = {}
         # W7 / EM-062 — governance-spawn outbox. When an `admit_agent` rule passes,
         # the world spawns the pending agent and parks an `agent_spawned{method:
         # governance}` event here; the runtime/api layer drains it after a vote and
@@ -818,6 +860,28 @@ class World:
                 building, frm, "operational", "repaired", agent.id),
         ]}
 
+    def _damage_building(
+        self, building: Building, amount: int, actor_id: str | None, reason: str
+    ) -> dict:
+        """Shared building-damage path (the W7 state machine, invariant 8). Applies
+        `amount` damage with health CLAMPED to [0,100], flips operational/under_*/
+        planned -> damaged, and damaged -> destroyed at health 0. Returns the
+        structure_state_changed event dict for the transition (or None-state if the
+        status did not change). Caller owns the accompanying domain event (conflict)
+        + any witness-trust effects. Both human arson and animal arson go through
+        here so invariant 8 holds identically for either actor."""
+        frm = building.status
+        # Clamp damage so we can never push health below 0 or above 100 (invariant 8).
+        amount = max(0, int(amount))
+        building.health = max(0, min(100, building.health - amount))
+        building.updated_tick = self.tick
+        if building.health <= 0:
+            building.status = "destroyed"
+        else:
+            building.status = "damaged"
+        return self._structure_state_changed_event(
+            building, frm, building.status, reason, actor_id)
+
     def action_arson(self, agent: AgentState, building_id: str) -> dict:
         """Crime: health -= buildings.arson_damage -> damaged/destroyed. Lowers
         witness trust like steal. Emits conflict + structure_state_changed."""
@@ -830,14 +894,8 @@ class World:
             return self._fail_event(
                 agent.id, "arson", "already destroyed",
                 f"{agent.name} cannot torch {building.name} (already rubble).")
-        frm = building.status
         damage = int(self._bld_param("arson_damage", 50))
-        building.health = max(0, building.health - damage)
-        building.updated_tick = self.tick
-        if building.health <= 0:
-            building.status = "destroyed"
-        else:
-            building.status = "damaged"
+        state_evt = self._damage_building(building, damage, agent.id, "arson")
 
         # Crime: co-located witnesses lose trust in the arsonist (like steal).
         for witness in self.agents_at(building.location):
@@ -858,8 +916,7 @@ class World:
                     "damage": damage,
                 },
             },
-            self._structure_state_changed_event(
-                building, frm, building.status, "arson", agent.id),
+            state_evt,
         ]}
 
     def action_take_offline(self, agent: AgentState, building_id: str) -> dict:
@@ -945,6 +1002,51 @@ class World:
             if agent_id in self._turn_order:
                 self._turn_order.remove(agent_id)
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # W8 / EM-064 — animals (chaos layer). Animals are NOT in the agent
+    # round-robin and have NO credits account (invariant 7).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def spawn_animal(
+        self,
+        species: str,
+        name: str,
+        location: str,
+        personality: str = "",
+    ) -> Animal:
+        """Create an Animal and register it in world.animals. Returns the Animal.
+        Location is clamped to a known place when possible. No credits (invariant 7)."""
+        if location not in self.places and self.places:
+            location = next(iter(self.places))
+        animal_id = f"animal_{name.lower()}_{str(uuid.uuid4())[:6]}"
+        animal = Animal(
+            id=animal_id,
+            species=str(species),
+            name=str(name),
+            location=str(location),
+            energy=int(getattr(self.params, "starting_energy", 100)),
+            created_tick=self.tick,
+            personality=str(personality or ""),
+        )
+        self.animals[animal_id] = animal
+        return animal
+
+    def living_animals(self) -> list[Animal]:
+        return [a for a in self.animals.values() if a.alive]
+
+    def animal_damage_building(self, building_id: str, amount: int) -> dict | None:
+        """World-side entry point for an animal damaging a building (cat/dog arson
+        or a knock_over on a structure). Reuses the SHARED _damage_building path so
+        invariant 8 holds identically to human arson (operational->damaged->
+        destroyed, health clamped 0..100). Animals do NOT alter agent trust (no
+        standing). Returns the structure_state_changed event dict, or None if the
+        building is missing / already destroyed (no-op). actor_id is left None here;
+        AnimalRuntime stamps actor_id/actor_type on the emitted event."""
+        building = self.buildings.get(building_id)
+        if building is None or building.status == "destroyed":
+            return None
+        return self._damage_building(building, amount, None, "animal")
+
     def to_snapshot(self, profile_colors: dict[str, str] | None = None) -> dict:
         pc = profile_colors or {}
         return {
@@ -959,4 +1061,6 @@ class World:
             ],
             "rules": [r.to_dict() for r in self.rules.values()],
             "buildings": [b.to_dict() for b in self.buildings.values()],
+            # W8 — chaos-layer animals; the 3D village renders a roaming cat + dog.
+            "animals": [a.to_dict() for a in self.animals.values()],
         }

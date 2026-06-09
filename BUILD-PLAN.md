@@ -142,3 +142,6 @@ What shipped and when. Append on each wave/milestone close.
 | 2026-05-26 | v1 complete | All waves shipped. Open: EM-043 (FE unit tests, P1) + EM-048 (live 2-model run, awaiting user token) |
 | 2026-06-08 | W4 build | Cozy 3D village (frontend, R4F+drei) + routed-via surfacing (backend) shipped in parallel; wave gate PASS (`tsc -b`+`vite build`, 55 tests) |
 | 2026-06-08 | EM-048 ✅ | Live 3-agent / 3-model FreeLLMAPI run >11 min, 3/3 alive, real chat + passed rule; proxy reroutes surfaced via `X-Routed-Via`. The project goal is met. |
+| 2026-06-08 | W6 instrumentation | EM-053–059 + EM-067 — replay, decision-trace, governance/laws history, social graph, AWI + model-vs-model dashboard; 97 tests + adversarial panel + render-sanity GREEN (`3879d1c`, `d4227cf`) |
+| 2026-06-08 | W7 expanded world | EM-060–063 + EM-068 — buildings/structure state, collective-project pipeline, tiered tools, ad-hoc spawn, decision cache; gate GREEN (`78dadf9`) |
+| 2026-06-09 | W8 chaos animals | EM-064/065 — LLM-driven cat & dog (free-scale: slow cadence, reflex + occasional LLM, reflex-only fallback) + Animal Chaos Feed / `is_chaotic` tagging; suite-integrated `test_w8.py` (6 checks) + full backend suite GREEN |
