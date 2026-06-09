@@ -129,7 +129,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-103 | P2 | W11 | backend | user 2026-06-09 | Legislation-as-architecture guard: agents built a Monument named after a LAW ("Festival Fund Transparency Initiative") alongside a second monument — project/rule cross-contamination. Keep the emergent charm but add semantics: project proposals that duplicate an active/proposed rule's name get steered to governance (or flagged commemorative + linked to the rule); dedupe near-identical monuments. Pairs with EM-087 duplicate-law semantics | open | — |
 | EM-104 | P2 | W11 | frontend | user 2026-06-09 | Collapsible model legend in the controls column (8-profile roster eats vertical space) | open | — |
 
-_Next free ID: EM-105._
+| EM-105 | P2 | W11 | frontend | user 2026-06-09 | Expandable feed column: user-resizable width via drag handle on the feed/world boundary (persisted in localStorage), with sane min/max so the village never collapses; pairs with the EM-096 layout | open | — |
+
+_Next free ID: EM-106._
 
 ## Notes
 
