@@ -33,6 +33,10 @@ export interface Agent {
   mood: string;
   alive: boolean;
   zero_energy_turns: number;
+  // W9 (EM-070) — turns left before death while energy is 0. Optional/null so a
+  // pre-W9 backend (or mock mode) stays valid; the UI shows a death countdown
+  // only when this is a number.
+  turns_until_death?: number | null;
   beliefs: string[];
   relationships: Record<string, Relationship>;
 }
@@ -150,6 +154,11 @@ export type EventKind =
   | 'relationship'
   | 'agent_died'
   | 'agent_spawned'
+  // W9 survival/extinction surfacing (EM-070/071, event-log.md v1.1.0 §4).
+  // agent_starving payload: {energy, turns_until_death, threshold};
+  // world_extinct payload: {tick, last_agent_id, auto_paused}.
+  | 'agent_starving'
+  | 'world_extinct'
   | 'rule_proposed'
   | 'rule_vote'
   | 'rule_passed'

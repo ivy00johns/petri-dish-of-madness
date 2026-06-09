@@ -147,7 +147,7 @@ function ChaosEntry({ event }: ChaosEntryProps) {
 }
 
 export default function AnimalChaosFeed(props: PanelProps) {
-  const { events, currentTick } = props;
+  const { events, currentTick, historyLoading } = props;
 
   // Filter to the animal channel, re-project AT the shared scrub tick (follows
   // the scrubber like every panel), newest-first. The events ref is already
@@ -193,8 +193,10 @@ export default function AnimalChaosFeed(props: PanelProps) {
       <div className="flex-1 min-h-0 overflow-y-auto">
         {chaos.length === 0 ? (
           <div className="flex items-center justify-center h-24 px-4 text-center">
-            <span className="font-mono text-[10px] text-lab-dim leading-relaxed">
-              No critter mischief yet — the cat and dog haven’t acted by this tick.
+            <span className="font-mono text-[10px] text-lab-muted leading-relaxed">
+              {historyLoading === true && events.length === 0
+                ? 'History loading…'
+                : 'No critter mischief at this tick — the cat and dog haven’t acted yet.'}
             </span>
           </div>
         ) : (

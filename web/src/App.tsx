@@ -17,7 +17,11 @@ import { useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { useSimulation } from './hooks/useSimulation';
 import type { SimulationState, SimulationControls } from './hooks/useSimulation';
+import { useRoutingHealth } from './hooks/useRoutingHealth';
+import type { RoutingHealth } from './hooks/useRoutingHealth';
 import { Header } from './components/Header';
+import { RoutingDegradedBanner } from './components/RoutingDegradedBanner';
+import { ExtinctionBanner } from './components/ExtinctionBanner';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
@@ -32,6 +36,9 @@ type Sim = SimulationState & SimulationControls;
 export default function App() {
   const sim = useSimulation();
   const { world, connected, mockMode } = sim;
+  // EM-072: detect a silently-collapsed model A/B from live data (assigned
+  // profiles vs the routed_via models actually answering).
+  const routingHealth = useRoutingHealth(world, sim.history);
 
   return (
     <div className="flex flex-col h-screen bg-lab-bg text-lab-text overflow-hidden">
@@ -47,7 +54,7 @@ export default function App() {
       {/* ── Routed body ─────────────────────────────────────────── */}
       <Routes>
         {/* "/" keeps the 3D village as the default live view. */}
-        <Route path="/" element={<LiveLayout sim={sim} />} />
+        <Route path="/" element={<LiveLayout sim={sim} routingHealth={routingHealth} />} />
         {/*
           "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's
           <Canvas>) is NOT rendered on this route, so React/R3F unmount the
@@ -56,7 +63,15 @@ export default function App() {
         <Route
           path="/inspector"
           element={
-            <InspectorLayout world={sim.world} history={sim.history} mockMode={sim.mockMode} />
+            <InspectorLayout
+              world={sim.world}
+              history={sim.history}
+              historyLoading={sim.historyLoading}
+              historyTruncated={sim.historyTruncated}
+              mockMode={sim.mockMode}
+              onSeekTick={sim.seekTick}
+              routingHealth={routingHealth}
+            />
           }
         />
       </Routes>
@@ -72,12 +87,19 @@ export default function App() {
  * Center: World map (CozyWorld 3D default, top ~55%) + Event feed (bottom ~45%)
  * Right:  Controls + Model legend (scrollable)
  */
-function LiveLayout({ sim }: { sim: Sim }) {
+function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHealth }) {
   const { world, events } = sim;
   const [view, setView] = useState<WorldView>('village');
 
   return (
     <>
+      {/* EM-072: dismissible warning when every profile routes to one model. */}
+      <RoutingDegradedBanner health={routingHealth} />
+
+      {/* EM-071: extinction banner + end-of-run summary (computed from the
+          deeper history so deaths/rules/crimes survive the 200-cap feed). */}
+      <ExtinctionBanner world={world} events={sim.history} />
+
       {/* ── Three-column body ──────────────────────────────────── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* LEFT — Agent panels */}

@@ -55,3 +55,4 @@ frontend-inspector v1.1.0, events.schema x-known-kinds (+`agent_starving`, `worl
 
 | Date | Gate | Result |
 |---|---|---|
+| 2026-06-09 | Wave gate (impl) | GREEN — pytest 149/149; `tsc -b` + `vite build` clean; diff-scoped token check clean (hex only in token declarations; inline styles are var()/data-driven) |

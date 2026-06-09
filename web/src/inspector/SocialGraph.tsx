@@ -50,7 +50,7 @@ const COOLDOWN_TICKS = 120; // bounded settle, then the sim freezes (battery).
 const NODE_REL_SIZE = 5;
 
 export default function SocialGraph(props: PanelProps) {
-  const { events, agents, currentTick } = props;
+  const { events, agents, currentTick, historyLoading } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<ForceGraphMethods<GraphNode, GraphLink>>();
@@ -130,10 +130,16 @@ export default function SocialGraph(props: PanelProps) {
   }, []);
 
   // Pause the render loop on unmount (leak-free, like the annex demands).
+  // Audit C5: the ref MUST be read INSIDE the cleanup — at effect setup
+  // fgRef.current is still undefined (the graph mounts after), so capturing it
+  // there made the pause a no-op and the rAF loop survived route unmount.
   useEffect(() => {
-    const fg = fgRef.current;
     return () => {
-      fg?.pauseAnimation();
+      // Intentional: fgRef holds the ForceGraph instance (assigned AFTER this
+      // effect runs), not a React-rendered node — reading it at teardown IS
+      // the fix; capturing it at setup is the C5 bug.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      fgRef.current?.pauseAnimation();
     };
   }, []);
 
@@ -316,7 +322,7 @@ export default function SocialGraph(props: PanelProps) {
             enablePanInteraction
           />
         ) : (
-          <EmptyState nodeCount={nodeCount} sized={size.w > 0} />
+          <EmptyState nodeCount={nodeCount} sized={size.w > 0} loading={historyLoading === true} />
         )}
 
         {/* A subtle "frozen" affordance once the sim settles (battery proof). */}
@@ -338,16 +344,28 @@ export default function SocialGraph(props: PanelProps) {
 
 // ── empty / degenerate states (0–1 nodes, or not yet measured) ────────────────
 
-function EmptyState({ nodeCount, sized }: { nodeCount: number; sized: boolean }) {
+function EmptyState({
+  nodeCount,
+  sized,
+  loading,
+}: {
+  nodeCount: number;
+  sized: boolean;
+  loading: boolean;
+}) {
   const msg = !sized
     ? 'sizing…'
-    : nodeCount === 0
-      ? 'no agents in this run yet'
-      : 'one lone agent — no relationships to graph';
+    : loading && nodeCount === 0
+      ? 'history loading…'
+      : nodeCount === 0
+        ? 'no agents in this run yet'
+        : 'one lone agent — no relationships to graph';
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center">
-      <span className="font-mono text-[10px] uppercase tracking-widest text-lab-dim">{msg}</span>
-      {sized && nodeCount <= 1 && (
+      <span className="font-mono text-[11px] uppercase tracking-widest text-lab-muted border border-lab-border px-2 py-0.5">
+        {msg}
+      </span>
+      {sized && nodeCount <= 1 && !loading && (
         <p className="font-mono text-[10px] text-lab-muted leading-relaxed max-w-prose">
           The social web fills in as agents form ties — allies, rivals, gifts and conflicts.
           Scrub forward, or wait for the run to populate.

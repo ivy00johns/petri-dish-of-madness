@@ -64,7 +64,7 @@ const OUTCOME_CLASS: Record<NonNullable<TurnTrace['outcome']>, string> = {
   failed: 'border-lab-danger text-lab-danger bg-lab-danger/10',
 };
 
-export default function DecisionTrace({ events, agents, profiles, currentTick }: PanelProps) {
+export default function DecisionTrace({ events, agents, profiles, currentTick, historyLoading }: PanelProps) {
   // Agent id → display name (the trace shows names, not raw ids).
   const agentName = useMemo(() => {
     const m = new Map<string, string>();
@@ -109,10 +109,17 @@ export default function DecisionTrace({ events, agents, profiles, currentTick }:
       </div>
 
       {turns.length === 0 ? (
-        <EmptyState
-          title="No turns recorded yet"
-          detail="Each agent turn emits a linked span chain (perceived → llm_call → reasoning → action). They'll appear here as the run advances."
-        />
+        historyLoading === true && events.length === 0 ? (
+          <EmptyState
+            title="History loading…"
+            detail="Backfilling the run from the event log — recent turns appear as pages arrive."
+          />
+        ) : (
+          <EmptyState
+            title="No turns at this tick"
+            detail="Each agent turn emits a linked span chain (perceived → llm_call → reasoning → action). Scrub forward, or wait for the run to advance."
+          />
+        )
       ) : (
         <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,11rem)_minmax(0,1fr)]">
           {/* ── LEFT: recent-turn list ─────────────────────────────────────── */}

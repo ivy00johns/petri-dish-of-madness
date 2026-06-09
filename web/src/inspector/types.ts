@@ -20,9 +20,17 @@ import type { Agent, ModelProfile, WorldEvent, EventKind } from '../types';
 // Every panel (DecisionTrace, GovernanceHistory, SocialGraph, AWIDashboard,
 // and ReplayScrubber's siblings) is mounted with EXACTLY this prop bag.
 export interface PanelProps {
-  /** Rolling event history (newest-first), the panels' primary data source. */
+  /**
+   * Event history (newest-first), the panels' primary data source. While
+   * scrubbed (not pinned to live) InspectorLayout passes a SCOPED slice
+   * (events with tick <= currentTick) so panels never bleed live-edge data
+   * into a replayed view (audit C8, frontend-inspector.md v1.1.0 §3).
+   */
   events: WorldEvent[];
-  /** Live agents (the social-graph nodes + analytics population). */
+  /**
+   * Agents (the social-graph nodes + analytics population). While scrubbed,
+   * `alive` is re-projected at the scrub tick from death events (audit C8).
+   */
   agents: Agent[];
   /** Model profiles — the legend, and the color-by-model source. */
   profiles: ModelProfile[];
@@ -30,6 +38,12 @@ export interface PanelProps {
   currentTick: number;
   /** Latest tick present in `events` (the scrubber's right edge). */
   maxTick: number;
+  /**
+   * True while the live-mode /api/events backfill is still paging in (EM-069).
+   * Panels with no data yet label it "history loading…" instead of an empty
+   * claim like "no events". Optional: absent ⇒ not loading (mock mode).
+   */
+  historyLoading?: boolean;
 }
 
 // ── Decision trace (EM-056) ──────────────────────────────────────────────────
@@ -193,8 +207,12 @@ export interface AwiByModel {
   dead: number;
   crimes: number;
   gives: number;
+  /** Proposals BY this model's agents. */
   proposals: number;
+  /** Of this model's proposals, how many passed (audit C6: same population as `rejected`). */
   passed: number;
+  /** Of this model's proposals, how many were rejected. */
+  rejected: number;
   creditShare: number;
 }
 

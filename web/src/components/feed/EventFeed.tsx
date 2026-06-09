@@ -28,6 +28,10 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   relationship:     '♡',
   agent_died:       '✦',
   agent_spawned:    '✧',
+  // W9 survival/extinction surfacing (EM-070/071): starvation warnings read as
+  // alarms, extinction as the run's full stop.
+  agent_starving:   '⚠',
+  world_extinct:    '☠',
   rule_proposed:    '⚖',
   rule_vote:        '☑',
   rule_passed:      '★',
@@ -96,7 +100,7 @@ const CATEGORIES: FeedCategory[] = [
   { key: 'chat',    label: 'Chat',    icon: '◉', kinds: ['agent_speech'] },
   { key: 'actions', label: 'Actions', icon: '◆', kinds: ['agent_action', 'agent_moved'] },
   { key: 'economy', label: 'Economy', icon: '¢', kinds: ['economy'] },
-  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'conflict', 'agent_died', 'agent_spawned'] },
+  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'conflict', 'agent_died', 'agent_spawned', 'agent_starving', 'world_extinct'] },
   { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
   { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
@@ -149,9 +153,22 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
   // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
   // no model profile_color, and we want them to pop out of the human-agent feed).
   const animal = isAnimalEvent(event);
+  // W9 (EM-070/071): starvation warnings ALWAYS read in the warn register and
+  // extinction in the danger register — even though these events carry a model
+  // profile_color, a survival alarm must not blend into the agent's color.
+  const starving = event.kind === 'agent_starving';
+  const extinct = event.kind === 'world_extinct';
   const color = animal
     ? ANIMAL_MAGENTA
-    : event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? '#3a3a50';
+    : starving
+      ? 'var(--lab-warn)'
+      : extinct
+        ? 'var(--lab-danger)'
+        : event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? 'var(--marker-trace)';
+  // The hover profile badge alpha-appends hex digits, so it only renders with a
+  // hex source (the agent's data-driven profile color / a kind fallback) — the
+  // var()-register warning kinds keep the agent's own color on the badge.
+  const badgeColor = event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? null;
   const icon = animal ? '🐾' : KIND_ICON[event.kind] ?? '·';
   // Surface the animal's in-character thought (or any agent_action thought) on hover.
   const tip = animal
@@ -179,7 +196,15 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
 
       {/* Content */}
       <div className="flex-1 min-w-0">
-        <span className="font-mono text-xs text-lab-text leading-relaxed break-words">
+        <span
+          className={`font-mono text-xs leading-relaxed break-words ${
+            starving
+              ? 'text-lab-warn font-semibold'
+              : extinct
+                ? 'text-lab-danger font-bold uppercase tracking-wide'
+                : 'text-lab-text'
+          }`}
+        >
           {event.text ?? `[${event.kind}]`}
         </span>
 
@@ -208,11 +233,15 @@ function FeedEntry({ event, isNew }: FeedEntryProps) {
         )}
       </div>
 
-      {/* Profile badge */}
-      {event.profile && (
+      {/* Profile badge (hex-only path: badgeColor is alpha-appended) */}
+      {event.profile && badgeColor && badgeColor.startsWith('#') && (
         <span
           className="absolute top-1 right-1 font-mono text-[8px] px-1 py-px rounded-sm hidden group-hover:block"
-          style={{ backgroundColor: color + '30', color, border: `1px solid ${color}40` }}
+          style={{
+            backgroundColor: badgeColor + '30',
+            color: badgeColor,
+            border: `1px solid ${badgeColor}40`,
+          }}
         >
           {event.profile}
         </span>

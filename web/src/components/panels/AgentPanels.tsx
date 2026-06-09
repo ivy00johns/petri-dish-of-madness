@@ -15,20 +15,30 @@ interface AgentCardProps {
   world: WorldState;
 }
 
+// Energy level below which the bar reads as a crisis (mirrors the backend's
+// world.starving_warn_threshold default, EM-070).
+const ENERGY_WARN_THRESHOLD = 25;
+
 function EnergyBar({ value, color }: { value: number; color: string }) {
   const pct = Math.max(0, Math.min(100, value));
-  const barColor = pct > 60 ? color : pct > 25 ? '#ff9900' : '#ff3333';
+  // Warn/danger registers via the declared lab tokens (inspector-tokens.css);
+  // `color` itself is the data-driven model color.
+  const barColor =
+    pct > 60 ? color : pct > ENERGY_WARN_THRESHOLD ? 'var(--lab-warn)' : 'var(--lab-danger)';
+  // EM-070: below the warn threshold the crisis should be impossible to miss —
+  // the bar (and at 0, the readout) pulses via the existing Tailwind token.
+  const critical = pct <= ENERGY_WARN_THRESHOLD;
 
   return (
     <div className="flex items-center gap-1.5">
       <div className="energy-bar-track flex-1 h-1.5">
         <div
-          className="h-full rounded-full transition-all duration-500"
+          className={`h-full rounded-full transition-all duration-500 ${critical ? 'animate-pulse' : ''}`}
           style={{ width: `${pct}%`, backgroundColor: barColor }}
         />
       </div>
       <span
-        className="font-mono text-[10px] tabular-nums w-7 text-right"
+        className={`font-mono text-[10px] tabular-nums w-7 text-right ${pct <= 0 ? 'animate-pulse font-bold' : ''}`}
         style={{ color: barColor }}
       >
         {Math.round(pct)}
@@ -65,6 +75,12 @@ function RelationshipTag({
 function AgentCard({ agent, world }: AgentCardProps) {
   const color = agent.profile_color ?? '#888888';
   const isAlive = agent.alive;
+  // EM-070: the death countdown. The W9 backend carries turns_until_death on
+  // world_state agents while energy is 0; absent (older backend / mock) the
+  // badge simply never renders.
+  const turnsLeft = agent.turns_until_death;
+  const dying =
+    isAlive && agent.energy <= 0 && typeof turnsLeft === 'number' && turnsLeft >= 0;
 
   // Top 3 relationships sorted by |trust| desc
   const topRels = Object.entries(agent.relationships)
@@ -99,6 +115,14 @@ function AgentCard({ agent, world }: AgentCardProps) {
           {!isAlive && (
             <span className="font-mono text-[9px] text-lab-danger border border-lab-danger px-1">
               DEAD
+            </span>
+          )}
+          {dying && (
+            <span
+              className="font-mono text-[9px] font-bold text-lab-danger border border-lab-danger bg-lab-danger/15 px-1 animate-pulse whitespace-nowrap"
+              title="Energy is 0 — this villager dies unless they recharge in time."
+            >
+              DYING — {turnsLeft} TURN{turnsLeft === 1 ? '' : 'S'} LEFT
             </span>
           )}
         </div>

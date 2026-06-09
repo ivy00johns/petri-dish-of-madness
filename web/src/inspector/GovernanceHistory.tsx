@@ -81,7 +81,7 @@ function isClockTower(entry: GovTimelineEntry): boolean {
 }
 
 export default function GovernanceHistory(props: PanelProps) {
-  const { events, agents, currentTick } = props;
+  const { events, agents, currentTick, historyLoading } = props;
 
   // Re-project at the shared scrub tick: only legislate over what had happened
   // by `currentTick` (scrub once, every panel follows — the inspector contract).
@@ -138,7 +138,7 @@ export default function GovernanceHistory(props: PanelProps) {
 
       {/* The legislative timeline */}
       {timeline.length === 0 ? (
-        <EmptyState />
+        <EmptyState loading={historyLoading === true && events.length === 0} />
       ) : (
         <ol className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-3">
           {timeline.map((entry) => (
@@ -484,24 +484,29 @@ function DownstreamLink({
 
 // ── Empty / labeled state ────────────────────────────────────────────────────
 
-function EmptyState() {
+// D2: the old "ASSEMBLY IDLE" chip was a dim void — the empty state now leads
+// with a bright, bordered label and explains WHERE legislation comes from.
+function EmptyState({ loading }: { loading: boolean }) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-2 px-4 py-6 text-center">
+    <div className="flex-1 flex flex-col items-center justify-center gap-2.5 px-4 py-6 text-center">
       <span
-        className="font-mono text-2xl leading-none"
+        className="font-mono text-3xl leading-none"
         style={{ color: GOV_ACCENT }}
         aria-hidden="true"
       >
         §
       </span>
-      <p className="font-mono text-xs text-lab-muted leading-relaxed max-w-prose">
-        No legislation yet. When an agent proposes a rule, its full lifecycle —
-        proposal, votes, enactment or rejection, and every downstream
-        consequence — will chart here.
-      </p>
-      <span className="font-mono text-[10px] uppercase tracking-widest text-lab-dim border border-lab-border px-2 py-0.5">
-        Assembly idle
+      <span
+        className="font-mono text-[11px] font-bold uppercase tracking-widest text-lab-text border px-2.5 py-1 rounded-sm"
+        style={{ borderColor: GOV_ACCENT }}
+      >
+        {loading ? 'History loading…' : 'No proposals yet'}
       </span>
+      <p className="font-mono text-[11px] text-lab-muted leading-relaxed max-w-prose">
+        {loading
+          ? 'Backfilling the legislative record from the event log.'
+          : 'No proposals yet — agents legislate at Town Hall. When one proposes a rule, its full lifecycle (proposal, votes, enactment or rejection, and every downstream consequence) charts here.'}
+      </p>
     </div>
   );
 }

@@ -391,7 +391,7 @@ function inferRelType(text: string | null | undefined): string {
 const CRIME_KINDS: Record<string, true> = { conflict: true };
 
 function emptyByModel(): AwiByModel {
-  return { alive: 0, dead: 0, crimes: 0, gives: 0, proposals: 0, passed: 0, creditShare: 0 };
+  return { alive: 0, dead: 0, crimes: 0, gives: 0, proposals: 0, passed: 0, rejected: 0, creditShare: 0 };
 }
 
 /**
@@ -435,6 +435,20 @@ export function awiSummary(
     return byModel[name];
   };
 
+  // Per-model governance attribution (audit C6): a pass/reject is credited to
+  // the model whose agent PROPOSED the rule, so numerator and denominator
+  // measure the same thing — proposals BY that model that passed, over
+  // proposals BY that model that resolved (passed + rejected).
+  const proposerModelByRule = new Map<string, string | null>();
+  const openRuleIds: string[] = [];
+  const resolveRuleModel = (e: WorldEvent): AwiByModel | null => {
+    const rid = ruleIdOf(e) ?? openRuleIds[0] ?? null;
+    if (!rid) return null;
+    const idx = openRuleIds.indexOf(rid);
+    if (idx >= 0) openRuleIds.splice(idx, 1);
+    return ensureModel(proposerModelByRule.get(rid));
+  };
+
   for (const e of inRange) {
     const p = payload(e);
     const model = ensureModel(e.profile);
@@ -465,12 +479,22 @@ export function awiSummary(
       proposeRule += 1;
       proposed += 1;
       if (model) model.proposals += 1;
+      const rid = ruleIdOf(e);
+      if (rid) {
+        proposerModelByRule.set(rid, e.profile ?? null);
+        openRuleIds.push(rid);
+      }
     }
     if (e.kind === 'rule_passed') {
       passed += 1;
-      if (model) model.passed += 1;
+      const proposerModel = resolveRuleModel(e);
+      if (proposerModel) proposerModel.passed += 1;
     }
-    if (e.kind === 'rule_rejected') rejected += 1;
+    if (e.kind === 'rule_rejected') {
+      rejected += 1;
+      const proposerModel = resolveRuleModel(e);
+      if (proposerModel) proposerModel.rejected += 1;
+    }
     if (e.kind === 'rule_vote') {
       voteEvents += 1;
       if (e.actor_id) voters.add(e.actor_id);
@@ -658,9 +682,13 @@ export function replayStateAt(
     for (const p of base.places ?? []) placeXY.set(p.id, { x: p.x, y: p.y });
   }
 
-  const fromTick = base?.tick ?? 0;
+  // Fold boundary (audit C4; event-log.md v1.1.0 §3 / api.openapi v1.2.0): a
+  // snapshot at tick S is the state AFTER all tick-S events, so the fold is
+  // STRICT-LEFT — keep events with base.tick < e.tick <= tick. With no snapshot
+  // the fold starts before tick 0 (so tick-0 events apply).
+  const fromTick = base ? base.tick : -1;
   for (const e of ascending(events)) {
-    if (e.tick <= fromTick || e.tick > tick) continue;
+    if (!(e.tick > fromTick && e.tick <= tick)) continue;
     if (e.kind === 'agent_moved' && e.actor_id) {
       const to = str(payload(e)['to']) ?? str(payload(e)['location']) ?? e.target_id;
       if (to && placeXY.has(to)) location.set(e.actor_id, to);
