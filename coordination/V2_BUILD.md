@@ -14,8 +14,8 @@ NOT a demotion. W7/W8 world features render *in* the 3D village. Encoded in
 | Wave | Items | Status |
 |---|---|---|
 | **W5 Foundations (gate)** | EM-053 `/inspector` annex + WebGL unmount · EM-054 event-log spine · EM-066 decision-trace output | ✅ DONE — gate GREEN |
-| **W6 Instrumentation** | EM-055 replay · EM-056 trace inspector · EM-057 governance history · EM-058 social graph · EM-059 AWI dashboard · EM-067 usage tracking | unblocked → next |
-| **W7 World** | EM-060 tiered tools · EM-061 building state · EM-062 collective projects · EM-063 ad-hoc spawn · EM-068 caching | blocked on W5/W6 |
+| **W6 Instrumentation** | EM-055 replay · EM-056 trace inspector · EM-057 governance history · EM-058 social graph · EM-059 AWI dashboard · EM-067 usage tracking | ✅ DONE — gate GREEN |
+| **W7 World** | EM-060 tiered tools · EM-061 building state · EM-062 collective projects · EM-063 ad-hoc spawn · EM-068 caching | unblocked → next |
 | **W8 Chaos** | EM-064 cat & dog · EM-065 Animal Chaos Feed | blocked on W7 |
 
 ## Contracts (W5 gate — LOCKED)
@@ -68,6 +68,13 @@ persistence → `persistence/**` · backend → `engine,agents,api,run.py` · pr
   them (`unknown place 'None'`). Not a bug — motivates W7 (collective projects + buildings let
   them actually build it). No fix; it's the design pull toward W7.
 - Per-attempt `llm_call` rows confirmed emitting live (two `consults` rows on a retried turn). ✓
+
+## Wave gate log (W6)
+
+- **W6 build gate PASS** — backend 79, `tsc -b`+`vite build` exit 0, design-token-guard clean (CSS vars + data-driven colors, 0 hardcoded hex). Bundle >500KB warning → lazy-load-inspector follow-up (not a blocker).
+- **Live-run fix landed** — optional trace fields truncate-not-reject (verified: the exact "too long" case validates; structural args still strict; 79/79).
+- **render-sanity PASS** (browser walk, mock mode) — all 5 panels render REAL data (decision-trace chain, governance lifecycle 10 proposed/6 active, social graph 5/5 agents 9 ties, 9-AWI w/ values + no composite score + model-vs-model); **0 WebGL contexts on /inspector** (3D truly unmounts); 0 console errors; no smell tokens. Evidence: docs/build-evidence/w6/.
+- Minor cosmetic follow-ups: `@@` glyphs (missing icon chars) in trace memory rows; lazy-load inspector to shrink bundle.
 
 ## Wave gate log
 

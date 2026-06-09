@@ -3,11 +3,13 @@
 Every open item, ID'd and prioritized. This is the canonical "what exactly needs doing?"
 list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
-> **Status (2026-06-08):** v1 shipped (W0–W3). **W4 (cozy 3D village + live run) complete on
-> `build/emergence-madness-3d`.** EM-048 (the project goal) is **DONE** — a 3-agent, 3-model
-> world ran live on FreeLLMAPI for >11 min, all 3 alive, with real chat and a passed rule. The
-> center view is now a cozy 3D village (Stardew × Animal-Crossing) and the UI surfaces the
-> model that *actually* answered each turn (`X-Routed-Via`). Open: EM-043 (FE unit tests, P1).
+> **Status (2026-06-08):** v1 (W0–W4) shipped. **v2 in progress on `build/v2-expansion`:**
+> **W5 (foundations) ✅** — append-only event-log trace spine + decision-trace output + the
+> 2D `/inspector` analysis annex (3D village stays primary). **W6 (instrumentation) ✅** —
+> replay, decision-trace inspector, governance history, social graph, 9-AWI + model-vs-model
+> dashboard, per-provider usage capture; QA 97/97, render-sanity PASS. **Next: W7 (expanded
+> world — tools, buildings, collective projects, spawn, caching), then W8 (chaos animals).**
+> Open from v1: EM-043 (FE unit tests, P1).
 
 ## Format & conventions
 
@@ -63,11 +65,11 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-052 | P2 | W4 | config | user req | Seed 3 agents co-located in plaza so conversation starts round 1 | done | orch |
 | EM-053 | P0 | W5 | frontend | research-v2 #1 | Add `/inspector` route — a 2D *analysis annex* (3D village stays the **primary** view at `/`); unmount the WebGL canvas while analyzing | done | frontend |
 | EM-054 | P0 | W5 | persistence | research-v2 #2 | Append-only event-log schema (OTel-style linked turn traces) + WAL + periodic snapshots | done | persistence |
-| EM-055 | P1 | W6 | frontend | research-v2 #3 | Session replay viewer (2D timeline scrubber + top-down Canvas map) | open | — |
-| EM-056 | P1 | W6 | frontend | research-v2 #4 | Agent decision-trace inspector (perceived → memories → llm_call → reasoning → action) | open | — |
-| EM-057 | P1 | W6 | frontend | research-v2 #5 | Governance/laws history view w/ downstream-consequence links (the "clock tower" failure) | open | — |
-| EM-058 | P1 | W6 | frontend | research-v2 #6 | Relationship/social-graph viz (react-force-graph-2d, time-scrub) | open | — |
-| EM-059 | P1 | W6 | frontend | research-v2 #7 | Analytics: 9-AWI + model-vs-model dashboard (uPlot/Observable Plot) | open | — |
+| EM-055 | P1 | W6 | frontend | research-v2 #3 | Session replay viewer (2D timeline scrubber + top-down Canvas map) | done | frontend |
+| EM-056 | P1 | W6 | frontend | research-v2 #4 | Agent decision-trace inspector (perceived → memories → llm_call → reasoning → action) | done | frontend |
+| EM-057 | P1 | W6 | frontend | research-v2 #5 | Governance/laws history view w/ downstream-consequence links (the "clock tower" failure) | done | frontend |
+| EM-058 | P1 | W6 | frontend | research-v2 #6 | Relationship/social-graph viz (react-force-graph-2d, time-scrub) | done | frontend |
+| EM-059 | P1 | W6 | frontend | research-v2 #7 | Analytics: 9-AWI + model-vs-model dashboard (uPlot/Observable Plot) | done | frontend |
 | EM-060 | P2 | W7 | backend | research-v2 #8 | Expanded tiered tool catalog (🟢 reflex vs 🔵 LLM-served), location/agreement-gated | open | — |
 | EM-061 | P2 | W7 | backend | research-v2 #9 | Building/structure mutable state model (status/health/progress transitions) | open | — |
 | EM-062 | P2 | W7 | backend | research-v2 #10 | Collective-project pipeline (propose→fund→build→succeed/fail) | open | — |
@@ -75,7 +77,7 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-064 | P3 | W8 | backend | research-v2 #12 | LLM-driven cat & dog as distinct `actor_type:"animal"` chaos entities | open | — |
 | EM-065 | P3 | W8 | frontend | research-v2 #13 | Animal Chaos Feed + `is_chaotic` tagging/surfacing (magenta on timeline) | open | — |
 | EM-066 | P1 | W5 | contracts | research-v2 §patterns | Structured decision-trace action output `{perceived_summary, memories_used, reasoning, chosen_tool, args}` in one call (enabler for EM-054/056) | done | backend |
-| EM-067 | P1 | W6 | providers | research-v2 §x-cut | Per-provider RPD/TPD usage tracking in event log + cap-aware throttling; **also emit per-attempt `llm_call` rows** (W5 logs only the final attempt — see Notes) | open | — |
+| EM-067 | P1 | W6 | providers | research-v2 §x-cut | Per-provider RPD/TPD usage tracking in event log + cap-aware throttling; **also emit per-attempt `llm_call` rows** (W5 logs only the final attempt — see Notes) | done | providers |
 | EM-068 | P2 | W7 | providers | research-v2 §x-cut | Decision/prompt-prefix caching (persona + memory-hash + coarse-world-state) | open | — |
 
 _Next free ID: EM-069._
