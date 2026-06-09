@@ -20,9 +20,13 @@
   --lab-surface: #111114;
   --lab-chrome: #1a1a20;
   --lab-border: #252530;
+  --lab-border-bright: #3a3a48;
+  --lab-text: #e8e8f0;
   --lab-muted: #5a5a72;
   --lab-dim: #3a3a50;
   --lab-acid: #c8ff00;
+  --lab-danger: #ff3333;
+  --lab-warn: #ff9900;
 
   /* Replay event-marker legend (color-coded by category). */
   --marker-crime: #ff3333;

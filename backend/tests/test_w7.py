@@ -509,7 +509,10 @@ def test_gate_build_step_requires_under_construction():
     a.location = "plaza"
     bid = _propose(world, a, "Clock", "clocktower", 10)  # planned, not under_construction
     err = _validate_world({"action": "build_step", "args": {"building_id": bid}}, a, world)
-    assert err is not None and "under_construction" in err
+    # W9 / EM-073 B4: an UNFUNDED planned building is still rejected, but with a
+    # funding-specific reason (a fully-funded planned building now validates OK —
+    # world.action_build_step auto-advances it to under_construction).
+    assert err is not None and "not fully funded" in err
     # Building untouched.
     assert world.buildings[bid].progress == 0
     assert world.buildings[bid].status == "planned"

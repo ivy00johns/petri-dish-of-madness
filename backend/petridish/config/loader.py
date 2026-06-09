@@ -241,9 +241,19 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # W9 / EM-070 — survival pressure: energy below this threshold marks an agent
+    # as starving (one-shot `agent_starving` warning + prompt urgency).
+    starving_warn_threshold: float = 25.0
+    # W9 / EM-071 — pause the tick loop when the last living human agent dies
+    # (after emitting + broadcasting `world_extinct`). Animals alone do not keep
+    # the run "alive".
+    auto_pause_on_extinction: bool = True
     # W5 / EM-054: snapshot cadence + DB destination (additive, backward-compatible).
-    # snapshot_interval_ticks bounds replay cost; db_path ':memory:' is fine for
-    # tests, but a real run that wants replay must point at a file (config world.db_path).
+    # snapshot_interval_ticks bounds replay cost. The DATACLASS default for
+    # db_path stays ':memory:' (tests build WorldParams directly), but the
+    # shipped config/world.yaml sets a file path (W10 / EM-085) so real runs
+    # persist across restarts. Relative yaml paths resolve against the parent
+    # of the config/ dir — see _resolve_db_path.
     snapshot_interval_ticks: int = 25
     db_path: str = ":memory:"
     # W6 / EM-067 — optional cap-aware throttle policy. Default OFF (disabled)
@@ -288,6 +298,28 @@ def _interpolate(value: Any) -> Any:
 
 def _interp_dict(d: dict) -> dict:
     return {k: _interpolate(v) for k, v in d.items()}
+
+
+def _resolve_db_path(value: Any, config_dir: Path | None) -> str:
+    """Resolution rule for world.db_path (W10 / EM-085).
+
+    ':memory:' (and sqlite 'file:' URIs) and ABSOLUTE paths pass through
+    untouched. A RELATIVE path resolves against the PARENT of the config/
+    directory — i.e. the repo root — so 'data/run.sqlite' lands in ONE
+    predictable place regardless of the launch cwd (./dev runs uvicorn from
+    backend/, ad-hoc launches often run from the repo root). When no config
+    dir exists (embedded defaults / EM_CONFIG_DIR unset and none found), the
+    path is returned as-is and resolves against cwd, unchanged from pre-W10.
+    """
+    path = str(value or ":memory:")
+    if path == ":memory:" or path.startswith("file:"):
+        return path
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return str(p)
+    if config_dir is not None:
+        return str(Path(config_dir).resolve().parent / p)
+    return path
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -418,7 +450,9 @@ def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
     return out
 
 
-def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
+def _parse_world(
+    raw: dict, config_dir: Path | None = None
+) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
     w = raw.get("world", {})
     params = WorldParams(
         agent_count=int(w.get("agent_count", 5)),
@@ -436,8 +470,10 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
+        auto_pause_on_extinction=bool(w.get("auto_pause_on_extinction", True)),
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
-        db_path=str(_interpolate(w.get("db_path", ":memory:"))),
+        db_path=_resolve_db_path(_interpolate(w.get("db_path", ":memory:")), config_dir),
         usage_caps=_parse_usage_caps(w.get("usage_caps")),
         buildings=_parse_buildings(w.get("buildings")),
         spawn=_parse_spawn(w.get("spawn")),
@@ -505,7 +541,7 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
         world_raw = yaml.safe_load(EMBEDDED_WORLD_YAML)
 
     profiles = _parse_profiles(profiles_raw)
-    world_params, places, agents = _parse_world(world_raw)
+    world_params, places, agents = _parse_world(world_raw, cfg_dir)
     # W8 — top-level `animals:` seed list (separate from world.animals params).
     animal_seeds = _parse_animal_seeds(world_raw)
 

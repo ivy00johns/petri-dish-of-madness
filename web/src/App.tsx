@@ -13,11 +13,16 @@
  *                  hidden). See frontend-inspector.md §2.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { useSimulation } from './hooks/useSimulation';
+import { animalModelMap } from './lib/animalIdentity';
 import type { SimulationState, SimulationControls } from './hooks/useSimulation';
+import { useRoutingHealth } from './hooks/useRoutingHealth';
+import type { RoutingHealth } from './hooks/useRoutingHealth';
 import { Header } from './components/Header';
+import { RoutingDegradedBanner } from './components/RoutingDegradedBanner';
+import { ExtinctionBanner } from './components/ExtinctionBanner';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
@@ -32,6 +37,9 @@ type Sim = SimulationState & SimulationControls;
 export default function App() {
   const sim = useSimulation();
   const { world, connected, mockMode } = sim;
+  // EM-072: detect a silently-collapsed model A/B from live data (assigned
+  // profiles vs the routed_via models actually answering).
+  const routingHealth = useRoutingHealth(world, sim.history);
 
   return (
     <div className="flex flex-col h-screen bg-lab-bg text-lab-text overflow-hidden">
@@ -47,7 +55,7 @@ export default function App() {
       {/* ── Routed body ─────────────────────────────────────────── */}
       <Routes>
         {/* "/" keeps the 3D village as the default live view. */}
-        <Route path="/" element={<LiveLayout sim={sim} />} />
+        <Route path="/" element={<LiveLayout sim={sim} routingHealth={routingHealth} />} />
         {/*
           "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's
           <Canvas>) is NOT rendered on this route, so React/R3F unmount the
@@ -56,7 +64,15 @@ export default function App() {
         <Route
           path="/inspector"
           element={
-            <InspectorLayout world={sim.world} history={sim.history} mockMode={sim.mockMode} />
+            <InspectorLayout
+              world={sim.world}
+              history={sim.history}
+              historyLoading={sim.historyLoading}
+              historyTruncated={sim.historyTruncated}
+              mockMode={sim.mockMode}
+              onSeekTick={sim.seekTick}
+              routingHealth={routingHealth}
+            />
           }
         />
       </Routes>
@@ -72,12 +88,30 @@ export default function App() {
  * Center: World map (CozyWorld 3D default, top ~55%) + Event feed (bottom ~45%)
  * Right:  Controls + Model legend (scrollable)
  */
-function LiveLayout({ sim }: { sim: Sim }) {
+function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHealth }) {
   const { world, events } = sim;
   const [view, setView] = useState<WorldView>('village');
 
+  // EM-089: which model each critter consults. world_state animals do NOT
+  // carry the profile (backend Animal.to_dict omits it), so it's derived from
+  // the latest animal llm_call in the DEEP history (the 200-cap feed would
+  // lose it between slow animal cadences). Empty until an animal has consulted
+  // the LLM — the labels omit the chip until then (graceful degradation).
+  const animalModels = useMemo(
+    () => animalModelMap(sim.history, world?.animals ?? [], world?.profiles ?? []),
+    [sim.history, world],
+  );
+
   return (
     <>
+      {/* EM-072: dismissible warning when every profile routes to one model. */}
+      <RoutingDegradedBanner health={routingHealth} />
+
+      {/* EM-071: extinction banner + end-of-run summary (computed from the
+          deeper history so deaths/rules/crimes survive the 200-cap feed).
+          EM-084: its NEW RUN CTA restarts the run via /api/control/reset. */}
+      <ExtinctionBanner world={world} events={sim.history} onReset={sim.reset} />
+
       {/* ── Three-column body ──────────────────────────────────── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* LEFT — Agent panels */}
@@ -116,9 +150,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
             </div>
             <div style={{ height: 'calc(100% - 28px)' }}>
               {view === 'village' ? (
-                <CozyWorld world={world} events={events} />
+                <CozyWorld world={world} events={events} animalModels={animalModels} />
               ) : (
-                <WorldMap world={world} events={events} />
+                <WorldMap world={world} events={events} animalModels={animalModels} />
               )}
             </div>
           </div>
@@ -142,6 +176,7 @@ function LiveLayout({ sim }: { sim: Sim }) {
             onStart={sim.start}
             onPause={sim.pause}
             onStep={sim.step}
+            onReset={sim.reset}
             onSpeed={sim.setSpeed}
             onReassign={sim.reassignModel}
             onInject={sim.injectEvent}

@@ -6,13 +6,22 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { WorldState, WorldEvent, WSMessage, ModelProfile, SpawnSpec } from '../types';
 import { buildInitialWorldState, generateTick, mockControls } from '../mock/generator';
+import { inspectorApi, eventRowToWorldEvent } from '../inspector/api';
 
 const MOCK_MODE = import.meta.env.VITE_MOCK === '1';
 const MAX_EVENTS = 200;
-// Rolling event-history window for the inspector annex (frontend-inspector.md
-// §3). Much deeper than the 200-capped live feed; older ticks beyond this are
-// reachable only via the backend replay API (W6). Configurable.
-const MAX_HISTORY = 5000;
+// Event-history memory cap (frontend-inspector.md v1.1.0 §1). In live mode the
+// history is SEEDED from GET /api/events on mount (keyset-paginated backfill)
+// and then fed from the WS, deduped by seq — so after a fresh page load mid-run
+// every inspector panel renders the full run. The cap bounds memory; when it
+// trips, the NEWEST events are kept and `historyTruncated` surfaces a notice.
+const MAX_HISTORY = 50_000;
+// Page size for the /api/events keyset backfill.
+const BACKFILL_CHUNK = 1000;
+// WS reconnect backoff (audit C3): 2s base, doubling, capped at 30s; reset on
+// a successful open.
+const RECONNECT_BASE_MS = 2000;
+const RECONNECT_MAX_MS = 30_000;
 
 export interface SimulationState {
   world: WorldState | null;
@@ -23,6 +32,16 @@ export interface SimulationState {
    * deeper window for replay/trace/graph/dashboard (wired at W6).
    */
   history: WorldEvent[];
+  /**
+   * True while the live-mode /api/events backfill is still paging in (EM-069).
+   * Panels show a "history loading…" empty state instead of a blank region.
+   */
+  historyLoading: boolean;
+  /**
+   * True when the history hit the MAX_HISTORY memory cap (or the backfill
+   * stopped early) — older events exist on the backend but not in memory.
+   */
+  historyTruncated: boolean;
   /** Latest tick observed (the inspector scrubber's right edge). */
   maxTick: number;
   connected: boolean;
@@ -33,6 +52,14 @@ export interface SimulationControls {
   start: () => void;
   pause: () => void;
   step: () => void;
+  /**
+   * EM-084: start a NEW RUN. Live: POST /api/control/reset (the backend
+   * rebuilds the world from config and broadcasts the fresh world_state).
+   * Mock: mockControls.reset() rebuilds the generator's seed world. Both paths
+   * clear the local feed/history so the new run starts clean (and anything
+   * derived from them — e.g. the extinction banner — dismisses).
+   */
+  reset: () => void;
   setSpeed: (tickIntervalSeconds: number) => void;
   reassignModel: (agentId: string, profile: string) => void;
   injectEvent: (kind?: string) => void;
@@ -60,10 +87,20 @@ export function useSimulation(): SimulationState & SimulationControls {
   const [history, setHistory] = useState<WorldEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [mockMode, setMockMode] = useState(MOCK_MODE);
+  const [historyLoading, setHistoryLoading] = useState(!MOCK_MODE);
+  const [historyTruncated, setHistoryTruncated] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const mockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mockSpeedRef = useRef<number>(2000);
   const reconnectAttemptsRef = useRef<number>(0);
+  // The pending reconnect timer (audit C3): stored so effect cleanup can cancel
+  // it — otherwise a dead hook instance reconnects and sets state after unmount.
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Collision-free seq source for client-synthesized events (audit C10):
+  // negative and decrementing, so it can never collide with the backend's (or
+  // the mock generator's) positive monotonic seqs — EventFeed keys stay unique.
+  const syntheticSeqRef = useRef(-1);
+  const nextSyntheticSeq = useCallback(() => syntheticSeqRef.current--, []);
   // After this many failed reconnects, fall back to mock so the UI is never
   // dead. A recovered live socket still tears the mock loop down on open/msg.
   const MAX_RECONNECTS_BEFORE_MOCK = 3;
@@ -71,15 +108,89 @@ export function useSimulation(): SimulationState & SimulationControls {
   // ── Rolling history (inspector annex) ──────────────────────────────────────
   // Prepend newly-arrived events (newest-first), de-duped on seq, capped at
   // MAX_HISTORY. Same input as the live feed; does not affect feed behavior.
+  // When the cap trips, the NEWEST events (by seq) are kept and the truncation
+  // is surfaced so the inspector can label it (EM-069).
   const pushHistory = useCallback((incoming: WorldEvent[]) => {
     if (incoming.length === 0) return;
     setHistory(prev => {
       const seen = new Set(prev.map(e => e.seq));
       const fresh = incoming.filter(e => !seen.has(e.seq));
       if (fresh.length === 0) return prev;
-      return [...fresh, ...prev].slice(0, MAX_HISTORY);
+      const merged = [...fresh, ...prev];
+      if (merged.length <= MAX_HISTORY) return merged;
+      setHistoryTruncated(true);
+      // Keep the newest MAX_HISTORY by seq (backfill can interleave old pages
+      // with live WS arrivals, so positional slicing isn't enough).
+      merged.sort((a, b) => b.seq - a.seq);
+      return merged.slice(0, MAX_HISTORY);
     });
   }, []);
+
+  // ── Live-feed seeding (EM-088) ─────────────────────────────────────────────
+  // A page refresh mid-run used to start the `/` feed empty (it only
+  // accumulated from WS connect). The backfill below now ALSO seeds the feed:
+  // merge incoming events deduped on seq against live WS arrivals, keep the
+  // newest MAX_EVENTS by seq. Every kind is pushed — exactly like the live WS
+  // path — because feed kind-filtering is render-time: EventFeed's category
+  // filter keeps the decision-trace chain default-muted (events.schema
+  // x-feed-rendering), so seeding never floods the feed with perceived/memory
+  // rows. The WS path's payload.thought lift is applied here too.
+  const pushFeed = useCallback((incoming: WorldEvent[]) => {
+    if (incoming.length === 0) return;
+    setEvents(prev => {
+      const seen = new Set(prev.map(e => e.seq));
+      const fresh = incoming.filter(e => !seen.has(e.seq));
+      if (fresh.length === 0) return prev;
+      for (const evt of fresh) {
+        if (evt.thought === undefined && typeof evt.payload?.thought === 'string') {
+          evt.thought = evt.payload.thought;
+        }
+      }
+      return [...fresh, ...prev].sort((a, b) => b.seq - a.seq).slice(0, MAX_EVENTS);
+    });
+  }, []);
+
+  // ── Backfill on mount (EM-069 / frontend-inspector.md v1.1.0 §1) ───────────
+  // Live mode seeds the history from GET /api/events, keyset-paginated via
+  // after_seq ascending until exhausted (or the memory cap), merged with the WS
+  // rolling history deduped by seq. Degrades silently when there is no backend
+  // (inspectorApi resolves to []), so mock-fallback runs are unaffected.
+  useEffect(() => {
+    if (MOCK_MODE) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        let afterSeq = 0;
+        let fetched = 0;
+        for (;;) {
+          const rows = await inspectorApi.events({
+            afterSeq,
+            order: 'asc',
+            limit: BACKFILL_CHUNK,
+          });
+          if (cancelled) return;
+          if (rows.length === 0) break;
+          const mapped = rows.map(eventRowToWorldEvent);
+          pushHistory(mapped);
+          // EM-088: the same pages seed the live feed (newest 200 by seq win).
+          pushFeed(mapped);
+          afterSeq = rows[rows.length - 1].seq;
+          fetched += rows.length;
+          if (fetched >= MAX_HISTORY) {
+            // More may exist beyond the memory cap; stop and label it.
+            setHistoryTruncated(true);
+            break;
+          }
+          if (rows.length < BACKFILL_CHUNK) break;
+        }
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pushHistory, pushFeed]);
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
 
@@ -184,11 +295,19 @@ export function useSimulation(): SimulationState & SimulationControls {
       }
 
       // Keep trying to reconnect; a recovered socket always wins over mock.
-      setTimeout(() => {
+      // Exponential backoff (audit C3): 2s, 4s, 8s… capped at 30s, reset on a
+      // successful open. The handle is stored so unmount cleanup cancels it.
+      const delay = Math.min(
+        RECONNECT_MAX_MS,
+        RECONNECT_BASE_MS * 2 ** Math.max(0, reconnectAttemptsRef.current - 1),
+      );
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
         if (!wsRef.current) {
           connectWS();
         }
-      }, 2000);
+      }, delay);
     };
 
     ws.onerror = () => {
@@ -217,6 +336,12 @@ export function useSimulation(): SimulationState & SimulationControls {
 
     return () => {
       stopMockLoop();
+      // Cancel any pending reconnect (audit C3) so a dead hook instance never
+      // reconnects or sets state after unmount (the StrictMode WS warning).
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -272,12 +397,42 @@ export function useSimulation(): SimulationState & SimulationControls {
     }
   }, [mockMode, apiPost, pushHistory]);
 
+  // EM-084: start a NEW RUN. Clears the run-scoped local state first (feed,
+  // history, truncation flag) so the new run renders clean — the extinction
+  // banner derives from these and dismisses immediately. Live: the backend
+  // rebuilds the world from config and broadcasts the fresh world_state (the
+  // old `world` stays on screen for the broadcast round-trip only). Mock: the
+  // generator rebuilds its seed world synchronously.
+  const reset = useCallback(() => {
+    setEvents([]);
+    setHistory([]);
+    setHistoryTruncated(false);
+    if (mockMode) {
+      stopMockLoop();
+      const fresh = mockControls.reset();
+      // Mirror the backend: a reset restores the config tick interval too.
+      mockSpeedRef.current = fresh.tick_interval_seconds * 1000;
+      setWorld(fresh);
+      // Restart the loop against the rebuilt generator state (running=true).
+      startMockLoop();
+    } else {
+      apiPost('/api/control/reset');
+    }
+  }, [mockMode, apiPost, stopMockLoop, startMockLoop]);
+
   const setSpeed = useCallback((tickIntervalSeconds: number) => {
     if (mockMode) {
       mockSpeedRef.current = tickIntervalSeconds * 1000;
+      // W10/D5: record it in the mock "server" too, so the next world_state
+      // broadcast carries the new tick_interval_seconds (the control panel
+      // derives its speed label from world_state — server is truth).
+      mockControls.setSpeed(tickIntervalSeconds);
       // Restart loop with new speed
       stopMockLoop();
       if (mockControls.isRunning()) startMockLoop();
+      // Optimistic local echo (mirrors the live broadcast) so the label
+      // reflects the change immediately even while paused.
+      setWorld(prev => (prev ? { ...prev, tick_interval_seconds: tickIntervalSeconds } : prev));
     } else {
       apiPost('/api/control/speed', { tick_interval_seconds: tickIntervalSeconds });
     }
@@ -306,7 +461,9 @@ export function useSimulation(): SimulationState & SimulationControls {
       if (agent && prof) {
         const evt: WorldEvent = {
           type: 'event',
-          seq: Date.now(),
+          // Synthetic client-side event: negative decrementing seq (audit C10)
+          // — can never collide with real (positive) seqs, keys stay unique.
+          seq: nextSyntheticSeq(),
           tick: world?.tick ?? 0,
           kind: 'model_reassigned',
           actor_id: agentId,
@@ -321,7 +478,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     } else {
       apiPost(`/api/agents/${agentId}/model`, { profile });
     }
-  }, [mockMode, apiPost, world, pushHistory]);
+  }, [mockMode, apiPost, world, pushHistory, nextSyntheticSeq]);
 
   const injectEvent = useCallback((kind?: string) => {
     if (mockMode) {
@@ -359,20 +516,21 @@ export function useSimulation(): SimulationState & SimulationControls {
     return max;
   }, [world, history]);
 
-  // Inspector scrub control. The inspector panels project from `history` purely
-  // client-side, so in mock mode scrubbing needs no engine call — but a scrub
-  // implies "stop advancing the live edge", so we pause the loop. In live mode
-  // this is the W6 hook point for a deep `api.replay(tick)` fetch; pausing keeps
-  // the projection stable. Kept additive — existing behavior is unchanged.
+  // Inspector scrub control (frontend-inspector.md v1.1.0 §2/§3). Scrubbing
+  // means "stop advancing the live edge so the projection is stable", so both
+  // modes pause the loop. The deep-replay materialization itself
+  // (GET /api/replay?tick=T → base snapshot + strict-left delta, folded through
+  // replayStateAt) is owned by the inspector annex (useReplayMaterials), which
+  // fetches against the scrub tick the annex already owns — this hook's live
+  // path is the engine-side half: pause, so the run doesn't advance under the
+  // scrubbed projection.
   const seekTick = useCallback((tick: number) => {
-    void tick; // panels re-project from `history`; nothing to mutate here yet.
+    void tick; // the annex projects at the tick; the engine just needs pausing.
     if (mockMode) {
       mockControls.pause();
       stopMockLoop();
     } else {
       apiPost('/api/control/pause');
-      // W6: fetch `api.replay(tick)` to materialize state beyond the rolling
-      // window. Until then the inspector projects from `history` client-side.
     }
   }, [mockMode, apiPost, stopMockLoop]);
 
@@ -380,12 +538,15 @@ export function useSimulation(): SimulationState & SimulationControls {
     world,
     events,
     history,
+    historyLoading,
+    historyTruncated,
     maxTick,
     connected,
     mockMode,
     start,
     pause,
     step,
+    reset,
     setSpeed,
     reassignModel,
     injectEvent,

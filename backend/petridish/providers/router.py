@@ -193,6 +193,12 @@ class Router:
                 self._cache.popitem(last=False)  # evict least-recently-used
         return text
 
+    def clear_cache(self) -> None:
+        """Flush the decision cache + pending HIT snapshots (W9, audit B12).
+        Called on world reset so prior-run decisions never serve into a new run."""
+        self._cache.clear()
+        self._pending_cached.clear()
+
     def last_routed_via(self, profile_name: str) -> str | None:
         """Return the model the proxy actually routed the last request to for
         this profile's persistent adapter, or None if unknown.

@@ -25,6 +25,7 @@ import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
 import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia } from './worldSpace';
+import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // How recent an animal's last chaotic event must be (in seq distance from the
 // newest event) for the critter to still wear its magenta chaos accent. This
@@ -34,6 +35,12 @@ const CHAOS_RECENCY_SEQ = 80;
 interface CozyWorldProps {
   world: WorldState | null;
   events: WorldEvent[];
+  /**
+   * EM-089: animalId → the model profile the critter consults (derived by the
+   * caller from animal llm_call events — world_state animals don't carry it).
+   * Optional; absent/empty ⇒ the critter labels omit the model chip.
+   */
+  animalModels?: Map<string, AnimalModelId>;
 }
 
 const BUBBLE_LIFETIME_MS = 5200;
@@ -51,7 +58,7 @@ interface LiveBubble extends BubbleData {
   expires: number;
 }
 
-export function CozyWorld({ world, events }: CozyWorldProps) {
+export function CozyWorld({ world, events, animalModels }: CozyWorldProps) {
   // ── Chat bubble lifecycle ──────────────────────────────────────────────
   const lastSeqRef = useRef<number>(-1);
   const [bubbles, setBubbles] = useState<LiveBubble[]>([]);
@@ -171,6 +178,7 @@ export function CozyWorld({ world, events }: CozyWorldProps) {
           bubblesByAgent={bubblesByAgent}
           routedByAgent={routedByAgent}
           chaoticAnimals={chaoticAnimals}
+          animalModels={animalModels}
         />
         <OrbitControls
           enablePan={false}
@@ -201,11 +209,13 @@ function Scene({
   bubblesByAgent,
   routedByAgent,
   chaoticAnimals,
+  animalModels,
 }: {
   world: WorldState;
   bubblesByAgent: Map<string, BubbleData[]>;
   routedByAgent: Map<string, string>;
   chaoticAnimals: Set<string>;
+  animalModels?: Map<string, AnimalModelId>;
 }) {
   const animMap = useRef<Map<string, AnimPos>>(new Map());
   // W8: animals roam, so they get their own animated-position map keyed by id.
@@ -334,6 +344,7 @@ function Scene({
             center={center}
             animRef={anim}
             chaotic={chaoticAnimals.has(animal.id)}
+            model={animalModels?.get(animal.id) ?? null}
           />
         );
       })}

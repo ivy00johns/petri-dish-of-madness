@@ -26,6 +26,7 @@ import { useFrame } from '@react-three/fiber';
 import { Billboard, Html, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Animal } from '../../types';
+import type { AnimalModelId } from '../../lib/animalIdentity';
 import {
   animalStyle,
   hashUnit,
@@ -46,14 +47,30 @@ interface CritterProps {
   animRef: CritterPos;
   /** Whether this animal is currently in a chaotic streak (magenta accent). */
   chaotic: boolean;
+  /**
+   * EM-089: the model profile this critter consults on LLM-decision ticks
+   * (from the latest animal llm_call — world_state animals don't carry it).
+   * null/absent ⇒ the label omits the model chip (reflex-only so far).
+   */
+  model?: AnimalModelId | null;
 }
 
 const LABEL_Y = 1.5;
 // Radius the critter roams around its place center.
 const WANDER_RADIUS = 3.2;
 
-/** The floating info card above a critter: name, species, mood, energy. */
-function CritterLabel({ animal, chaotic }: { animal: Animal; chaotic: boolean }) {
+/** The floating info card above a critter: name, species, mood, energy —
+ *  and (EM-089) the model profile it consults, in the profile's color (the
+ *  same treatment villagers get), when known. */
+function CritterLabel({
+  animal,
+  chaotic,
+  model,
+}: {
+  animal: Animal;
+  chaotic: boolean;
+  model?: AnimalModelId | null;
+}) {
   const energy = Math.max(0, Math.min(100, animal.energy));
   const icon = animal.species === 'cat' ? '🐱' : '🐶';
   // Data-driven border: magenta while chaotic, else a soft warm rim. Inline
@@ -93,6 +110,26 @@ function CritterLabel({ animal, chaotic }: { animal: Animal; chaotic: boolean })
               <span style={{ color: ANIMAL_CHAOS_MAGENTA, fontWeight: 700 }}>chaos</span>
             )}
           </div>
+          {/* EM-089: the model behind the critter (villager-style chip; the
+              color is the profile's data-driven color). Omitted when unknown —
+              an animal that has only ever acted on reflex has no model yet. */}
+          {model && (
+            <div
+              style={{
+                marginTop: 2,
+                fontSize: 9.5,
+                color: model.color ?? '#f4ecdf',
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                maxWidth: 130,
+              }}
+              title={`LLM decisions route to ${model.profile}`}
+            >
+              🧠 {model.profile}
+            </div>
+          )}
           {/* energy bar */}
           <div
             style={{
@@ -272,7 +309,7 @@ function ChaosCollar() {
   );
 }
 
-export function Critter({ animal, center, animRef, chaotic }: CritterProps) {
+export function Critter({ animal, center, animRef, chaotic, model }: CritterProps) {
   const groupRef = useRef<THREE.Group>(null);
   const tailRef = useRef<THREE.Group>(null);
   const bobPhase = useRef(hashUnit(animal.id) * Math.PI * 2);
@@ -345,7 +382,7 @@ export function Critter({ animal, center, animRef, chaotic }: CritterProps) {
 
       {chaotic && animal.alive && <ChaosCollar />}
 
-      <CritterLabel animal={animal} chaotic={chaotic} />
+      <CritterLabel animal={animal} chaotic={chaotic} model={model} />
     </group>
   );
 }

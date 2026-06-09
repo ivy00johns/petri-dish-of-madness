@@ -17,11 +17,21 @@
 
 import { useRef, useEffect, useCallback } from 'react';
 import type { WorldState, WorldEvent } from '../../types';
+import type { AnimalModelId } from '../../lib/animalIdentity';
 import { PLACE_STYLES } from '../world3d/worldSpace';
+// Declares the shared :root tokens (incl. --marker-animal, the chaos magenta)
+// the canvas reads via getComputedStyle — token-only color, no hardcoded hex.
+import '../../inspector/inspector-tokens.css';
 
 interface WorldMapProps {
   world: WorldState | null;
   events: WorldEvent[];
+  /**
+   * EM-089: animalId → the model profile the critter consults (derived by the
+   * caller from animal llm_call events — world_state animals don't carry it).
+   * Optional; absent/empty ⇒ animal labels omit the model line.
+   */
+  animalModels?: Map<string, AnimalModelId>;
 }
 
 const SPEECH_PULSE_MS = 2600;   // how long a "speaking" pulse lasts
@@ -30,7 +40,7 @@ const SETTLE_EPS = 0.4;         // logical-units distance considered "arrived"
 
 interface Vec { x: number; y: number }
 
-export function WorldMap({ world, events }: WorldMapProps) {
+export function WorldMap({ world, events, animalModels }: WorldMapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
@@ -40,9 +50,15 @@ export function WorldMap({ world, events }: WorldMapProps) {
   worldRef.current = world;
   const eventsRef = useRef<WorldEvent[]>(events);
   eventsRef.current = events;
+  // EM-089: latest model-identity map in a ref for the stable render loop.
+  const animalModelsRef = useRef<Map<string, AnimalModelId> | undefined>(animalModels);
+  animalModelsRef.current = animalModels;
 
   // Per-agent rendered center in logical [0..1000] space (eases toward target).
   const posRef = useRef<Map<string, Vec>>(new Map());
+  // W10/D4: per-animal rendered center (separate map so an animal id can never
+  // collide with an agent id).
+  const animalPosRef = useRef<Map<string, Vec>>(new Map());
   // agentId -> timestamp (ms) at which its speaking pulse expires.
   const speakingRef = useRef<Map<string, number>>(new Map());
   const lastSpeechSeqRef = useRef<number>(-1);
@@ -169,6 +185,47 @@ export function WorldMap({ world, events }: WorldMapProps) {
       drawAgent(ctx, a, ax, ay, agentR, speaking, pulse);
     });
 
+    // W10 / audit D4: animals — the chaos critters roam the 2D map too (they
+    // were 3D + feed only). Species-emoji markers ringed in the chaos magenta
+    // (--marker-animal, the SAME token the Animal Chaos Feed / replay markers
+    // use), gliding between places exactly like agents do. They sit BELOW the
+    // place footprint so they never tangle with the agent fan above it.
+    const worldAnimals = world.animals ?? [];
+    if (worldAnimals.length > 0) {
+      const chaosInk = cssVar('--marker-animal') || cssVar('--lab-muted');
+      const animalR = Math.max(7, agentR * 0.8);
+      // Group per place for a small side-by-side fan of co-located critters.
+      const animalsByPlace = new Map<string, string[]>();
+      worldAnimals.forEach((an) => {
+        const list = animalsByPlace.get(an.location) ?? [];
+        list.push(an.id);
+        animalsByPlace.set(an.location, list);
+      });
+      worldAnimals.forEach((an) => {
+        const targetLogical = placeLogical.get(an.location) ?? { x: 500, y: 500 };
+        let p = animalPosRef.current.get(an.id);
+        if (!p) { p = { ...targetLogical }; animalPosRef.current.set(an.id, p); } // new critter: snap
+
+        const dx = targetLogical.x - p.x;
+        const dy = targetLogical.y - p.y;
+        if (Math.hypot(dx, dy) > SETTLE_EPS) {
+          p.x += dx * EASE;
+          p.y += dy * EASE;
+          animating = true;
+        } else {
+          p.x = targetLogical.x;
+          p.y = targetLogical.y;
+        }
+
+        const colocated = animalsByPlace.get(an.location) ?? [an.id];
+        const idx = colocated.indexOf(an.id);
+        const fan = (idx - (colocated.length - 1) / 2) * animalR * 2.6;
+        const ax = sx(p.x) + fan;
+        const ay = sy(p.y) + clusterR * 1.45;
+        drawAnimal(ctx, an, ax, ay, animalR, chaosInk, animalModelsRef.current?.get(an.id) ?? null);
+      });
+    }
+
     // Place labels on top — always readable above agent clusters.
     ctx.save();
     ctx.font = 'bold 10px "IBM Plex Mono", monospace';
@@ -212,6 +269,9 @@ export function WorldMap({ world, events }: WorldMapProps) {
 
   // New world state → animate agents toward their (possibly new) places.
   useEffect(() => { kick(); }, [world, kick]);
+
+  // EM-089: a freshly-resolved animal model identity → repaint the labels.
+  useEffect(() => { kick(); }, [animalModels, kick]);
 
   // New speech events → start/refresh speaking pulses (skip historical backlog).
   useEffect(() => {
@@ -312,6 +372,73 @@ function drawBuilding(
   ctx.fill();
 
   ctx.restore();
+}
+
+/**
+ * W10 / audit D4 — one animal marker: a species emoji (🐱/🐶, matching the 3D
+ * critter cards) inside a chaos-magenta ring, name labeled beneath in the same
+ * accent. `accent` is the resolved --marker-animal token (data-driven; never a
+ * hardcoded literal here). Unknown species fall back to their initial.
+ */
+function drawAnimal(
+  ctx: CanvasRenderingContext2D,
+  animal: { name: string; species: string; alive: boolean },
+  ax: number,
+  ay: number,
+  r: number,
+  accent: string,
+  /** EM-089: the model the critter consults; null ⇒ omit the model line. */
+  model: AnimalModelId | null,
+) {
+  ctx.save();
+  if (!animal.alive) ctx.globalAlpha = 0.25;
+
+  // Magenta accent ring — the critters read as the chaos layer at a glance.
+  ctx.beginPath();
+  ctx.arc(ax, ay, r, 0, Math.PI * 2);
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Species marker: emoji renders in its own colors; non-cat/dog species use
+  // their initial tinted with the accent.
+  const emoji = animal.species === 'cat' ? '🐱' : animal.species === 'dog' ? '🐶' : null;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (emoji) {
+    ctx.font = `${Math.round(r * 1.5)}px "IBM Plex Mono", monospace`;
+    ctx.fillText(emoji, ax, ay + 0.5);
+  } else {
+    ctx.font = `600 ${Math.round(r)}px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = accent;
+    ctx.fillText((animal.species[0] ?? '?').toUpperCase(), ax, ay + 0.5);
+  }
+
+  // Name label beneath, in the chaos accent.
+  ctx.font = 'bold 9px "IBM Plex Mono", monospace';
+  ctx.fillStyle = accent;
+  ctx.textBaseline = 'top';
+  ctx.fillText(animal.name.slice(0, 10), ax, ay + r + 2);
+
+  // EM-089: the model behind the critter, in the profile's data-driven color
+  // (same treatment agents get) — omitted when unknown (reflex-only so far).
+  if (model) {
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    if (model.color) ctx.fillStyle = model.color;
+    ctx.fillText(model.profile.slice(0, 14), ax, ay + r + 12);
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Read a declared CSS custom property (a theme token from inspector-tokens.css)
+ * for Canvas use, where a class can't apply. Returns '' if unresolved (only in
+ * a non-DOM environment) — never a hardcoded hex literal.
+ */
+function cssVar(name: string): string {
+  if (typeof window === 'undefined') return '';
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
 function drawAgent(

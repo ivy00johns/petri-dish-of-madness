@@ -16,7 +16,9 @@ NOT a demotion. W7/W8 world features render *in* the 3D village. Encoded in
 | **W5 Foundations (gate)** | EM-053 `/inspector` annex + WebGL unmount · EM-054 event-log spine · EM-066 decision-trace output | ✅ DONE — gate GREEN |
 | **W6 Instrumentation** | EM-055 replay · EM-056 trace inspector · EM-057 governance history · EM-058 social graph · EM-059 AWI dashboard · EM-067 usage tracking | ✅ DONE — gate GREEN |
 | **W7 World** | EM-060 tiered tools · EM-061 building state · EM-062 collective projects · EM-063 ad-hoc spawn · EM-068 caching | ✅ DONE — gate GREEN (after fix) |
-| **W8 Chaos** | EM-064 cat & dog · EM-065 Animal Chaos Feed | unblocked → next (finale) |
+| **W8 Chaos** | EM-064 cat & dog · EM-065 Animal Chaos Feed | ✅ DONE (2026-06-09 — see BUILD-PLAN.md closure log) |
+
+**v2.1 audit waves (successor builds):** W9 ✅ done (`coordination/W9_BUILD.md`, `BUILD_RESULTS_W9.md`) · W10 in progress (`coordination/W10_BUILD.md`).
 
 ## Contracts (W5 gate — LOCKED)
 

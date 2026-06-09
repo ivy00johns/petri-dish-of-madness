@@ -11,7 +11,7 @@
 // these types works against either data source.
 // ============================================================
 
-import type { Agent, ModelProfile, WorldEvent, EventKind } from '../types';
+import type { Agent, ModelProfile, WorldEvent, EventKind, BuildingStatus } from '../types';
 
 // ── PanelProps — the single contract every inspector panel receives ──────────
 //
@@ -20,9 +20,17 @@ import type { Agent, ModelProfile, WorldEvent, EventKind } from '../types';
 // Every panel (DecisionTrace, GovernanceHistory, SocialGraph, AWIDashboard,
 // and ReplayScrubber's siblings) is mounted with EXACTLY this prop bag.
 export interface PanelProps {
-  /** Rolling event history (newest-first), the panels' primary data source. */
+  /**
+   * Event history (newest-first), the panels' primary data source. While
+   * scrubbed (not pinned to live) InspectorLayout passes a SCOPED slice
+   * (events with tick <= currentTick) so panels never bleed live-edge data
+   * into a replayed view (audit C8, frontend-inspector.md v1.1.0 §3).
+   */
   events: WorldEvent[];
-  /** Live agents (the social-graph nodes + analytics population). */
+  /**
+   * Agents (the social-graph nodes + analytics population). While scrubbed,
+   * `alive` is re-projected at the scrub tick from death events (audit C8).
+   */
   agents: Agent[];
   /** Model profiles — the legend, and the color-by-model source. */
   profiles: ModelProfile[];
@@ -30,6 +38,20 @@ export interface PanelProps {
   currentTick: number;
   /** Latest tick present in `events` (the scrubber's right edge). */
   maxTick: number;
+  /**
+   * True while the live-mode /api/events backfill is still paging in (EM-069).
+   * Panels with no data yet label it "history loading…" instead of an empty
+   * claim like "no events". Optional: absent ⇒ not loading (mock mode).
+   */
+  historyLoading?: boolean;
+  /**
+   * W10 (EM-075): true while scrubbed when at least one agent's energy/credits
+   * at the scrub tick could NOT be reconstructed from events (no `turn_start`
+   * sample ≤ T in the scoped window) — those agents carry live-edge values.
+   * Panels that surface per-agent economy (the AWI economy card) show a subtle
+   * "~" approximation marker with an explanatory title. Absent ⇒ exact/live.
+   */
+  agentsApproximate?: boolean;
 }
 
 // ── Decision trace (EM-056) ──────────────────────────────────────────────────
@@ -193,8 +215,12 @@ export interface AwiByModel {
   dead: number;
   crimes: number;
   gives: number;
+  /** Proposals BY this model's agents. */
   proposals: number;
+  /** Of this model's proposals, how many passed (audit C6: same population as `rejected`). */
   passed: number;
+  /** Of this model's proposals, how many were rejected. */
+  rejected: number;
   creditShare: number;
 }
 
@@ -238,10 +264,46 @@ export interface ReplayAgentPos {
   alive: boolean;
 }
 
+/**
+ * W10 / audit C7 — building state TIME-PROJECTED at a tick. A minimal subset of
+ * `Building` (exactly what the replay mini-map + structures readout render), so
+ * both a full live `Building` and an event-folded projection satisfy it.
+ */
+export interface ReplayBuildingState {
+  id: string;
+  name: string;
+  kind: string;
+  location: string;
+  status: BuildingStatus;
+  progress: number;
+}
+
+/**
+ * W10 / audit D4 — an animal position for the replay mini-map. Animal moves are
+ * NOT replayable from events (`animal_action` doesn't carry the destination
+ * place id), so positions are best-effort: snapshot-based when deep-replay
+ * materials are present, otherwise the live roster (flagged `approximate`).
+ */
+export interface ReplayAnimalPos {
+  id: string;
+  name: string;
+  species: string;
+  /** Logical [0..1000] position (the place the animal is at). */
+  x: number;
+  y: number;
+  alive: boolean;
+  /** True when the position comes from the live roster, not a tick-T source. */
+  approximate: boolean;
+}
+
 export interface ReplayFrame {
   tick: number;
   /** Agent positions at this tick (for the top-down map). */
   agents: ReplayAgentPos[];
+  /** W10/C7: building state projected at this tick (status/progress at T). */
+  buildings: ReplayBuildingState[];
+  /** W10/D4: animal positions at this tick (best-effort, see ReplayAnimalPos). */
+  animals: ReplayAnimalPos[];
   /** Events that occurred AT exactly this tick (for the markers detail). */
   eventsAtTick: WorldEvent[];
 }

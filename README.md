@@ -97,11 +97,13 @@ flowchart TB
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| Python | 3.11+ | Local dev without Docker — installed into a project-local `.venv` |
-| Node.js | 18+ | For local dev without Docker |
-| Docker + Compose | v2.x | For `make up` / `docker compose up` |
+
+| Tool             | Version | Notes                                                             |
+| ---------------- | ------- | ----------------------------------------------------------------- |
+| Python           | 3.11+   | Local dev without Docker — installed into a project-local `.venv` |
+| Node.js          | 18+     | For local dev without Docker                                      |
+| Docker + Compose | v2.x    | For `make up` / `docker compose up`                               |
+
 
 ---
 
@@ -128,7 +130,7 @@ make install
 
 `./dev` auto-activates `.venv` if it exists, so you don't have to keep it activated yourself.
 
-Open **http://localhost:5173** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and click the filter chips above the feed to show only the categories you care about. Visit **/inspector** for the analysis annex (replay, decision traces, governance history, social graph, model dashboards).
+Open **[http://localhost:5173](http://localhost:5173)** — the cozy 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation you need either a model (the FreeLLMAPI live demo below) or the offline **mock profile** (see "Run with zero tokens"). Use the header toggle to switch the center view between **THE VILLAGE** (3D) and the **WORLD MAP** (2D), and click the filter chips above the feed to show only the categories you care about. Visit **/inspector** for the analysis annex (replay, decision traces, governance history, social graph, model dashboards).
 
 > **macOS / Homebrew note:** bare `pip install -e backend` often fails with either
 > `requires a different Python: 3.10.x not in '>=3.11'` (a too-old Homebrew Python is
@@ -170,6 +172,7 @@ cp .env.example .env
 ```
 
 The default profiles (`config/profiles.yaml`) request three distinct models:
+
 - `gemini-flash` → `gemini-3.5-flash`
 - `qwen-next` → `qwen/qwen3-next-80b-a3b-instruct:free`
 - `deepseek-pro` → `deepseek-ai/deepseek-v4-pro`
@@ -185,31 +188,37 @@ regardless. Confirm what your proxy serves with `curl -s $FREELLMAPI_BASE_URL/mo
 
 **Step 4 — Watch**
 
-Open **http://localhost:5173** and click **Start**. The 3D village comes alive:
+Open **[http://localhost:5173](http://localhost:5173)** and click **Start**. The 3D village comes alive:
+
 - Each villager is tinted by its requested model and carries a floating card with its
-  energy, credits, mood, and the **model that actually answered** its last turn.
+energy, credits, mood, and the **model that actually answered** its last turn.
 - Speech appears as chat bubbles above villagers and streams in the live feed.
 - Live-reassign any agent's model from its panel — it takes effect on the next turn.
 - A cat (**Mochi**) and dog (**Biscuit**) roam and cause chaos — knocking things over,
-  stealing food — their in-character lines streaming to the Animal Chaos Feed.
+stealing food — their in-character lines streaming to the Animal Chaos Feed.
 - Filter the live feed with the category chips: click a chip to show **only** that
-  category, click more to stack two or three (e.g. **◉ Chat** + **🐾 Animals**), and
-  click **✕ clear** to reset.
+category, click more to stack two or three (e.g. **◉ Chat** + **🐾 Animals**), and
+click **✕ clear** to reset.
 - Open **/inspector** to replay ticks, read the decision trace behind any action, and
-  watch the social graph + model dashboards build up.
+watch the social graph + model dashboards build up.
 
 Runs comfortably past 5 minutes with all 3 alive (they recharge to survive); expect emergent
 gossip, alliances, the occasional theft, and passed rules.
 
+> **Replayable runs need a file DB:** the event log defaults to in-memory SQLite
+> (`db_path: ":memory:"` — fine for tests, gone on restart). For a run you want to replay
+> in `/inspector`, set `db_path` under `world:` in `config/world.yaml` to a file path,
+> e.g. `db_path: data/run.sqlite` (see `contracts/event-log.md` §6).
+
 **Troubleshooting the live run**
 
 - **Every agent shows `idle fallback` with a `401: Invalid API key` (or, on older builds,
-  `Illegal header value b'Bearer '`)** — `FREELLMAPI_KEY` is missing or wrong. `.env` is read
-  **once at startup**, so if you add or change the key while `./dev` is running, **stop it
-  (Ctrl-C) and re-run `./dev`** — the live process won't pick up the new value otherwise.
-- **`Connection refused` to `:3001`** — the FreeLLMAPI proxy isn't running (or
-  `FREELLMAPI_BASE_URL` is wrong). Start the proxy and confirm with
-  `curl -s $FREELLMAPI_BASE_URL/models -H "Authorization: Bearer $FREELLMAPI_KEY"`.
+`Illegal header value b'Bearer '`)** — `FREELLMAPI_KEY` is missing or wrong. `.env` is read
+**once at startup**, so if you add or change the key while `./dev` is running, **stop it
+(Ctrl-C) and re-run `./dev`** — the live process won't pick up the new value otherwise.
+- `**Connection refused` to `:3001**` — the FreeLLMAPI proxy isn't running (or
+`FREELLMAPI_BASE_URL` is wrong). Start the proxy and confirm with
+`curl -s $FREELLMAPI_BASE_URL/models -H "Authorization: Bearer $FREELLMAPI_KEY"`.
 
 ---
 
@@ -220,11 +229,11 @@ profile. The default world assigns the three villagers to FreeLLMAPI profiles, s
 the **backend** entirely offline, point the agents at `mock` in one of these ways:
 
 - **Edit `config/world.yaml`** — set `profile: mock` for Ada, Bram, and Cleo, then `./dev`
-  and click **Start**; or
+and click **Start**; or
 - **Reassign live in the UI** — open each agent's panel and choose **Reassign Model → mock**
-  (takes effect on its next turn); or
+(takes effect on its next turn); or
 - **Headless** — from the repo root: `.venv/bin/python -m petridish.run --ticks 50 --profile mock`
-  (no frontend; prints events to the console, remaps every agent to `mock`).
+(no frontend; prints events to the console, remaps every agent to `mock`).
 
 > Note: simply opening the frontend with **no backend running** also shows a scripted mock
 > preview (the UI animates itself). But `./dev` starts the real backend, which uses each
@@ -252,7 +261,7 @@ For Docker-based Ollama:
 ```bash
 docker compose --profile ollama up
 # Then pull a model inside the container:
-docker exec petridish-ollama ollama pull llama3.2
+docker compose exec ollama ollama pull llama3.2
 ```
 
 ---
@@ -264,8 +273,8 @@ The same images deploy anywhere. Swap `FREELLMAPI_BASE_URL` to a hosted gateway 
 ```bash
 # Build and push
 docker compose build
-docker tag emergencemadness-backend registry.example.com/em-backend:latest
-docker tag emergencemadness-web     registry.example.com/em-web:latest
+docker tag petri-dish-of-madness-backend registry.example.com/em-backend:latest
+docker tag petri-dish-of-madness-web     registry.example.com/em-web:latest
 docker push registry.example.com/em-backend:latest
 docker push registry.example.com/em-web:latest
 
@@ -300,12 +309,14 @@ docker compose build
 docker compose down
 ```
 
-| Service | Port | Always on? | Notes |
-|---------|------|-----------|-------|
-| `backend` | 8000 | Yes | FastAPI + uvicorn |
-| `web` | 8080 | Yes | nginx serving Vite build + proxy |
-| `ollama` | 11434 | Opt-in (`--profile ollama`) | Local LLM server |
-| `freellmapi` | 3001 | Opt-in (`--profile freellmapi`) | Self-hosted gateway |
+
+| Service      | Port  | Always on?                      | Notes                            |
+| ------------ | ----- | ------------------------------- | -------------------------------- |
+| `backend`    | 8000  | Yes                             | FastAPI + uvicorn                |
+| `web`        | 8080  | Yes                             | nginx serving Vite build + proxy |
+| `ollama`     | 11434 | Opt-in (`--profile ollama`)     | Local LLM server                 |
+| `freellmapi` | 3001  | Opt-in (`--profile freellmapi`) | Self-hosted gateway              |
+
 
 ---
 

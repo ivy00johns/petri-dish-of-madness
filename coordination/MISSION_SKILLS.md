@@ -25,3 +25,31 @@ Every box ends ✅ (invoked, artifact path) or with a one-line deferral reason.
 - `repo-deep-dive` — DONE-EQUIVALENT: reference project (Emergence-World) already analyzed via Explore agent during brainstorming; findings folded into the spec.
 - `llm-wiki` — DEFERRED: project knowledge lives in the living-plan docs (START-HERE/BUILD-PLAN/REMAINING-WORK); a wiki is redundant for a build this size.
 - `security-review` / `code-review` — run as post-build second pass (Phase C) if time permits; low surface (local, no auth, no PII).
+
+## W9 — "Make v2 true" (source: BUILD-PLAN.md §Wave 9, scanned 2026-06-09)
+
+The W9 mission text names no external skills explicitly; orchestrator defaults apply.
+
+- [x] `contract-author` — contract DELTAS authored inline by orchestrator (event-log
+      v1.1.0, api 1.2.0, frontend-inspector v1.1.0, events.schema kinds) — `0f26901`.
+      Full skill deferred: small amendments to locked contracts, not greenfield authoring.
+- [x] `render-sanity` / live-browser pass — Playwright verification vs W9 exit criteria:
+      fresh-load scrub @t10/t60 of a 98-tick run, starvation countdown, extinction
+      banner + auto-pause, console 0 errors; routing banner field-verified by user.
+      Screenshots: `.playwright/2026-06-09_12-46-13/screenshots/verify-*.png`.
+- [x] `design-token-guard` — diff-scoped check at wave gate: hex only in token
+      declarations; added inline styles are var()/data-driven. Full skill deferred to a
+      repo-wide pass (tracked under EM-082 a11y/W11).
+- [x] `git-commit` — 0f26901, f23b1df, 35cd186, a8dba06 + closeout commit.
+
+## W10 — "Trust & hygiene" (source: BUILD-PLAN.md §Wave 10, scanned 2026-06-09)
+
+- [x] `contract-author` — deltas authored inline by orchestrator (/api/animals, schema kind
+      cleanup) — `0912b12`. Full skill deferred: small amendments, not greenfield.
+- [x] `render-sanity` / live-browser pass — feed-seeding on refresh, 8-profile legend,
+      animals + chips on 2D map, 🧠 markers, RESET WORLD end-to-end (run preserved on disk),
+      console 0 errors. Screenshots: `.playwright/2026-06-09_12-46-13/screenshots/verify-w10-*`.
+- [x] `design-token-guard` — diff-scoped check at wave-1 gate (one hex = pre-existing
+      WebGL-overlay ink idiom).
+- [x] `git-commit` — 0912b12, 61e9d29, 82984f0, 86a5c8e, 80ea7dc, 5f42d15 + closeout.
+- [x] `git-pr` — PR opened build/w10-trust-hygiene → main (user-requested).

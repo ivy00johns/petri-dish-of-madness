@@ -13,7 +13,7 @@
 //   - A scrub at tick T projects state as of T (events with tick <= T).
 // ============================================================
 
-import type { Agent, ModelProfile, WorldEvent, EventKind } from '../types';
+import type { Agent, Animal, Building, BuildingStatus, ModelProfile, WorldEvent, EventKind } from '../types';
 import type {
   TurnTrace,
   TraceSpan,
@@ -28,6 +28,8 @@ import type {
   AwiByModel,
   ReplayFrame,
   ReplayAgentPos,
+  ReplayBuildingState,
+  ReplayAnimalPos,
 } from './types';
 
 // ── small payload helpers (open payloads → typed reads, null-safe) ───────────
@@ -391,7 +393,7 @@ function inferRelType(text: string | null | undefined): string {
 const CRIME_KINDS: Record<string, true> = { conflict: true };
 
 function emptyByModel(): AwiByModel {
-  return { alive: 0, dead: 0, crimes: 0, gives: 0, proposals: 0, passed: 0, creditShare: 0 };
+  return { alive: 0, dead: 0, crimes: 0, gives: 0, proposals: 0, passed: 0, rejected: 0, creditShare: 0 };
 }
 
 /**
@@ -435,6 +437,20 @@ export function awiSummary(
     return byModel[name];
   };
 
+  // Per-model governance attribution (audit C6): a pass/reject is credited to
+  // the model whose agent PROPOSED the rule, so numerator and denominator
+  // measure the same thing — proposals BY that model that passed, over
+  // proposals BY that model that resolved (passed + rejected).
+  const proposerModelByRule = new Map<string, string | null>();
+  const openRuleIds: string[] = [];
+  const resolveRuleModel = (e: WorldEvent): AwiByModel | null => {
+    const rid = ruleIdOf(e) ?? openRuleIds[0] ?? null;
+    if (!rid) return null;
+    const idx = openRuleIds.indexOf(rid);
+    if (idx >= 0) openRuleIds.splice(idx, 1);
+    return ensureModel(proposerModelByRule.get(rid));
+  };
+
   for (const e of inRange) {
     const p = payload(e);
     const model = ensureModel(e.profile);
@@ -451,7 +467,9 @@ export function awiSummary(
       const tool = str(p['chosen_tool']) ?? (e.kind === 'action_chosen' ? str(p['tool']) : null);
       if (tool) (toolsByAgent[e.actor_id] ??= new Set()).add(tool);
       if (e.kind === 'agent_moved') {
-        const place = str(p['to']) ?? str(p['location']);
+        // W9-QA-1: the backend emits the destination as payload.place
+        // (runtime.py ground truth); `to`/`location` are tolerated fallbacks.
+        const place = str(p['place']) ?? str(p['to']) ?? str(p['location']);
         if (place) (placesByAgent[e.actor_id] ??= new Set()).add(place);
       }
     }
@@ -465,12 +483,22 @@ export function awiSummary(
       proposeRule += 1;
       proposed += 1;
       if (model) model.proposals += 1;
+      const rid = ruleIdOf(e);
+      if (rid) {
+        proposerModelByRule.set(rid, e.profile ?? null);
+        openRuleIds.push(rid);
+      }
     }
     if (e.kind === 'rule_passed') {
       passed += 1;
-      if (model) model.passed += 1;
+      const proposerModel = resolveRuleModel(e);
+      if (proposerModel) proposerModel.passed += 1;
     }
-    if (e.kind === 'rule_rejected') rejected += 1;
+    if (e.kind === 'rule_rejected') {
+      rejected += 1;
+      const proposerModel = resolveRuleModel(e);
+      if (proposerModel) proposerModel.rejected += 1;
+    }
     if (e.kind === 'rule_vote') {
       voteEvents += 1;
       if (e.actor_id) voters.add(e.actor_id);
@@ -620,6 +648,41 @@ export interface ReplaySnapshot {
   /** Minimal positional state: agentId → place id, plus place coords. */
   agents?: Array<{ id: string; location: string; profile?: string | null; alive?: boolean }>;
   places?: Array<{ id: string; x: number; y: number }>;
+  /** W10/C7: building state at the snapshot tick (subset of world_state.buildings). */
+  buildings?: Array<{
+    id: string;
+    name?: string;
+    kind?: string;
+    location?: string;
+    status?: string;
+    progress?: number;
+  }>;
+  /** W10/D4: animal roster at the snapshot tick. */
+  animals?: Array<{
+    id: string;
+    name?: string;
+    species?: string;
+    location: string;
+    alive?: boolean;
+  }>;
+}
+
+/** The seven contract building statuses (world-model.md §W7) — used to validate
+ *  open event payloads before they drive a glyph color. */
+const BUILDING_STATUSES = new Set<BuildingStatus>([
+  'planned',
+  'under_construction',
+  'operational',
+  'damaged',
+  'offline',
+  'abandoned',
+  'destroyed',
+]);
+
+function asBuildingStatus(v: unknown): BuildingStatus | null {
+  return typeof v === 'string' && BUILDING_STATUSES.has(v as BuildingStatus)
+    ? (v as BuildingStatus)
+    : null;
 }
 
 /**
@@ -627,6 +690,14 @@ export interface ReplaySnapshot {
  * Folds the nearest prior snapshot forward through agent_moved / agent_died
  * events up to `tick`. With no snapshots (mock), starts from the agent roster
  * and replays movement. Pure: never mutates inputs.
+ *
+ * W10 additions:
+ *   • Buildings (audit C7): `frame.buildings` is the building state AT `tick`,
+ *     folded from snapshot buildings (base) + construction-lifecycle events —
+ *     never the live roster's status. `liveBuildings` only fills display
+ *     metadata (name/kind/location) for entries the event window can't name.
+ *   • Animals (audit D4): `frame.animals` is a best-effort roster at `tick`
+ *     (see the fold below for why animal positions are approximate).
  */
 export function replayStateAt(
   events: WorldEvent[],
@@ -634,6 +705,8 @@ export function replayStateAt(
   tick: number,
   agents: Agent[],
   places: Array<{ id: string; x: number; y: number }>,
+  liveBuildings: Building[] = [],
+  liveAnimals: Animal[] = [],
 ): ReplayFrame {
   const placeXY = new Map<string, { x: number; y: number }>();
   for (const p of places) placeXY.set(p.id, { x: p.x, y: p.y });
@@ -658,11 +731,24 @@ export function replayStateAt(
     for (const p of base.places ?? []) placeXY.set(p.id, { x: p.x, y: p.y });
   }
 
-  const fromTick = base?.tick ?? 0;
+  // Fold boundary (audit C4; event-log.md v1.1.0 §3 / api.openapi v1.2.0): a
+  // snapshot at tick S is the state AFTER all tick-S events, so the fold is
+  // STRICT-LEFT — keep events with base.tick < e.tick <= tick. With no snapshot
+  // the fold starts before tick 0 (so tick-0 events apply).
+  const fromTick = base ? base.tick : -1;
   for (const e of ascending(events)) {
-    if (e.tick <= fromTick || e.tick > tick) continue;
+    if (!(e.tick > fromTick && e.tick <= tick)) continue;
     if (e.kind === 'agent_moved' && e.actor_id) {
-      const to = str(payload(e)['to']) ?? str(payload(e)['location']) ?? e.target_id;
+      // W9-QA-1: the backend's agent_moved destination is payload.place
+      // (runtime.py emits {place: <place_id>}); without it the replay delta
+      // never moved anyone and scrubbed positions went stale between
+      // snapshots. `to`/`location`/`target_id` remain as fallbacks (mock /
+      // older shapes).
+      const to =
+        str(payload(e)['place']) ??
+        str(payload(e)['to']) ??
+        str(payload(e)['location']) ??
+        e.target_id;
       if (to && placeXY.has(to)) location.set(e.actor_id, to);
     } else if (e.kind === 'agent_died' && e.actor_id) {
       aliveOf.set(e.actor_id, false);
@@ -689,9 +775,193 @@ export function replayStateAt(
     });
   }
 
+  // ── W10 / audit C7 — time-projected building state ─────────────────────────
+  // The C7 bug: the replay mini-map drew live building status while scrubbed.
+  // Fix: building state at T is a pure event fold. Base = snapshot.buildings
+  // (state AFTER all tick-base.tick events) when present; otherwise the fold
+  // starts EMPTY and `project_proposed` / `structure_state_changed` events
+  // CREATE entries — the live roster is never used as a status source, only to
+  // fill display metadata (name/kind/location) for buildings whose creating
+  // event predates the available window. Tolerant of missing payload fields:
+  // every read is null-checked and an unknown status keeps the previous one.
+  const bld = new Map<string, ReplayBuildingState>();
+  const ensureBld = (id: string): ReplayBuildingState => {
+    let b = bld.get(id);
+    if (!b) {
+      b = { id, name: id, kind: '', location: '', status: 'planned', progress: 0 };
+      bld.set(id, b);
+    }
+    return b;
+  };
+  for (const s of base?.buildings ?? []) {
+    if (!s.id) continue;
+    const b = ensureBld(s.id);
+    if (s.name) b.name = s.name;
+    if (s.kind) b.kind = s.kind;
+    if (s.location) b.location = s.location;
+    const status = asBuildingStatus(s.status);
+    if (status) b.status = status;
+    if (typeof s.progress === 'number' && Number.isFinite(s.progress)) b.progress = s.progress;
+  }
+  for (const e of ascending(events)) {
+    if (!(e.tick > fromTick && e.tick <= tick)) continue;
+    const p = payload(e);
+    const buildingId = str(p['building_id']) ?? (e.kind.startsWith('project_') || e.kind.startsWith('building_') || e.kind === 'structure_state_changed' ? e.target_id ?? null : null);
+    if (!buildingId) continue;
+    if (e.kind === 'project_proposed') {
+      // payload: {building_id, name, kind, location, funds_required, function}
+      const b = ensureBld(buildingId);
+      b.name = str(p['name']) ?? b.name;
+      b.kind = str(p['kind']) ?? b.kind;
+      b.location = str(p['location']) ?? b.location;
+      b.status = 'planned';
+      b.progress = 0;
+    } else if (e.kind === 'structure_state_changed') {
+      // payload: {building_id, from, to, reason} — `to` drives the status.
+      const b = ensureBld(buildingId);
+      const to = asBuildingStatus(p['to']);
+      if (to) b.status = to;
+    } else if (e.kind === 'project_built' || e.kind === 'project_completed') {
+      // payload: {building_id, progress, step}
+      const b = ensureBld(buildingId);
+      const progress = num(p['progress']);
+      if (progress !== null) b.progress = Math.max(0, Math.min(100, progress));
+    } else if (e.kind === 'building_operational') {
+      // payload: {building_id, kind, function, location}
+      const b = ensureBld(buildingId);
+      b.status = 'operational';
+      b.progress = 100;
+      b.kind = str(p['kind']) ?? b.kind;
+      b.location = str(p['location']) ?? b.location;
+    }
+    // project_funded / project_contributed carry funds only — nothing the
+    // replay frame renders changes, so they are intentionally not folded.
+  }
+  // Display-metadata fill ONLY (never status/progress) from the live roster.
+  for (const lb of liveBuildings) {
+    const b = bld.get(lb.id);
+    if (!b) continue;
+    if (!b.name || b.name === b.id) b.name = lb.name;
+    if (!b.kind) b.kind = lb.kind;
+    if (!b.location) b.location = lb.location;
+  }
+  // Tolerant back-fill: a live-roster building ABSENT from the fold either
+  // (a) was created AFTER the scrub tick (its earliest event is a
+  //     project_proposed > T) → it does not exist at T, skip it;
+  // (b) predates the available window (seeded world / truncated history). For
+  //     (b), rewind through its earliest later transition when possible —
+  //     structure_state_changed carries `from`, the status BEFORE the change —
+  //     otherwise fall back to the live state (better than vanishing).
+  for (const lb of liveBuildings) {
+    if (bld.has(lb.id)) continue;
+    let earliestLater: WorldEvent | null = null;
+    for (const e of events) {
+      if (e.tick <= tick) continue;
+      const p = payload(e);
+      const bid = str(p['building_id']) ?? e.target_id;
+      if (bid !== lb.id) continue;
+      if (earliestLater === null || e.seq < earliestLater.seq) earliestLater = e;
+    }
+    if (earliestLater?.kind === 'project_proposed') continue; // born after T
+    let status: BuildingStatus = lb.status;
+    if (earliestLater?.kind === 'structure_state_changed') {
+      status = asBuildingStatus(payload(earliestLater)['from']) ?? lb.status;
+    }
+    bld.set(lb.id, {
+      id: lb.id,
+      name: lb.name,
+      kind: lb.kind,
+      location: lb.location,
+      status,
+      progress: lb.progress,
+    });
+  }
+
+  // ── W10 / audit D4 — animals at `tick` (best-effort) ───────────────────────
+  // Animal positions are NOT faithfully replayable from events: a wander's
+  // `animal_action` payload carries no destination place id (only prose). So:
+  //   base = snapshot.animals (true roster at base.tick ≤ T) when present,
+  //   else the live roster, flagged `approximate`;
+  //   then fold animal_spawned (payload carries location — drop animals whose
+  //   spawn is AFTER T) and animal_died ≤ T for liveness.
+  interface AnimalAcc {
+    name: string;
+    species: string;
+    location: string;
+    alive: boolean;
+    approximate: boolean;
+  }
+  const ani = new Map<string, AnimalAcc>();
+  if (base?.animals) {
+    for (const a of base.animals) {
+      if (!a.id || !a.location) continue;
+      ani.set(a.id, {
+        name: a.name ?? a.id,
+        species: a.species ?? '',
+        location: a.location,
+        alive: a.alive ?? true,
+        approximate: false,
+      });
+    }
+  } else {
+    for (const a of liveAnimals) {
+      ani.set(a.id, {
+        name: a.name,
+        species: a.species,
+        location: a.location,
+        alive: a.alive,
+        approximate: true,
+      });
+    }
+  }
+  for (const e of ascending(events)) {
+    if (e.tick > fromTick && e.tick <= tick) {
+      if (e.kind === 'animal_spawned' && e.actor_id) {
+        const p = payload(e);
+        const cur = ani.get(e.actor_id);
+        ani.set(e.actor_id, {
+          name: str(p['name']) ?? cur?.name ?? e.actor_id,
+          species: str(p['species']) ?? cur?.species ?? '',
+          location: str(p['location']) ?? cur?.location ?? '',
+          alive: true,
+          approximate: false,
+        });
+      } else if (e.kind === 'animal_died' && e.actor_id) {
+        const cur = ani.get(e.actor_id);
+        if (cur) cur.alive = false;
+      }
+    } else if (e.tick > tick && e.kind === 'animal_spawned' && e.actor_id) {
+      // Spawned AFTER the scrub tick — it does not exist at T. Only the
+      // live-roster fallback is overruled; a snapshot ≤ T already attested
+      // the animal existed (snapshots are authoritative, events tolerated).
+      const cur = ani.get(e.actor_id);
+      if (cur === undefined || cur.approximate) ani.delete(e.actor_id);
+    }
+  }
+  const animalPositions: ReplayAnimalPos[] = [];
+  for (const [id, a] of ani) {
+    const xy = placeXY.get(a.location);
+    if (!xy) continue;
+    animalPositions.push({
+      id,
+      name: a.name,
+      species: a.species,
+      x: xy.x,
+      y: xy.y,
+      alive: a.alive,
+      approximate: a.approximate,
+    });
+  }
+
   const eventsAtTick = ascending(events).filter((e) => e.tick === tick);
 
-  return { tick, agents: agentPositions, eventsAtTick };
+  return {
+    tick,
+    agents: agentPositions,
+    buildings: [...bld.values()],
+    animals: animalPositions,
+    eventsAtTick,
+  };
 }
 
 /** Nearest snapshot with tick <= T (replay cost bound, event-log.md §5). */
@@ -701,6 +971,92 @@ export function nearestSnapshot(snapshots: ReplaySnapshot[], tick: number): Repl
     if (s.tick <= tick && (best === null || s.tick > best.tick)) best = s;
   }
   return best;
+}
+
+// ── W10 — scrub-consistent status strip + agent economy re-projection ────────
+
+/**
+ * Rules ACTIVE within `events` (callers pass the SCOPED slice, tick <= T, so
+ * this is "rules active at the scrub tick"). A rule is active once passed and
+ * never un-passes (no repeal mechanic in the contract), so counting the
+ * governance lifecycle over the scoped window is exact.
+ */
+export function activeRuleCount(events: WorldEvent[]): number {
+  return governanceTimeline(events).filter((r) => r.status === 'active').length;
+}
+
+/**
+ * The sim DAY at the latest event in `events` (callers pass the SCOPED slice).
+ * `turn_start` is the cheapest authoritative carrier ({..., day} per
+ * event-log.md §3); the LATEST turn_start wins. `fallback` (the live world's
+ * day) is returned when the window holds no turn_start.
+ */
+export function dayAt(events: WorldEvent[], fallback: number): number {
+  let bestSeq = -Infinity;
+  let day: number | null = null;
+  for (const e of events) {
+    if (e.kind !== 'turn_start' || e.seq <= bestSeq) continue;
+    const d = num(payload(e)['day']);
+    if (d !== null) {
+      bestSeq = e.seq;
+      day = d;
+    }
+  }
+  return day ?? fallback;
+}
+
+/** Per-agent energy/credits re-projected from events (W10 / EM-075). */
+export interface AgentEconomySample {
+  energy: number;
+  credits: number;
+  /** True when the value came from an authoritative turn_start sample. */
+  sampled: boolean;
+}
+
+/**
+ * Re-project each agent's energy/credits from the SCOPED event window
+ * (callers pass events with tick <= T, the scrub position).
+ *
+ * Approach (event-log.md §3): every `turn_start` payload carries the acting
+ * agent's {energy, credits} — the cheapest authoritative per-turn sample. The
+ * LATEST turn_start ≤ T anchors the value; later `action_resolved.state_deltas`
+ * ({energy?, credits?, ...}) by the same agent are folded on top (they are the
+ * only trivially-attributable per-agent deltas — economy events can move
+ * credits for the TARGET too, which a turn-anchored fold can't safely split,
+ * and per-turn energy decay is engine-internal and never evented). So the
+ * result is exact-at-turn-granularity: an agent's value as of its most recent
+ * turn at-or-before T, plus its own resolved deltas. Agents with NO turn_start
+ * in the window (spawned later / never acted / window truncated) are absent
+ * from the map — callers keep the live value and mark it approximate ("~").
+ */
+export function agentEconomyAt(events: WorldEvent[]): Map<string, AgentEconomySample> {
+  const out = new Map<string, AgentEconomySample>();
+  for (const e of ascending(events)) {
+    if (!e.actor_id) continue;
+    const p = payload(e);
+    if (e.kind === 'turn_start') {
+      const energy = num(p['energy']);
+      const credits = num(p['credits']);
+      if (energy === null && credits === null) continue;
+      const prev = out.get(e.actor_id);
+      out.set(e.actor_id, {
+        energy: energy ?? prev?.energy ?? 0,
+        credits: credits ?? prev?.credits ?? 0,
+        sampled: true,
+      });
+    } else if (e.kind === 'action_resolved') {
+      const cur = out.get(e.actor_id);
+      if (!cur) continue;
+      const deltas = numRecord(p['state_deltas']);
+      if (deltas['energy'] !== undefined) {
+        cur.energy = Math.max(0, Math.min(100, cur.energy + deltas['energy']));
+      }
+      if (deltas['credits'] !== undefined) {
+        cur.credits = cur.credits + deltas['credits'];
+      }
+    }
+  }
+  return out;
 }
 
 // ── Replay markers (EM-055) — color-coded by type, for the timeline ──────────

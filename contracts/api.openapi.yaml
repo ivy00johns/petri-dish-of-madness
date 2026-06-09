@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.1.0
+  version: 1.2.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -55,6 +55,14 @@ paths:
       summary: Spawn an agent (W7 EM-063 — god-mode immediate, or governance-gated when mode=governance)
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name, profile], properties: { name: {type: string}, personality: {type: string}, profile: {type: string}, location: {type: string}, mode: { type: string, enum: [god, governance], default: god, description: "god=immediate; governance=enqueue admit_agent proposal" } } } } } }
       responses: { "201": { description: "created (god) — emits agent_spawned{method:god}" }, "202": { description: "accepted (governance) — admit_agent proposal enqueued; agent admitted iff vote passes" } }
+  /api/animals:
+    get:
+      summary: List animals with state (W8 EM-064) — also present in world_state.animals; empty array when no run/animals (never 500)
+      responses: { "200": { description: animals, content: { application/json: { schema: { type: array, items: { type: object } } } } } }
+    post:
+      summary: Spawn an animal immediately (god-mode), emitting animal_spawned. Animals have no credits and are not in the agent round-robin.
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [species, name], properties: { species: { type: string, enum: [cat, dog] }, name: { type: string }, location: { type: string, default: plaza }, personality: { type: string, default: "" } } } } } }
+      responses: { "201": { description: "created — {status, animal_id}" }, "400": { description: unknown species }, "503": { description: not initialized } }
   /api/buildings:
     get:
       summary: List buildings/structures with state (W7 EM-061) — also available in world_state.buildings
@@ -106,7 +114,12 @@ paths:
       responses: { "200": { description: ticks, content: { application/json: { schema: { type: array, items: { type: object, properties: { tick: { type: integer } } } } } } } }
   /api/replay:
     get:
-      summary: Replay materials for tick T — nearest prior snapshot + events to fold forward (EM-055)
+      summary: Replay materials for tick T — nearest prior snapshot + the fold-forward delta (EM-055)
+      description: >
+        v1.2.0 (W9, audit §B7): `events` contains ONLY the delta — rows with
+        base.tick < event.tick <= T (strict on the left; the snapshot at base.tick
+        already includes all tick-base.tick events, per event-log.md v1.1.0 §boundary).
+        Clients fold `events` onto `base.state` without further filtering.
       parameters: [ { name: tick, in: query, required: true, schema: { type: integer } } ]
       responses: { "200": { description: replay, content: { application/json: { schema: { type: object, properties: { base: { type: object, properties: { tick: { type: integer }, state: { type: object } } }, events: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } } } }
   /api/analytics:

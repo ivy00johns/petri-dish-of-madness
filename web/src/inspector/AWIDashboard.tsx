@@ -143,7 +143,7 @@ export default function AWIDashboard(props: PanelProps) {
       </div>
 
       {!hasData ? (
-        <EmptyState />
+        <EmptyState loading={props.historyLoading === true} />
       ) : (
         <div className="flex flex-col gap-4 p-3 min-h-0">
           {/* ACT 1 — the nine indicators, side by side. */}
@@ -159,7 +159,7 @@ export default function AWIDashboard(props: PanelProps) {
               <GovernanceCard summary={summary} />
               <ExpressionCard summary={summary} />
               <SocialFabricCard summary={summary} />
-              <EconomyCard summary={summary} />
+              <EconomyCard summary={summary} approximate={props.agentsApproximate === true} />
               <ConstitutionCard summary={summary} />
               <UsageCard summary={summary} />
             </div>
@@ -203,15 +203,16 @@ function SectionLabel({ title, hint }: { title: string; hint: string }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ loading }: { loading: boolean }) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-2 p-8 text-center">
-      <span className="font-mono text-xs uppercase tracking-widest text-lab-dim">
-        Awaiting world data
+      <span className="font-mono text-xs uppercase tracking-widest text-lab-muted">
+        {loading ? 'History loading…' : 'Awaiting world data'}
       </span>
       <span className="font-mono text-[10px] text-lab-muted max-w-xs leading-relaxed">
-        The nine welfare indicators and the model-vs-model cut populate as agents
-        act. Start a run (or load the mock feed) to watch the models diverge.
+        {loading
+          ? 'Backfilling the run from the event log — indicators populate as pages arrive.'
+          : 'The nine welfare indicators and the model-vs-model cut populate as agents act. Start a run (or load the mock feed) to watch the models diverge.'}
       </span>
     </div>
   );
@@ -354,14 +355,23 @@ function SocialFabricCard({ summary }: { summary: AwiSummary }) {
   );
 }
 
-function EconomyCard({ summary }: { summary: AwiSummary }) {
+function EconomyCard({ summary, approximate = false }: { summary: AwiSummary; approximate?: boolean }) {
   const e = summary.economy;
+  // W10 / EM-075: while scrubbed, per-agent credits are re-projected from
+  // turn_start samples; agents with no sample in the window keep live values,
+  // so the credit-derived figures are flagged with a subtle "~".
   return (
     <IndicatorCard
       label="Economy"
-      value={e.gini.toFixed(2)}
+      value={`${approximate ? '~' : ''}${e.gini.toFixed(2)}`}
       detail={
-        <span>
+        <span
+          title={
+            approximate
+              ? 'Approximate at the scrub tick: some agents have no turn_start sample in the scoped window, so their credits are live-edge values.'
+              : undefined
+          }
+        >
           <span className="text-lab-muted">gini</span> ·{' '}
           <span className="text-lab-muted">throughput</span>{' '}
           <span className="text-lab-text">{compact(e.throughput)}</span>
@@ -440,7 +450,10 @@ function ModelLeaderboard({
             <th className="text-right font-medium py-1 px-1" title="gives vs crimes">
               coop
             </th>
-            <th className="text-right font-medium py-1 px-1" title="proposals passed / proposed">
+            <th
+              className="text-right font-medium py-1 px-1"
+              title="of this model's proposals: passed / resolved (passed + rejected)"
+            >
               gov
             </th>
             <th className="text-right font-medium py-1 px-1" title="share of total credits">
@@ -456,7 +469,10 @@ function ModelLeaderboard({
             const pop = m.alive + m.dead;
             const survival = pop > 0 ? m.alive / pop : 0;
             const coop = cooperationIndex(m);
-            const govResolved = m.proposals;
+            // Audit C6: numerator and denominator measure the SAME population —
+            // this model's proposals that passed / this model's proposals that
+            // resolved (passed + rejected). Open proposals don't count yet.
+            const govResolved = m.passed + m.rejected;
             const reqs = summary.usage.byProfile[name]?.requests ?? 0;
             const color = colors.get(name) || neutral;
             return (
@@ -483,7 +499,10 @@ function ModelLeaderboard({
                 <td className="text-right tabular-nums py-1 px-1" title={`${m.gives} gives · ${m.crimes} crimes`}>
                   {m.gives + m.crimes > 0 ? pct(coop) : '—'}
                 </td>
-                <td className="text-right tabular-nums py-1 px-1">
+                <td
+                  className="text-right tabular-nums py-1 px-1"
+                  title={`${m.proposals} proposed · ${m.passed} passed · ${m.rejected} rejected`}
+                >
                   {govResolved > 0 ? (
                     <>
                       {m.passed}/{govResolved}

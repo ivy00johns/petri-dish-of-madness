@@ -16,19 +16,27 @@
  * Canvas reads colors from data (agent profile colors) and named marker tokens.
  */
 
-import { useEffect, useMemo, useRef, useCallback } from 'react';
-import type { Agent, Building, BuildingStatus, ModelProfile, WorldEvent } from '../types';
+import { useEffect, useMemo, useRef, useCallback, useState } from 'react';
+import type { Agent, Animal, BuildingStatus, ModelProfile, WorldEvent } from '../types';
 import { replayStateAt, markerCategory } from './selectors';
 import type { MarkerCategory, ReplaySnapshot } from './selectors';
+import type { ReplayBuildingState } from './types';
 import './inspector-tokens.css';
 
 interface ReplayScrubberProps {
   events: WorldEvent[];
   agents: Agent[];
   profiles: ModelProfile[];
-  places: Array<{ id: string; x: number; y: number }>;
-  /** W7 buildings — surfaced as status markers on the mini-map + readout. */
-  buildings?: Building[];
+  places: Array<{ id: string; x: number; y: number; name?: string }>;
+  /**
+   * W7 buildings — surfaced as status markers on the mini-map + readout.
+   * W10 / audit C7: while scrubbed, InspectorLayout passes the TIME-PROJECTED
+   * building state at the scrub tick (folded by replayStateAt) instead of the
+   * live roster, so the map/readout show each structure as it WAS at tick T.
+   */
+  buildings?: ReplayBuildingState[];
+  /** W10 / audit D4: live animal roster — the replay fold's position fallback. */
+  animals?: Animal[];
   currentTick: number;
   maxTick: number;
   /** Optional deep-replay snapshots (live mode); empty in mock. */
@@ -88,13 +96,20 @@ export function ReplayScrubber({
   profiles,
   places,
   buildings = [],
+  animals = [],
   currentTick,
   maxTick,
   snapshots = [],
   onSeek,
 }: ReplayScrubberProps) {
+  // Audit C2: refs drive the interval (no re-subscribe per tick) but a ref read
+  // in render never updates the DOM — so play/speed are ALSO tracked as state,
+  // kept in lockstep with the refs, and the button label / aria-pressed render
+  // from the state.
   const playingRef = useRef(false);
+  const [playing, setPlaying] = useState(false);
   const speedRef = useRef<number>(1);
+  const [speed, setSpeedState] = useState<number>(1);
   const playTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -107,10 +122,20 @@ export function ReplayScrubber({
   maxRef.current = maxTick;
 
   // The replay frame at the current scrub tick (positions for the mini-map).
-  const frame = useMemo(
-    () => replayStateAt(events, snapshots, currentTick, agents, places),
-    [events, snapshots, currentTick, agents, places],
-  );
+  // The animal roster rides along so frame.animals can fall back to live
+  // positions when no snapshot covers the tick (D4 — best-effort, labeled "~").
+  const frame = useMemo(() => {
+    const f = replayStateAt(events, snapshots, currentTick, agents, places, [], animals);
+    // Pinned to the live edge: the live roster IS the tick-T truth, so the
+    // roster-fallback positions are exact — clear the approximation flag.
+    if (currentTick >= maxTick && f.animals.some((a) => a.approximate)) {
+      return {
+        ...f,
+        animals: f.animals.map((a) => (a.approximate ? { ...a, approximate: false } : a)),
+      };
+    }
+    return f;
+  }, [events, snapshots, currentTick, maxTick, agents, places, animals]);
 
   // Marker buckets per tick (for the timeline rail). Newest data wins.
   const markers = useMemo(() => {
@@ -127,6 +152,7 @@ export function ReplayScrubber({
 
   const stopPlay = useCallback(() => {
     playingRef.current = false;
+    setPlaying(false);
     if (playTimerRef.current) {
       clearInterval(playTimerRef.current);
       playTimerRef.current = null;
@@ -136,6 +162,7 @@ export function ReplayScrubber({
   const startPlay = useCallback(() => {
     if (playTimerRef.current) clearInterval(playTimerRef.current);
     playingRef.current = true;
+    setPlaying(true);
     playTimerRef.current = setInterval(() => {
       const next = tickRef.current + 1;
       if (next > maxRef.current) {
@@ -168,6 +195,7 @@ export function ReplayScrubber({
   const setSpeed = useCallback(
     (s: number) => {
       speedRef.current = s;
+      setSpeedState(s);
       if (playingRef.current) startPlay(); // re-arm interval at the new rate
     },
     [startPlay],
@@ -197,8 +225,10 @@ export function ReplayScrubber({
     // Read the lab tokens off the declared CSS custom properties so the canvas
     // stays in lockstep with the theme (never a hardcoded hex literal).
     const bg = cssVar('--lab-bg');
-    const grid = cssVar('--lab-chrome');
     const neutral = cssVar('--inspector-node-neutral');
+    const outline = cssVar('--lab-border-bright') || cssVar('--lab-muted');
+    const labelInk = cssVar('--lab-muted');
+    const brightInk = cssVar('--lab-text') || neutral;
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
 
@@ -206,21 +236,29 @@ export function ReplayScrubber({
     const sx = (x: number) => pad + (x / 1000) * (W - 2 * pad);
     const sy = (y: number) => pad + (y / 1000) * (H - 2 * pad);
 
-    // Faint place footprints (so positions read as "somewhere").
+    // Place footprints + labels (audit D3 quick-win: the old ghost outlines
+    // were nearly invisible and the dots unlabeled — brighter token strokes
+    // and a name under each footprint make the map legible at a glance).
     ctx.save();
-    ctx.strokeStyle = grid;
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = 1.5;
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
     for (const p of places) {
       const px = sx(p.x);
       const py = sy(p.y);
-      ctx.strokeRect(px - 6, py - 6, 12, 12);
+      ctx.strokeRect(px - 7, py - 7, 14, 14);
+      ctx.fillStyle = labelInk;
+      ctx.fillText((p.name ?? p.id).slice(0, 14), px, py + 9);
     }
     ctx.restore();
 
     // W7: building markers — a small diamond per building at its place, colored
     // by status. A stable per-building angle offsets it from the place center so
-    // co-located structures don't stack. (Status reflects the live world; the
-    // mini-map shows where things stand "now".)
+    // co-located structures don't stack. (W10/C7: while scrubbed the `buildings`
+    // prop is the TIME-PROJECTED state at the scrub tick, so the diamond color
+    // is the status the structure had at tick T — not the live edge.)
     const placeById = new Map(places.map((p) => [p.id, p]));
     for (const b of buildings) {
       const place = placeById.get(b.location);
@@ -252,18 +290,67 @@ export function ReplayScrubber({
       ctx.restore();
     }
 
-    // Agents at currentTick.
+    // Agents at currentTick — dot + bright outline ring + name label, with
+    // co-located agents fanned slightly so dots don't fully stack (D3).
+    const nameOf = new Map(agents.map((a) => [a.id, a.name]));
     const r = Math.max(4, Math.min(W, H) * 0.018);
+    const seenAt = new Map<string, number>();
     for (const a of frame.agents) {
-      const ax = sx(a.x);
-      const ay = sy(a.y);
+      const locKey = `${a.x},${a.y}`;
+      const slot = seenAt.get(locKey) ?? 0;
+      seenAt.set(locKey, slot + 1);
+      const fan = slot * (r * 2.4);
+      const ax = sx(a.x) + fan;
+      const ay = sy(a.y) - fan * 0.4;
       ctx.save();
-      if (!a.alive) ctx.globalAlpha = 0.25;
+      if (!a.alive) ctx.globalAlpha = 0.3;
       ctx.beginPath();
       ctx.arc(ax, ay, r, 0, Math.PI * 2);
       // a.color is the agent's model color from data; empty → neutral token.
       ctx.fillStyle = a.color || neutral;
       ctx.fill();
+      // Bright ring so a dot reads against dark place footprints.
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = brightInk;
+      ctx.stroke();
+      // Name label above the dot (dead agents read with a struck "†").
+      ctx.font = '9px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = brightInk;
+      const name = nameOf.get(a.id) ?? a.id;
+      ctx.fillText(`${a.alive ? '' : '† '}${name.slice(0, 10)}`, ax, ay - r - 1);
+      ctx.restore();
+    }
+
+    // W10 / audit D4: animals — small magenta-accented triangles (distinct from
+    // the round agent dots and the diamond buildings), with the SAME name-label
+    // treatment agents got in W9 (D3). Positions are best-effort (see
+    // replayStateAt): a "~" prefix marks a live-roster approximation.
+    const animalInk = cssVar('--marker-animal') || neutral;
+    const ar = Math.max(3, Math.min(W, H) * 0.014);
+    for (const a of frame.animals) {
+      const px = sx(a.x);
+      // Sit animals slightly below the place footprint so they never stack on
+      // the agent fan above it.
+      const py = sy(a.y) + ar * 3;
+      ctx.save();
+      if (!a.alive) ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.moveTo(px, py - ar);
+      ctx.lineTo(px + ar, py + ar);
+      ctx.lineTo(px - ar, py + ar);
+      ctx.closePath();
+      ctx.fillStyle = animalInk;
+      ctx.fill();
+      ctx.font = '9px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(
+        `${a.approximate ? '~' : ''}${a.alive ? '' : '† '}${a.name.slice(0, 10)}`,
+        px,
+        py + ar + 1,
+      );
       ctx.restore();
     }
 
@@ -275,7 +362,7 @@ export function ReplayScrubber({
     ctx.textBaseline = 'bottom';
     ctx.fillText(`TICK ${frame.tick}`, W - 6, H - 5);
     ctx.restore();
-  }, [frame, places, buildings]);
+  }, [frame, places, buildings, agents]);
 
   useEffect(() => {
     draw();
@@ -315,8 +402,9 @@ export function ReplayScrubber({
             onClick={togglePlay}
             className="lab-btn-primary"
             aria-label="Play or pause the replay"
+            aria-pressed={playing}
           >
-            {playingRef.current ? 'PAUSE' : 'PLAY'}
+            {playing ? 'PAUSE' : 'PLAY'}
           </button>
           <button
             type="button"
@@ -338,12 +426,12 @@ export function ReplayScrubber({
                 type="button"
                 onClick={() => setSpeed(s)}
                 className={
-                  speedRef.current === s
+                  speed === s
                     ? 'font-mono text-[10px] px-1.5 py-0.5 border border-lab-acid text-lab-acid bg-lab-acid/10'
                     : 'font-mono text-[10px] px-1.5 py-0.5 border border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid transition-colors'
                 }
                 aria-label={`Set replay speed ${s}x`}
-                aria-pressed={speedRef.current === s}
+                aria-pressed={speed === s}
               >
                 {s}×
               </button>

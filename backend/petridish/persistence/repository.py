@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS snapshots (
 class SQLiteRepository:
     def __init__(self, db_path: str | Path = ":memory:"):
         self._db_path = str(db_path)
+        # W10 / EM-085: file-backed DBs may target a not-yet-existing directory
+        # (the default config now points at <repo>/data/run.sqlite); create the
+        # parent so sqlite3.connect never fails on a fresh checkout.
+        if self._db_path != ":memory:" and not self._db_path.startswith("file:"):
+            Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.executescript(SCHEMA)
         # Durability + concurrency pragmas (contracts/event-log.md §6). journal_mode=WAL
@@ -501,6 +506,8 @@ class SQLiteRepository:
 
         Returns the dict shape in event-log.md §7. by_model groups on events.profile;
         usage reads llm_call payloads (gen_ai.usage.*). Tolerant of nulls throughout.
+        constitution.active_rules reads the rules table (true rule state) for the
+        full-range view, with a rule_* event projection for tick-windowed queries.
         """
         events = self.get_events(run_id, from_tick=from_tick, to_tick=to_tick, order="asc")
 
@@ -519,6 +526,9 @@ class SQLiteRepository:
         credits_by_agent: dict[str, int] = {}
         gives = 0
         amendments = 0
+        # B9: per-rule status projection (last lifecycle event wins) so
+        # active_rules can derive from rule STATE, not event arithmetic.
+        rule_status: dict[str, str] = {}
         # by_model accumulators keyed on profile.
         by_model: dict[str, dict] = {}
         # usage accumulators keyed on profile.
@@ -590,21 +600,43 @@ class SQLiteRepository:
                 if actor is not None and tool:
                     tools_by_agent.setdefault(actor, set()).add(tool)
             if kind == "agent_moved":
-                dest = payload.get("to") or payload.get("location") or ev.get("target_id")
+                # W9-QA-1b: the emitter writes the destination to payload.place;
+                # keep to/location/target_id as fallbacks, mirroring the frontend
+                # chain (selectors.ts replayStateAt, post-W9-QA-1).
+                dest = (
+                    payload.get("place")
+                    or payload.get("to")
+                    or payload.get("location")
+                    or ev.get("target_id")
+                )
                 if actor is not None and dest:
                     places_by_agent.setdefault(actor, set()).add(dest)
 
+            if kind in ("rule_proposed", "rule_passed", "rule_rejected", "rule_repealed"):
+                # rule identity mirrors get_rule_history's extraction; a missing
+                # id degrades to a per-event key so the row still projects.
+                rid = (
+                    payload.get("rule_id")
+                    or ev.get("target_id")
+                    or payload.get("id")
+                    or f"__rule_seq_{ev.get('seq')}"
+                )
             if kind == "rule_proposed":
                 proposed += 1
                 propose_rule_count += 1
                 _model(profile)["proposals"] += 1
+                rule_status.setdefault(rid, "proposed")
             elif kind == "rule_vote":
                 votes_cast += 1
             elif kind == "rule_passed":
                 passed += 1
                 _model(profile)["passed"] += 1
+                rule_status[rid] = "active"
             elif kind == "rule_rejected":
                 rejected += 1
+                rule_status[rid] = "rejected"
+            elif kind == "rule_repealed":
+                rule_status[rid] = "repealed"
             elif kind == "rule_amended":
                 amendments += 1
 
@@ -665,7 +697,23 @@ class SQLiteRepository:
         # known; use votes / max(proposals,1) as a tolerant participation proxy.
         participation = round(votes_cast / proposed, 4) if proposed else 0.0
 
-        active_rules = passed - rejected if (passed - rejected) > 0 else passed
+        # B9: active_rules derives from actual rules STATE, never from
+        # `passed - rejected` arithmetic (a rejected PROPOSAL never deactivates a
+        # passed rule). For the full-range view the rules table is the source of
+        # truth (status='active'); the event projection covers tick-windowed
+        # queries and event-only ingestion where the table has no rows.
+        projected_active = sum(1 for s in rule_status.values() if s == "active")
+        if from_tick is None and to_tick is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) "
+                "FROM rules WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            total_rule_rows = row[0] or 0
+            active_rules = int(row[1] or 0) if total_rule_rows else projected_active
+        else:
+            active_rules = projected_active
 
         return {
             "population": population,
