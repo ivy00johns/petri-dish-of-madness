@@ -23,19 +23,28 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(scope="module")
 def client():
-    """Create TestClient with the app using embedded (all-mock) config."""
-    # Clear any config dir overrides so embedded defaults are used
-    env_before = os.environ.copy()
-    os.environ.pop("EM_CONFIG_DIR", None)
+    """Create a TestClient and neutralize the W8 chaos-animal layer so stepping
+    is deterministic.
 
-    # Import app after env is clean
+    The repo config (loaded via .env's EM_CONFIG_DIR, which dotenv applies with
+    override=True at import) enables network-LLM cat/dog animals on a real
+    profile. On cadence-aligned ticks an animal rolls an LLM call that blocks the
+    whole turn ~5s against the absent local proxy — making /api/control/step
+    flaky. Agents are forced to `mock` per-test via _all_agents_to_mock(), but
+    animals have no per-entity model hook, so we disable them at the source on
+    the built world right after lifespan."""
+    import sys
     from petridish.api.app import app
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
+    # `petridish.api.app` the *name* resolves to the FastAPI instance (the package
+    # __init__ does `from .app import app`), so reach the real module via sys.modules.
+    _appmod = sys.modules["petridish.api.app"]
 
-    # Restore env
-    os.environ.clear()
-    os.environ.update(env_before)
+    with TestClient(app, raise_server_exceptions=True) as c:
+        # Lifespan has built the world; kill the chaos layer for determinism.
+        if _appmod._world is not None:
+            _appmod._world.params.animals.enabled = False
+            _appmod._world.animals.clear()
+        yield c
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -61,17 +70,6 @@ def _all_agents_to_mock(client: TestClient) -> None:
     state = client.get("/api/state").json()
     for agent in state.get("agents", []):
         client.post(f"/api/agents/{agent['id']}/model", json={"profile": "mock"})
-
-
-def _wait_for_tick(client: TestClient, target: int, timeout: float = 5.0) -> int:
-    """Poll /api/state until tick >= target (step runs on the background asyncio task)."""
-    import time
-    deadline = time.time() + timeout
-    tick = client.get("/api/state").json()["tick"]
-    while tick < target and time.time() < deadline:
-        time.sleep(0.05)
-        tick = client.get("/api/state").json()["tick"]
-    return tick
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -213,41 +211,37 @@ def test_reassign_unknown_profile_returns_400(client):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_step_advances_tick_by_one(client):
-    """POST /api/control/step advances tick by exactly 1."""
+    """POST /api/control/step advances tick by exactly 1 and returns the new tick
+    only AFTER the turn has completed (synchronous step — no polling/race)."""
     _all_agents_to_mock(client)
-    # Get tick before
-    state_before = client.get("/api/state").json()
-    tick_before = state_before["tick"]
+    client.post("/api/control/pause")  # deterministic single-stepping
+    tick_before = client.get("/api/state").json()["tick"]
 
-    # Step
     resp = client.post("/api/control/step")
     assert resp.status_code == 200, f"Expected 200 on step, got {resp.status_code}: {resp.text}"
     assert resp.json().get("status") == "ok"
-
-    # step runs on the background asyncio task — poll for it to land
-    tick_after = _wait_for_tick(client, tick_before + 1)
-
-    assert tick_after == tick_before + 1, (
-        f"Expected tick to advance from {tick_before} to {tick_before + 1}, got {tick_after}"
+    # The step endpoint awaits turn completion, so the new tick is authoritative now.
+    assert resp.json()["tick"] == tick_before + 1, (
+        f"Expected step to return tick {tick_before + 1}, got {resp.json().get('tick')}"
     )
+    assert client.get("/api/state").json()["tick"] == tick_before + 1
 
 
 def test_multiple_steps_advance_tick_correctly(client):
-    """Multiple POST /api/control/step calls each advance tick by 1."""
+    """Each POST /api/control/step advances tick by exactly 1, deterministically."""
     _all_agents_to_mock(client)
-    state_before = client.get("/api/state").json()
-    tick_before = state_before["tick"]
+    client.post("/api/control/pause")
+    tick_before = client.get("/api/state").json()["tick"]
 
     n_steps = 3
-    for _ in range(n_steps):
+    for i in range(1, n_steps + 1):
         resp = client.post("/api/control/step")
         assert resp.status_code == 200
+        assert resp.json()["tick"] == tick_before + i, (
+            f"After {i} step(s), expected tick {tick_before + i}, got {resp.json().get('tick')}"
+        )
 
-    tick_after = _wait_for_tick(client, tick_before + n_steps)
-
-    assert tick_after == tick_before + n_steps, (
-        f"Expected tick to advance by {n_steps} (from {tick_before}), got {tick_after}"
-    )
+    assert client.get("/api/state").json()["tick"] == tick_before + n_steps
 
 
 # ──────────────────────────────────────────────────────────────────────────────

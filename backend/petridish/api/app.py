@@ -246,10 +246,10 @@ async def control_pause():
 async def control_step():
     if _loop is None:
         raise HTTPException(503, "Not initialized")
-    _loop.step()
-    # Give the loop a moment to process the step
-    await asyncio.sleep(0.1)
-    return {"status": "ok"}
+    # Await the turn's completion so the response reflects the advanced tick
+    # (deterministic stepping — no fire-and-forget race).
+    tick = await _loop.step_and_wait()
+    return {"status": "ok", "tick": tick}
 
 
 class SpeedBody(BaseModel):

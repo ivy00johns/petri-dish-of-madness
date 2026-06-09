@@ -104,6 +104,10 @@ class TickLoop:
         # Count of explicit single-step requests queued while paused.
         # Each consumed step advances exactly one turn then re-pauses.
         self._pending_steps: int = 0
+        # Futures awaiting a queued step's turn to COMPLETE (step_and_wait). FIFO:
+        # each consumed step resolves the oldest waiter with the post-turn tick, so
+        # the API can return only once the turn has actually advanced.
+        self._step_waiters: list[asyncio.Future] = []
 
         # sequence counter for WS messages
         self._seq: int = 0
@@ -155,6 +159,31 @@ class TickLoop:
         # A step must work even when the loop has never been started.
         self._ensure_task()
 
+    async def step_and_wait(self, timeout: float = 5.0) -> int:
+        """Queue a single step and await its turn's completion; return the tick
+        after the turn ran. Unlike step(), this lets the API return only once the
+        turn has actually advanced — deterministic stepping, no polling/race."""
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._step_waiters.append(fut)
+        self._pending_steps += 1
+        self._step_event.set()
+        self._ensure_task()
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            # Turn didn't finish in time: drop the waiter, report the current tick.
+            if fut in self._step_waiters:
+                self._step_waiters.remove(fut)
+            return self._world.tick
+
+    def _resolve_step_waiter(self) -> None:
+        """Signal the oldest step_and_wait() caller that its turn completed."""
+        while self._step_waiters:
+            fut = self._step_waiters.pop(0)
+            if not fut.done():
+                fut.set_result(self._world.tick)
+                return
+
     def set_speed(self, tick_interval_seconds: float) -> None:
         self._world.tick_interval_seconds = tick_interval_seconds
 
@@ -165,6 +194,11 @@ class TickLoop:
         """Reset world from config. Pauses loop, rebuilds state, starts new DB run."""
         self.pause()
         self._pending_steps = 0
+        # Release any step_and_wait() callers so they don't block on the reset.
+        while self._step_waiters:
+            fut = self._step_waiters.pop(0)
+            if not fut.done():
+                fut.set_result(self._world.tick)
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -278,21 +312,30 @@ class TickLoop:
             # A queued step always advances exactly one turn (even while running);
             # otherwise we advance because we're in continuous-run mode.
             step_only = False
+            consumed_step = False
             if self._pending_steps > 0:
                 self._pending_steps -= 1
+                consumed_step = True
                 # Only treat as a "stop after one turn" step when not running.
                 step_only = self._paused
             self._step_event.clear()
 
             agent = self._world.next_agent()
             if agent is None:
+                if consumed_step:
+                    self._resolve_step_waiter()  # don't hang the caller
                 await asyncio.sleep(0.5)
                 continue
 
             if not agent.alive:
+                if consumed_step:
+                    self._resolve_step_waiter()
                 continue
 
             await self._execute_turn(agent)
+
+            if consumed_step:
+                self._resolve_step_waiter()
 
             if step_only:
                 # Single-step while paused: advance one turn, stay paused.
