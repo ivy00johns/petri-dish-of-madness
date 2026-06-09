@@ -243,6 +243,9 @@ export function useSimulation(): SimulationState & SimulationControls {
       mockControls.start();
       if (!mockTimerRef.current) startMockLoop();
     } else {
+      // Optimistic: flip the button immediately; the next server broadcast
+      // confirms (or corrects) it, instead of waiting a full tick to switch.
+      setWorld(prev => (prev ? { ...prev, running: true } : prev));
       apiPost('/api/control/start');
     }
   }, [mockMode, apiPost, startMockLoop]);
@@ -251,6 +254,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     if (mockMode) {
       mockControls.pause();
     } else {
+      setWorld(prev => (prev ? { ...prev, running: false } : prev));
       apiPost('/api/control/pause');
     }
   }, [mockMode, apiPost]);
