@@ -19,7 +19,18 @@
  * reproducible, so replay/scrub re-projects the same data.
  */
 
-import type { WorldState, WorldEvent, Agent, Place, ModelProfile, Rule, EventKind } from '../types';
+import type {
+  WorldState,
+  WorldEvent,
+  Agent,
+  Place,
+  ModelProfile,
+  Rule,
+  EventKind,
+  Building,
+  BuildingStatus,
+  SpawnSpec,
+} from '../types';
 
 // ── Seed data matching contracts/providers.md world.yaml ──────────────────────
 
@@ -76,6 +87,22 @@ let rules: Rule[] = [];
 // Currently-open rule id (for the staged lifecycle), and whether it resolved.
 let openRuleId: string | null = null;
 let ruleCounter = 0;
+
+// ── Buildings (W7) — config mirrors config/world.yaml world.buildings ─────────
+const BUILD_STEP = 20;            // progress per build_step (5 steps = done)
+const ABANDON_AFTER_TICKS = 40;   // no fund/build activity while not operational
+
+let buildings: Building[] = [];
+let buildingCounter = 0;
+
+// A small library of buildable projects (kind + funds + function + cost).
+const PROJECT_BLUEPRINTS: Array<{ name: string; kind: string; funds: number; fn: string }> = [
+  { name: 'Village Clock Tower', kind: 'clocktower', funds: 12, fn: 'voting' },
+  { name: 'Community Garden',    kind: 'garden',     funds: 8,  fn: '+forage' },
+  { name: "Tinkerer's Workshop", kind: 'workshop',   funds: 10, fn: '+work_reward' },
+  { name: 'The Granary',         kind: 'farm',       funds: 9,  fn: '+forage' },
+  { name: 'Old Library',         kind: 'library',    funds: 11, fn: 'lore' },
+];
 
 function nextSeq() { return ++seq; }
 
@@ -443,6 +470,252 @@ function advanceOpenRule(actor: Agent, turnId: string): WorldEvent[] {
   return out;
 }
 
+// ── Building lifecycle (W7) ───────────────────────────────────────────────────
+//
+// Drives a believable collective-project pipeline so the 3D village visibly
+// grows offline: propose_project → contribute_funds → build_step.. → operational
+// (one project completes), and a second project that STALLS → abandoned (the
+// "clock tower that never got built"). Each transition emits the contract event
+// kinds (project_proposed / project_funded / project_built / building_operational
+// + structure_state_changed{from,to,reason}), tagged with the turn's turn_id so
+// the inspector groups cause→effect exactly like the rule lifecycle.
+
+/** Emit a state-machine transition (structure_state_changed) for a building. */
+function emitStructureChange(
+  b: Building,
+  from: BuildingStatus,
+  to: BuildingStatus,
+  reason: string,
+  actor: Agent | null,
+  turnId: string,
+): WorldEvent {
+  return emit({
+    kind: 'structure_state_changed',
+    actor,
+    turnId,
+    actorType: actor ? 'human_agent' : 'system',
+    text: `${b.name}: ${from} → ${to} (${reason}).`,
+    payload: { building_id: b.id, from, to, reason, kind: b.kind, progress: b.progress },
+  });
+}
+
+/** Pick a fresh blueprint not already proposed; null if all are in play. */
+function pickBlueprint() {
+  const taken = new Set(buildings.map((b) => b.kind));
+  const free = PROJECT_BLUEPRINTS.filter((p) => !taken.has(p.kind));
+  return free.length ? pick(free) : null;
+}
+
+/**
+ * Advance the building pipeline for one turn. The acting agent proposes a new
+ * project (occasionally), funds an under-funded one, or lays a build_step on an
+ * under-construction one at its place. Returns the events emitted this turn.
+ */
+function advanceBuildings(actor: Agent, turnId: string): WorldEvent[] {
+  const out: WorldEvent[] = [];
+
+  // 1. Propose a new project now and then (cap concurrent active projects).
+  const activeProjects = buildings.filter(
+    (b) => b.status === 'planned' || b.status === 'under_construction',
+  );
+  if (activeProjects.length < 2 && rnd() < 0.18) {
+    const bp = pickBlueprint();
+    if (bp) {
+      buildingCounter += 1;
+      const b: Building = {
+        id: `bld-${buildingCounter}`,
+        name: bp.name,
+        kind: bp.kind,
+        location: actor.location,
+        owner_id: 'public',
+        status: 'planned',
+        health: 100,
+        condition_label: 'pristine',
+        progress: 0,
+        funds_committed: 0,
+        funds_required: bp.funds,
+        contributors: [],
+        function: bp.fn,
+      };
+      buildings.push(b);
+      lastActivityTick.set(b.id, tick);
+      out.push(emit({
+        kind: 'project_proposed',
+        actor,
+        turnId,
+        text: `${actor.name} proposes a new project: ${b.name}.`,
+        payload: { building_id: b.id, name: b.name, kind: b.kind, funds_required: b.funds_required, function: b.function },
+      }));
+      out.push(emitStructureChange(b, 'planned', 'planned', 'proposed', actor, turnId));
+      return out; // one project action per turn
+    }
+  }
+
+  // 2. Fund a planned project the actor can afford (flips to under_construction
+  //    once fully funded + lays the first build_step).
+  const fundable = buildings.find((b) => b.status === 'planned');
+  if (fundable && actor.credits >= 2 && rnd() < 0.6) {
+    const give = Math.min(actor.credits, randInt(2, 5), fundable.funds_required - fundable.funds_committed + 4);
+    if (give > 0) {
+      actor.credits -= give;
+      fundable.funds_committed += give;
+      lastActivityTick.set(fundable.id, tick);
+      if (!fundable.contributors.includes(actor.id)) fundable.contributors.push(actor.id);
+      out.push(emit({
+        kind: 'project_funded',
+        actor,
+        turnId,
+        text: `${actor.name} commits ${give} credits to ${fundable.name} (${fundable.funds_committed}/${fundable.funds_required}).`,
+        payload: { building_id: fundable.id, amount: give, funds_committed: fundable.funds_committed, funds_required: fundable.funds_required },
+      }));
+      // economy mirror so the AWI/social panels see the credit flow.
+      out.push(emit({
+        kind: 'economy',
+        actor,
+        turnId,
+        text: `${give} credits → ${fundable.name}.`,
+        payload: { action: 'contribute_funds', building_id: fundable.id, amount: -give, source: 'contribute_funds' },
+      }));
+      if (fundable.funds_committed >= fundable.funds_required) {
+        fundable.status = 'under_construction';
+        fundable.progress = Math.min(100, fundable.progress + BUILD_STEP);
+        out.push(emitStructureChange(fundable, 'planned', 'under_construction', 'fully_funded', actor, turnId));
+        out.push(emit({
+          kind: 'project_built',
+          actor,
+          turnId,
+          text: `${actor.name} breaks ground on ${fundable.name} (${fundable.progress}%).`,
+          payload: { building_id: fundable.id, progress: fundable.progress, step: BUILD_STEP },
+        }));
+      }
+      return out;
+    }
+  }
+
+  // 3. Lay a build_step on an under-construction project (visible growth). The
+  //    designated STALL project (the clock tower) is skipped so it abandons.
+  const buildable = buildings.find(
+    (b) => b.status === 'under_construction' && !stalledBuildingIds.has(b.id),
+  );
+  if (buildable && rnd() < 0.7) {
+    buildable.progress = Math.min(100, buildable.progress + BUILD_STEP);
+    lastActivityTick.set(buildable.id, tick);
+    out.push(emit({
+      kind: 'project_built',
+      actor,
+      turnId,
+      text: `${actor.name} works on ${buildable.name} (${buildable.progress}%).`,
+      payload: { building_id: buildable.id, progress: buildable.progress, step: BUILD_STEP },
+    }));
+    if (buildable.progress >= 100) {
+      buildable.status = 'operational';
+      out.push(emitStructureChange(buildable, 'under_construction', 'operational', 'completed', actor, turnId));
+      out.push(emit({
+        kind: 'building_operational',
+        actor,
+        turnId,
+        text: `${buildable.name} is complete — ${buildable.function} is now active!`,
+        payload: { building_id: buildable.id, kind: buildable.kind, function: buildable.function },
+      }));
+    }
+    return out;
+  }
+
+  return out;
+}
+
+/** Per-round abandonment sweep: a non-operational project with no fund/build
+ *  activity for ABANDON_AFTER_TICKS becomes `abandoned` (engine-side, system
+ *  actor) — the realistic collective failure. */
+function sweepAbandoned(turnId: string): WorldEvent[] {
+  const out: WorldEvent[] = [];
+  for (const b of buildings) {
+    if (b.status !== 'planned' && b.status !== 'under_construction') continue;
+    const since = tick - (lastActivityTick.get(b.id) ?? 0);
+    if (since >= ABANDON_AFTER_TICKS) {
+      const from = b.status;
+      b.status = 'abandoned';
+      out.push(emitStructureChange(b, from, 'abandoned', 'no_activity', null, turnId));
+    }
+  }
+  return out;
+}
+
+// The clock tower is seeded already under construction but deliberately STALLS
+// (no one lays further build_steps), so it slides into `abandoned` after the
+// abandon window — the headline "clock tower that never got built".
+const stalledBuildingIds = new Set<string>();
+const lastActivityTick = new Map<string, number>();
+
+/** Seed the world with a couple of in-flight projects so the village isn't bare
+ *  on first paint: one community garden under construction, and the doomed clock
+ *  tower stalled mid-build. */
+function seedBuildings() {
+  if (buildings.length > 0) return;
+  buildingCounter = 0;
+
+  // A garden already rising at the commons (will keep progressing → operational).
+  buildingCounter += 1;
+  const garden: Building = {
+    id: `bld-${buildingCounter}`,
+    name: 'Community Garden',
+    kind: 'garden',
+    location: 'commons',
+    owner_id: 'public',
+    status: 'under_construction',
+    health: 100,
+    condition_label: 'pristine',
+    progress: 40,
+    funds_committed: 8,
+    funds_required: 8,
+    contributors: ['esi', 'ada'],
+    function: '+forage',
+  };
+  buildings.push(garden);
+  lastActivityTick.set(garden.id, 0);
+
+  // The doomed clock tower, stalled at the town hall.
+  buildingCounter += 1;
+  const tower: Building = {
+    id: `bld-${buildingCounter}`,
+    name: 'Village Clock Tower',
+    kind: 'clocktower',
+    location: 'townhall',
+    owner_id: 'public',
+    status: 'under_construction',
+    health: 100,
+    condition_label: 'pristine',
+    progress: 20,
+    funds_committed: 12,
+    funds_required: 12,
+    contributors: ['cleo'],
+    function: 'voting',
+  };
+  buildings.push(tower);
+  stalledBuildingIds.add(tower.id);
+  // last activity at tick 0 so it abandons ~tick ABANDON_AFTER_TICKS.
+  lastActivityTick.set(tower.id, 0);
+
+  // An operational house already standing at the hearth (kind tinted, function).
+  buildingCounter += 1;
+  const house: Building = {
+    id: `bld-${buildingCounter}`,
+    name: 'Wayfarer Cottage',
+    kind: 'house',
+    location: 'home',
+    owner_id: 'dov',
+    status: 'operational',
+    health: 100,
+    condition_label: 'pristine',
+    progress: 100,
+    funds_committed: 6,
+    funds_required: 6,
+    contributors: ['dov'],
+    function: '+energy',
+  };
+  buildings.push(house);
+}
+
 // ── Generator ─────────────────────────────────────────────────────────────────
 
 export function buildInitialWorldState(): WorldState {
@@ -453,6 +726,7 @@ export function buildInitialWorldState(): WorldState {
       }
     });
   });
+  seedBuildings();
   return {
     type: 'world_state',
     seq: nextSeq(),
@@ -462,6 +736,7 @@ export function buildInitialWorldState(): WorldState {
     agents: agents.map(a => ({ ...a })),
     rules: [...rules],
     profiles: PROFILES,
+    buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
   };
 }
 
@@ -524,6 +799,14 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
   }
   events.push(...advanceOpenRule(actor, turnId));
 
+  // ── Building lifecycle (W7): propose / fund / build_step → operational, and
+  //    the stalled clock tower drifting to abandoned. ──────────────────────────
+  events.push(...advanceBuildings(actor, turnId));
+  // Per-round abandonment sweep (round = every living agent acted once).
+  if (tick % Math.max(1, liveAgents.length) === 0) {
+    events.push(...sweepAbandoned(turnId));
+  }
+
   // ── Death check ─────────────────────────────────────────────────────────────
   if (actor.energy <= 0) {
     actor.zero_energy_turns++;
@@ -552,8 +835,82 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     agents: agents.map(a => ({ ...a })),
     rules: rules.map(r => ({ ...r })),
     profiles: PROFILES,
+    buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
   };
 
+  return { state, events };
+}
+
+// ── Ad-hoc spawn (W7 EM-063) — synthesize a new agent in mock mode ───────────
+let spawnCounter = 0;
+
+/**
+ * Synthesize a hot-joined agent from a god-panel spawn spec. Returns the new
+ * world state (agent added) plus the events (agent_spawned + a perceived nudge
+ * for co-located neighbors, mirroring the contract's "nearby agents notice the
+ * newcomer"). `mode:governance` emits a governance-method spawn event with a
+ * synthetic proposal id (the mock admits immediately — no live vote engine).
+ */
+function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEvent[] } {
+  const prof = PROFILES.find(p => p.name === spec.profile) ?? PROFILES[0];
+  spawnCounter += 1;
+  const id = `spawn-${spawnCounter}`;
+  const location = PLACES.some(p => p.id === spec.location) ? spec.location : 'plaza';
+  const agent: Agent = {
+    id,
+    name: spec.name || `Newcomer ${spawnCounter}`,
+    personality: spec.personality || 'A curious newcomer finding their footing.',
+    profile: prof.name,
+    profile_color: prof.color,
+    location,
+    energy: 90,
+    credits: 10,
+    mood: 'newly arrived',
+    alive: true,
+    zero_energy_turns: 0,
+    beliefs: [],
+    relationships: {},
+  };
+  agents.push(agent);
+
+  const turnId = newTurnId();
+  const method = spec.mode === 'governance' ? 'governance' : 'god';
+  const proposalId = method === 'governance' ? `admit-${spawnCounter}` : undefined;
+  const events: WorldEvent[] = [];
+  events.push(emit({
+    kind: 'agent_spawned',
+    actor: agent,
+    turnId,
+    actorType: 'god',
+    text: method === 'governance'
+      ? `${agent.name} petitions to join (admit_agent ${proposalId}).`
+      : `${agent.name} materializes at ${PLACES.find(p => p.id === location)?.name ?? location}.`,
+    payload: { method, profile: agent.profile, location, ...(proposalId ? { proposal_id: proposalId } : {}) },
+  }));
+  // Co-located neighbors perceive the newcomer.
+  const nearby = agents.filter(a => a.alive && a.id !== id && a.location === location);
+  if (nearby.length > 0) {
+    events.push(emit({
+      kind: 'perceived',
+      actor: agent,
+      turnId,
+      text: `${nearby.map(a => a.name).join(', ')} notice ${agent.name} arrive.`,
+      payload: { visible_agents: nearby.map(a => a.id), newcomer: id },
+    }));
+  }
+  events.reverse();
+
+  const state: WorldState = {
+    type: 'world_state',
+    seq: nextSeq(),
+    tick, day, running,
+    tick_interval_seconds: TICK_INTERVAL,
+    places: PLACES,
+    agents: agents.map(a => ({ ...a })),
+    rules: rules.map(r => ({ ...r })),
+    profiles: PROFILES,
+    buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
+  };
   return { state, events };
 }
 
@@ -570,6 +927,7 @@ export const mockControls = {
       agent.profile_color = prof.color;
     }
   },
+  spawn: (spec: SpawnSpec) => spawnAgentMock(spec),
   isRunning: () => running,
   getProfiles: () => PROFILES,
 };

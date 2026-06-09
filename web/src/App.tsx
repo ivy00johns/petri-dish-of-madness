@@ -145,6 +145,7 @@ function LiveLayout({ sim }: { sim: Sim }) {
             onSpeed={sim.setSpeed}
             onReassign={sim.reassignModel}
             onInject={sim.injectEvent}
+            onSpawn={sim.spawnAgent}
             profiles={sim.getProfiles()}
           />
 

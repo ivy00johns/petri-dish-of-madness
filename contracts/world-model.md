@@ -144,6 +144,18 @@ Context assembly filters `valid_actions` by these gates; `_validate_world` enfor
 Existing actions keep their semantics; they gain registry tiers (movement/economy/perception =
 reflex; say/propose_rule = llm). `propose_rule` MAY gain a `ban_arson` effect (optional).
 
+**Implementation return contract (locked — the W7 integration boundary):** the six
+`world.action_*` methods take `(agent, building_id: str[, amount])` and RETURN a ready-to-emit
+**event dict**, or `{"_multi": [event, ...]}` for multi-event outcomes (NOT the `(ok, reason,
+value)` tuple some older `action_*` used) — `propose_project` also returns `"_building_id"`. On a
+bad/illegal id they return a `parse_failure` event dict, never raise. The runtime's `_apply_action`
+consumes these exactly like the existing `vote → {_multi:[...]}` branch (spread base
+`{profile, profile_color, tick}` onto each and emit); it does NOT unpack a tuple and passes the
+**id string**, not a Building object. `_validate_world` gates BEFORE dispatch (build_step:
+under_construction + at the building's place; arson: blocked by active `ban_arson`; contribute:
+affordability; take_offline: owner). Governance spawn: the API calls
+`world.enqueue_admit_agent(...)` (not `propose_admit_agent`) and returns its `rule.id` as `proposal_id`.
+
 ### Ad-hoc spawn (EM-063)
 Two paths, selected by config `spawn.mode` (default `god`):
 - **god** — immediate: `POST /api/agents` (exists) spawns now; emits `agent_spawned{method:"god"}`. A

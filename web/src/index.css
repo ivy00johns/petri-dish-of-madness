@@ -97,6 +97,15 @@
            focus:outline-none focus:border-lab-acid;
   }
 
+  /* Text input / textarea (god-panel spawn form) */
+  .lab-input {
+    @apply font-mono bg-lab-chrome text-lab-text border border-lab-border
+           px-2 py-1.5 rounded-sm
+           placeholder:text-lab-dim
+           hover:border-lab-border-bright
+           focus:outline-none focus:border-lab-acid;
+  }
+
   /* Energy bar */
   .energy-bar-track {
     @apply h-1 bg-lab-chrome rounded-full overflow-hidden;

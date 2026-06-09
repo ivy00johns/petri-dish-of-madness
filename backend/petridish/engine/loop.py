@@ -97,6 +97,11 @@ class TickLoop:
         # sequence counter for WS messages
         self._seq: int = 0
 
+        # W7 — last world.round we ran the per-round building lifecycle for, so we
+        # advance building abandonment + drain governance spawns exactly once per
+        # round (not once per turn).
+        self._last_building_round: int = 0
+
         # EM-067 cap-aware throttle: effective slowdown multiplier applied to the
         # continuous-run sleep. 1.0 = no slowdown. Recomputed each turn from
         # recent llm_call usage ONLY when world.usage_caps.enabled (default OFF).
@@ -185,13 +190,18 @@ class TickLoop:
         self._world.places = {p.id: p for p in places}
         self._world.agents = {a.id: a for a in agents}
         self._world.rules = {}
+        # W7 — clear buildings + governance-spawn outbox on reset.
+        self._world.buildings = {}
+        self._world.pending_spawn_events = []
         self._world.tick = 0
         self._world.day = 0
+        self._world.round = 0
         self._world.running = False
         self._world.tick_interval_seconds = config.world.tick_interval_seconds
         self._world._turn_order = sorted(self._world.agents.keys())
         self._world._turn_index = 0
         self._world._round_start = True
+        self._last_building_round = 0
 
         # Clear agent memories
         self._runtime._memory.clear()
@@ -289,6 +299,11 @@ class TickLoop:
 
         profile_name = self._router.profile_name_for(agent.id, agent.profile)
         profile_color = self._get_profile_color(agent)
+
+        # W7 — once-per-round building lifecycle: advance abandonment + flush any
+        # governance-spawn events queued by an admit_agent rule that just passed.
+        # Emitted as standalone system events (no turn_id) before this turn's chain.
+        self._advance_round_buildings()
 
         try:
             # 1. turn_start (now persisted + carries turn_id)
@@ -390,6 +405,48 @@ class TickLoop:
             self._broadcast_world_state()
         finally:
             self._current_turn_id = None
+
+    def _advance_round_buildings(self) -> None:
+        """W7 per-round hook. Runs once per round (guarded by world.round):
+          - advance building lifecycle (idle non-operational buildings past the
+            abandon window -> abandoned), emitting structure_state_changed events;
+          - drain any governance-spawn events parked by an admit_agent rule that
+            passed since the last round, emitting agent_spawned{method:governance}.
+        Both are emitted as standalone system events (outside any turn's chain).
+        Additive: if the world lacks these methods (older snapshot), it no-ops."""
+        world = self._world
+        current_round = getattr(world, "round", 0)
+        if current_round <= self._last_building_round:
+            # Still flush any pending spawns (a vote mid-round may have queued one).
+            self._flush_spawn_events()
+            return
+        self._last_building_round = current_round
+
+        advance = getattr(world, "advance_buildings", None)
+        if callable(advance):
+            try:
+                for evt in advance():
+                    self._emit_event(evt)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("building lifecycle advance failed: %s", exc)
+        self._flush_spawn_events()
+
+    def _flush_spawn_events(self) -> None:
+        """Emit + persist any queued governance-spawn events (EM-062), then
+        broadcast a fresh world_state so a hot-joined agent appears immediately."""
+        drain = getattr(self._world, "drain_spawn_events", None)
+        if not callable(drain):
+            return
+        try:
+            events = drain()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("spawn drain failed: %s", exc)
+            return
+        if not events:
+            return
+        for evt in events:
+            self._emit_event(evt)
+        self._broadcast_world_state()
 
     def _emit_trace_chain(
         self, agent: AgentState, profile_name: str, profile_color: str, trace: dict

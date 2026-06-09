@@ -37,6 +37,40 @@ export interface Agent {
   relationships: Record<string, Relationship>;
 }
 
+// ============================================================
+// Building (W7) — match contracts/world-model.md §W7. Buildings live in the
+// world snapshot + event log (NO new SQL tables). A "project" is a Building in
+// planned/under_construction — one entity, one lifecycle. Rendered in the 3D
+// village by `status`. world_state gains `buildings: [Building]`.
+// ============================================================
+
+export type BuildingStatus =
+  | 'planned'
+  | 'under_construction'
+  | 'operational'
+  | 'damaged'
+  | 'offline'
+  | 'abandoned'
+  | 'destroyed';
+
+export type BuildingCondition = 'pristine' | 'worn' | 'damaged' | 'ruined';
+
+export interface Building {
+  id: string;
+  name: string;
+  kind: string;                 // clocktower|garden|workshop|farm|library|house|monument|...
+  location: string;             // place id
+  owner_id: string | null;      // agent id | "public" | null
+  status: BuildingStatus;
+  health: number;               // 0..100
+  condition_label: BuildingCondition;
+  progress: number;             // 0..100
+  funds_committed: number;
+  funds_required: number;
+  contributors: string[];       // agent ids
+  function: string;             // utility while operational, e.g. "+forage" | "+energy" | "voting"
+}
+
 export type RuleEffect = 'ban_stealing' | 'ubi' | 'recharge_subsidy' | 'work_bonus';
 export type RuleStatus = 'proposed' | 'active' | 'rejected';
 
@@ -73,6 +107,9 @@ export interface WorldState {
   agents: Agent[];
   rules: Rule[];
   profiles: ModelProfile[];
+  // W7: structures/projects rendered in the 3D village by `status`. Optional so
+  // a W5/W6 backend (or a snapshot predating buildings) stays valid.
+  buildings?: Building[];
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -134,6 +171,21 @@ export interface WorldEvent {
 }
 
 export type WSMessage = WorldState | WorldEvent;
+
+// ============================================================
+// Ad-hoc spawn (W7 EM-063) — POST /api/agents body. `mode` god = immediate,
+// governance = enqueue an admit_agent proposal. Matches api.openapi.yaml.
+// ============================================================
+
+export type SpawnMode = 'god' | 'governance';
+
+export interface SpawnSpec {
+  name: string;
+  personality: string;
+  profile: string;
+  location: string;
+  mode: SpawnMode;
+}
 
 // ============================================================
 // App state

@@ -34,4 +34,15 @@
 
   /* Neutral fallback for an agent with no model color yet. */
   --inspector-node-neutral: #5a5a72;
+
+  /* W7 building-status markers (mini-map squares + projects readout dots).
+     Both the canvas (getComputedStyle) and the DOM legend (var(--…)) read these
+     same tokens, so a building marker can never drift from the theme. */
+  --building-planned: #6e8ad4;
+  --building-under-construction: #ff9900;
+  --building-operational: #8fd44a;
+  --building-damaged: #ff6b3d;
+  --building-offline: #5a5a72;
+  --building-abandoned: #9c8460;
+  --building-destroyed: #6b6b6b;
 }

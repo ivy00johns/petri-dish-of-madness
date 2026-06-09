@@ -20,9 +20,10 @@ import type { WorldState, WorldEvent } from '../../types';
 import { Ground } from './Ground';
 import { Scenery } from './Scenery';
 import { Building } from './Building';
+import { Structure } from './Structure';
 import { Villager, type AnimPos } from './Villager';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, latestRoutedVia } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia } from './worldSpace';
 
 interface CozyWorldProps {
   world: WorldState | null;
@@ -184,12 +185,23 @@ function Scene({
 }) {
   const animMap = useRef<Map<string, AnimPos>>(new Map());
   const { places, agents } = world;
+  const buildings = world.buildings ?? [];
 
   const placeCenters = useMemo(() => {
     const m = new Map<string, { x: number; z: number }>();
     places.forEach((p) => m.set(p.id, placeToWorld(p)));
     return m;
   }, [places]);
+
+  // W7: each Building sits at a stable satellite spot near its place center, so
+  // a project rises NEXT TO the existing structure rather than on top of it.
+  const buildingSpots = useMemo(() => {
+    const center = { x: 0, z: 0 };
+    return buildings.map((b) => {
+      const c = placeCenters.get(b.location) ?? center;
+      return { building: b, ...buildingSpot(c, b.id) };
+    });
+  }, [buildings, placeCenters]);
 
   const targets = useMemo(() => {
     const byPlace = new Map<string, string[]>();
@@ -252,6 +264,11 @@ function Scene({
 
       {places.map((p) => (
         <Building key={p.id} place={p} />
+      ))}
+
+      {/* W7: living structures/projects, rendered by status near their place. */}
+      {buildingSpots.map(({ building, x, z }) => (
+        <Structure key={building.id} building={building} x={x} z={z} />
       ))}
 
       {agents.map((a) => {

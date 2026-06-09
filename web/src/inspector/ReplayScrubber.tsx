@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useMemo, useRef, useCallback } from 'react';
-import type { Agent, ModelProfile, WorldEvent } from '../types';
+import type { Agent, Building, BuildingStatus, ModelProfile, WorldEvent } from '../types';
 import { replayStateAt, markerCategory } from './selectors';
 import type { MarkerCategory, ReplaySnapshot } from './selectors';
 import './inspector-tokens.css';
@@ -27,11 +27,30 @@ interface ReplayScrubberProps {
   agents: Agent[];
   profiles: ModelProfile[];
   places: Array<{ id: string; x: number; y: number }>;
+  /** W7 buildings — surfaced as status markers on the mini-map + readout. */
+  buildings?: Building[];
   currentTick: number;
   maxTick: number;
   /** Optional deep-replay snapshots (live mode); empty in mock. */
   snapshots?: ReplaySnapshot[];
   onSeek: (tick: number) => void;
+}
+
+// W7 building-status → CSS custom property (declared in inspector-tokens.css).
+// The canvas (getComputedStyle) and the DOM readout (var(--…)) share these, so
+// markers never drift from the theme (no hardcoded hex anywhere).
+const BUILDING_STATUS_VAR: Record<BuildingStatus, string> = {
+  planned: '--building-planned',
+  under_construction: '--building-under-construction',
+  operational: '--building-operational',
+  damaged: '--building-damaged',
+  offline: '--building-offline',
+  abandoned: '--building-abandoned',
+  destroyed: '--building-destroyed',
+};
+
+function buildingStatusVarRef(status: BuildingStatus): string {
+  return `var(${BUILDING_STATUS_VAR[status]})`;
 }
 
 // Marker colors are a fixed, named LEGEND tied to the contract's color code
@@ -68,6 +87,7 @@ export function ReplayScrubber({
   agents,
   profiles,
   places,
+  buildings = [],
   currentTick,
   maxTick,
   snapshots = [],
@@ -197,6 +217,41 @@ export function ReplayScrubber({
     }
     ctx.restore();
 
+    // W7: building markers — a small diamond per building at its place, colored
+    // by status. A stable per-building angle offsets it from the place center so
+    // co-located structures don't stack. (Status reflects the live world; the
+    // mini-map shows where things stand "now".)
+    const placeById = new Map(places.map((p) => [p.id, p]));
+    for (const b of buildings) {
+      const place = placeById.get(b.location);
+      if (!place) continue;
+      // deterministic angle from the id so the diamond sits beside the footprint.
+      let h = 2166136261;
+      for (let i = 0; i < b.id.length; i++) {
+        h ^= b.id.charCodeAt(i);
+        h = (h * 16777619) >>> 0;
+      }
+      const ang = ((h % 360) / 360) * Math.PI * 2;
+      const off = Math.min(W, H) * 0.05;
+      const bx = sx(place.x) + Math.cos(ang) * off;
+      const by = sy(place.y) + Math.sin(ang) * off;
+      const sz = Math.max(3, Math.min(W, H) * 0.014);
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = cssVar(BUILDING_STATUS_VAR[b.status] ?? '--building-planned') || neutral;
+      // hollow for not-yet-built states so they read as "incomplete".
+      const hollow = b.status === 'planned' || b.status === 'destroyed';
+      if (hollow) {
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-sz / 2, -sz / 2, sz, sz);
+      } else {
+        ctx.fillRect(-sz / 2, -sz / 2, sz, sz);
+      }
+      ctx.restore();
+    }
+
     // Agents at currentTick.
     const r = Math.max(4, Math.min(W, H) * 0.018);
     for (const a of frame.agents) {
@@ -220,7 +275,7 @@ export function ReplayScrubber({
     ctx.textBaseline = 'bottom';
     ctx.fillText(`TICK ${frame.tick}`, W - 6, H - 5);
     ctx.restore();
-  }, [frame, places]);
+  }, [frame, places, buildings]);
 
   useEffect(() => {
     draw();
@@ -353,9 +408,51 @@ export function ReplayScrubber({
           )}
         </div>
 
+        {/* W7: tiny projects/structures readout — one row per building, with a
+            status dot, name, kind, and a progress bar for in-flight projects. */}
+        {buildings.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <span className="font-mono text-[10px] text-lab-muted uppercase tracking-wide">
+              Structures · {buildings.length}
+            </span>
+            <div className="flex flex-col gap-0.5">
+              {buildings.map((b) => (
+                <div key={b.id} className="flex items-center gap-2">
+                  <i
+                    className="inline-block w-2 h-2 rounded-sm shrink-0"
+                    style={{ backgroundColor: buildingStatusVarRef(b.status) }}
+                    aria-hidden="true"
+                  />
+                  <span className="font-mono text-[10px] text-lab-text truncate max-w-[9rem]" title={b.name}>
+                    {b.name}
+                  </span>
+                  <span className="font-mono text-[9px] text-lab-dim uppercase shrink-0">
+                    {b.status.replace(/_/g, ' ')}
+                  </span>
+                  {(b.status === 'under_construction' || b.status === 'planned') && (
+                    <span className="ml-auto flex items-center gap-1 shrink-0">
+                      <span className="relative inline-block w-12 h-1 bg-lab-chrome rounded-sm overflow-hidden">
+                        <span
+                          className="absolute inset-y-0 left-0 rounded-sm"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, b.progress))}%`,
+                            backgroundColor: buildingStatusVarRef(b.status),
+                          }}
+                        />
+                      </span>
+                      <span className="font-mono text-[9px] tabular-nums text-lab-muted">{b.progress}%</span>
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <span className="font-mono text-[10px] text-lab-dim">
           {frame.eventsAtTick.length} event{frame.eventsAtTick.length === 1 ? '' : 's'} at this tick ·{' '}
           {profiles.length} models · {agents.length} agents
+          {buildings.length > 0 ? ` · ${buildings.length} structures` : ''}
         </span>
       </div>
     </section>

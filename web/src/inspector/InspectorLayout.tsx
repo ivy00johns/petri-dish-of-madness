@@ -51,6 +51,8 @@ export function InspectorLayout({ world, history, mockMode, onSeekTick }: Inspec
     () => (world?.places ?? []).map((p) => ({ id: p.id, x: p.x, y: p.y })),
     [world],
   );
+  // W7: buildings surface as small status markers on the replay mini-map.
+  const buildings = useMemo(() => world?.buildings ?? [], [world]);
 
   const maxTick = useMemo(() => Math.max(selectMaxTick(history), world?.tick ?? 0), [history, world]);
 
@@ -112,6 +114,7 @@ export function InspectorLayout({ world, history, mockMode, onSeekTick }: Inspec
           agents={agents}
           profiles={profiles}
           places={places}
+          buildings={buildings}
           currentTick={currentTick}
           maxTick={maxTick}
           onSeek={handleSeek}

@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import type { WorldState, WorldEvent, WSMessage, ModelProfile } from '../types';
+import type { WorldState, WorldEvent, WSMessage, ModelProfile, SpawnSpec } from '../types';
 import { buildInitialWorldState, generateTick, mockControls } from '../mock/generator';
 
 const MOCK_MODE = import.meta.env.VITE_MOCK === '1';
@@ -36,6 +36,12 @@ export interface SimulationControls {
   setSpeed: (tickIntervalSeconds: number) => void;
   reassignModel: (agentId: string, profile: string) => void;
   injectEvent: (kind?: string) => void;
+  /**
+   * Ad-hoc spawn (W7 EM-063). Live: POST /api/agents with the spawn spec
+   * (god=immediate 201, governance=enqueued 202). Mock: synthesize a new agent
+   * locally and surface the agent_spawned event in the feed.
+   */
+  spawnAgent: (spec: SpawnSpec) => void;
   getProfiles: () => ModelProfile[];
   /**
    * Inspector scrub control (frontend-inspector.md §3). In MOCK mode the
@@ -324,6 +330,19 @@ export function useSimulation(): SimulationState & SimulationControls {
     }
   }, [mockMode, apiPost, pushHistory]);
 
+  const spawnAgent = useCallback((spec: SpawnSpec) => {
+    if (mockMode) {
+      const { state, events: newEvents } = mockControls.spawn(spec);
+      setWorld(state);
+      setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+      pushHistory(newEvents);
+    } else {
+      // Live: POST /api/agents (201 god / 202 governance). The backend emits the
+      // agent_spawned event over the WS, which lands via onmessage like any other.
+      apiPost('/api/agents', spec);
+    }
+  }, [mockMode, apiPost, pushHistory]);
+
   const getProfiles = useCallback((): ModelProfile[] => {
     return world?.profiles ?? mockControls.getProfiles();
   }, [world]);
@@ -366,6 +385,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     setSpeed,
     reassignModel,
     injectEvent,
+    spawnAgent,
     getProfiles,
     seekTick,
   };

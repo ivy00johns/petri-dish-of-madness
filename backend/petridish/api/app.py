@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -312,14 +312,65 @@ class SpawnBody(BaseModel):
     profile: str
     personality: str = "A generic agent."
     location: str = "plaza"
+    # W7 / EM-063 — spawn mode. god = immediate (default, as today); governance =
+    # enqueue an admit_agent proposed rule carrying the agent spec; the agent is
+    # admitted only if the vote passes threshold.
+    mode: str | None = None
 
 
-@app.post("/api/agents", status_code=201)
-async def spawn_agent(body: SpawnBody):
+def _spawn_mode(body: SpawnBody) -> str:
+    """Effective spawn mode: explicit body.mode wins; else config spawn.mode; else god."""
+    if body.mode:
+        return body.mode
+    spawn_cfg = getattr(_config.world, "spawn", None) if _config else None
+    mode = getattr(spawn_cfg, "mode", None) if spawn_cfg is not None else None
+    return mode or "god"
+
+
+@app.post("/api/agents")
+async def spawn_agent(body: SpawnBody, response: Response):
     if _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
     if _router.get_profile(body.profile) is None:
         raise HTTPException(400, f"Unknown profile: {body.profile}")
+
+    mode = _spawn_mode(body)
+
+    if mode == "governance":
+        # Enqueue an admit_agent proposal carrying the agent spec; the agent enters
+        # only if the vote passes threshold. world-core owns the proposal store and
+        # admits the agent when the vote resolves (_on_rule_activated). This is a
+        # SYSTEM-initiated proposal (no human actor), so proposer_id is "system".
+        rule = _world.enqueue_admit_agent(
+            proposer_id="system",
+            name=body.name,
+            personality=body.personality,
+            profile=body.profile,
+            location=body.location,
+        )
+        proposal_id = rule.id
+        spec = {
+            "name": body.name,
+            "profile": body.profile,
+            "personality": body.personality,
+            "location": body.location,
+        }
+        if _loop:
+            _loop._emit_event({
+                "kind": "agent_spawned",
+                "actor_id": None,
+                "actor_type": "system",
+                "profile": body.profile,
+                "profile_color": _loop._get_profile_color_for_profile(body.profile)
+                if hasattr(_loop, "_get_profile_color_for_profile") else None,
+                "text": f"Admission of {body.name} proposed (governance vote pending).",
+                "payload": {"method": "governance", "proposal_id": proposal_id, "spec": spec},
+            })
+            _loop._broadcast_world_state()
+        response.status_code = 202
+        return {"status": "pending", "mode": "governance", "proposal_id": proposal_id}
+
+    # god (default): immediate spawn as today.
     agent = _world.spawn_agent(
         name=body.name,
         personality=body.personality,
@@ -333,13 +384,39 @@ async def spawn_agent(body: SpawnBody):
         _loop._emit_event({
             "kind": "agent_spawned",
             "actor_id": agent.id,
+            "actor_type": "god",
             "profile": body.profile,
             "profile_color": _loop._get_profile_color(agent),
             "text": f"{agent.name} spawned.",
-            "payload": {"agent_id": agent.id, "name": agent.name},
+            "payload": {"agent_id": agent.id, "name": agent.name, "method": "god"},
         })
         _loop._broadcast_world_state()
-    return {"status": "ok", "agent_id": agent.id}
+    response.status_code = 201
+    return {"status": "ok", "agent_id": agent.id, "mode": "god"}
+
+
+@app.get("/api/buildings")
+async def get_buildings():
+    """List buildings/structures with state (W7 EM-061). Also present in
+    world_state.buildings. Empty-200 when there is no active run / no buildings —
+    never 500 (matches the W6 read-endpoint style)."""
+    if _world is None:
+        return []
+    store = getattr(_world, "buildings", None)
+    if not isinstance(store, dict):
+        # Fall back to the snapshot's buildings key if world-core surfaces it there.
+        if _loop is not None:
+            snap = _loop.current_snapshot()
+            return snap.get("buildings", []) if isinstance(snap, dict) else []
+        return []
+    out = []
+    for b in store.values():
+        to_dict = getattr(b, "to_dict", None)
+        if callable(to_dict):
+            out.append(to_dict())
+        elif isinstance(b, dict):
+            out.append(b)
+    return out
 
 
 @app.delete("/api/agents/{agent_id}")

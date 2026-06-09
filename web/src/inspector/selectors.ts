@@ -723,8 +723,13 @@ export function markerCategory(e: WorldEvent): MarkerCategory {
   }
   if (
     e.kind === 'project_proposed' ||
-    e.kind === 'project_contributed' ||
-    e.kind === 'project_completed' ||
+    e.kind === 'project_contributed' ||  // legacy alias, tolerated
+    e.kind === 'project_funded' ||       // events.schema.json x-known-kinds (W7)
+    e.kind === 'project_completed' ||    // legacy alias, tolerated
+    e.kind === 'project_built' ||        // events.schema.json x-known-kinds (W7)
+    e.kind === 'building_operational' ||
+    e.kind === 'building_damaged' ||
+    e.kind === 'building_destroyed' ||
     e.kind === 'structure_state_changed'
   ) {
     return 'construction';

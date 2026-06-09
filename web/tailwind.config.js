@@ -25,6 +25,9 @@ export default {
           'acid-dim': '#8ab300',
           danger: '#ff3333',
           warn: '#ff9900',
+          // God-panel accent (W7 spawn) — a violet that reads "creator mode".
+          god: '#7b6cf6',
+          'god-bright': '#a99bff',
         }
       },
       animation: {

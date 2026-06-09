@@ -56,11 +56,98 @@ ACTION_SCHEMA = {
                 "move_to", "say", "whisper", "work", "forage", "recharge",
                 "give", "steal", "insult", "attack", "set_relationship",
                 "remember", "propose_rule", "vote", "idle",
+                # W7 / EM-060+062 construction actions (action-protocol v1.1.0).
+                "propose_project", "contribute_funds", "build_step",
+                "repair", "arson", "take_offline",
             ],
         },
         "args": {"type": "object", "default": {}},
     },
+    # Per-action arg requirements mirrored from action-protocol.schema.json so the
+    # inline schema validates the 6 new construction actions structurally (the
+    # canonical contract is contracts/action-protocol.schema.json). Only the
+    # behavioral args are validated strictly here; cosmetic/optional args are open.
+    "allOf": [
+        {"if": {"properties": {"action": {"const": "propose_project"}}},
+         "then": {"properties": {"args": {"required": ["name", "kind"], "properties": {
+             "name": {"type": "string", "maxLength": 60},
+             "kind": {"type": "string", "maxLength": 30},
+             "funds_required": {"type": "integer", "minimum": 1},
+             "function": {"type": "string", "maxLength": 40},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "contribute_funds"}}},
+         "then": {"properties": {"args": {"required": ["building_id", "amount"], "properties": {
+             "building_id": {"type": "string"},
+             "amount": {"type": "integer", "minimum": 1},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "build_step"}}},
+         "then": {"properties": {"args": {"required": ["building_id"], "properties": {
+             "building_id": {"type": "string"},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "repair"}}},
+         "then": {"properties": {"args": {"required": ["building_id"], "properties": {
+             "building_id": {"type": "string"},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "arson"}}},
+         "then": {"properties": {"args": {"required": ["building_id"], "properties": {
+             "building_id": {"type": "string"},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "take_offline"}}},
+         "then": {"properties": {"args": {"required": ["building_id"], "properties": {
+             "building_id": {"type": "string"},
+         }}}}},
+    ],
 }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tool registry (EM-060) — per-action tier + gating metadata.
+#
+# Mirrors world-model.md §W7 "Tiered tool catalog". Each action carries:
+#   tier            — "reflex" (engine resolves deterministically; the LLM still
+#                     *chooses* it as its one turn-action) | "llm" (reasoning-heavy).
+#                     Resolution is ALWAYS engine code; tier drives prompt framing.
+#   location_gate   — place kind(s) the action is only offered at, or None (anywhere).
+#                     For build_step/repair/take_offline the gate is the building's
+#                     OWN place (resolved per-turn from args), encoded as "@building".
+#   agreement_gate  — active rule effect that BLOCKS the action, or None.
+#
+# Context assembly uses this to SHRINK the per-turn valid_actions list (free-scale);
+# _validate_world enforces the same gates at resolution time.
+# ──────────────────────────────────────────────────────────────────────────────
+
+TOOL_REGISTRY: dict[str, dict[str, Any]] = {
+    # Movement / perception / economy → reflex, offered anywhere.
+    "idle":             {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "move_to":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "remember":         {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "forage":           {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "recharge":         {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "work":             {"tier": "reflex", "location_gate": "work",          "agreement_gate": None},
+    "give":             {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "steal":            {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_stealing"},
+    # Social / governance → llm-served (the reasoning-heavy choices).
+    "say":              {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
+    "whisper":          {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
+    "insult":           {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
+    "attack":           {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
+    "set_relationship": {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
+    "propose_rule":     {"tier": "llm",    "location_gate": "governance",    "agreement_gate": None},
+    "vote":             {"tier": "llm",    "location_gate": "governance",    "agreement_gate": None},
+    # W7 construction actions.
+    "propose_project":  {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
+    "contribute_funds": {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "build_step":       {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+    "repair":           {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+    "arson":            {"tier": "reflex", "location_gate": "@building",     "agreement_gate": "ban_arson"},
+    "take_offline":     {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+}
+
+
+def _action_tier(action: str) -> str:
+    """The registry tier for an action (defaults to 'llm' for unknown actions)."""
+    meta = TOOL_REGISTRY.get(action)
+    return meta.get("tier", "llm") if meta else "llm"
 
 IDLE_ACTION = {"action": "idle", "args": {}}
 
@@ -206,6 +293,67 @@ def _sanitize_optional_trace_fields(action_dict: dict) -> None:
             action_dict.pop("memories_used", None)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Building accessors (read the world-core building store defensively).
+#
+# world.buildings is owned by world-core-agent (a dict[str, BuildingState] mirroring
+# world.agents/world.rules). We treat it as optional so the runtime imports and runs
+# even before that store lands, and so non-building worlds (tests) stay valid.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _buildings(world: World) -> dict[str, Any]:
+    store = getattr(world, "buildings", None)
+    return store if isinstance(store, dict) else {}
+
+
+def _building_field(building: Any, field: str, default: Any = None) -> Any:
+    """Read a field from a BuildingState (attr) or a building dict, gracefully."""
+    if building is None:
+        return default
+    if isinstance(building, dict):
+        return building.get(field, default)
+    return getattr(building, field, default)
+
+
+def _emit_world_result(result: Any, base: dict, thought: str = "") -> dict:
+    """Spread per-turn base metadata (profile/profile_color/tick) onto whatever a
+    world-core `action_*` method returned and hand it back in the loop's emit shape.
+
+    The W7 building actions return a fully-formed, ready-to-emit event dict
+    (kind/actor_id/target_id?/text/payload), or {"_multi": [evt, ...]} for
+    multi-event outcomes (propose_project also rides a "_building_id"). They never
+    raise; an illegal id comes back as a `parse_failure` event. This consumes them
+    exactly like the `vote` branch consumes its own `_multi`: it does NOT unpack a
+    tuple and does NOT re-derive transitions — it reads the kinds/payloads the world
+    already produced and overlays the base fields the loop needs.
+    """
+    building_id = None
+    if isinstance(result, dict) and "_building_id" in result:
+        building_id = result.get("_building_id")
+
+    def _decorate(evt: dict) -> dict:
+        # base supplies profile/profile_color/tick + a default actor_id; the world
+        # event's own actor_id/target_id/text/payload win where present.
+        merged = {**base, **evt}
+        payload = dict(merged.get("payload") or {})
+        if thought and "thought" not in payload:
+            payload["thought"] = thought
+        if building_id is not None:
+            payload.setdefault("building_id", building_id)
+        merged["payload"] = payload
+        return merged
+
+    if isinstance(result, dict) and "_multi" in result:
+        return {"_multi": [_decorate(evt) for evt in result["_multi"]]}
+    if isinstance(result, dict):
+        return _decorate(result)
+    # Defensive: a malformed world return collapses to a parse_failure so the loop
+    # keeps turning rather than crashing the round.
+    return {**base, "kind": "parse_failure",
+            "text": "world action returned an unexpected value.",
+            "payload": {"error": "bad_world_result"}}
+
+
 def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str | None:
     """Returns an error string or None if world-legal."""
     action = action_dict.get("action")
@@ -284,6 +432,78 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
 
+    # ── W7 construction actions (world-model.md §W7) ───────────────────────────
+    elif action == "propose_project":
+        # Structurally validated already; nothing further is world-illegal — a new
+        # Building is created at the agent's place with owner=public.
+        name = args.get("name")
+        if not name:
+            return "propose_project requires a name"
+
+    elif action == "contribute_funds":
+        building_id = args.get("building_id")
+        amount = args.get("amount", 0)
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status in ("destroyed", "abandoned"):
+            return f"building '{building_id}' is {status} — cannot fund"
+        if amount <= 0:
+            return "contribute_funds amount must be positive"
+        if agent.credits < amount:
+            return f"insufficient credits: have {agent.credits}, need {amount}"
+
+    elif action == "build_step":
+        building_id = args.get("building_id")
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status != "under_construction":
+            return f"building '{building_id}' is {status}, not under_construction"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to build_step"
+
+    elif action == "repair":
+        building_id = args.get("building_id")
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status not in ("damaged", "offline"):
+            return f"building '{building_id}' is {status}; repair needs damaged/offline"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to repair"
+
+    elif action == "arson":
+        if world.has_active_rule("ban_arson"):
+            return "ban_arson rule is active — arson is forbidden"
+        building_id = args.get("building_id")
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status in ("destroyed",):
+            return f"building '{building_id}' is already destroyed"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to commit arson"
+
+    elif action == "take_offline":
+        building_id = args.get("building_id")
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        owner_id = _building_field(building, "owner_id")
+        if owner_id != agent.id:
+            return f"only the owner can take building '{building_id}' offline"
+        status = _building_field(building, "status")
+        if status != "operational":
+            return f"building '{building_id}' is {status}, not operational"
+
     return None
 
 
@@ -310,7 +530,38 @@ def _assemble_context(
     active_rules = [r for r in world.rules.values() if r.status == "active"]
     proposed_rules = [r for r in world.rules.values() if r.status == "proposed"]
 
-    # Valid actions with place-gating hints
+    # Buildings at the agent's place + active projects it could contribute to.
+    # Co-located buildings drive build_step/repair/arson/take_offline gating; the
+    # project list lets agents fund/build them (this is what closes the W7 loop).
+    here_buildings = [
+        b for b in _buildings(world).values()
+        if _building_field(b, "location") == agent.location
+    ]
+    # Active projects = anything not yet operational and not dead (anywhere) — the
+    # agent can contribute_funds to these from afar; build_step needs co-location.
+    open_projects = [
+        b for b in _buildings(world).values()
+        if _building_field(b, "status") in ("planned", "under_construction")
+    ]
+
+    # ── Tool-registry-driven valid_actions (EM-060) ───────────────────────────
+    # Filter the per-turn action list by each action's registry gates: place-kind
+    # location_gate, the "@building" co-location gate, and agreement_gate (active
+    # rule). Gating SHRINKS the prompt → smaller, free-scale turns.
+    def _gate_ok(action: str) -> bool:
+        meta = TOOL_REGISTRY.get(action)
+        if meta is None:
+            return True
+        gate = meta.get("agreement_gate")
+        if gate and world.has_active_rule(gate):
+            return False
+        loc = meta.get("location_gate")
+        if loc is None:
+            return True
+        if loc == "@building":
+            return bool(here_buildings)  # only offer when a building is here
+        return place_kind == loc
+
     valid_actions: list[str] = []
     valid_actions.append("idle, forage, recharge, move_to, remember")
     valid_actions.append("say (text) - speak to everyone here")
@@ -321,16 +572,34 @@ def _assemble_context(
         valid_actions.append(f"insult (target) - insult: {target_names}")
         valid_actions.append(f"attack (target) - attack: {target_names}")
         valid_actions.append(f"set_relationship (target, type) - ally|rival|neutral|friend|enemy")
-        if not world.has_active_rule("ban_stealing"):
+        if _gate_ok("steal"):
             valid_actions.append(f"steal (target) - steal from: {target_names}")
-    if place_kind == "work":
+    if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
         valid_actions.append("(work requires a work place)")
-    valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus")
-    if proposed_rules:
+    # Governance actions are gated to a governance place.
+    if _gate_ok("propose_rule"):
+        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus")
+    if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
+
+    # ── W7 construction actions (offered per gates) ───────────────────────────
+    valid_actions.append("propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place")
+    if open_projects:
+        valid_actions.append("contribute_funds (building_id, amount) - fund an active project below to push it toward construction")
+    for b in here_buildings:
+        bid = _building_field(b, "id")
+        status = _building_field(b, "status")
+        if status == "under_construction" and _gate_ok("build_step"):
+            valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
+        if status in ("damaged", "offline") and _gate_ok("repair"):
+            valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
+        if status != "destroyed" and _gate_ok("arson"):
+            valid_actions.append(f"arson (building_id={bid}) - burn this building (a crime; witnesses lose trust)")
+        if status == "operational" and _building_field(b, "owner_id") == agent.id and _gate_ok("take_offline"):
+            valid_actions.append(f"take_offline (building_id={bid}) - you own this; take it offline")
 
     # Recent events summary
     event_lines = []
@@ -347,6 +616,33 @@ def _assemble_context(
         other_name = other.name if other else other_id
         rel_lines.append(f"  {other_name}: {rel.type} (trust={rel.trust})")
     rel_text = "\n".join(rel_lines) if rel_lines else "  (none)"
+
+    # Buildings here (drives build_step/repair/arson/take_offline) — surface their
+    # mutable state so the model can act on them.
+    bld_here_lines = []
+    for b in here_buildings:
+        bld_here_lines.append(
+            f"  id={_building_field(b, 'id')} {_building_field(b, 'name')!r} "
+            f"kind={_building_field(b, 'kind')} status={_building_field(b, 'status')} "
+            f"progress={_building_field(b, 'progress', 0)}/100 "
+            f"health={_building_field(b, 'health', 100)}/100 "
+            f"funds={_building_field(b, 'funds_committed', 0)}/{_building_field(b, 'funds_required', 0)} "
+            f"owner={_building_field(b, 'owner_id')}"
+        )
+    bld_here_text = "\n".join(bld_here_lines) if bld_here_lines else "  (none here)"
+
+    # Active projects you could contribute to (anywhere) — the W7 collective loop.
+    project_lines = []
+    for b in open_projects:
+        need = _building_field(b, "funds_required", 0)
+        have = _building_field(b, "funds_committed", 0)
+        project_lines.append(
+            f"  id={_building_field(b, 'id')} {_building_field(b, 'name')!r} "
+            f"kind={_building_field(b, 'kind')} status={_building_field(b, 'status')} "
+            f"at={_building_field(b, 'location')} funds={have}/{need} "
+            f"progress={_building_field(b, 'progress', 0)}/100"
+        )
+    project_text = "\n".join(project_lines) if project_lines else "  (none)"
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
@@ -370,6 +666,12 @@ Mood: {agent.mood}
 
 === RELATIONSHIPS ===
 {rel_text}
+
+=== BUILDINGS HERE ===
+{bld_here_text}
+
+=== ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
+{project_text}
 
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
@@ -603,7 +905,7 @@ class AgentRuntime:
             "action_chosen": {
                 "chosen_tool": action_dict.get("action"),
                 "args": action_dict.get("args") or {},
-                "tier": "llm",
+                "tier": _action_tier(action_dict.get("action")),
             },
             "resolved": {"outcome": outcome, "state_deltas": state_deltas},
         }
@@ -917,6 +1219,49 @@ class AgentRuntime:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to vote but: {reason}",
                         "payload": {"error": reason}}
+
+        # ── W7 construction actions (dispatch to world-core action_*) ─────────
+        # Each world action_* returns a ready-to-emit event dict / {"_multi":[...]}
+        # (NOT an (ok, reason, value) tuple) and takes the building_id STRING, not a
+        # Building object. _emit_world_result spreads base metadata onto each, just
+        # like the `vote` branch above. Illegal ids come back as parse_failure events
+        # from the world itself, so the loop keeps turning.
+        elif action == "propose_project":
+            name = args.get("name", "")
+            kind = args.get("kind", "")
+            funds_required = args.get("funds_required")
+            function = args.get("function")
+            result = self.world.action_propose_project(
+                agent, name, kind, funds_required, function
+            )
+            return _emit_world_result(result, base, thought)
+
+        elif action == "contribute_funds":
+            building_id = args.get("building_id", "")
+            amount = args.get("amount", 0)
+            result = self.world.action_contribute_funds(agent, building_id, amount)
+            return _emit_world_result(result, base, thought)
+
+        elif action == "build_step":
+            building_id = args.get("building_id", "")
+            result = self.world.action_build_step(agent, building_id)
+            return _emit_world_result(result, base, thought)
+
+        elif action == "repair":
+            building_id = args.get("building_id", "")
+            result = self.world.action_repair(agent, building_id)
+            return _emit_world_result(result, base, thought)
+
+        elif action == "arson":
+            building_id = args.get("building_id", "")
+            result = self.world.action_arson(agent, building_id)
+            return _emit_world_result(result, base, thought)
+
+        elif action == "take_offline":
+            building_id = args.get("building_id", "")
+            # take_offline returns a SINGLE structure_state_changed event dict (no _multi).
+            result = self.world.action_take_offline(agent, building_id)
+            return _emit_world_result(result, base, thought)
 
         else:
             return {**base, "kind": "agent_action",

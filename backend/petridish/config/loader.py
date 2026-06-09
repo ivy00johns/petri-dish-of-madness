@@ -156,6 +156,44 @@ class UsageCaps:
 
 
 @dataclass
+class BuildingParams:
+    """W7 / EM-061+062 — buildings & the collective-project pipeline
+    (config `world.buildings`). Additive, backward-compatible defaults; the world
+    engine reads these for build_step size, the abandonment window, arson damage,
+    and the operational garden/farm + workshop economy buffs.
+
+      enabled            — master toggle for the buildings subsystem.
+      build_step         — progress added per `build_step` action (5 steps = 100%).
+      abandon_after_ticks— no fund/build activity while not operational -> abandoned.
+      arson_damage       — health removed per `arson`.
+      forage_bonus       — extra forage_reward at an operational garden/farm's place.
+      work_bonus_pct     — extra work_reward % at an operational workshop's place.
+    """
+    enabled: bool = True
+    build_step: int = 20
+    abandon_after_ticks: int = 40
+    arson_damage: int = 50
+    forage_bonus: int = 1
+    work_bonus_pct: int = 50
+
+
+@dataclass
+class SpawnParams:
+    """W7 / EM-063 — ad-hoc spawn policy (config `world.spawn`).
+    `god` = immediate spawn (default, best for tinkering); `governance` = a spawn
+    enqueues an admit_agent proposal, admitted iff the vote passes threshold."""
+    mode: str = "god"   # god | governance
+
+
+@dataclass
+class CacheParams:
+    """W7 / EM-068 — router decision cache (config `world.cache`). Keyed on
+    profile + messages; a hit reuses the prior completion (free-scale win)."""
+    enabled: bool = True
+    max_entries: int = 512
+
+
+@dataclass
 class WorldParams:
     agent_count: int = 5
     tick_interval_seconds: float = 0.5
@@ -180,6 +218,11 @@ class WorldParams:
     # W6 / EM-067 — optional cap-aware throttle policy. Default OFF (disabled)
     # so existing tests/behavior are unchanged; only the tick loop reads it.
     usage_caps: UsageCaps = field(default_factory=UsageCaps)
+    # W7 — buildings/project pipeline, ad-hoc spawn mode, and the decision cache.
+    # All additive with backward-compatible defaults so W5/W6 worlds are unchanged.
+    buildings: BuildingParams = field(default_factory=BuildingParams)
+    spawn: SpawnParams = field(default_factory=SpawnParams)
+    cache: CacheParams = field(default_factory=CacheParams)
 
 
 @dataclass
@@ -264,6 +307,43 @@ def _parse_usage_caps(raw: dict | None) -> UsageCaps:
     )
 
 
+def _parse_buildings(raw: dict | None) -> BuildingParams:
+    """Parse the optional `world.buildings` block. Absent/empty -> defaults
+    (backward-compatible)."""
+    if not isinstance(raw, dict):
+        return BuildingParams()
+    d = BuildingParams()
+    return BuildingParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        build_step=int(raw.get("build_step", d.build_step)),
+        abandon_after_ticks=int(raw.get("abandon_after_ticks", d.abandon_after_ticks)),
+        arson_damage=int(raw.get("arson_damage", d.arson_damage)),
+        forage_bonus=int(raw.get("forage_bonus", d.forage_bonus)),
+        work_bonus_pct=int(raw.get("work_bonus_pct", d.work_bonus_pct)),
+    )
+
+
+def _parse_spawn(raw: dict | None) -> SpawnParams:
+    """Parse the optional `world.spawn` block. Absent/empty -> god (default)."""
+    if not isinstance(raw, dict):
+        return SpawnParams()
+    mode = str(raw.get("mode", "god"))
+    if mode not in ("god", "governance"):
+        mode = "god"
+    return SpawnParams(mode=mode)
+
+
+def _parse_cache(raw: dict | None) -> CacheParams:
+    """Parse the optional `world.cache` block. Absent/empty -> enabled defaults."""
+    if not isinstance(raw, dict):
+        return CacheParams()
+    d = CacheParams()
+    return CacheParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_entries=int(raw.get("max_entries", d.max_entries)),
+    )
+
+
 def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
     w = raw.get("world", {})
     params = WorldParams(
@@ -285,6 +365,9 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
         db_path=str(_interpolate(w.get("db_path", ":memory:"))),
         usage_caps=_parse_usage_caps(w.get("usage_caps")),
+        buildings=_parse_buildings(w.get("buildings")),
+        spawn=_parse_spawn(w.get("spawn")),
+        cache=_parse_cache(w.get("cache")),
     )
 
     places = [
