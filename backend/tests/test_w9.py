@@ -21,8 +21,9 @@ originally exposed a destination-key mismatch (backend agent_moved emits
 payload.place; the frontend fold read to/location/target_id only). The
 frontend fix landed in selectors.ts (place-first chain at both sites) and the
 property test now mirrors the shipped chain. The backend half of the same
-mismatch (W9-QA-1b, repository.py get_analytics space-exploration) is still
-open — pinned by the one remaining strict xfail below, W10/EM-076 scope.
+mismatch (W9-QA-1b, repository.py get_analytics space-exploration) was fixed
+in W10/EM-076 — its former strict xfail is now the plain passing
+test_analytics_space_exploration_counts_moves below.
 """
 from __future__ import annotations
 
@@ -418,7 +419,8 @@ def _fold_agent_state(
     """Replicates the frontend replayStateAt fold (selectors.ts) for agent
     location + alive: base snapshot state, then agent_moved / agent_died from
     the strict-left delta. `dest_keys`/`use_target_id` parameterize how the
-    agent_moved destination is extracted (see the xfail test below)."""
+    agent_moved destination is extracted (see the W9-QA-1 history note in the
+    module docstring)."""
     loc = dict(roster)
     alive = {aid: True for aid in roster}
     if base:
@@ -556,22 +558,13 @@ async def test_replay_fold_forward_property_matches_ground_truth():
     assert checked >= 15
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "W9-QA-1b (REAL BUG, W10/EM-076 scope): the backend's own "
-        "get_analytics space-exploration aggregation (repository.py:593) reads "
-        "payload['to'] / payload['location'] / target_id from agent_moved rows, "
-        "while the emitter writes payload['place'] — so the AWI "
-        "space_exploration indicator is ALWAYS empty on real runs. Pre-existing "
-        "(W6-era), surfaced by the W9 fold-forward property work. The FRONTEND "
-        "half of this mismatch (W9-QA-1, selectors.ts) was fixed 2026-06-09; "
-        "this backend half remains. strict=True: fixing repository.py flips "
-        "this test loudly — then drop the marker."
-    ),
-)
 @pytest.mark.asyncio
-async def test_analytics_space_exploration_counts_moves_xfail():
+async def test_analytics_space_exploration_counts_moves():
+    """W9-QA-1b (FIXED in W10/EM-076): get_analytics space-exploration reads the
+    agent_moved destination from payload.place first (the key the emitter
+    actually writes), with to/location/target_id fallbacks mirroring the
+    frontend chain — so moving agents register in the AWI indicator. This was
+    the strict-xfail pin of the backend half of the W9-QA-1 key mismatch."""
     loop, world, repo, _, _ = _make_loop(
         script=[{"action": "move_to", "args": {"place": "plaza"}},
                 {"action": "move_to", "args": {"place": "market"}}],
@@ -582,6 +575,9 @@ async def test_analytics_space_exploration_counts_moves_xfail():
     assert by_agent, (
         "space_exploration.by_agent empty despite agent_moved events"
     )
+    # Each mover alternates plaza/market: unique-place counts must be exact.
+    for aid, count in by_agent.items():
+        assert 1 <= count <= 2, f"{aid}: implausible unique-place count {count}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -963,6 +963,12 @@ class TickLoop:
         p = self._router.get_profile(profile_name)
         return p.color if p else "#888888"
 
+    def _get_profile_color_for_profile(self, profile_name: str) -> str:
+        """Color for a profile NAME (no agent yet) — the governance spawn path
+        emits agent_spawned before the agent exists (audit B14)."""
+        p = self._router.get_profile(profile_name)
+        return p.color if p else "#888888"
+
     def _save_snapshot(self, tick: int) -> None:
         """Persist a world snapshot to bound replay cost (EM-054 §5). Reuses
         world.to_snapshot exactly as _broadcast_world_state does. Defensive: a

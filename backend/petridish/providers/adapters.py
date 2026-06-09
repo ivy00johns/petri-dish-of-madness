@@ -264,8 +264,11 @@ class GeminiAdapter:
         ]
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models"
-            f"/{self._model_id}:generateContent?key={self._api_key}"
+            f"/{self._model_id}:generateContent"
         )
+        # Audit B11: the key travels in the x-goog-api-key header, never the URL
+        # query string (query params leak into proxy/access logs and tracebacks).
+        headers = {"x-goog-api-key": self._api_key}
         payload = {
             "contents": contents,
             "generationConfig": {
@@ -275,7 +278,7 @@ class GeminiAdapter:
         }
         started = time.perf_counter()
         async with httpx.AsyncClient() as client:
-            data, _routed_via = await _post_with_retry(client, url, {}, payload, self.name)
+            data, _routed_via = await _post_with_retry(client, url, headers, payload, self.name)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         self.last_routed_via = self._model_id
         # Gemini: usageMetadata.promptTokenCount/candidatesTokenCount (often absent

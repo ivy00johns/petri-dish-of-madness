@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config.loader import load_config, WorldConfig
 from ..engine.world import World, AgentState, PlaceState
@@ -59,16 +59,34 @@ _config: WorldConfig | None = None
 _connections: set[WebSocket] = set()
 
 
+def _on_ws_send_done(task: asyncio.Task, ws: WebSocket) -> None:
+    """Done-callback for scheduled WS sends (audit B10): consume the task's
+    exception (no 'Task exception was never retrieved' noise) and discard the
+    failed socket so _connections never accumulates stale entries."""
+    if task.cancelled():
+        _connections.discard(ws)
+        return
+    exc = task.exception()  # consumes the exception
+    if exc is not None:
+        _connections.discard(ws)
+        log.debug("WS send failed; dropping socket: %s", exc)
+
+
 def _broadcast(msg: dict) -> None:
-    """Non-async broadcaster; schedules message to all connected WS clients."""
-    dead = set()
+    """Non-async broadcaster; schedules message to all connected WS clients.
+
+    Each send is scheduled with a done-callback that consumes failures and
+    evicts the dead socket from _connections (audit B10) — no unbounded
+    stale-socket growth, no unhandled-exception noise."""
+    data = json.dumps(msg)
     for ws in list(_connections):
         try:
-            # Fire-and-forget: schedule coroutine
-            asyncio.ensure_future(ws.send_text(json.dumps(msg)))
+            task = asyncio.ensure_future(ws.send_text(data))
         except Exception:
-            dead.add(ws)
-    _connections.difference_update(dead)
+            # Scheduling itself failed (e.g. no running loop for this socket).
+            _connections.discard(ws)
+            continue
+        task.add_done_callback(lambda t, ws=ws: _on_ws_send_done(t, ws))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -308,10 +326,12 @@ async def reassign_model(agent_id: str, body: ReassignBody):
 # Spawn / kill agents
 
 class SpawnBody(BaseModel):
-    name: str
+    # Audit B15: length caps — these strings flow into system prompts (token
+    # bloat / prompt-injection surface). Over-limit bodies get FastAPI's 422.
+    name: str = Field(max_length=40)
     profile: str
-    personality: str = "A generic agent."
-    location: str = "plaza"
+    personality: str = Field(default="A generic agent.", max_length=280)
+    location: str = Field(default="plaza", max_length=40)
     # W7 / EM-063 — spawn mode. god = immediate (default, as today); governance =
     # enqueue an admit_agent proposed rule carrying the agent spec; the agent is
     # admitted only if the vote passes threshold.
@@ -361,8 +381,7 @@ async def spawn_agent(body: SpawnBody, response: Response):
                 "actor_id": None,
                 "actor_type": "system",
                 "profile": body.profile,
-                "profile_color": _loop._get_profile_color_for_profile(body.profile)
-                if hasattr(_loop, "_get_profile_color_for_profile") else None,
+                "profile_color": _loop._get_profile_color_for_profile(body.profile),
                 "text": f"Admission of {body.name} proposed (governance vote pending).",
                 "payload": {"method": "governance", "proposal_id": proposal_id, "spec": spec},
             })
@@ -445,10 +464,11 @@ async def get_animals():
 
 
 class SpawnAnimalBody(BaseModel):
+    # Audit B15: same caps as SpawnBody (species is enum-checked in the handler).
     species: str            # cat | dog
-    name: str
-    location: str = "plaza"
-    personality: str = ""
+    name: str = Field(max_length=40)
+    location: str = Field(default="plaza", max_length=40)
+    personality: str = Field(default="", max_length=280)
 
 
 @app.post("/api/animals")
