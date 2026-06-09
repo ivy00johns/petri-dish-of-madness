@@ -12,12 +12,17 @@
  *     the event history with the pure projections in lib/extinction.ts
  *     (selector style, mock-safe).
  *
+ * W11b (EM-107): renders through BannerFade inside the TopBannerLayer overlay
+ * — appearing/clearing (a NEW RUN reset clears it) never reflows the app;
+ * enter/exit is an opacity-only fade.
+ *
  * Token-only styling (lab-danger register).
  */
 
 import { useMemo, useState } from 'react';
 import type { WorldState, WorldEvent } from '../types';
 import { computeExtinction, computeRunSummary } from '../lib/extinction';
+import { BannerFade } from './BannerFade';
 
 export function ExtinctionBanner({
   world,
@@ -40,10 +45,14 @@ export function ExtinctionBanner({
   );
   const [showSummary, setShowSummary] = useState(true);
 
-  if (!extinction || !summary) return null;
+  // EM-107: presence is managed by BannerFade (opacity-only enter/exit, kept
+  // mounted through the exit fade); a never-extinct run renders nothing.
+  const present = extinction !== null && summary !== null;
 
   return (
-    <div role="alert" className="shrink-0 border-b border-lab-danger bg-lab-danger/10">
+    <BannerFade show={present}>
+      {present && (
+    <div role="alert" className="border-b border-lab-danger bg-lab-danger/10">
       {/* The headline strip. */}
       <div className="flex items-center gap-3 px-4 py-2">
         <span className="font-mono text-sm text-lab-danger shrink-0" aria-hidden="true">
@@ -128,6 +137,8 @@ export function ExtinctionBanner({
         </div>
       )}
     </div>
+      )}
+    </BannerFade>
   );
 }
 

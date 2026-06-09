@@ -158,6 +158,14 @@
   animation: phantomDrift 2.4s ease-in-out infinite;
 }
 
+/* W11b (EM-107): top banners fade opacity ONLY — never height/transform (the
+   old in-flow mount/unmount reflowed the whole app: the "zoom" feeling).
+   Duration mirrors FADE_MS in BannerFade.tsx; the prefers-reduced-motion
+   block below forces it to ~0ms (instant) for motion-sensitive users. */
+.banner-fade {
+  transition: opacity 180ms ease-out;
+}
+
 /* Subtle scanline effect on header */
 @keyframes scanline {
   0% { transform: translateY(-100%); }

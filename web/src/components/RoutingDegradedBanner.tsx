@@ -14,60 +14,68 @@
  * seconds (health.recovered) so the state change is legible instead of the
  * warning silently vanishing.
  *
+ * W11b (EM-107): renders through BannerFade inside the TopBannerLayer overlay
+ * — appearance/clearing never reflows the app (the hysteresis flapping used
+ * to "zoom" the whole UI below it); enter/exit is an opacity-only fade.
+ *
  * Token-only styling (lab-warn register; lab-acid for the recovery note).
  */
 
 import { useState } from 'react';
 import type { RoutingHealth } from '../hooks/useRoutingHealth';
+import { BannerFade } from './BannerFade';
 
 export function RoutingDegradedBanner({ health }: { health: RoutingHealth }) {
   // Dismissal is keyed by the degraded model so a new collapse re-surfaces it.
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
 
   // EM-072 follow-up: transient recovery note after the degradation clears.
-  if (!health.degraded && health.recovered) {
-    return (
-      <div
-        role="status"
-        className="flex items-center gap-3 px-4 py-1.5 border-b border-lab-acid bg-lab-acid/10 shrink-0"
-      >
-        <span className="font-mono text-xs text-lab-acid shrink-0" aria-hidden="true">
-          ✓
-        </span>
-        <p className="flex-1 min-w-0 font-mono text-[11px] text-lab-acid leading-snug">
-          <span className="font-bold uppercase tracking-wide">Routing recovered</span> —
-          profiles are resolving to distinct models again; the model-vs-model comparison is
-          valid from here on.
-        </p>
-      </div>
-    );
-  }
-
-  if (!health.degraded || !health.model) return null;
-  if (dismissedFor === health.model) return null;
+  const showRecovered = !health.degraded && health.recovered === true;
+  const showDegraded =
+    health.degraded && health.model !== null && dismissedFor !== health.model;
 
   return (
-    <div
-      role="alert"
-      className="flex items-center gap-3 px-4 py-1.5 border-b border-lab-warn bg-lab-warn/10 shrink-0"
-    >
-      <span className="font-mono text-xs text-lab-warn shrink-0" aria-hidden="true">
-        ⚠
-      </span>
-      <p className="flex-1 min-w-0 font-mono text-[11px] text-lab-warn leading-snug">
-        <span className="font-bold uppercase tracking-wide">Routing degraded:</span>{' '}
-        all {health.profileCount} profiles are being served by{' '}
-        <span className="font-bold">{health.model}</span> — model-vs-model comparison is
-        not valid for this run.
-      </p>
-      <button
-        type="button"
-        onClick={() => setDismissedFor(health.model)}
-        className="shrink-0 font-mono text-[10px] uppercase tracking-wide px-1.5 py-0.5 border border-lab-warn text-lab-warn hover:bg-lab-warn/20 transition-colors rounded-sm"
-        aria-label="Dismiss the routing-degraded warning"
-      >
-        ✕ dismiss
-      </button>
-    </div>
+    <>
+      <BannerFade show={showRecovered}>
+        <div
+          role="status"
+          className="flex items-center gap-3 px-4 py-1.5 border-b border-lab-acid bg-lab-acid/10"
+        >
+          <span className="font-mono text-xs text-lab-acid shrink-0" aria-hidden="true">
+            ✓
+          </span>
+          <p className="flex-1 min-w-0 font-mono text-[11px] text-lab-acid leading-snug">
+            <span className="font-bold uppercase tracking-wide">Routing recovered</span> —
+            profiles are resolving to distinct models again; the model-vs-model comparison is
+            valid from here on.
+          </p>
+        </div>
+      </BannerFade>
+
+      <BannerFade show={showDegraded}>
+        <div
+          role="alert"
+          className="flex items-center gap-3 px-4 py-1.5 border-b border-lab-warn bg-lab-warn/10"
+        >
+          <span className="font-mono text-xs text-lab-warn shrink-0" aria-hidden="true">
+            ⚠
+          </span>
+          <p className="flex-1 min-w-0 font-mono text-[11px] text-lab-warn leading-snug">
+            <span className="font-bold uppercase tracking-wide">Routing degraded:</span>{' '}
+            all {health.profileCount} profiles are being served by{' '}
+            <span className="font-bold">{health.model}</span> — model-vs-model comparison is
+            not valid for this run.
+          </p>
+          <button
+            type="button"
+            onClick={() => setDismissedFor(health.model)}
+            className="shrink-0 font-mono text-[10px] uppercase tracking-wide px-1.5 py-0.5 border border-lab-warn text-lab-warn hover:bg-lab-warn/20 transition-colors rounded-sm"
+            aria-label="Dismiss the routing-degraded warning"
+          >
+            ✕ dismiss
+          </button>
+        </div>
+      </BannerFade>
+    </>
   );
 }

@@ -16,6 +16,7 @@
 
 import { useMemo, useState } from 'react';
 import type { WorldEvent } from '../types';
+import { BannerFade } from './BannerFade';
 
 interface UsageAlert {
   seq: number;
@@ -61,41 +62,45 @@ export function UsageAlertBanner({ history }: { history: WorldEvent[] }) {
   const [dismissed, setDismissed] = useState<ReadonlySet<number>>(new Set());
 
   const alerts = useMemo(() => latestUsageAlerts(history), [history]);
-  const visible = alerts.filter((a) => !dismissed.has(a.seq));
 
-  if (visible.length === 0) return null;
+  if (alerts.length === 0) return null;
 
+  // W11b (EM-107): every row renders through BannerFade (keyed by
+  // provider+metric, stable across windows) so a dismissal fades out and a
+  // re-armed alert fades back in — zero layout shift either way (the stack
+  // lives in the TopBannerLayer overlay).
   return (
-    <div className="shrink-0">
-      {visible.map((a) => (
-        <div
-          key={`${a.provider}|${a.metric}`}
-          role="alert"
-          className="flex items-center gap-3 px-4 py-1.5 border-b border-lab-warn bg-lab-warn/10"
-        >
-          <span className="font-mono text-xs text-lab-warn shrink-0" aria-hidden="true">
-            ⚠
-          </span>
-          <p className="flex-1 min-w-0 m-0 font-mono text-[11px] text-lab-warn leading-snug">
-            <span className="font-bold uppercase tracking-wide">Usage alert:</span>{' '}
-            <span className="font-bold">{a.provider}</span> at{' '}
-            <span className="font-bold tabular-nums">{Math.round(a.pct)}%</span> of its daily{' '}
-            {METRIC_LABEL[a.metric] ?? a.metric} cap
-            {a.limit !== null && (
-              <span className="text-lab-warn/80"> (limit {a.limit.toLocaleString()})</span>
-            )}{' '}
-            — routing may degrade when it trips.
-          </p>
-          <button
-            type="button"
-            onClick={() => setDismissed((cur) => new Set(cur).add(a.seq))}
-            className="shrink-0 font-mono text-[10px] uppercase tracking-wide px-1.5 py-0.5 border border-lab-warn text-lab-warn hover:bg-lab-warn/20 transition-colors rounded-sm"
-            aria-label={`Dismiss the ${a.provider} usage alert`}
+    <>
+      {alerts.map((a) => (
+        <BannerFade key={`${a.provider}|${a.metric}`} show={!dismissed.has(a.seq)}>
+          <div
+            role="alert"
+            className="flex items-center gap-3 px-4 py-1.5 border-b border-lab-warn bg-lab-warn/10"
           >
-            ✕ dismiss
-          </button>
-        </div>
+            <span className="font-mono text-xs text-lab-warn shrink-0" aria-hidden="true">
+              ⚠
+            </span>
+            <p className="flex-1 min-w-0 m-0 font-mono text-[11px] text-lab-warn leading-snug">
+              <span className="font-bold uppercase tracking-wide">Usage alert:</span>{' '}
+              <span className="font-bold">{a.provider}</span> at{' '}
+              <span className="font-bold tabular-nums">{Math.round(a.pct)}%</span> of its daily{' '}
+              {METRIC_LABEL[a.metric] ?? a.metric} cap
+              {a.limit !== null && (
+                <span className="text-lab-warn/80"> (limit {a.limit.toLocaleString()})</span>
+              )}{' '}
+              — routing may degrade when it trips.
+            </p>
+            <button
+              type="button"
+              onClick={() => setDismissed((cur) => new Set(cur).add(a.seq))}
+              className="shrink-0 font-mono text-[10px] uppercase tracking-wide px-1.5 py-0.5 border border-lab-warn text-lab-warn hover:bg-lab-warn/20 transition-colors rounded-sm"
+              aria-label={`Dismiss the ${a.provider} usage alert`}
+            >
+              ✕ dismiss
+            </button>
+          </div>
+        </BannerFade>
       ))}
-    </div>
+    </>
   );
 }

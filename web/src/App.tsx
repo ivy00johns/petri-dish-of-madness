@@ -15,18 +15,18 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { useSimulation } from './hooks/useSimulation';
 import { animalModelMap } from './lib/animalIdentity';
 import type { SimulationState, SimulationControls } from './hooks/useSimulation';
 import { useRoutingHealth } from './hooks/useRoutingHealth';
-import type { RoutingHealth } from './hooks/useRoutingHealth';
 import type { FocusTarget } from './types';
 import { Header } from './components/Header';
 import { RoutingDegradedBanner } from './components/RoutingDegradedBanner';
 import { UsageAlertBanner } from './components/UsageAlertBanner';
 import { ExtinctionBanner } from './components/ExtinctionBanner';
 import { MinWidthGate, useViewportWide } from './components/MinWidthGate';
+import { TopBannerLayer } from './components/BannerFade';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
@@ -72,6 +72,9 @@ export default function App() {
   // instead of a broken layout. The simulation hook stays mounted, so the
   // run keeps streaming and nothing is lost while the user resizes.
   const wide = useViewportWide();
+  // EM-107: the routing + extinction banners stay live-route-only (the
+  // inspector has its own compact routing chip in the status strip).
+  const onLive = useLocation().pathname === '/';
 
   if (!wide) {
     return <MinWidthGate />;
@@ -88,34 +91,49 @@ export default function App() {
         mockMode={mockMode}
       />
 
-      {/* EM-083: usage alerts surface on BOTH routes (amber, dismissible,
-          re-armed by each new window's event). */}
-      <UsageAlertBanner history={sim.history} />
+      {/* ── Body: routed content + the layout-stable banner overlay ─
+          EM-107: every top banner renders in TopBannerLayer — absolutely
+          positioned over the routed body, so banner appearance/clearing
+          moves ZERO content pixels (the old in-flow mounts reflowed the
+          whole app: the "zoom" feeling). Banners fade opacity only and
+          stack vertically; each stays individually dismissible. */}
+      <div className="relative flex flex-col flex-1 min-h-0">
+        <TopBannerLayer>
+          {/* EM-083: usage alerts surface on BOTH routes. */}
+          <UsageAlertBanner history={sim.history} />
+          {/* EM-072: model-A/B collapse warning + recovery transient. */}
+          {onLive && <RoutingDegradedBanner health={routingHealth} />}
+          {/* EM-071/084: extinction headline + end-of-run summary + NEW RUN.
+              Computed from the deeper history so deaths/rules/crimes survive
+              the 200-cap feed; its CTA restarts via /api/control/reset. */}
+          {onLive && <ExtinctionBanner world={world} events={sim.history} onReset={sim.reset} />}
+        </TopBannerLayer>
 
-      {/* ── Routed body ─────────────────────────────────────────── */}
-      <Routes>
-        {/* "/" keeps the 3D village as the default live view. */}
-        <Route path="/" element={<LiveLayout sim={sim} routingHealth={routingHealth} />} />
-        {/*
-          "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's
-          <Canvas>) is NOT rendered on this route, so React/R3F unmount the
-          R3F tree and dispose the WebGL context.
-        */}
-        <Route
-          path="/inspector"
-          element={
-            <InspectorLayout
-              world={sim.world}
-              history={sim.history}
-              historyLoading={sim.historyLoading}
-              historyTruncated={sim.historyTruncated}
-              mockMode={sim.mockMode}
-              onSeekTick={sim.seekTick}
-              routingHealth={routingHealth}
-            />
-          }
-        />
-      </Routes>
+        {/* ── Routed body ───────────────────────────────────────── */}
+        <Routes>
+          {/* "/" keeps the 3D village as the default live view. */}
+          <Route path="/" element={<LiveLayout sim={sim} />} />
+          {/*
+            "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's
+            <Canvas>) is NOT rendered on this route, so React/R3F unmount the
+            R3F tree and dispose the WebGL context.
+          */}
+          <Route
+            path="/inspector"
+            element={
+              <InspectorLayout
+                world={sim.world}
+                history={sim.history}
+                historyLoading={sim.historyLoading}
+                historyTruncated={sim.historyTruncated}
+                mockMode={sim.mockMode}
+                onSeekTick={sim.seekTick}
+                routingHealth={routingHealth}
+              />
+            }
+          />
+        </Routes>
+      </div>
     </div>
   );
 }
@@ -134,7 +152,7 @@ export default function App() {
  * old AgentPanels datum (name, model badge, energy, credits, mood, dying/dead,
  * top relationships) lives on the strip cards, plus location.
  */
-function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHealth }) {
+function LiveLayout({ sim }: { sim: Sim }) {
   const { world, events } = sim;
   const [view, setView] = useState<WorldView>('village');
   // EM-095: camera focus (follow/zoom target) + the reset-view signal.
@@ -203,13 +221,9 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
 
   return (
     <>
-      {/* EM-072: dismissible warning when every profile routes to one model. */}
-      <RoutingDegradedBanner health={routingHealth} />
-
-      {/* EM-071: extinction banner + end-of-run summary (computed from the
-          deeper history so deaths/rules/crimes survive the 200-cap feed).
-          EM-084: its NEW RUN CTA restarts the run via /api/control/reset. */}
-      <ExtinctionBanner world={world} events={sim.history} onReset={sim.reset} />
+      {/* EM-107: the routing-degraded + extinction banners moved to App's
+          TopBannerLayer overlay — they no longer mount in flow here, so
+          their appearance/clearing can't reflow this layout. */}
 
       {/* ── Three-region body (EM-096) ─────────────────────────── */}
       <div
