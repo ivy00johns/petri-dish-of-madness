@@ -188,6 +188,13 @@ the wave: `tsc -b` + `vite build` green, `design-token-guard` clean, and `render
   horizontally-scrollable card strip at the BOTTOM edge of the world view (model
   badge, energy, location stay visible per card); RIGHT column = controls + legend
   (unchanged width or narrower). No information is lost vs today's layout.
+  **Priority clarification (user, 2026-06-09): the chat/feed is the product's
+  centerpiece right now — the city gets better over time, but chat is key.** The
+  feed's default width is generous (not a minimum-viable sliver), its typography and
+  line length are first-class reading experience, and the village's extra pixels
+  come from reclaiming the old agents column — NEVER from squeezing the feed. When
+  layout tradeoffs arise, the feed wins. (EM-105's drag handle lets the user trade
+  the balance either way at runtime.)
 - **EM-094 story so far:** an always-on, zero-LLM computed digest (pure selector over
   the rolling history: deaths, active rules, project status, current-drama heuristic
   such as recent conflicts/starvation) rendered at the top of the feed column,
