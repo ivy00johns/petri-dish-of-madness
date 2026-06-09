@@ -1,0 +1,57 @@
+/*
+ * Inspector design tokens (frontend-inspector.md §4/§7).
+ *
+ * The inspector's Canvas2D surfaces (the replay mini-map) cannot take Tailwind
+ * classes — a canvas `fillStyle` needs a real color value. To stay token-only
+ * (no hardcoded hex / inline literals; design-token-guard clean) these declare
+ * the inspector palette as CSS custom properties. Both the DOM (via `var(--…)`)
+ * and the canvas (via `getComputedStyle(...).getPropertyValue('--…')`) read the
+ * SAME declared tokens, so the canvas can never drift from the theme.
+ *
+ * The `--lab-*` values mirror the Tailwind `lab` palette (tailwind.config.js,
+ * owned by the frontend palette); the `--marker-*` values are the event-marker
+ * legend the replay scrubber color-codes by category (contract §4:
+ * crime=red, governance=blue, construction=amber, animal=magenta, trace=dim).
+ */
+
+:root {
+  /* Surface tokens mirroring the Tailwind lab palette (for canvas use). */
+  --lab-bg: #0a0a0b;
+  --lab-surface: #111114;
+  --lab-chrome: #1a1a20;
+  --lab-border: #252530;
+  --lab-muted: #5a5a72;
+  --lab-dim: #3a3a50;
+  --lab-acid: #c8ff00;
+
+  /* Replay event-marker legend (color-coded by category). */
+  --marker-crime: #ff3333;
+  --marker-governance: #3498db;
+  --marker-construction: #ff9900;
+  --marker-animal: #d957d9;
+  --marker-trace: #3a3a50;
+  --marker-other: #5a5a72;
+
+  /* Neutral fallback for an agent with no model color yet. */
+  --inspector-node-neutral: #5a5a72;
+
+  /* W8 Animal Chaos Feed (EM-065). The feed's magenta register is the SAME
+     --marker-animal the replay timeline + main-feed critter border use, so the
+     chaos color reads identically everywhere. These derived tints keep the panel
+     token-only (no hardcoded hex / inline literals; design-token-guard clean). */
+  --chaos-accent: var(--marker-animal);
+  --chaos-surface: rgba(217, 87, 217, 0.08);
+  --chaos-border: rgba(217, 87, 217, 0.35);
+  --chaos-chaotic: #ff7ad9; /* a brighter magenta for the "is_chaotic" badge */
+
+  /* W7 building-status markers (mini-map squares + projects readout dots).
+     Both the canvas (getComputedStyle) and the DOM legend (var(--…)) read these
+     same tokens, so a building marker can never drift from the theme. */
+  --building-planned: #6e8ad4;
+  --building-under-construction: #ff9900;
+  --building-operational: #8fd44a;
+  --building-damaged: #ff6b3d;
+  --building-offline: #5a5a72;
+  --building-abandoned: #9c8460;
+  --building-destroyed: #6b6b6b;
+}

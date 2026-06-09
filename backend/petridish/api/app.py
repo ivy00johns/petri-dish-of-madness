@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -103,7 +103,9 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     for agent in agents:
         router.reassign(agent.id, agent.profile)
 
-    repo = SQLiteRepository(":memory:")
+    # Thread the configured DB path so a real run can persist for replay; default
+    # ':memory:' keeps tests and ad-hoc launches ephemeral (EM-054 §6).
+    repo = SQLiteRepository(getattr(cfg.world, "db_path", ":memory:") or ":memory:")
     runtime = AgentRuntime(world, router)
     return world, router, runtime, repo
 
@@ -244,10 +246,10 @@ async def control_pause():
 async def control_step():
     if _loop is None:
         raise HTTPException(503, "Not initialized")
-    _loop.step()
-    # Give the loop a moment to process the step
-    await asyncio.sleep(0.1)
-    return {"status": "ok"}
+    # Await the turn's completion so the response reflects the advanced tick
+    # (deterministic stepping — no fire-and-forget race).
+    tick = await _loop.step_and_wait()
+    return {"status": "ok", "tick": tick}
 
 
 class SpeedBody(BaseModel):
@@ -310,14 +312,65 @@ class SpawnBody(BaseModel):
     profile: str
     personality: str = "A generic agent."
     location: str = "plaza"
+    # W7 / EM-063 — spawn mode. god = immediate (default, as today); governance =
+    # enqueue an admit_agent proposed rule carrying the agent spec; the agent is
+    # admitted only if the vote passes threshold.
+    mode: str | None = None
 
 
-@app.post("/api/agents", status_code=201)
-async def spawn_agent(body: SpawnBody):
+def _spawn_mode(body: SpawnBody) -> str:
+    """Effective spawn mode: explicit body.mode wins; else config spawn.mode; else god."""
+    if body.mode:
+        return body.mode
+    spawn_cfg = getattr(_config.world, "spawn", None) if _config else None
+    mode = getattr(spawn_cfg, "mode", None) if spawn_cfg is not None else None
+    return mode or "god"
+
+
+@app.post("/api/agents")
+async def spawn_agent(body: SpawnBody, response: Response):
     if _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
     if _router.get_profile(body.profile) is None:
         raise HTTPException(400, f"Unknown profile: {body.profile}")
+
+    mode = _spawn_mode(body)
+
+    if mode == "governance":
+        # Enqueue an admit_agent proposal carrying the agent spec; the agent enters
+        # only if the vote passes threshold. world-core owns the proposal store and
+        # admits the agent when the vote resolves (_on_rule_activated). This is a
+        # SYSTEM-initiated proposal (no human actor), so proposer_id is "system".
+        rule = _world.enqueue_admit_agent(
+            proposer_id="system",
+            name=body.name,
+            personality=body.personality,
+            profile=body.profile,
+            location=body.location,
+        )
+        proposal_id = rule.id
+        spec = {
+            "name": body.name,
+            "profile": body.profile,
+            "personality": body.personality,
+            "location": body.location,
+        }
+        if _loop:
+            _loop._emit_event({
+                "kind": "agent_spawned",
+                "actor_id": None,
+                "actor_type": "system",
+                "profile": body.profile,
+                "profile_color": _loop._get_profile_color_for_profile(body.profile)
+                if hasattr(_loop, "_get_profile_color_for_profile") else None,
+                "text": f"Admission of {body.name} proposed (governance vote pending).",
+                "payload": {"method": "governance", "proposal_id": proposal_id, "spec": spec},
+            })
+            _loop._broadcast_world_state()
+        response.status_code = 202
+        return {"status": "pending", "mode": "governance", "proposal_id": proposal_id}
+
+    # god (default): immediate spawn as today.
     agent = _world.spawn_agent(
         name=body.name,
         personality=body.personality,
@@ -331,13 +384,105 @@ async def spawn_agent(body: SpawnBody):
         _loop._emit_event({
             "kind": "agent_spawned",
             "actor_id": agent.id,
+            "actor_type": "god",
             "profile": body.profile,
             "profile_color": _loop._get_profile_color(agent),
             "text": f"{agent.name} spawned.",
-            "payload": {"agent_id": agent.id, "name": agent.name},
+            "payload": {"agent_id": agent.id, "name": agent.name, "method": "god"},
         })
         _loop._broadcast_world_state()
-    return {"status": "ok", "agent_id": agent.id}
+    response.status_code = 201
+    return {"status": "ok", "agent_id": agent.id, "mode": "god"}
+
+
+@app.get("/api/buildings")
+async def get_buildings():
+    """List buildings/structures with state (W7 EM-061). Also present in
+    world_state.buildings. Empty-200 when there is no active run / no buildings —
+    never 500 (matches the W6 read-endpoint style)."""
+    if _world is None:
+        return []
+    store = getattr(_world, "buildings", None)
+    if not isinstance(store, dict):
+        # Fall back to the snapshot's buildings key if world-core surfaces it there.
+        if _loop is not None:
+            snap = _loop.current_snapshot()
+            return snap.get("buildings", []) if isinstance(snap, dict) else []
+        return []
+    out = []
+    for b in store.values():
+        to_dict = getattr(b, "to_dict", None)
+        if callable(to_dict):
+            out.append(to_dict())
+        elif isinstance(b, dict):
+            out.append(b)
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# W8 / EM-064 — animals (chaos layer). GET lists the cat + dog (also present in
+# world_state.animals); POST spawns one ad-hoc (god-mode), W6 spawn-style.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/animals")
+async def get_animals():
+    """List animals with state (W8 EM-064). Also present in world_state.animals.
+    Empty-200 when there is no active run / no animals — never 500 (matches the
+    W6/W7 read-endpoint style)."""
+    if _world is None:
+        return []
+    store = getattr(_world, "animals", None)
+    if not isinstance(store, dict):
+        return []
+    out = []
+    for a in store.values():
+        to_dict = getattr(a, "to_dict", None)
+        if callable(to_dict):
+            out.append(to_dict())
+        elif isinstance(a, dict):
+            out.append(a)
+    return out
+
+
+class SpawnAnimalBody(BaseModel):
+    species: str            # cat | dog
+    name: str
+    location: str = "plaza"
+    personality: str = ""
+
+
+@app.post("/api/animals")
+async def spawn_animal_endpoint(body: SpawnAnimalBody, response: Response):
+    """Spawn an animal immediately (god-mode), emitting animal_spawned. Animals
+    have no credits (invariant 7) and are NOT in the agent round-robin — they act
+    on the slow animal cadence."""
+    if _world is None:
+        raise HTTPException(503, "Not initialized")
+    if body.species not in ("cat", "dog"):
+        raise HTTPException(400, f"Unknown species: {body.species!r} (cat|dog)")
+    animal = _world.spawn_animal(
+        species=body.species,
+        name=body.name,
+        location=body.location,
+        personality=body.personality,
+    )
+    if _loop:
+        _loop._emit_event({
+            "kind": "animal_spawned",
+            "actor_id": animal.id,
+            "actor_type": "animal",
+            "text": f"{animal.name} the {animal.species} appears.",
+            "payload": {
+                "animal_id": animal.id,
+                "species": animal.species,
+                "name": animal.name,
+                "location": animal.location,
+                "method": "god",
+            },
+        })
+        _loop._broadcast_world_state()
+    response.status_code = 201
+    return {"status": "ok", "animal_id": animal.id}
 
 
 @app.delete("/api/agents/{agent_id}")
@@ -376,3 +521,104 @@ async def inject_event(body: InjectBody = InjectBody()):
         return {"status": "ok", **result}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# W6 read-only event-log endpoints (api.openapi.yaml v1.1.0 / event-log.md §7).
+# These surface the repository §7 query methods over the active run
+# (_loop._run_id). With no active run/repo they return empty arrays / empty
+# payloads with 200 — never 500 — so the /inspector annex degrades gracefully.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _active_run_id() -> int | None:
+    """The run_id of the active run, or None when nothing is initialized yet."""
+    if _loop is None:
+        return None
+    return _loop._run_id
+
+
+@app.get("/api/events")
+async def get_events(
+    from_tick: int | None = Query(default=None),
+    to_tick: int | None = Query(default=None),
+    kinds: str | None = Query(default=None, description="comma-separated kinds"),
+    actor_id: str | None = Query(default=None),
+    turn_id: str | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    order: str = Query(default="asc"),
+):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    kind_list = [k for k in kinds.split(",") if k] if kinds else None
+    return _repo.get_events(
+        run_id,
+        from_tick=from_tick,
+        to_tick=to_tick,
+        kinds=kind_list,
+        actor_id=actor_id,
+        turn_id=turn_id,
+        after_seq=after_seq,
+        limit=limit,
+        order=order,
+    )
+
+
+@app.get("/api/turns/{turn_id}")
+async def get_turn_trace(turn_id: str):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_turn_trace(run_id, turn_id)
+
+
+@app.get("/api/rules/history")
+async def get_rule_history():
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_rule_history(run_id)
+
+
+@app.get("/api/relationships")
+async def get_relationships(
+    agent_id: str | None = Query(default=None),
+    from_tick: int | None = Query(default=None),
+    to_tick: int | None = Query(default=None),
+):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_relationship_timeline(
+        run_id, agent_id=agent_id, from_tick=from_tick, to_tick=to_tick
+    )
+
+
+@app.get("/api/snapshots")
+async def get_snapshots():
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_snapshots(run_id)
+
+
+@app.get("/api/replay")
+async def get_replay(tick: int = Query(...)):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return {"base": None, "events": []}
+    base = _repo.nearest_snapshot(run_id, tick)
+    events = _repo.get_events(run_id, to_tick=tick, order="asc")
+    return {"base": base, "events": events}
+
+
+@app.get("/api/analytics")
+async def get_analytics(
+    from_tick: int | None = Query(default=None),
+    to_tick: int | None = Query(default=None),
+):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return {}
+    return _repo.get_analytics(run_id, from_tick=from_tick, to_tick=to_tick)

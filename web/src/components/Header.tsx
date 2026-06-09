@@ -3,6 +3,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 
 interface HeaderProps {
   tick: number;
@@ -14,6 +15,8 @@ interface HeaderProps {
 
 export function Header({ tick, day, running, connected, mockMode }: HeaderProps) {
   const [tickFlash, setTickFlash] = useState(false);
+  const location = useLocation();
+  const onInspector = location.pathname === '/inspector';
 
   useEffect(() => {
     setTickFlash(true);
@@ -36,6 +39,16 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
         <span className="font-mono text-[10px] text-lab-dim border border-lab-border px-1 py-px hidden sm:inline">
           CHAOS LAB v1
         </span>
+
+        {/* Route toggle — 3D live world ⇄ 2D analysis annex. */}
+        <Link
+          to={onInspector ? '/' : '/inspector'}
+          className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid transition-colors rounded-sm no-underline"
+          aria-label={onInspector ? 'Back to the live 3D world' : 'Open the Inspector analysis annex'}
+          title={onInspector ? 'Back to the live world' : 'Open the Inspector (analysis)'}
+        >
+          {onInspector ? '← Live' : 'Inspector'}
+        </Link>
       </div>
 
       {/* Center — tick / day counter */}

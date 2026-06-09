@@ -1,13 +1,22 @@
 /**
- * App — root layout: 3-column chaos lab.
+ * App — root shell + routing.
  *
- * Left:   Agent panels (scrollable card stack)
- * Center: World map (canvas, top ~55%) + Event feed (bottom ~45%)
- * Right:  Controls + Model legend (scrollable)
+ * The simulation hook lives here (one WS connection, shared across routes).
+ * Routing chooses what renders below the header:
+ *
+ *   "/"          → the existing 3-column chaos lab (3D CozyWorld is the
+ *                  PRIMARY view; the in-page village/map toggle is intact).
+ *   "/inspector" → the 2D analysis annex (InspectorLayout) — mounts NO
+ *                  <Canvas>. Because routing controls whether LiveLayout
+ *                  renders, navigating to /inspector UNMOUNTS the CozyWorld
+ *                  <Canvas>, releasing the WebGL/GPU context (not merely
+ *                  hidden). See frontend-inspector.md §2.
  */
 
 import { useState } from 'react';
+import { Routes, Route } from 'react-router-dom';
 import { useSimulation } from './hooks/useSimulation';
+import type { SimulationState, SimulationControls } from './hooks/useSimulation';
 import { Header } from './components/Header';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
@@ -15,17 +24,18 @@ import { EventFeed } from './components/feed/EventFeed';
 import { AgentPanels } from './components/panels/AgentPanels';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
+import { InspectorLayout } from './inspector/InspectorLayout';
 
 type WorldView = 'village' | 'map';
+type Sim = SimulationState & SimulationControls;
 
 export default function App() {
   const sim = useSimulation();
-  const { world, events, connected, mockMode } = sim;
-  const [view, setView] = useState<WorldView>('village');
+  const { world, connected, mockMode } = sim;
 
   return (
     <div className="flex flex-col h-screen bg-lab-bg text-lab-text overflow-hidden">
-      {/* ── Header ─────────────────────────────────────────────── */}
+      {/* ── Header (persistent across routes) ───────────────────── */}
       <Header
         tick={world?.tick ?? 0}
         day={world?.day ?? 0}
@@ -34,6 +44,40 @@ export default function App() {
         mockMode={mockMode}
       />
 
+      {/* ── Routed body ─────────────────────────────────────────── */}
+      <Routes>
+        {/* "/" keeps the 3D village as the default live view. */}
+        <Route path="/" element={<LiveLayout sim={sim} />} />
+        {/*
+          "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's
+          <Canvas>) is NOT rendered on this route, so React/R3F unmount the
+          R3F tree and dispose the WebGL context.
+        */}
+        <Route
+          path="/inspector"
+          element={
+            <InspectorLayout world={sim.world} history={sim.history} mockMode={sim.mockMode} />
+          }
+        />
+      </Routes>
+    </div>
+  );
+}
+
+/**
+ * LiveLayout — the existing 3-column chaos lab, unchanged, now mounted under
+ * the "/" route.
+ *
+ * Left:   Agent panels (scrollable card stack)
+ * Center: World map (CozyWorld 3D default, top ~55%) + Event feed (bottom ~45%)
+ * Right:  Controls + Model legend (scrollable)
+ */
+function LiveLayout({ sim }: { sim: Sim }) {
+  const { world, events } = sim;
+  const [view, setView] = useState<WorldView>('village');
+
+  return (
+    <>
       {/* ── Three-column body ──────────────────────────────────── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* LEFT — Agent panels */}
@@ -101,6 +145,7 @@ export default function App() {
             onSpeed={sim.setSpeed}
             onReassign={sim.reassignModel}
             onInject={sim.injectEvent}
+            onSpawn={sim.spawnAgent}
             profiles={sim.getProfiles()}
           />
 
@@ -110,6 +155,6 @@ export default function App() {
           </div>
         </aside>
       </div>
-    </div>
+    </>
   );
 }

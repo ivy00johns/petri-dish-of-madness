@@ -95,6 +95,12 @@ class ModelProfile:
     color: str = "#888888"
     base_url: str = ""
     api_key_env: str = ""
+    # W6 / EM-067 — optional cost metadata (additive, backward-compatible).
+    # `is_free_tier` flags profiles routed through a free proxy/tier (so the
+    # throttle/cost views can prefer them); `cost_per_1k` is a coarse blended
+    # USD cost per 1k tokens for the model, used only for display/analytics.
+    is_free_tier: bool = False
+    cost_per_1k: float | None = None
 
     def api_key(self) -> str | None:
         if self.api_key_env:
@@ -126,6 +132,99 @@ class AgentConfig:
 
 
 @dataclass
+class UsageCaps:
+    """W6 / EM-067 — cap-aware throttle policy (config `world.usage_caps`).
+
+    DEFAULT OFF (`enabled=False`) so existing tests/behavior are unchanged.
+    When enabled, the tick loop aggregates recent `llm_call` usage per profile
+    over a sliding window of `period_ticks`; a profile near its cap emits a
+    `usage_sampled` event (actor_type 'system') and may lengthen the effective
+    tick interval. Throttling never blocks chat() (contracts/providers.md).
+
+      rpd          — requests/day cap (per profile), None = no request cap.
+      tpd          — tokens/day cap  (per profile), None = no token cap.
+      period_ticks — sliding window (in ticks) the cap is measured over.
+      slowdown_factor — multiplier applied to the tick interval when near a cap.
+      near_threshold  — fraction (0..1) of a cap that counts as "near".
+    """
+    enabled: bool = False
+    rpd: int | None = None
+    tpd: int | None = None
+    period_ticks: int = 100
+    slowdown_factor: float = 1.0
+    near_threshold: float = 0.8
+
+
+@dataclass
+class BuildingParams:
+    """W7 / EM-061+062 — buildings & the collective-project pipeline
+    (config `world.buildings`). Additive, backward-compatible defaults; the world
+    engine reads these for build_step size, the abandonment window, arson damage,
+    and the operational garden/farm + workshop economy buffs.
+
+      enabled            — master toggle for the buildings subsystem.
+      build_step         — progress added per `build_step` action (5 steps = 100%).
+      abandon_after_ticks— no fund/build activity while not operational -> abandoned.
+      arson_damage       — health removed per `arson`.
+      forage_bonus       — extra forage_reward at an operational garden/farm's place.
+      work_bonus_pct     — extra work_reward % at an operational workshop's place.
+    """
+    enabled: bool = True
+    build_step: int = 20
+    abandon_after_ticks: int = 40
+    arson_damage: int = 50
+    forage_bonus: int = 1
+    work_bonus_pct: int = 50
+
+
+@dataclass
+class SpawnParams:
+    """W7 / EM-063 — ad-hoc spawn policy (config `world.spawn`).
+    `god` = immediate spawn (default, best for tinkering); `governance` = a spawn
+    enqueues an admit_agent proposal, admitted iff the vote passes threshold."""
+    mode: str = "god"   # god | governance
+
+
+@dataclass
+class CacheParams:
+    """W7 / EM-068 — router decision cache (config `world.cache`). Keyed on
+    profile + messages; a hit reuses the prior completion (free-scale win)."""
+    enabled: bool = True
+    max_entries: int = 512
+
+
+@dataclass
+class AnimalParams:
+    """W8 / EM-064 — LLM-driven chaos animals (config `world.animals`).
+
+    Free-scale is the whole point: animals act on a SLOW cadence and only
+    SOMETIMES use the LLM. Additive, backward-compatible defaults so W5-W7
+    worlds (which lack the block) are unchanged.
+
+      enabled            — master toggle for the animal subsystem.
+      act_every_n_ticks  — an animal gets a turn every Nth tick (slower than agents).
+      llm_chance         — P(LLM decision) on an acted tick; else a zero-LLM reflex.
+      model_profile      — cheapest/fastest free profile for the LLM decision; the
+                           runtime falls back to reflex-only if it is unavailable.
+    """
+    enabled: bool = False
+    act_every_n_ticks: int = 3
+    llm_chance: float = 0.25
+    model_profile: str = ""
+
+
+@dataclass
+class AnimalSeed:
+    """W8 / EM-064 — a seed critter from the top-level `animals:` list. Spawned at
+    world init when `world.animals.enabled`. `personality` is optional flavour fed
+    into the animal's role card (the persona's drives stay species-driven)."""
+    species: str            # cat | dog
+    name: str
+    location: str
+    personality: str = ""
+
+
+@dataclass
 class WorldParams:
     agent_count: int = 5
     tick_interval_seconds: float = 0.5
@@ -142,6 +241,22 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # W5 / EM-054: snapshot cadence + DB destination (additive, backward-compatible).
+    # snapshot_interval_ticks bounds replay cost; db_path ':memory:' is fine for
+    # tests, but a real run that wants replay must point at a file (config world.db_path).
+    snapshot_interval_ticks: int = 25
+    db_path: str = ":memory:"
+    # W6 / EM-067 — optional cap-aware throttle policy. Default OFF (disabled)
+    # so existing tests/behavior are unchanged; only the tick loop reads it.
+    usage_caps: UsageCaps = field(default_factory=UsageCaps)
+    # W7 — buildings/project pipeline, ad-hoc spawn mode, and the decision cache.
+    # All additive with backward-compatible defaults so W5/W6 worlds are unchanged.
+    buildings: BuildingParams = field(default_factory=BuildingParams)
+    spawn: SpawnParams = field(default_factory=SpawnParams)
+    cache: CacheParams = field(default_factory=CacheParams)
+    # W8 — LLM-driven chaos animals. Additive; default-disabled so a world.yaml
+    # without an `animals` block behaves exactly as before.
+    animals: AnimalParams = field(default_factory=AnimalParams)
 
 
 @dataclass
@@ -150,6 +265,9 @@ class WorldConfig:
     places: list[PlaceConfig] = field(default_factory=list)
     agents: list[AgentConfig] = field(default_factory=list)
     profiles: list[ModelProfile] = field(default_factory=list)
+    # W8 — seed critters (the cat & dog) from the top-level `animals:` list.
+    # Empty for W5-W7 configs; the loop spawns these at init when animals.enabled.
+    animals: list[AnimalSeed] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -180,6 +298,12 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
     profiles = []
     for p in raw.get("profiles", []):
         p = _interp_dict(p)
+        cost_raw = p.get("cost_per_1k")
+        cost_per_1k: float | None
+        try:
+            cost_per_1k = float(cost_raw) if cost_raw is not None else None
+        except (TypeError, ValueError):
+            cost_per_1k = None
         profiles.append(ModelProfile(
             name=p["name"],
             adapter=p["adapter"],
@@ -189,8 +313,109 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
             color=p.get("color", "#888888"),
             base_url=p.get("base_url", ""),
             api_key_env=p.get("api_key_env", ""),
+            is_free_tier=bool(p.get("is_free_tier", False)),
+            cost_per_1k=cost_per_1k,
         ))
     return profiles
+
+
+def _parse_usage_caps(raw: dict | None) -> UsageCaps:
+    """Parse the optional `world.usage_caps` block. Absent/empty → disabled
+    defaults (backward-compatible). Null int caps stay None (no cap)."""
+    if not isinstance(raw, dict):
+        return UsageCaps()
+
+    def _opt_int(key: str) -> int | None:
+        v = raw.get(key)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    return UsageCaps(
+        enabled=bool(raw.get("enabled", False)),
+        rpd=_opt_int("rpd"),
+        tpd=_opt_int("tpd"),
+        period_ticks=int(raw.get("period_ticks", 100)),
+        slowdown_factor=float(raw.get("slowdown_factor", 1.0)),
+        near_threshold=float(raw.get("near_threshold", 0.8)),
+    )
+
+
+def _parse_buildings(raw: dict | None) -> BuildingParams:
+    """Parse the optional `world.buildings` block. Absent/empty -> defaults
+    (backward-compatible)."""
+    if not isinstance(raw, dict):
+        return BuildingParams()
+    d = BuildingParams()
+    return BuildingParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        build_step=int(raw.get("build_step", d.build_step)),
+        abandon_after_ticks=int(raw.get("abandon_after_ticks", d.abandon_after_ticks)),
+        arson_damage=int(raw.get("arson_damage", d.arson_damage)),
+        forage_bonus=int(raw.get("forage_bonus", d.forage_bonus)),
+        work_bonus_pct=int(raw.get("work_bonus_pct", d.work_bonus_pct)),
+    )
+
+
+def _parse_spawn(raw: dict | None) -> SpawnParams:
+    """Parse the optional `world.spawn` block. Absent/empty -> god (default)."""
+    if not isinstance(raw, dict):
+        return SpawnParams()
+    mode = str(raw.get("mode", "god"))
+    if mode not in ("god", "governance"):
+        mode = "god"
+    return SpawnParams(mode=mode)
+
+
+def _parse_cache(raw: dict | None) -> CacheParams:
+    """Parse the optional `world.cache` block. Absent/empty -> enabled defaults."""
+    if not isinstance(raw, dict):
+        return CacheParams()
+    d = CacheParams()
+    return CacheParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_entries=int(raw.get("max_entries", d.max_entries)),
+    )
+
+
+def _parse_animals(raw: dict | None) -> AnimalParams:
+    """Parse the optional `world.animals` block. Absent/empty -> disabled defaults
+    (backward-compatible). `model_profile` stays "" when unset; the runtime then
+    falls back to reflex-only (free-scale guarantee)."""
+    if not isinstance(raw, dict):
+        return AnimalParams()
+    d = AnimalParams()
+    return AnimalParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        act_every_n_ticks=max(1, int(raw.get("act_every_n_ticks", d.act_every_n_ticks))),
+        llm_chance=float(raw.get("llm_chance", d.llm_chance)),
+        model_profile=str(raw.get("model_profile", d.model_profile) or ""),
+    )
+
+
+def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
+    """Parse the top-level `animals:` seed list (the cat & dog). Absent -> [].
+    Each entry needs species + name; location defaults to the first place."""
+    out: list[AnimalSeed] = []
+    places = raw.get("places", []) or []
+    default_loc = places[0]["id"] if places and isinstance(places[0], dict) else "plaza"
+    for a in raw.get("animals", []) or []:
+        if not isinstance(a, dict):
+            continue
+        species = str(a.get("species", "")).strip()
+        name = str(a.get("name", "")).strip()
+        if not species or not name:
+            continue
+        out.append(AnimalSeed(
+            species=species,
+            name=name,
+            location=str(a.get("location", default_loc) or default_loc),
+            personality=str(a.get("personality", "")),
+        ))
+    return out
 
 
 def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
@@ -211,6 +436,13 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
+        db_path=str(_interpolate(w.get("db_path", ":memory:"))),
+        usage_caps=_parse_usage_caps(w.get("usage_caps")),
+        buildings=_parse_buildings(w.get("buildings")),
+        spawn=_parse_spawn(w.get("spawn")),
+        cache=_parse_cache(w.get("cache")),
+        animals=_parse_animals(w.get("animals")),
     )
 
     places = [
@@ -274,6 +506,8 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
 
     profiles = _parse_profiles(profiles_raw)
     world_params, places, agents = _parse_world(world_raw)
+    # W8 — top-level `animals:` seed list (separate from world.animals params).
+    animal_seeds = _parse_animal_seeds(world_raw)
 
     # Ensure mock profile always present
     if not any(p.name == "mock" for p in profiles):
@@ -299,4 +533,5 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
         places=places,
         agents=agents,
         profiles=profiles,
+        animals=animal_seeds,
     )

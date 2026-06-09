@@ -40,6 +40,45 @@ class Router:
 
 All adapters: timeout default 30s, 1 network retry on 5xx/429 with small backoff, then raise ProviderError.
 
+## Usage capture — W6 / EM-067
+
+`chat()` STILL returns `str` (no breaking change). Usage rides alongside as adapter state:
+
+```python
+class Provider(Protocol):
+    last_routed_via: str | None   # W4 — model that actually answered
+    last_usage: dict | None       # W6 — set after a successful chat(); None for Mock / on error
+# last_usage shape (null-tolerant — Gemini free tier often omits tokens):
+# { "input_tokens": int|None, "output_tokens": int|None,
+#   "latency_ms": float, "finish_reason": str|None, "cached": bool }
+class Router:
+    def last_usage(self, profile_name: str) -> dict | None   # mirrors last_routed_via
+```
+
+- **openai** adapter reads `usage.prompt_tokens`/`completion_tokens` + `choices[0].finish_reason`;
+  **anthropic** reads `usage.input_tokens`/`output_tokens` + `stop_reason`; **gemini** reads
+  `usageMetadata.promptTokenCount`/`candidatesTokenCount` (may be absent → null). Measure
+  `latency_ms` with a `perf_counter` wrapper around the whole `_post_with_retry`.
+- The runtime injects these into the `llm_call` event payload under the OTel keys
+  (`gen_ai.usage.input_tokens`/`output_tokens`, `latency_ms`, `gen_ai.response.finish_reasons`),
+  replacing the W5 nulls. **Per-attempt `llm_call` rows**: on a parse-failure retry, emit one
+  `llm_call` per attempt (attempt 1 + 2), each with its own usage, sharing the turn_id.
+- **Per-provider RPD/TPD** is computed from `llm_call` rows by `get_analytics().usage`
+  (no separate table). **Cap-aware throttling** is policy in the tick loop (config
+  `world.usage_caps`), NOT inside `chat()` — when a provider nears a cap, slow ticks / prefer a
+  cheaper profile; never block `chat()`. Mock has no usage (`last_usage=None`).
+
+## Decision caching — W7 / EM-068
+
+A Router-level LRU cache, internal (not in the public interface). `Router.chat()` keys on
+`sha1(profile_name + json(messages))` — the messages already embed the persona + retrieved
+memory + coarse world state, so an identical key means an identical situation. On a HIT, return
+the cached text WITHOUT a network call and set the next `last_usage` snapshot's `cached=true`
+(→ `llm_call.cached=true`, tokens null, latency ~0); on a MISS, call the adapter and store the
+result. Config `world.cache` `{enabled: true (default), max_entries: 512}`. Mock is never cached
+(deterministic already). Caching never crosses world states — different world ⇒ different
+messages ⇒ different key. This halves repeated-context cost on free tiers.
+
 ## ModelProfile (config)
 
 ```yaml

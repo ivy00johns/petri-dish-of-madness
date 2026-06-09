@@ -19,6 +19,57 @@ world:
   memory_window: 12
   attack_energy_cost: 6
 
+  # W6 / EM-067 — cap-aware throttle (optional, DEFAULT OFF). When enabled, the
+  # tick loop aggregates recent llm_call usage per model profile over a sliding
+  # window of `period_ticks`; a profile crossing `near_threshold` of its rpd/tpd
+  # cap emits a `usage_sampled` event and (if slowdown_factor > 1) lengthens the
+  # effective tick interval. Throttling never blocks a model call — it only slows
+  # ticks. Leave `enabled: false` to keep the default fast, uncapped behavior.
+  usage_caps:
+    enabled: false
+    rpd: null            # requests/day cap per profile (null = uncapped)
+    tpd: null            # tokens/day cap per profile   (null = uncapped)
+    period_ticks: 100    # sliding window the cap is measured over
+    slowdown_factor: 1.0 # interval multiplier when near a cap (1.0 = no slowdown)
+    near_threshold: 0.8  # fraction of a cap that counts as "near"
+
+  # W7 / EM-061+062 — buildings & the collective-project pipeline. A "project" is a
+  # Building in planned/under_construction; agents propose_project, contribute_funds,
+  # then build_step it to operational. Failure modes are the point: funds that never
+  # reach funds_required, or no build_step for abandon_after_ticks -> abandoned.
+  buildings:
+    enabled: true
+    build_step: 20         # progress added per build_step action (5 steps = done)
+    abandon_after_ticks: 40  # no fund/build activity while not operational -> abandoned
+    arson_damage: 50       # health removed per arson
+    forage_bonus: 1        # extra forage_reward at an operational garden/farm's place
+    work_bonus_pct: 50     # extra work_reward % at an operational workshop's place
+
+  # W7 / EM-063 — ad-hoc spawn. god = immediate (default, best for tinkering);
+  # governance = spawn enqueues an admit_agent proposal, admitted iff the vote passes.
+  spawn:
+    mode: god              # god | governance
+
+  # W7 / EM-068 — router decision cache (free-scale). Keyed on profile + messages
+  # (which embed persona + memory + world state); a hit reuses the prior completion.
+  cache:
+    enabled: true
+    max_entries: 512
+
+  # W8 / EM-064 — LLM-driven chaos animals (actor_type:"animal"). Free-scale is the
+  # whole game here: animals act on a SLOW cadence and only SOMETIMES use the LLM —
+  # most ticks are a zero-LLM reflex micro-behavior (roll-for-activity). The LLM
+  # decision routes to the cheapest profile and is intentionally under-constrained.
+  animals:
+    enabled: true
+    act_every_n_ticks: 3      # an animal gets a turn every Nth tick (slower than agents)
+    llm_chance: 0.25          # P(LLM decision) on an acted tick; else a reflex micro-behavior
+    model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
+
+animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
+  - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
+  - { species: dog, name: Biscuit, location: commons, personality: "Loyal, excitable, food-motivated, impulsive; chases anything that moves and means well even mid-disaster." }
+
 places:
   - { id: plaza,    name: Central Plaza, x: 500, y: 500, kind: social,     description: "Open square where everyone mingles." }
   - { id: market,   name: Market,        x: 750, y: 400, kind: work,       description: "Earn credits by working." }

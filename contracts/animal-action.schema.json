@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "petri-dish-of-madness/animal-action/v1.0.0",
+  "title": "Animal Action (W8 / EM-064)",
+  "description": "The JSON an ANIMAL's model returns on an LLM-decision tick (not every tick — see world-model.md §W8 roll-for-activity). Distinct from the agent action protocol: animals are framed as critters that act impulsively and IN-CHARACTER, NOT to optimize. The toolset is intentionally UNDER-CONSTRAINED so the LLM may choose an absurd escalation (arson/steal_food). Parsed like the agent action (first valid JSON object; one retry; on failure the animal falls back to a reflex micro-behavior, never idles the loop). animal_thought is a short in-character line surfaced in the Animal Chaos Feed.",
+  "type": "object",
+  "required": ["action"],
+  "additionalProperties": false,
+  "properties": {
+    "animal_thought": { "type": "string", "maxLength": 280, "description": "In-character thought (cat: aloof/mischievous; dog: excited/loyal). Surfaced in the chaos feed; truncated, never fails the turn." },
+    "mood": { "type": "string", "maxLength": 40 },
+    "action": {
+      "type": "string",
+      "enum": ["wander", "nap", "knock_over", "scratch", "mark_territory", "pounce", "chase", "idle", "steal_food", "arson"]
+    },
+    "args": { "type": "object", "default": {} }
+  },
+  "allOf": [
+    { "if": { "properties": { "action": { "const": "knock_over" } } },
+      "then": { "properties": { "args": { "properties": { "target": { "type": "string", "description": "optional building_id or agent_id" } } } } } },
+    { "if": { "properties": { "action": { "const": "pounce" } } },
+      "then": { "properties": { "args": { "properties": { "target": { "type": "string" } } } } } },
+    { "if": { "properties": { "action": { "const": "chase" } } },
+      "then": { "properties": { "args": { "properties": { "target": { "type": "string" } } } } } },
+    { "if": { "properties": { "action": { "const": "scratch" } } },
+      "then": { "properties": { "args": { "properties": { "target": { "type": "string" } } } } } },
+    { "if": { "properties": { "action": { "const": "steal_food" } } },
+      "then": { "properties": { "args": { "required": ["target"], "properties": { "target": { "type": "string", "description": "agent_id whose snack is taken — comedic, moves NO credits (invariant 7)" } } } } } },
+    { "if": { "properties": { "action": { "const": "arson" } } },
+      "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } }
+  ],
+  "examples": [
+    { "animal_thought": "That tall wooden thing offends me. I shall knock it over.", "action": "knock_over", "args": { "target": "garden" } },
+    { "animal_thought": "A warm sunbeam. Nothing else matters.", "mood": "smug", "action": "nap", "args": {} },
+    { "animal_thought": "FIRE? no — but the clock tower would look better as kindling.", "action": "arson", "args": { "building_id": "clocktower" } },
+    { "animal_thought": "BALL? STICK? PERSON? everything is the best thing!", "mood": "ecstatic", "action": "chase", "args": { "target": "agent_bram" } }
+  ]
+}

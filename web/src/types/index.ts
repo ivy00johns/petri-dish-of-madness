@@ -37,6 +37,61 @@ export interface Agent {
   relationships: Record<string, Relationship>;
 }
 
+// ============================================================
+// Building (W7) — match contracts/world-model.md §W7. Buildings live in the
+// world snapshot + event log (NO new SQL tables). A "project" is a Building in
+// planned/under_construction — one entity, one lifecycle. Rendered in the 3D
+// village by `status`. world_state gains `buildings: [Building]`.
+// ============================================================
+
+export type BuildingStatus =
+  | 'planned'
+  | 'under_construction'
+  | 'operational'
+  | 'damaged'
+  | 'offline'
+  | 'abandoned'
+  | 'destroyed';
+
+export type BuildingCondition = 'pristine' | 'worn' | 'damaged' | 'ruined';
+
+export interface Building {
+  id: string;
+  name: string;
+  kind: string;                 // clocktower|garden|workshop|farm|library|house|monument|...
+  location: string;             // place id
+  owner_id: string | null;      // agent id | "public" | null
+  status: BuildingStatus;
+  health: number;               // 0..100
+  condition_label: BuildingCondition;
+  progress: number;             // 0..100
+  funds_committed: number;
+  funds_required: number;
+  contributors: string[];       // agent ids
+  function: string;             // utility while operational, e.g. "+forage" | "+energy" | "voting"
+}
+
+// ============================================================
+// Animal (W8) — match contracts/world-model.md §W8. Animals are a DISTINCT
+// entity type (actor_type:"animal"), NOT human agents: own persona, looser
+// action set, slow cadence, own logging channel. They share the world
+// mechanically (places, can damage buildings) but have NO credits account
+// (invariant 7). They live in world.animals; world_state gains `animals: [Animal]`.
+// Rendered as a roaming cat + dog in the 3D village (species-shaped, tinted).
+// ============================================================
+
+export type AnimalSpecies = 'cat' | 'dog';
+
+export interface Animal {
+  id: string;
+  species: AnimalSpecies;
+  name: string;
+  location: string;             // place id
+  energy: number;               // 0..100
+  mood: string;                 // short free text
+  alive: boolean;
+}
+
 export type RuleEffect = 'ban_stealing' | 'ubi' | 'recharge_subsidy' | 'work_bonus';
 export type RuleStatus = 'proposed' | 'active' | 'rejected';
 
@@ -73,8 +128,18 @@ export interface WorldState {
   agents: Agent[];
   rules: Rule[];
   profiles: ModelProfile[];
+  // W7: structures/projects rendered in the 3D village by `status`. Optional so
+  // a W5/W6 backend (or a snapshot predating buildings) stays valid.
+  buildings?: Building[];
+  // W8: the roaming chaos critters (cat + dog). Optional so a pre-W8 backend (or
+  // a snapshot predating animals) stays valid; the 3D village renders each one.
+  animals?: Animal[];
 }
 
+// Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
+// (event-log.md §4) with no schema migration. The literal union documents the
+// kinds the UI knows about; `string & {}` keeps the type open without losing
+// autocomplete on the known members.
 export type EventKind =
   | 'turn_start'
   | 'agent_action'
@@ -93,7 +158,25 @@ export type EventKind =
   | 'parse_failure'
   | 'model_reassigned'
   | 'random_event'
-  | 'control';
+  | 'control'
+  // Animal chaos layer (W8 / EM-064-065). Distinct actor_type:"animal" events;
+  // surfaced MAGENTA in the Animal Chaos Feed + the main feed + replay markers.
+  | 'animal_spawned'
+  | 'animal_action'
+  | 'animal_died'
+  // Decision-trace chain (event-log.md §3) — one linked chain per agent turn.
+  | 'perceived'
+  | 'memory_retrieved'
+  | 'llm_call'
+  | 'reasoning'
+  | 'action_chosen'
+  | 'action_resolved'
+  // Open union: keeps autocomplete on the known members while tolerating the
+  // unknown kinds W6–W8 add (event-log.md §4). The feed default-renders them.
+  | (string & {});
+
+// Non-agent actor classes (event-log.md §2). Absent ⇒ human_agent.
+export type ActorType = 'human_agent' | 'system' | 'god' | 'animal';
 
 export interface WorldEvent {
   type: 'event';
@@ -107,11 +190,34 @@ export interface WorldEvent {
   text?: string | null;
   payload?: Record<string, unknown>;
   ts?: string;
+  // Decision-trace correlation + actor classification (event-log.md §2/§3).
+  // Carried on live events so the inspector (W6) can group a turn's chain.
+  turn_id?: string | null;
+  actor_type?: ActorType | null;
+  sim_time?: number | null;
+  // W8 (EM-065) — true when an animal invoked a crime/economy/structure-targeting
+  // or otherwise low-prior action. Drives the magenta Animal Chaos Feed surfacing.
+  is_chaotic?: boolean | null;
   // UI-only: thought from payload
   thought?: string;
 }
 
 export type WSMessage = WorldState | WorldEvent;
+
+// ============================================================
+// Ad-hoc spawn (W7 EM-063) — POST /api/agents body. `mode` god = immediate,
+// governance = enqueue an admit_agent proposal. Matches api.openapi.yaml.
+// ============================================================
+
+export type SpawnMode = 'god' | 'governance';
+
+export interface SpawnSpec {
+  name: string;
+  personality: string;
+  profile: string;
+  location: string;
+  mode: SpawnMode;
+}
 
 // ============================================================
 // App state

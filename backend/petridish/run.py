@@ -63,7 +63,7 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
     for agent in agents:
         router.reassign(agent.id, agent.profile)
 
-    repo = SQLiteRepository(":memory:")
+    repo = SQLiteRepository(getattr(cfg.world, "db_path", ":memory:") or ":memory:")
     runtime = AgentRuntime(world, router)
     # Inject world into mock providers so they can vote dynamically
     router.inject_world(world)
@@ -107,6 +107,10 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             evts = [raw_result]
 
         for evt in evts:
+            # _trace is the EM-066 decision-trace structure consumed by the
+            # TickLoop chain emitter; the headless runner doesn't expand it, so
+            # drop it from the persisted/broadcast event dict.
+            evt = {k: v for k, v in evt.items() if k != "_trace"}
             stamped = {
                 "type": "event",
                 "seq": i,

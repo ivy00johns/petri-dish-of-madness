@@ -20,9 +20,16 @@ import type { WorldState, WorldEvent } from '../../types';
 import { Ground } from './Ground';
 import { Scenery } from './Scenery';
 import { Building } from './Building';
+import { Structure } from './Structure';
 import { Villager, type AnimPos } from './Villager';
+import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, latestRoutedVia } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia } from './worldSpace';
+
+// How recent an animal's last chaotic event must be (in seq distance from the
+// newest event) for the critter to still wear its magenta chaos accent. This
+// keeps the accent a transient "they just did something" glow, not permanent.
+const CHAOS_RECENCY_SEQ = 80;
 
 interface CozyWorldProps {
   world: WorldState | null;
@@ -111,6 +118,21 @@ export function CozyWorld({ world, events }: CozyWorldProps) {
     return m;
   }, [events, world]);
 
+  // W8: which animals are CURRENTLY chaotic — scan the (newest-first) events for
+  // a recent animal event flagged is_chaotic, keyed by the animal's actor_id.
+  // The critter wears the magenta chaos accent while that event is still recent.
+  const chaoticAnimals = useMemo(() => {
+    const set = new Set<string>();
+    if (events.length === 0) return set;
+    const newestSeq = events[0].seq;
+    for (const e of events) {
+      if (newestSeq - e.seq > CHAOS_RECENCY_SEQ) break; // events are newest-first
+      const isAnimal = e.actor_type === 'animal' || e.kind === 'animal_action' || e.kind === 'animal_spawned';
+      if (isAnimal && e.is_chaotic && e.actor_id) set.add(e.actor_id);
+    }
+    return set;
+  }, [events]);
+
   // Group active bubbles by agent (cap per agent).
   const bubblesByAgent = useMemo(() => {
     const m = new Map<string, BubbleData[]>();
@@ -148,6 +170,7 @@ export function CozyWorld({ world, events }: CozyWorldProps) {
           world={world}
           bubblesByAgent={bubblesByAgent}
           routedByAgent={routedByAgent}
+          chaoticAnimals={chaoticAnimals}
         />
         <OrbitControls
           enablePan={false}
@@ -177,19 +200,35 @@ function Scene({
   world,
   bubblesByAgent,
   routedByAgent,
+  chaoticAnimals,
 }: {
   world: WorldState;
   bubblesByAgent: Map<string, BubbleData[]>;
   routedByAgent: Map<string, string>;
+  chaoticAnimals: Set<string>;
 }) {
   const animMap = useRef<Map<string, AnimPos>>(new Map());
+  // W8: animals roam, so they get their own animated-position map keyed by id.
+  const critterMap = useRef<Map<string, CritterPos>>(new Map());
   const { places, agents } = world;
+  const buildings = world.buildings ?? [];
+  const animals = world.animals ?? [];
 
   const placeCenters = useMemo(() => {
     const m = new Map<string, { x: number; z: number }>();
     places.forEach((p) => m.set(p.id, placeToWorld(p)));
     return m;
   }, [places]);
+
+  // W7: each Building sits at a stable satellite spot near its place center, so
+  // a project rises NEXT TO the existing structure rather than on top of it.
+  const buildingSpots = useMemo(() => {
+    const center = { x: 0, z: 0 };
+    return buildings.map((b) => {
+      const c = placeCenters.get(b.location) ?? center;
+      return { building: b, ...buildingSpot(c, b.id) };
+    });
+  }, [buildings, placeCenters]);
 
   const targets = useMemo(() => {
     const byPlace = new Map<string, string[]>();
@@ -254,6 +293,11 @@ function Scene({
         <Building key={p.id} place={p} />
       ))}
 
+      {/* W7: living structures/projects, rendered by status near their place. */}
+      {buildingSpots.map(({ building, x, z }) => (
+        <Structure key={building.id} building={building} x={x} z={z} />
+      ))}
+
       {agents.map((a) => {
         const target = targets.get(a.id) ?? { x: 0, z: 0 };
         let anim = animMap.current.get(a.id);
@@ -269,6 +313,27 @@ function Scene({
             animRef={anim}
             routedVia={routedByAgent.get(a.id)}
             bubbles={bubblesByAgent.get(a.id) ?? []}
+          />
+        );
+      })}
+
+      {/* W8: the roaming chaos critters (cat + dog), each wandering near its
+          place; chaotic ones wear the magenta accent. 3D stays primary. */}
+      {animals.map((animal) => {
+        const center = placeCenters.get(animal.location) ?? { x: 0, z: 0 };
+        let anim = critterMap.current.get(animal.id);
+        if (!anim) {
+          // Start the critter at its place center so it doesn't fly in from origin.
+          anim = { x: center.x, z: center.z };
+          critterMap.current.set(animal.id, anim);
+        }
+        return (
+          <Critter
+            key={animal.id}
+            animal={animal}
+            center={center}
+            animRef={anim}
+            chaotic={chaoticAnimals.has(animal.id)}
           />
         );
       })}

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 import httpx
 
@@ -20,6 +21,25 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = 30.0
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _coerce_int(value: object) -> int | None:
+    """Best-effort int coercion for token counts that may arrive as int, str,
+    float, or be absent/null. Returns None when no usable number is present."""
+    if value is None:
+        return None
+    if isinstance(value, bool):  # guard: bool is an int subclass
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except (ValueError, AttributeError):
+            return None
+    return None
 
 
 async def _post_with_retry(
@@ -72,6 +92,11 @@ class OpenAICompatibleAdapter:
         self._api_key = api_key
         self._model_id = model_id
         self.last_routed_via: str | None = None
+        self.last_usage: dict | None = None
+        # Ask for a JSON object so weak free models can't drift into prose
+        # (the T8 idle-fallback failure). Sticky-disabled the first time a
+        # provider rejects the param — see chat().
+        self._json_mode = True
 
     async def chat(
         self,
@@ -90,17 +115,59 @@ class OpenAICompatibleAdapter:
         api_key = (self._api_key or "").strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        payload = {
-            "model": self._model_id,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+
+        def _payload(json_mode: bool) -> dict:
+            p = {
+                "model": self._model_id,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if json_mode:
+                p["response_format"] = {"type": "json_object"}
+            return p
+
+        # Time the whole post (incl. retry/backoff) with perf_counter (W6).
+        started = time.perf_counter()
         async with httpx.AsyncClient() as client:
-            data, routed_via = await _post_with_retry(client, url, headers, payload, self.name)
+            try:
+                data, routed_via = await _post_with_retry(
+                    client, url, headers, _payload(self._json_mode), self.name
+                )
+            except ProviderError as exc:
+                # Providers that don't understand `response_format` answer 4xx.
+                # Disable JSON mode for this adapter's lifetime and retry once
+                # WITHOUT it — degrade to plain prompting, not a dead tick.
+                if not self._json_mode or exc.status not in (400, 404, 422):
+                    raise
+                log.warning(
+                    "[%s] response_format rejected (HTTP %s); disabling JSON mode",
+                    self.name, exc.status,
+                )
+                self._json_mode = False
+                data, routed_via = await _post_with_retry(
+                    client, url, headers, _payload(False), self.name
+                )
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
         # Surface the model the proxy actually routed to. Prefer the explicit
         # X-Routed-Via header, then the body's "model" field, then our request.
         self.last_routed_via = routed_via or data.get("model") or self._model_id
+        # Capture token usage (OpenAI shape) + finish_reason. Null-tolerant: free
+        # proxies sometimes omit `usage`; keep latency regardless.
+        usage = data.get("usage") if isinstance(data, dict) else None
+        usage = usage if isinstance(usage, dict) else {}
+        finish_reason = None
+        try:
+            finish_reason = data["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError):
+            finish_reason = None
+        self.last_usage = {
+            "input_tokens": _coerce_int(usage.get("prompt_tokens")),
+            "output_tokens": _coerce_int(usage.get("completion_tokens")),
+            "latency_ms": latency_ms,
+            "finish_reason": finish_reason,
+            "cached": False,
+        }
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -119,6 +186,7 @@ class AnthropicAdapter:
         self._model_id = model_id
         self._base_url = "https://api.anthropic.com"
         self.last_routed_via: str | None = None
+        self.last_usage: dict | None = None
 
     async def chat(
         self,
@@ -146,9 +214,22 @@ class AnthropicAdapter:
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
 
+        started = time.perf_counter()
         async with httpx.AsyncClient() as client:
             data, _routed_via = await _post_with_retry(client, url, headers, payload, self.name)
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
         self.last_routed_via = self._model_id
+        # Anthropic Messages API: usage.input_tokens/output_tokens + stop_reason.
+        usage = data.get("usage") if isinstance(data, dict) else None
+        usage = usage if isinstance(usage, dict) else {}
+        stop_reason = data.get("stop_reason") if isinstance(data, dict) else None
+        self.last_usage = {
+            "input_tokens": _coerce_int(usage.get("input_tokens")),
+            "output_tokens": _coerce_int(usage.get("output_tokens")),
+            "latency_ms": latency_ms,
+            "finish_reason": stop_reason,
+            "cached": False,
+        }
         try:
             return data["content"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -166,6 +247,7 @@ class GeminiAdapter:
         self._api_key = api_key
         self._model_id = model_id
         self.last_routed_via: str | None = None
+        self.last_usage: dict | None = None
 
     async def chat(
         self,
@@ -191,9 +273,27 @@ class GeminiAdapter:
                 "temperature": temperature,
             },
         }
+        started = time.perf_counter()
         async with httpx.AsyncClient() as client:
             data, _routed_via = await _post_with_retry(client, url, {}, payload, self.name)
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
         self.last_routed_via = self._model_id
+        # Gemini: usageMetadata.promptTokenCount/candidatesTokenCount (often absent
+        # on the free tier → null). finishReason on the first candidate.
+        meta = data.get("usageMetadata") if isinstance(data, dict) else None
+        meta = meta if isinstance(meta, dict) else {}
+        finish_reason = None
+        try:
+            finish_reason = data["candidates"][0].get("finishReason")
+        except (KeyError, IndexError, TypeError):
+            finish_reason = None
+        self.last_usage = {
+            "input_tokens": _coerce_int(meta.get("promptTokenCount")),
+            "output_tokens": _coerce_int(meta.get("candidatesTokenCount")),
+            "latency_ms": latency_ms,
+            "finish_reason": finish_reason,
+            "cached": False,
+        }
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:

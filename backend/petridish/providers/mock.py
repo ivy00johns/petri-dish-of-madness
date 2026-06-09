@@ -27,6 +27,9 @@ class MockProvider:
     name = "mock"
     color = "#2ecc71"
     last_routed_via = "mock"
+    # Mock has no real model call → no token usage. The runtime keeps the
+    # llm_call OTel keys present-but-null when last_usage is None (W6 / EM-067).
+    last_usage = None
 
     def __init__(self, script: list | None = None):
         self._script = script          # if set, all agents cycle this same list
