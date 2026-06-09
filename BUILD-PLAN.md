@@ -127,6 +127,45 @@ before adding entities.
 
 ---
 
+## Wave 9–11 — v2.1: audit remediation + texture (planned)
+
+Filed 2026-06-09 via `plan-intake` from `docs/audit-2026-06-09.md` (full audit: backend +
+frontend code audits, live UX review against a real FreeLLMAPI run, doc-drift sweep; UX
+companion: `docs/ux-review-2026-06-09.md`). Tactical detail + IDs live in
+`docs/REMAINING-WORK.md` (EM-069–EM-083, plus re-scoped EM-043).
+
+**Wave 9 — "Make v2 true" (the gate).** The audit's headline: deep replay is dead code (the
+inspector never reads the persisted event log — `inspectorApi` has zero consumers) and the
+live run starved to total extinction while looking cheerful (no survival pressure in prompts,
+no extinction UX, and all three "different model" profiles silently routed to one model).
+Items: **EM-069** (wire deep replay), **EM-070** (survival pressure), **EM-071** (extinction/
+run-end UX), **EM-072** (routing-degraded banner), **EM-073** (backend P1 batch: animal
+turn_id contamination, reset race, ban_arson unreachable, build_step validator, duplicate
+llm_call rows), **EM-074** (frontend P1 batch: play/pause state, WS reconnect leak, force-graph
+pause, AWI gov column, seq collision).
+
+**Exit criteria:**
+- Scrubbing to any tick of a finished run renders correct world state from snapshot + delta
+  (works after a fresh page load with zero rolling history).
+- A live run where agents hold credits no longer ends in silent total starvation: needs are
+  in the prompt, starvation warns in the feed, and 0-alive pauses or banners the run.
+- A run where all profiles route to one model shows a routing-degraded warning.
+- Backend suite green with new regression tests for each EM-073 fix; console clean.
+
+**Wave 10 — Trust & hygiene.** Make the analytics and replay trustworthy and sync the paper
+trail. Items: **EM-075** (replay fidelity: snapshot round-state, time-projected buildings,
+map legibility, animals on 2D map), **EM-076** (analytics correctness), **EM-077** (platform
+hardening), **EM-078** (docs/contracts sync incl. the README regression), **EM-043** (re-scoped
+frontend unit tests targeting selectors/scrubber/dashboard).
+
+**Wave 11 — New texture (free-scale).** The best unfiled ideas from `deep-research-v2.md`
+§Recommendations and `docs/FUTURE.md`, gated behind a healthy core. Items: **EM-079**
+(active-commitments injection), **EM-080** (importance-threshold reflection/diary), **EM-081**
+(capped reactive overhearing — promoted from FUTURE.md), **EM-082** (mobile/min-width decision
++ a11y pass), **EM-083** (real blackout effect + RPD/TPD benchmark alerts).
+
+---
+
 ## Closure log
 
 What shipped and when. Append on each wave/milestone close.
@@ -145,3 +184,4 @@ What shipped and when. Append on each wave/milestone close.
 | 2026-06-08 | W6 instrumentation | EM-053–059 + EM-067 — replay, decision-trace, governance/laws history, social graph, AWI + model-vs-model dashboard; 97 tests + adversarial panel + render-sanity GREEN (`3879d1c`, `d4227cf`) |
 | 2026-06-08 | W7 expanded world | EM-060–063 + EM-068 — buildings/structure state, collective-project pipeline, tiered tools, ad-hoc spawn, decision cache; gate GREEN (`78dadf9`) |
 | 2026-06-09 | W8 chaos animals | EM-064/065 — LLM-driven cat & dog (free-scale: slow cadence, reflex + occasional LLM, reflex-only fallback) + Animal Chaos Feed / `is_chaotic` tagging; suite-integrated `test_w8.py` (6 checks) + full backend suite GREEN |
+| 2026-06-09 | Audit intake | Full audit (`docs/audit-2026-06-09.md` + `docs/ux-review-2026-06-09.md`) → EM-069–083 filed via `plan-intake`, opening W9–W11; EM-043 re-scoped. W9 gate = deep-replay wiring (EM-069) + survival pressure (EM-070) |

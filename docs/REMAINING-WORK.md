@@ -3,19 +3,19 @@
 Every open item, ID'd and prioritized. This is the canonical "what exactly needs doing?"
 list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
-> **Status (2026-06-08):** v1 (W0–W4) shipped. **v2 in progress on `build/v2-expansion`:**
-> **W5 (foundations) ✅** — append-only event-log trace spine + decision-trace output + the
-> 2D `/inspector` analysis annex (3D village stays primary). **W6 (instrumentation) ✅** —
-> replay, decision-trace inspector, governance history, social graph, 9-AWI + model-vs-model
-> dashboard, per-provider usage capture; QA 97/97, render-sanity PASS. **Next: W7 (expanded
-> world — tools, buildings, collective projects, spawn, caching), then W8 (chaos animals).**
-> Open from v1: EM-043 (FE unit tests, P1).
+> **Status (2026-06-09):** v1 (W0–W4) and v2 (W5–W8) shipped on `build/v2-expansion`.
+> **W9–W11 filed 2026-06-09** via `plan-intake` from `docs/audit-2026-06-09.md` (full audit:
+> backend + frontend code audits, live UX review, doc-drift sweep). **W9 ("make v2 true") is
+> the gate:** wire the inspector to the persisted event log (deep replay is currently dead
+> code), add survival pressure + extinction UX, warn on routing collapse, and fix the P1 bug
+> batches. Then W10 (trust & hygiene), W11 (new texture). Open from v1: EM-043 (FE unit
+> tests, P1 — now scoped to regression-proof the W9 fixes; see Notes).
 
 ## Format & conventions
 
 - **ID** — `EM-###`. Stable, never reused. New items take the next free number.
 - **Priority** — `P0` (blocks the wave) · `P1` (needed for v1, not blocking) · `P2` (nice-to-have) · `P3` (deferred-ish).
-- **Wave** — `W0`–`W8` (see `BUILD-PLAN.md`). W0–W4 shipped; W5–W8 are the v2 expansion.
+- **Wave** — `W0`–`W11` (see `BUILD-PLAN.md`). W0–W4 shipped (v1); W5–W8 shipped (v2); W9–W11 are the audit-driven v2.1 plan.
 - **Area** — `infra` · `contracts` · `backend` · `providers` · `persistence` · `frontend` · `qe`.
 - **Source** — where it came from. New items from reports enter via `plan-intake`.
 - **Status** — `open` · `in-progress` · `blocked` · `done`.
@@ -79,8 +79,23 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-066 | P1 | W5 | contracts | research-v2 §patterns | Structured decision-trace action output `{perceived_summary, memories_used, reasoning, chosen_tool, args}` in one call (enabler for EM-054/056) | done | backend |
 | EM-067 | P1 | W6 | providers | research-v2 §x-cut | Per-provider RPD/TPD usage tracking in event log + cap-aware throttling; **also emit per-attempt `llm_call` rows** (W5 logs only the final attempt — see Notes) | done | providers |
 | EM-068 | P2 | W7 | providers | research-v2 §x-cut | Decision/prompt-prefix caching (persona + memory-hash + coarse-world-state) | done | providers |
+| EM-069 | P0 | W9 | frontend | audit §C1 | Wire deep replay: inspector boots from `/api/events`, scrub uses `/api/replay` snapshot+delta (filtered past `base.tick`), panels read beyond rolling window, fold-forward boundary fix, scrub pins panels | open | — |
+| EM-070 | P0 | W9 | backend | audit §A1 | Survival pressure: needs salience in turn prompt, no-charge recharge-at-full, starvation feed warnings, death-countdown surfacing | open | — |
+| EM-071 | P1 | W9 | frontend | audit §A2 | Extinction/run-end UX: auto-pause or banner on 0 alive + end-of-run summary card | open | — |
+| EM-072 | P1 | W9 | frontend | audit §A4 | Routing-degraded banner when all live profiles resolve to one routed model | open | — |
+| EM-073 | P1 | W9 | backend | audit §B1–B4,B6 | Backend correctness batch: animal turn_id stamp, reset awaits tick task, ban_arson proposable, build_step accepts funded `planned`, duplicate llm_call dedupe | open | — |
+| EM-074 | P1 | W9 | frontend | audit §C2,C3,C5,C6,C10 | Frontend correctness batch: replay play/pause state, WS reconnect cleanup+backoff, force-graph pause fix, AWI gov column, synthetic-event seq collision | open | — |
+| EM-075 | P2 | W10 | frontend | audit §B8,C7,D3,D4 | Replay fidelity: snapshot round/scheduler state, time-projected building status, replay-map legibility, animals on 2D map | open | — |
+| EM-076 | P2 | W10 | backend | audit §B9,D5 | Analytics correctness: active_rules formula/source of truth; speed label synced to server tick interval | open | — |
+| EM-077 | P2 | W10 | backend | audit §B10–B12,B14,B15 | Platform hardening: WS broadcast cleanup, Gemini key via header, decision-cache flush on reset, spawn input length caps, profile-color helper | open | — |
+| EM-078 | P2 | W10 | contracts | audit §E1–E5 | Docs/contracts sync: README screenshot/chaos-feed regression fix, `/api/animals` in OpenAPI, event-kind schema sync, V2_BUILD.md + FUTURE.md refresh | open | — |
+| EM-079 | P2 | W11 | backend | audit §F / research-v2 §rec | Active-commitments injection in turn prompt + ignored-commitment logging (clock-tower pressure) | open | — |
+| EM-080 | P2 | W11 | backend | audit §F / research-v2 §rec | Reflection/diary on importance threshold (~2–3×/day, Smallville pattern) | open | — |
+| EM-081 | P2 | W11 | backend | audit §F / FUTURE.md | Reactive overhearing chains, capped (1–2 listeners) + reflex-first responses (free-scale) | open | — |
+| EM-082 | P2 | W11 | frontend | audit §D1,D6 | Mobile decision (stacked read-only layout OR explicit min-width gate) + semantic headings / a11y pass | open | — |
+| EM-083 | P3 | W11 | backend | audit §B13 / research-v2 §bench | Make `blackout` event effect real; benchmark alerts on EM-067 usage data (>70% RPD/TPD → warn) | open | — |
 
-_Next free ID: EM-069._
+_Next free ID: EM-084._
 
 ## Notes
 
@@ -89,10 +104,20 @@ _Next free ID: EM-069._
   and the OpenAI-compatible adapter is verified end-to-end against a FreeLLMAPI-shaped stub
   (incl. the failure→idle path). The only remaining step is supplying a real token — see the
   "Run the 5-minute 2-model demo" section of `README.md` and `BUILD_RESULTS.md`.
-- **EM-043** deferred: frontend is covered by tsc typecheck, production build, a Playwright
-  reassign check, and render-sanity; component unit tests are a v1.1 nice-to-have.
+- **EM-043** re-scoped 2026-06-09 (was "v1.1 nice-to-have"): the audit found four frontend
+  bugs (audit §C2, C4, C5, C6) that component/selector unit tests would have caught. Target it
+  in W10 at the selectors + ReplayScrubber + AWIDashboard layer, regression-proofing the W9
+  fixes (EM-069/074).
 - **EM-053–EM-068 (v2 expansion)** entered 2026-06-08 via `plan-intake` from
   `docs/research/deep-research-v2.md`. They open **W5–W8** (Foundations → Instrumentation →
   Expanded world → Chaos animals). **W5 (EM-053/054/066) is the gate**: every later item reads
   the append-only event log, so lock that schema before building any Phase-1 UI. The report's
   own priority scale was translated into this ledger's "blocks-the-wave" P0–P3 semantics.
+- **EM-069–EM-083 (v2.1 audit plan)** entered 2026-06-09 via `plan-intake` from
+  `docs/audit-2026-06-09.md` (companion UX detail: `docs/ux-review-2026-06-09.md`). They open
+  **W9–W11** (Make v2 true → Trust & hygiene → New texture). **W9 (EM-069–074) is the gate**:
+  EM-069 closes the gap between "EM-055 done" and the actual deep-replay promise, and EM-070
+  fixes the starve-to-extinction failure observed live (all 3 agents died with credits in hand
+  while planning a festival). `audit §Xn` source refs point at the theme/finding IDs inside
+  the audit doc. No new entry was filed for frontend tests — that folds into the still-open
+  EM-043 (see above).
