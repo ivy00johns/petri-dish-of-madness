@@ -371,12 +371,13 @@ class World:
         cost = self.params.recharge_cost
         if self.has_active_rule("recharge_subsidy"):
             cost = max(1, cost // 2)
+        if agent.energy >= 100:
+            # W9 / EM-070 (audit B5): recharging at full energy is a REJECTION,
+            # not a silent credit sink — no charge, gated like other actions.
+            # The runtime validator surfaces "energy already full" to the agent.
+            return False, "already_full", 0.0
         if agent.credits < cost:
             return False, f"need {cost} credits, have {agent.credits}", 0.0
-        if agent.energy >= 100:
-            # No-op but succeed (idempotent)
-            agent.credits -= cost
-            return True, "already_full", 0.0
         agent.credits -= cost
         gained = min(self.params.recharge_amount, 100.0 - agent.energy)
         agent.energy = min(100.0, agent.energy + self.params.recharge_amount)
@@ -464,7 +465,9 @@ class World:
     def action_propose_rule(
         self, agent: AgentState, effect: str, text: str
     ) -> tuple[bool, str, RuleState | None]:
-        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus"}
+        # W9 / EM-073 B3: ban_arson included so the arson ban is reachable via
+        # governance (enforcement already gates arson in the runtime validator).
+        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # Check for duplicate active or proposed rule with same effect
@@ -1047,6 +1050,13 @@ class World:
             return None
         return self._damage_building(building, amount, None, "animal")
 
+    def turns_until_death(self, agent: AgentState) -> int | None:
+        """W9 / EM-070 — turns left before a zero-energy agent dies, from the
+        existing death_after_zero_turns tracking. None when energy > 0 or dead."""
+        if not agent.alive or agent.energy > 0:
+            return None
+        return max(0, self.params.death_after_zero_turns - agent.zero_energy_turns)
+
     def to_snapshot(self, profile_colors: dict[str, str] | None = None) -> dict:
         pc = profile_colors or {}
         return {
@@ -1054,9 +1064,20 @@ class World:
             "day": self.day,
             "running": self.running,
             "tick_interval_seconds": self.tick_interval_seconds,
+            # W9 / EM-073 B8 — scheduler state, so a fold-forward replay can
+            # faithfully project rounds (UBI), turn order, and turn position
+            # (event-log.md v1.1.0 §3). Additive keys; consumers may ignore.
+            "round": self.round,
+            "turn_order": list(self._turn_order),
+            "turn_index": self._turn_index,
+            "round_start": self._round_start,
             "places": [p.to_dict() for p in self.places.values()],
             "agents": [
-                a.to_dict(pc.get(a.profile, "#888888"))
+                {
+                    **a.to_dict(pc.get(a.profile, "#888888")),
+                    # W9 / EM-070 — starvation countdown (null when energy > 0).
+                    "turns_until_death": self.turns_until_death(a),
+                }
                 for a in self.agents.values()
             ],
             "rules": [r.to_dict() for r in self.rules.values()],

@@ -19,6 +19,16 @@ world:
   memory_window: 12
   attack_energy_cost: 6
 
+  # W9 / EM-070 — survival pressure. When an agent's energy drops below this
+  # threshold it is "starving": a one-shot `agent_starving` warning is emitted
+  # (and once per turn while energy is 0, with a turns-until-death countdown),
+  # and the agent's turn prompt gains explicit recharge-or-die urgency.
+  starving_warn_threshold: 25
+
+  # W9 / EM-071 — when the last living human agent dies, emit `world_extinct`
+  # and (if true) auto-pause the loop. Animals alone do not keep the run alive.
+  auto_pause_on_extinction: true
+
   # W6 / EM-067 — cap-aware throttle (optional, DEFAULT OFF). When enabled, the
   # tick loop aggregates recent llm_call usage per model profile over a sliding
   # window of `period_ticks`; a profile crossing `near_threshold` of its rpd/tpd

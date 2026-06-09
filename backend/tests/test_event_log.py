@@ -474,13 +474,14 @@ async def test_replay_nearest_snapshot_matches_live_projection_at_T():
     run_id = loop._run_id
 
     captured: dict[int, dict] = {}
-    # Drive turn by turn; after each turn (world.tick now == the post-turn tick),
-    # the engine has written a snapshot at world.tick. Capture the live projection
-    # at that same tick for comparison.
+    # Drive turn by turn. W9 / event-log v1.1.0 §3: the snapshot at tick S is the
+    # state AFTER all tick-S events — i.e. the turn that just ran (stamped tick
+    # world.tick - 1) wrote a snapshot at that tick reflecting the post-turn
+    # state. Capture the live projection NOW and key it by that completed tick.
     for _ in range(20):
         agent = world.next_agent()
         await loop._execute_turn(agent)
-        T = world.tick
+        T = world.tick - 1  # the tick the completed turn's events were stamped with
         captured[T] = _agents_state_map(world.to_snapshot()["agents"])
 
     assert captured, "no ticks captured"
@@ -527,16 +528,15 @@ async def test_replay_fold_forward_from_earlier_snapshot_matches_live():
     assert snap["tick"] <= T and snap["tick"] < 15
     base_tick = snap["tick"]
 
-    # A snapshot at tick K is written by the turn that advanced world.tick to K,
-    # i.e. it reflects state BEFORE any event stamped tick==K. So the fold window
-    # is [base_tick, T-1] inclusive: replay events stamped from base_tick up to the
-    # last completed turn (which stamped tick T-1). 'work' emits
-    # economy{credits_delta} rows.
+    # W9 / event-log v1.1.0 §3 (normative): a snapshot at tick K is the state
+    # AFTER all tick-K events. So the fold window is STRICT on the left:
+    # (base_tick, T] — i.e. events stamped base_tick+1 .. T-1 here (the last
+    # completed turn stamped tick T-1). 'work' emits economy{credits_delta} rows.
     folded = {
         a["id"]: int(a["credits"]) for a in snap["state"]["agents"]
     }
     fold_events = repo.get_events(
-        run_id, from_tick=base_tick, to_tick=T - 1, kinds=["economy"], order="asc"
+        run_id, from_tick=base_tick + 1, to_tick=T - 1, kinds=["economy"], order="asc"
     )
     assert fold_events, "expected economy rows to fold forward"
     for ev in fold_events:

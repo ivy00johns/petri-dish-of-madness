@@ -503,6 +503,9 @@ async def kill_agent(agent_id: str):
             "payload": {"reason": "killed_via_api"},
         })
         _loop._broadcast_world_state()
+        # W9 / EM-071 — god-killing the last living human agent is extinction
+        # too: emit world_extinct (+ auto-pause per config). Idempotent.
+        _loop.handle_extinction(agent)
     return {"status": "ok"}
 
 
@@ -605,11 +608,20 @@ async def get_snapshots():
 
 @app.get("/api/replay")
 async def get_replay(tick: int = Query(...)):
+    """Replay materials for tick T (api.openapi.yaml v1.2.0, audit B7).
+
+    `events` contains ONLY the fold-forward delta: rows with
+    base.tick < e.tick <= T (strict on the left — the snapshot at base.tick
+    already includes all tick-base.tick events, per event-log.md v1.1.0 §3).
+    If no snapshot exists, base is null and events cover 0 <= e.tick <= T.
+    Clients fold `events` onto `base.state` without further filtering.
+    """
     run_id = _active_run_id()
     if _repo is None or run_id is None:
         return {"base": None, "events": []}
     base = _repo.nearest_snapshot(run_id, tick)
-    events = _repo.get_events(run_id, to_tick=tick, order="asc")
+    from_tick = (base["tick"] + 1) if base is not None else 0
+    events = _repo.get_events(run_id, from_tick=from_tick, to_tick=tick, order="asc")
     return {"base": base, "events": events}
 
 

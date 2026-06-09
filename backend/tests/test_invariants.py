@@ -398,13 +398,18 @@ def test_inv5_recharge_strictly_increases_energy_unless_100():
 
 
 def test_inv5_recharge_no_increase_when_full():
+    # W9 / EM-070 (audit B5): recharging at full energy is now a REJECTION with
+    # no credit charge (was: silent success that ate credits for +0.0 energy).
     world, agents = make_world()
     a = agents[0]
     a.energy = 100.0
     a.credits = 10
     ok, reason, gained = world.action_recharge(a)
-    assert ok  # succeeds but no increase
+    assert not ok
+    assert reason == "already_full"
+    assert gained == 0.0
     assert a.energy == 100.0
+    assert a.credits == 10, "recharge at full energy must NOT charge credits"
 
 
 def test_inv5_attack_drains_energy_both_agents():

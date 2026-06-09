@@ -127,6 +127,12 @@ class TickLoop:
         # De-dupe usage_sampled emission: last tick a profile was sampled at.
         self._usage_sampled_at: dict[str, int] = {}
 
+        # W9 / EM-070 — agents already warned about crossing the starving
+        # threshold (one-shot, re-armed when energy recovers past the threshold).
+        self._starving_warned: set[str] = set()
+        # W9 / EM-071 — world_extinct has been emitted for this run (one-shot).
+        self._extinct_emitted: bool = False
+
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
@@ -202,16 +208,30 @@ class TickLoop:
             fut = self._step_waiters.pop(0)
             if not fut.done():
                 fut.set_result(self._world.tick)
-        # Drop any in-flight animal turn (it references the old world).
+        # Drop any in-flight animal turn (it references the old world) and AWAIT
+        # it so it cannot mutate the half-rebuilt world (audit B2).
         if self._animal_task is not None and not self._animal_task.done():
             self._animal_task.cancel()
+            try:
+                await self._animal_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("animal task raised during reset: %s", exc)
         self._animal_task = None
+        # W9 / EM-073 B2: properly await the cancelled tick task. A tick mid-LLM
+        # call (30s timeout) could otherwise keep running and mutate the world we
+        # are about to rebuild. (The old `asyncio.shield(asyncio.sleep(0.1))` was
+        # a no-op misuse — it neither awaited nor protected the task.)
         if self._task and not self._task.done():
             self._task.cancel()
             try:
-                await asyncio.shield(asyncio.sleep(0.1))
+                await self._task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("tick task raised during reset: %s", exc)
+        self._task = None
 
         from ..engine.world import World, AgentState, PlaceState, RuleState
         from ..config.loader import AgentConfig, PlaceConfig
@@ -259,6 +279,16 @@ class TickLoop:
 
         # Clear agent memories
         self._runtime._memory.clear()
+
+        # W9 — reset per-run survival/extinction tracking (EM-070/071).
+        self._starving_warned.clear()
+        self._extinct_emitted = False
+
+        # Flush the router decision cache (audit B12): prior-run cached decisions
+        # must never serve into a fresh run. No-op if the router lacks the cache.
+        clear_cache = getattr(self._router, "clear_cache", None)
+        if callable(clear_cache):
+            clear_cache()
 
         # New DB run
         cfg_json = json.dumps({"world": _world_params_json(config.world)})
@@ -465,18 +495,34 @@ class TickLoop:
                 self._emit_event(death_evt)
                 self._repo.save_agent(run_id, agent, tick)
 
+            # W9 / EM-070 — surface survival pressure (agent_starving events).
+            self._emit_starving_events(agent, profile_name, profile_color, died)
+
+            # W9 / EM-071 — extinction moment: the last living human agent just
+            # died (animals alone do not keep the run "alive"). Emit the event
+            # now (stamped with the death tick); the pause happens AFTER the
+            # end-of-turn broadcast below.
+            extinct = died and not world.living_agents()
+            if extinct:
+                self._emit_extinction(agent, tick)
+
             # Push events to agent memories
             for evt in events_to_emit:
                 self._runtime.push_event({**evt, "tick": tick})
 
+            # Periodic snapshot to bound replay cost (EM-054 §5). W9 / EM-073 B8:
+            # saved BEFORE the tick advances and labeled with the CURRENT tick, so
+            # a snapshot at tick S is the state AFTER all tick-S events (event-log
+            # v1.1.0 §3 — replay folds strictly-left: S < e.tick <= T). The tick-0
+            # init/reset snapshot is re-saved here after the first turn (INSERT OR
+            # REPLACE keeps it idempotent) so the boundary holds at tick 0 too.
+            interval = getattr(world.params, "snapshot_interval_ticks", 25)
+            if interval and tick % interval == 0:
+                self._save_snapshot(tick)
+
             # Advance tick
             world.tick += 1
             world.day = world.tick // world.params.turns_per_day
-
-            # Periodic snapshot to bound replay cost (EM-054 §5).
-            interval = getattr(world.params, "snapshot_interval_ticks", 25)
-            if interval and world.tick % interval == 0:
-                self._save_snapshot(world.tick)
 
             # EM-067 cap-aware throttle (config-gated, DEFAULT OFF). Reads recent
             # llm_call usage, may emit usage_sampled + set the slowdown factor.
@@ -484,6 +530,12 @@ class TickLoop:
 
             # Broadcast updated world state
             self._broadcast_world_state()
+
+            # W9 / EM-071 — pause only AFTER world_extinct has been emitted and
+            # the world state broadcast; the final broadcast carries running=False.
+            if extinct and bool(getattr(world.params, "auto_pause_on_extinction", True)):
+                self.pause()
+                self._broadcast_world_state()
         finally:
             self._current_turn_id = None
 
@@ -566,14 +618,22 @@ class TickLoop:
         if not animals:
             return
         acted = False
+        import uuid
         # Stable order so replay is reproducible within a batch.
         for animal in sorted(animals, key=lambda a: a.id):
+            # W9 / EM-073 B1 (event-log v1.1.0 §2): every animal turn gets its
+            # OWN turn_id. This background task runs concurrently with agent
+            # turns, so _emit_event's default (`self._current_turn_id`) would
+            # stamp the in-flight AGENT's correlation id onto animal events and
+            # pollute get_turn_trace(agent_turn_id).
+            animal_turn_id = uuid.uuid4().hex
             try:
                 events = await self._animal_runtime.act(animal, self._world, tick)
             except Exception as exc:  # pragma: no cover - defensive; act() shouldn't raise
                 log.warning("animal act failed for %s: %s", animal.id, exc)
                 continue
             for evt in events or []:
+                evt.setdefault("turn_id", animal_turn_id)
                 self._emit_event(evt)
                 self._runtime.push_event({**evt, "tick": tick})
             acted = True
@@ -600,6 +660,9 @@ class TickLoop:
         if callable(advance):
             try:
                 for evt in advance():
+                    # Standalone system event — keep it OUT of the in-flight
+                    # agent turn's chain (event-log v1.1.0 §2).
+                    evt.setdefault("turn_id", None)
                     self._emit_event(evt)
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("building lifecycle advance failed: %s", exc)
@@ -619,8 +682,119 @@ class TickLoop:
         if not events:
             return
         for evt in events:
+            # Standalone system event — not part of any agent turn's chain.
+            evt.setdefault("turn_id", None)
             self._emit_event(evt)
         self._broadcast_world_state()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # W9 / EM-070+071 — survival pressure + extinction
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _emit_starving_events(
+        self, current: AgentState, profile_name: str, profile_color: str, died: bool
+    ) -> None:
+        """Emit `agent_starving` events (event-log v1.1.0 §4):
+
+          - ONCE when an agent's energy crosses world.starving_warn_threshold
+            downward (re-armed when energy recovers past the threshold). Checked
+            for ALL living agents each turn so famine/attack victims warn
+            promptly, not only on their own turn.
+          - once per turn for the ACTING agent while its energy is 0, carrying
+            the turns-until-death countdown (skipped when it died this turn —
+            agent_died tells that story).
+
+        Payload: {energy, turns_until_death, threshold}. actor_type human_agent,
+        profile set (the feed colors it). Events for non-acting agents carry
+        turn_id null so they never pollute the acting agent's decision trace.
+        """
+        world = self._world
+        threshold = float(getattr(world.params, "starving_warn_threshold", 25))
+
+        # Re-arm the one-shot warning for anyone who recovered.
+        for a in world.living_agents():
+            if a.energy >= threshold:
+                self._starving_warned.discard(a.id)
+
+        # Per-turn countdown for the acting agent at zero energy.
+        if not died and current.alive and current.energy <= 0:
+            remaining = world.turns_until_death(current)
+            self._starving_warned.add(current.id)
+            self._emit_event({
+                "kind": "agent_starving",
+                "actor_id": current.id,
+                "actor_type": "human_agent",
+                "profile": profile_name,
+                "profile_color": profile_color,
+                "text": (
+                    f"⚠ {current.name} is starving — "
+                    f"{remaining} turn{'s' if remaining != 1 else ''} until death"
+                ),
+                "payload": {
+                    "energy": round(current.energy, 2),
+                    "turns_until_death": remaining,
+                    "threshold": threshold,
+                },
+            })
+
+        # One-shot downward-cross warning for every living agent below threshold.
+        for a in world.living_agents():
+            if a.energy >= threshold or a.id in self._starving_warned:
+                continue
+            self._starving_warned.add(a.id)
+            self._emit_event({
+                "kind": "agent_starving",
+                "actor_id": a.id,
+                "actor_type": "human_agent",
+                "profile": self._router.profile_name_for(a.id, a.profile),
+                "profile_color": self._get_profile_color(a),
+                # Only the acting agent's warning belongs to this turn's chain.
+                "turn_id": self._current_turn_id if a.id == current.id else None,
+                "text": (
+                    f"⚠ {a.name} is starving — energy {a.energy:.0f}/100 "
+                    f"(below {threshold:.0f})"
+                ),
+                "payload": {
+                    "energy": round(a.energy, 2),
+                    "turns_until_death": world.turns_until_death(a),
+                    "threshold": threshold,
+                },
+            })
+
+    def _emit_extinction(self, last_agent: AgentState, tick: int) -> None:
+        """Emit `world_extinct` (EM-071, event-log v1.1.0 §4) — once per run.
+        The caller is responsible for pausing AFTER the event is emitted and the
+        world state broadcast (world.auto_pause_on_extinction)."""
+        if self._extinct_emitted:
+            return
+        self._extinct_emitted = True
+        auto_pause = bool(getattr(self._world.params, "auto_pause_on_extinction", True))
+        self._emit_event({
+            "kind": "world_extinct",
+            "actor_id": None,
+            "actor_type": "system",
+            "text": (
+                f"☠ The world has gone extinct — {last_agent.name} was the last "
+                f"living human agent (tick {tick})."
+            ),
+            "payload": {
+                "tick": tick,
+                "last_agent_id": last_agent.id,
+                "auto_paused": auto_pause,
+            },
+        })
+
+    def handle_extinction(self, last_agent: AgentState) -> None:
+        """Public entry for non-turn death paths (e.g. DELETE /api/agents): emit
+        world_extinct, broadcast, then pause if world.auto_pause_on_extinction.
+        Idempotent (one world_extinct per run)."""
+        if self._extinct_emitted or self._world.living_agents():
+            return
+        self._emit_extinction(last_agent, self._world.tick)
+        self._broadcast_world_state()
+        if bool(getattr(self._world.params, "auto_pause_on_extinction", True)):
+            self.pause()
+            self._broadcast_world_state()
 
     def _emit_trace_chain(
         self, agent: AgentState, profile_name: str, profile_color: str, trace: dict
@@ -633,14 +807,15 @@ class TickLoop:
             trace = {}
         perceived = trace.get("perceived", {}) or {}
         memory = trace.get("memory", {}) or {}
-        # EM-067: one llm_call row per attempt. `llm_attempts` is a list of
-        # per-attempt span dicts (attempt 1, then attempt 2 on a retry). Fall
-        # back to the single legacy `llm` dict, then to one empty span — so the
-        # OTel keys are ALWAYS emitted with present-but-null values.
+        # EM-067 / W9 B6 (event-log v1.1.0 §1): `llm_call` is emitted EXACTLY
+        # once per attempt, from `llm_attempts` ONLY. The legacy W5 final-attempt
+        # `trace["llm"]` key is no longer read — a trace carrying both keys must
+        # not produce duplicate rows for the same attempt. When no attempt was
+        # recorded at all, emit ONE empty span so the OTel keys stay
+        # present-but-null and the per-turn chain keeps its uniform shape.
         llm_attempts = trace.get("llm_attempts")
         if not isinstance(llm_attempts, list) or not llm_attempts:
-            legacy = trace.get("llm")
-            llm_attempts = [legacy if isinstance(legacy, dict) else {}]
+            llm_attempts = [{}]
         reasoning = trace.get("reasoning", {}) or {}
         chosen = trace.get("action_chosen", {}) or {}
 
@@ -669,9 +844,16 @@ class TickLoop:
             },
         })
         # EM-067: emit one llm_call per attempt (attempt 1, then 2 on a retry),
-        # each carrying its own usage, all under this turn's turn_id.
+        # each carrying its own usage, all under this turn's turn_id. W9 B6:
+        # de-dupe on the attempt number so one attempt can NEVER yield two rows
+        # (event-log v1.1.0 §1 — exactly once per attempt).
+        emitted_attempts: set = set()
         for llm in llm_attempts:
             llm = llm if isinstance(llm, dict) else {}
+            attempt_no = llm.get("attempt", 1)
+            if attempt_no in emitted_attempts:
+                continue
+            emitted_attempts.add(attempt_no)
             self._emit_event({
                 **base, "kind": "llm_call",
                 "text": f"{agent.name} consults {profile_name}.",

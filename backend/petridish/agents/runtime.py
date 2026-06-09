@@ -383,6 +383,10 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return f"work requires a 'work' place; you are at '{agent.location}' ({place.kind if place else 'unknown'})"
 
     elif action == "recharge":
+        # W9 / EM-070 (audit B5): recharging at full energy is rejected here so
+        # the agent gets feedback (and is never charged for a no-op).
+        if agent.energy >= 100:
+            return "energy already full"
         cost = world.params.recharge_cost
         if world.has_active_rule("recharge_subsidy"):
             cost = max(1, cost // 2)
@@ -442,7 +446,8 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
 
     elif action == "propose_rule":
         effect = args.get("effect")
-        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus"}
+        # W9 / EM-073 B3: ban_arson is proposable (mirrors world.action_propose_rule).
+        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
 
@@ -474,7 +479,18 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if building is None:
             return f"unknown building '{building_id}'"
         status = _building_field(building, "status")
-        if status != "under_construction":
+        # W9 / EM-073 B4: a fully-funded `planned` building is buildable — the
+        # world auto-advances it to under_construction on the first build_step
+        # (world.action_build_step). Unfunded planned buildings stay rejected.
+        if status == "planned":
+            committed = _building_field(building, "funds_committed", 0)
+            required = _building_field(building, "funds_required", 0)
+            if committed < required:
+                return (
+                    f"building '{building_id}' is planned but not fully funded "
+                    f"({committed}/{required}) — contribute_funds first"
+                )
+        elif status != "under_construction":
             return f"building '{building_id}' is {status}, not under_construction"
         b_loc = _building_field(building, "location")
         if b_loc != agent.location:
@@ -594,7 +610,7 @@ def _assemble_context(
         valid_actions.append("(work requires a work place)")
     # Governance actions are gated to a governance place.
     if _gate_ok("propose_rule"):
-        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus")
+        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
@@ -606,7 +622,13 @@ def _assemble_context(
     for b in here_buildings:
         bid = _building_field(b, "id")
         status = _building_field(b, "status")
-        if status == "under_construction" and _gate_ok("build_step"):
+        # B4: a fully-funded planned building is buildable (first build_step
+        # begins construction), so offer it alongside under_construction.
+        funded_planned = (
+            status == "planned"
+            and _building_field(b, "funds_committed", 0) >= _building_field(b, "funds_required", 0)
+        )
+        if (status == "under_construction" or funded_planned) and _gate_ok("build_step"):
             valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
         if status in ("damaged", "offline") and _gate_ok("repair"):
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
@@ -658,6 +680,33 @@ def _assemble_context(
         )
     project_text = "\n".join(project_lines) if project_lines else "  (none)"
 
+    # ── W9 / EM-070 — survival pressure (the NEEDS block). Kept compact on
+    # purpose: it rides EVERY turn prompt, so token cost matters. Escalates from
+    # a one-line status to explicit recharge-or-die urgency below the starving
+    # threshold, to a hard countdown at zero energy (death_after_zero_turns).
+    recharge_cost = world.params.recharge_cost
+    if world.has_active_rule("recharge_subsidy"):
+        recharge_cost = max(1, recharge_cost // 2)
+    starve_threshold = getattr(params, "starving_warn_threshold", 25)
+    needs_lines = [
+        f"Energy {agent.energy:.0f}/100 — at 0 you start DYING. "
+        f"recharge restores energy (costs {recharge_cost} credits)."
+    ]
+    if agent.energy <= 0:
+        n = max(1, params.death_after_zero_turns - agent.zero_energy_turns)
+        needs_lines.append(
+            f"CRITICAL: you will DIE in {n} more turn(s) unless you recharge NOW "
+            f"(cost {recharge_cost} credits — you have {agent.credits}) or forage "
+            f"for credits. Nothing else matters."
+        )
+    elif agent.energy < starve_threshold:
+        needs_lines.append(
+            f"URGENT: you are starving (energy below {starve_threshold:.0f}). "
+            f"Recharge soon (cost {recharge_cost} credits — you have "
+            f"{agent.credits}) or you will start dying."
+        )
+    needs_text = "\n".join(f"  {line}" for line in needs_lines)
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
 Tick: {world.tick}
@@ -668,6 +717,9 @@ Location: {place_name} (kind={place_kind})
 Energy: {agent.energy:.1f}/100
 Credits: {agent.credits}
 Mood: {agent.mood}
+
+=== NEEDS ===
+{needs_text}
 
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}

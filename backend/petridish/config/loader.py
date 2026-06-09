@@ -241,6 +241,13 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # W9 / EM-070 — survival pressure: energy below this threshold marks an agent
+    # as starving (one-shot `agent_starving` warning + prompt urgency).
+    starving_warn_threshold: float = 25.0
+    # W9 / EM-071 — pause the tick loop when the last living human agent dies
+    # (after emitting + broadcasting `world_extinct`). Animals alone do not keep
+    # the run "alive".
+    auto_pause_on_extinction: bool = True
     # W5 / EM-054: snapshot cadence + DB destination (additive, backward-compatible).
     # snapshot_interval_ticks bounds replay cost; db_path ':memory:' is fine for
     # tests, but a real run that wants replay must point at a file (config world.db_path).
@@ -436,6 +443,8 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
+        auto_pause_on_extinction=bool(w.get("auto_pause_on_extinction", True)),
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
         db_path=str(_interpolate(w.get("db_path", ":memory:"))),
         usage_caps=_parse_usage_caps(w.get("usage_caps")),
