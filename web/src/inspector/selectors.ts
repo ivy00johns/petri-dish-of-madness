@@ -465,7 +465,9 @@ export function awiSummary(
       const tool = str(p['chosen_tool']) ?? (e.kind === 'action_chosen' ? str(p['tool']) : null);
       if (tool) (toolsByAgent[e.actor_id] ??= new Set()).add(tool);
       if (e.kind === 'agent_moved') {
-        const place = str(p['to']) ?? str(p['location']);
+        // W9-QA-1: the backend emits the destination as payload.place
+        // (runtime.py ground truth); `to`/`location` are tolerated fallbacks.
+        const place = str(p['place']) ?? str(p['to']) ?? str(p['location']);
         if (place) (placesByAgent[e.actor_id] ??= new Set()).add(place);
       }
     }
@@ -690,7 +692,16 @@ export function replayStateAt(
   for (const e of ascending(events)) {
     if (!(e.tick > fromTick && e.tick <= tick)) continue;
     if (e.kind === 'agent_moved' && e.actor_id) {
-      const to = str(payload(e)['to']) ?? str(payload(e)['location']) ?? e.target_id;
+      // W9-QA-1: the backend's agent_moved destination is payload.place
+      // (runtime.py emits {place: <place_id>}); without it the replay delta
+      // never moved anyone and scrubbed positions went stale between
+      // snapshots. `to`/`location`/`target_id` remain as fallbacks (mock /
+      // older shapes).
+      const to =
+        str(payload(e)['place']) ??
+        str(payload(e)['to']) ??
+        str(payload(e)['location']) ??
+        e.target_id;
       if (to && placeXY.has(to)) location.set(e.actor_id, to);
     } else if (e.kind === 'agent_died' && e.actor_id) {
       aliveOf.set(e.actor_id, false);
