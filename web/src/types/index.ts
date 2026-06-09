@@ -173,6 +173,11 @@ export type EventKind =
   | 'animal_spawned'
   | 'animal_action'
   | 'animal_died'
+  // W11a (EM-094, event-log.md v1.2.0 note 1) — the optional LLM narrator's
+  // periodic recap: actor_type:"system", actor_id:"narrator", text = the 2–3
+  // sentence recap, payload {from_tick, to_tick, profile, routed_via?}. Only
+  // emitted when world.narrator.enabled — absent histories are normal.
+  | 'narrator_summary'
   // Decision-trace chain (event-log.md §3) — one linked chain per agent turn.
   | 'perceived'
   | 'memory_retrieved'
@@ -227,6 +232,18 @@ export interface SpawnSpec {
   location: string;
   mode: SpawnMode;
 }
+
+// ============================================================
+// Camera focus (W11a EM-095/EM-099) — what the 3D village camera is locked
+// onto. 'agent'/'animal' FOLLOW the entity until the user drags; 'place' is a
+// one-shot zoom-to-place (id may be a Place id OR a W7 Building id — the
+// resolver in CozyWorld checks both). null = free camera.
+// ============================================================
+
+export type FocusTarget =
+  | { type: 'agent'; id: string }
+  | { type: 'animal'; id: string }
+  | { type: 'place'; id: string };
 
 // ============================================================
 // App state

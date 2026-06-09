@@ -23,18 +23,25 @@
  * little life (gentle motion, a glowing window, a fluttering flag).
  */
 
-import { useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Billboard, RoundedBox, Text } from '@react-three/drei';
+import type { ThreeEvent } from '@react-three/fiber';
+import { Billboard, RoundedBox, Text, useCursor } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Building } from '../../types';
 import { buildingStyle, type BuildingStyle } from './worldSpace';
+import { MiniMarker } from './Building';
+import { useProximity, PLACE_LABEL_DIST } from './useProximity';
 
 interface StructureProps {
   building: Building;
   /** World position (already a satellite spot near the place). */
   x: number;
   z: number;
+  /** EM-095/102: the current focus id (a place or building id), or null. */
+  focusedId?: string | null;
+  /** EM-095: clicked → zoom-to-place (the building's satellite spot). */
+  onPick?: (buildingId: string) => void;
 }
 
 // ── Floating label: name, kind tag, and a status/progress readout ────────────
@@ -460,9 +467,22 @@ function RubblePile() {
   );
 }
 
-export function Structure({ building, x, z }: StructureProps) {
+export function Structure({ building, x, z, focusedId, onPick }: StructureProps) {
   const style = useMemo(() => buildingStyle(building.kind), [building.kind]);
   const bobRef = useRef<THREE.Group>(null);
+  const [hovered, setHovered] = useState(false);
+  useCursor(hovered && Boolean(onPick));
+
+  // EM-102: full label only when near / hovered / the camera-focus target
+  // (EM-095 zoom-to-place reveals it). Far away → a small status-tinted marker.
+  const near = useProximity(useCallback(() => ({ x, z }), [x, z]), PLACE_LABEL_DIST);
+  const showFull = near || hovered || focusedId === building.id;
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    if (!onPick) return;
+    e.stopPropagation();
+    onPick(building.id);
+  };
 
   // Operational structures get a gentle, cheerful sway (Animal-Crossing life).
   const bobPhase = useRef(Math.random() * Math.PI * 2);
@@ -494,7 +514,12 @@ export function Structure({ building, x, z }: StructureProps) {
           : 3.6;
 
   return (
-    <group position={[x, 0, z]}>
+    <group
+      position={[x, 0, z]}
+      onClick={handleClick}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+      onPointerOut={() => setHovered(false)}
+    >
       <group ref={bobRef}>
         {building.status === 'planned' && <PlannedSite accent={style.accent} />}
 
@@ -539,7 +564,11 @@ export function Structure({ building, x, z }: StructureProps) {
         {building.status === 'destroyed' && <RubblePile />}
       </group>
 
-      <StructureLabel building={building} style={style} y={labelY} />
+      {showFull ? (
+        <StructureLabel building={building} style={style} y={labelY} />
+      ) : (
+        <MiniMarker y={labelY} color={STATUS_TINT[building.status] ?? style.accent} />
+      )}
     </group>
   );
 }

@@ -3,6 +3,15 @@
  * Newest entries on top. Left-bordered with profile_color.
  * agent_action entries show thought on hover; animal lines read inline.
  *
+ * Scroll stability (EM-093, contract §9): while the reader is scrolled away
+ * from the live edge the rendered list is a FROZEN SNAPSHOT of what was
+ * visible the moment they left the top. Arrivals mutate nothing in the DOM —
+ * neither the prepend-at-top shift nor the 200-cap trim-at-bottom clamp can
+ * move the viewport, because the row set literally does not change. The
+ * "X new" pill counts live arrivals against the snapshot; clicking it (or
+ * scrolling back to the top) thaws the list and re-pins to newest. This is a
+ * stronger form of scrollTop compensation: the compensation needed is zero.
+ *
  * Filtering is inclusive: click a category chip to show ONLY that category,
  * click more to stack two or three, click an active chip to drop it. With none
  * focused, everything shows except the default-muted trace chain. The focus set
@@ -177,6 +186,10 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
   // var()-register warning kinds keep the agent's own color on the badge.
   const badgeColor = event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? null;
   const icon = animal ? '🐾' : KIND_ICON[event.kind] ?? '·';
+  // Chat-first (contract §9 priority clarification): dialogue is the
+  // centerpiece — speech rows read slightly larger with inline speaker/model
+  // attribution, so the conversation scans without hovering.
+  const speech = event.kind === 'agent_speech';
   // Surface the animal's in-character thought (or any agent_action thought) on hover.
   const tip = animal
     ? (typeof event.payload?.animal_thought === 'string' ? event.payload.animal_thought : event.thought)
@@ -204,7 +217,7 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
       {/* Content */}
       <div className="flex-1 min-w-0">
         <span
-          className={`font-mono text-xs leading-relaxed break-words ${
+          className={`font-mono leading-relaxed break-words ${speech ? 'text-[13px]' : 'text-xs'} ${
             starving
               ? 'text-lab-warn font-semibold'
               : extinct
@@ -214,6 +227,18 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
         >
           {event.text ?? `[${event.kind}]`}
         </span>
+
+        {/* Inline model attribution on dialogue (hex-only alpha-append path,
+            same idiom as the hover profile badge below). */}
+        {speech && event.profile && badgeColor && badgeColor.startsWith('#') && (
+          <span
+            className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
+            style={{ color: badgeColor, borderColor: badgeColor + '50' }}
+            title={`spoken by a ${event.profile} villager`}
+          >
+            {event.profile}
+          </span>
+        )}
 
         {/* EM-089: LLM-decided animal action (vs a zero-cost reflex). */}
         {llmDecided && (
@@ -273,16 +298,14 @@ const TOP_THRESHOLD = 8;
 
 export function EventFeed({ events }: EventFeedProps) {
   const listRef = useRef<HTMLDivElement>(null);
-  const prevLengthRef = useRef(0);
-  const prevScrollHeightRef = useRef(0);
   const highlightLenRef = useRef(0);
-  // Pinned to the top (newest) vs. scrolled down reading history. A ref so the
-  // layout effect reads the latest value without re-subscribing.
-  const pinnedRef = useRef(true);
   const newEventIdsRef = useRef<Set<number>>(new Set());
 
-  const [scrolledAway, setScrolledAway] = useState(false);
-  const [unseen, setUnseen] = useState(0);
+  // EM-093: the frozen snapshot. null = pinned to newest (live, list follows
+  // arrivals); an array = the exact row set rendered while the reader is
+  // scrolled away. Arrivals never touch the frozen DOM, so the viewport can't
+  // move — not on prepend, and not on the upstream 200-cap trim.
+  const [frozen, setFrozen] = useState<WorldEvent[] | null>(null);
   const [focus, setFocus] = useState<Set<string>>(loadFocus);
 
   // Persist focused categories.
@@ -304,8 +327,24 @@ export function EventFeed({ events }: EventFeedProps) {
     [events, focus],
   );
 
+  // What actually renders: the live filtered list while pinned, the snapshot
+  // while scrolled away.
+  const displayEvents = frozen ?? visibleEvents;
+  const scrolledAway = frozen !== null;
+
+  // The "X new" pill: live arrivals not present in the snapshot. Deduped by
+  // seq (NOT a max-seq comparison — client-synthesized events carry negative
+  // seqs, so set membership is the only safe identity).
+  const unseen = useMemo(() => {
+    if (!frozen) return 0;
+    const held = new Set(frozen.map((e) => e.seq));
+    let n = 0;
+    for (const e of visibleEvents) if (!held.has(e.seq)) n++;
+    return n;
+  }, [frozen, visibleEvents]);
+
   // Highlight freshly-arrived entries briefly. Tracked with its own length ref so
-  // it stays independent of the scroll effect's bookkeeping.
+  // it stays independent of the freeze bookkeeping.
   useEffect(() => {
     if (visibleEvents.length > highlightLenRef.current) {
       const added = visibleEvents.length - highlightLenRef.current;
@@ -317,42 +356,30 @@ export function EventFeed({ events }: EventFeedProps) {
     highlightLenRef.current = visibleEvents.length;
   }, [visibleEvents]);
 
-  // Newest entries are prepended at the top. Preserve the reader's position:
-  //  • Pinned to top → stay pinned to the newest entry.
-  //  • Scrolled down → offset scrollTop by the height of the inserted content
-  //    so the entries being read stay put, and count them as "unseen".
+  // While pinned, newest entries prepend at the top — hold the viewport on
+  // the live edge (scrollTop 0). While frozen this is a no-op by design.
   useLayoutEffect(() => {
     const el = listRef.current;
-    if (!el) return;
-    const added = visibleEvents.length - prevLengthRef.current;
-
-    if (pinnedRef.current) {
-      el.scrollTop = 0;
-    } else if (added > 0) {
-      const delta = el.scrollHeight - prevScrollHeightRef.current;
-      if (delta > 0) el.scrollTop += delta;
-      setUnseen((c) => c + added);
-    }
-
-    prevScrollHeightRef.current = el.scrollHeight;
-    prevLengthRef.current = visibleEvents.length;
-  }, [visibleEvents]);
+    if (el && frozen === null) el.scrollTop = 0;
+  }, [visibleEvents, frozen]);
 
   const handleScroll = () => {
     const el = listRef.current;
     if (!el) return;
     const atTop = el.scrollTop <= TOP_THRESHOLD;
-    pinnedRef.current = atTop;
-    setScrolledAway(!atTop);
-    if (atTop) setUnseen(0);
+    if (atTop) {
+      // Back at the live edge: thaw and re-pin.
+      setFrozen((f) => (f === null ? f : null));
+    } else {
+      // Leaving the live edge: freeze the row set exactly as rendered now.
+      setFrozen((f) => f ?? visibleEvents);
+    }
   };
 
   const jumpToNewest = () => {
     const el = listRef.current;
     if (!el) return;
-    pinnedRef.current = true;
-    setScrolledAway(false);
-    setUnseen(0);
+    setFrozen(null);
     el.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -365,16 +392,12 @@ export function EventFeed({ events }: EventFeedProps) {
       return next;
     });
     // A filter change re-pins to newest so the list doesn't jump unpredictably.
-    pinnedRef.current = true;
-    setScrolledAway(false);
-    setUnseen(0);
+    setFrozen(null);
   };
 
   const clearFocus = () => {
     setFocus(new Set());
-    pinnedRef.current = true;
-    setScrolledAway(false);
-    setUnseen(0);
+    setFrozen(null);
   };
 
   const hiddenCount = events.length - visibleEvents.length;
@@ -446,14 +469,14 @@ export function EventFeed({ events }: EventFeedProps) {
           onScroll={handleScroll}
           className="absolute inset-0 overflow-y-auto"
         >
-          {visibleEvents.length === 0 ? (
+          {displayEvents.length === 0 ? (
             <div className="flex items-center justify-center h-16 font-mono text-xs text-lab-dim text-center px-4">
               {events.length === 0
                 ? 'WAITING FOR EVENTS…'
                 : 'No events in the selected filters yet — click ✕ clear to show all'}
             </div>
           ) : (
-            visibleEvents.map((event) => (
+            displayEvents.map((event) => (
               <FeedEntry
                 key={event.seq}
                 event={event}

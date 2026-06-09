@@ -4,8 +4,9 @@
  * The simulation hook lives here (one WS connection, shared across routes).
  * Routing chooses what renders below the header:
  *
- *   "/"          → the existing 3-column chaos lab (3D CozyWorld is the
- *                  PRIMARY view; the in-page village/map toggle is intact).
+ *   "/"          → the live chaos lab (W11a layout: feed+digest left, the 3D
+ *                  CozyWorld PRIMARY view center with the roster strip on its
+ *                  bottom edge, controls right; village/map toggle intact).
  *   "/inspector" → the 2D analysis annex (InspectorLayout) — mounts NO
  *                  <Canvas>. Because routing controls whether LiveLayout
  *                  renders, navigating to /inspector UNMOUNTS the CozyWorld
@@ -13,26 +14,50 @@
  *                  hidden). See frontend-inspector.md §2.
  */
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { useSimulation } from './hooks/useSimulation';
 import { animalModelMap } from './lib/animalIdentity';
 import type { SimulationState, SimulationControls } from './hooks/useSimulation';
 import { useRoutingHealth } from './hooks/useRoutingHealth';
 import type { RoutingHealth } from './hooks/useRoutingHealth';
+import type { FocusTarget } from './types';
 import { Header } from './components/Header';
 import { RoutingDegradedBanner } from './components/RoutingDegradedBanner';
 import { ExtinctionBanner } from './components/ExtinctionBanner';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
-import { AgentPanels } from './components/panels/AgentPanels';
+import { StorySoFar } from './components/feed/StorySoFar';
+import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
 import { InspectorLayout } from './inspector/InspectorLayout';
 
 type WorldView = 'village' | 'map';
 type Sim = SimulationState & SimulationControls;
+
+// ── EM-105: user-resizable feed column ───────────────────────────────────────
+// The chat/feed is the product's centerpiece (contract §9 priority
+// clarification), so the default is a GENEROUS reading width; the drag handle
+// lets the user trade feed↔village balance at runtime. Width persists.
+const FEED_W_KEY = 'em.layout.feedWidth';
+const FEED_W_DEFAULT = 432;
+const FEED_W_MIN = 280;
+/** Max: half the viewport — the village never collapses. */
+function feedWidthMax(): number {
+  return Math.max(FEED_W_MIN, Math.round(window.innerWidth * 0.5));
+}
+function clampFeedWidth(w: number): number {
+  return Math.min(Math.max(Math.round(w), FEED_W_MIN), feedWidthMax());
+}
+function loadFeedWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(FEED_W_KEY));
+    if (Number.isFinite(raw) && raw > 0) return clampFeedWidth(raw);
+  } catch { /* ignore */ }
+  return FEED_W_DEFAULT;
+}
 
 export default function App() {
   const sim = useSimulation();
@@ -81,16 +106,55 @@ export default function App() {
 }
 
 /**
- * LiveLayout — the existing 3-column chaos lab, unchanged, now mounted under
- * the "/" route.
+ * LiveLayout — the W11a redesign (EM-096, contract §9 — the user's sketch):
  *
- * Left:   Agent panels (scrollable card stack)
- * Center: World map (CozyWorld 3D default, top ~55%) + Event feed (bottom ~45%)
- * Right:  Controls + Model legend (scrollable)
+ * Left:   Story-so-far digest (EM-094) on top + full-height event feed.
+ * Center: The 3D village (CozyWorld default; 2D WorldMap via the toggle)
+ *         getting roughly twice the pixels it used to, with the agent +
+ *         critter roster as a horizontally-scrollable card strip along the
+ *         BOTTOM edge of the world view (EM-096/EM-099).
+ * Right:  Controls + collapsible model legend (EM-104).
+ *
+ * Desktop-first (~1280px+). No information was lost vs the old layout: every
+ * old AgentPanels datum (name, model badge, energy, credits, mood, dying/dead,
+ * top relationships) lives on the strip cards, plus location.
  */
 function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHealth }) {
   const { world, events } = sim;
   const [view, setView] = useState<WorldView>('village');
+  // EM-095: camera focus (follow/zoom target) + the reset-view signal.
+  const [focus, setFocus] = useState<FocusTarget | null>(null);
+  const [resetNonce, setResetNonce] = useState(0);
+
+  // EM-105: feed-column width — persisted, drag-handle driven.
+  const [feedWidth, setFeedWidth] = useState<number>(loadFeedWidth);
+  const [resizing, setResizing] = useState(false);
+  const dragStateRef = useRef<{ startX: number; startW: number } | null>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(FEED_W_KEY, String(feedWidth)); } catch { /* ignore */ }
+  }, [feedWidth]);
+
+  const handleResizeDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    // Pointer capture keeps the drag alive when the cursor outruns the thin
+    // handle. It's an enhancement only — jsdom (vitest) and synthetic events
+    // have no active pointer, so a failure must not kill the drag.
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    dragStateRef.current = { startX: e.clientX, startW: feedWidth };
+    setResizing(true);
+  }, [feedWidth]);
+
+  const handleResizeMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragStateRef.current;
+    if (!d) return;
+    setFeedWidth(clampFeedWidth(d.startW + (e.clientX - d.startX)));
+  }, []);
+
+  const handleResizeEnd = useCallback(() => {
+    dragStateRef.current = null;
+    setResizing(false);
+  }, []);
 
   // EM-089: which model each critter consults. world_state animals do NOT
   // carry the profile (backend Animal.to_dict omits it), so it's derived from
@@ -102,6 +166,26 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
     [sim.history, world],
   );
 
+  // Selecting from the strip (or clicking in the scene) focuses the 3D view —
+  // if the 2D map is up, switch back to the village so the follow is visible.
+  const handleFocus = useCallback((target: FocusTarget | null) => {
+    setFocus(target);
+    if (target) setView('village');
+  }, []);
+
+  const handleResetView = useCallback(() => {
+    setFocus(null);
+    setResetNonce((n) => n + 1);
+  }, []);
+
+  // Name of the followed entity for the header chip.
+  const followingName = useMemo(() => {
+    if (!focus || !world) return null;
+    if (focus.type === 'agent') return world.agents.find((a) => a.id === focus.id)?.name ?? null;
+    if (focus.type === 'animal') return world.animals?.find((a) => a.id === focus.id)?.name ?? null;
+    return null; // place focus is a one-shot zoom, not a follow
+  }, [focus, world]);
+
   return (
     <>
       {/* EM-072: dismissible warning when every profile routes to one model. */}
@@ -112,61 +196,138 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
           EM-084: its NEW RUN CTA restarts the run via /api/control/reset. */}
       <ExtinctionBanner world={world} events={sim.history} onReset={sim.reset} />
 
-      {/* ── Three-column body ──────────────────────────────────── */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* LEFT — Agent panels */}
+      {/* ── Three-region body (EM-096) ─────────────────────────── */}
+      <div
+        className={`flex flex-1 min-h-0 overflow-hidden ${resizing ? 'select-none cursor-col-resize' : ''}`}
+        style={{ '--feed-w': `${feedWidth}px` } as React.CSSProperties}
+      >
+        {/* LEFT — story so far + full-height feed. The chat/feed is the
+            centerpiece (contract §9 priority clarification): generous default
+            reading width, user-resizable via the handle (EM-105). */}
         <aside
-          className="w-52 shrink-0 border-r border-lab-border overflow-hidden flex flex-col bg-lab-surface"
-          aria-label="Agent status panels"
+          className="w-[var(--feed-w)] shrink-0 overflow-hidden flex flex-col bg-lab-surface"
+          aria-label="Story digest and live event feed"
         >
-          <AgentPanels world={world} />
+          <StorySoFar world={world} history={sim.history} />
+          <div className="flex-1 min-h-0" aria-label="Live event feed">
+            <EventFeed events={events} />
+          </div>
         </aside>
 
-        {/* CENTER — Map + Feed */}
-        <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Map */}
-          <div
-            className="border-b border-lab-border overflow-hidden"
-            style={{ flex: '0 0 55%' }}
+        {/* EM-105: the feed↔village drag handle. Pointer-drag resizes (hand-
+            rolled, no deps); double-click restores the default; arrow keys
+            nudge for keyboard users. Width persists to localStorage. */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the feed column (drag, arrow keys; double-click to reset)"
+          aria-valuenow={feedWidth}
+          aria-valuemin={FEED_W_MIN}
+          tabIndex={0}
+          title="Drag to resize the feed — double-click to reset"
+          onPointerDown={handleResizeDown}
+          onPointerMove={handleResizeMove}
+          onPointerUp={handleResizeEnd}
+          onPointerCancel={handleResizeEnd}
+          onDoubleClick={() => setFeedWidth(FEED_W_DEFAULT)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowLeft') setFeedWidth((w) => clampFeedWidth(w - 16));
+            if (e.key === 'ArrowRight') setFeedWidth((w) => clampFeedWidth(w + 16));
+          }}
+          className={`group shrink-0 w-1.5 cursor-col-resize relative z-10
+                      border-l border-lab-border
+                      ${resizing ? 'bg-lab-acid/60' : 'bg-lab-chrome hover:bg-lab-acid/40'}
+                      transition-colors duration-100
+                      focus-visible:bg-lab-acid/40`}
+        >
+          {/* grip dots — the visible affordance */}
+          <span
+            aria-hidden="true"
+            className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
+                        font-mono text-[8px] leading-[5px] tracking-tighter pointer-events-none
+                        ${resizing ? 'text-lab-bg' : 'text-lab-muted group-hover:text-lab-acid'}`}
           >
-            <div className="lab-header flex items-center justify-between gap-2">
-              <span>{view === 'village' ? 'THE VILLAGE' : 'WORLD MAP'}</span>
-              <div className="flex items-center gap-2">
-                {world && (
-                  <span className="font-mono text-[10px] text-lab-muted">
-                    {world.places.length} PLACES · {world.agents.filter(a => a.alive).length} AGENTS
-                  </span>
-                )}
+            ⋮
+          </span>
+        </div>
+
+        {/* CENTER — the world view (~2× the old pixels) + bottom roster strip */}
+        <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <div className="lab-header flex items-center justify-between gap-2 shrink-0">
+            <span>{view === 'village' ? 'THE VILLAGE' : 'WORLD MAP'}</span>
+            <div className="flex items-center gap-2">
+              {followingName && (
                 <button
                   type="button"
-                  onClick={() => setView(v => (v === 'village' ? 'map' : 'village'))}
-                  className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid transition-colors rounded-sm"
-                  aria-label={view === 'village' ? 'Switch to 2D map' : 'Switch to 3D village'}
-                  title={view === 'village' ? 'Switch to 2D map' : 'Switch to 3D village'}
+                  onClick={() => setFocus(null)}
+                  className="font-mono text-[10px] px-2 py-0.5 border border-lab-acid text-lab-acid rounded-sm hover:bg-lab-acid/15 transition-colors cursor-pointer"
+                  title="Camera is following — click (or drag the view) to release"
                 >
-                  {view === 'village' ? '2D MAP' : '3D VILLAGE'}
+                  ◉ FOLLOWING {followingName.toUpperCase()} ✕
                 </button>
-              </div>
+              )}
+              {world && (
+                <span className="font-mono text-[10px] text-lab-muted">
+                  {world.places.length} PLACES · {world.agents.filter(a => a.alive).length} AGENTS
+                </span>
+              )}
+              {view === 'village' && (
+                <button
+                  type="button"
+                  onClick={handleResetView}
+                  className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid transition-colors rounded-sm cursor-pointer"
+                  aria-label="Reset the camera to the default framing"
+                  title="Reset the camera to the default framing"
+                >
+                  ⌂ RESET VIEW
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setView(v => (v === 'village' ? 'map' : 'village'))}
+                className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid transition-colors rounded-sm cursor-pointer"
+                aria-label={view === 'village' ? 'Switch to 2D map' : 'Switch to 3D village'}
+                title={view === 'village' ? 'Switch to 2D map' : 'Switch to 3D village'}
+              >
+                {view === 'village' ? '2D MAP' : '3D VILLAGE'}
+              </button>
             </div>
-            <div style={{ height: 'calc(100% - 28px)' }}>
+          </div>
+
+          {/* World view — fills everything below the header; the roster strip
+              rides its bottom edge as an overlay so the village keeps the full
+              pixel area (contract §9: "~2× today's pixels"). */}
+          <div className="relative flex-1 min-h-0">
+            <div className="absolute inset-0">
               {view === 'village' ? (
-                <CozyWorld world={world} events={events} animalModels={animalModels} />
+                <CozyWorld
+                  world={world}
+                  events={events}
+                  animalModels={animalModels}
+                  focus={focus}
+                  resetNonce={resetNonce}
+                  onPick={handleFocus}
+                  onFocusBreak={() => setFocus(null)}
+                />
               ) : (
                 <WorldMap world={world} events={events} animalModels={animalModels} />
               )}
             </div>
-          </div>
 
-          {/* Feed */}
-          <div
-            className="flex-1 overflow-hidden bg-lab-surface"
-            aria-label="Live event feed"
-          >
-            <EventFeed events={events} />
+            {/* Bottom roster strip (EM-096/EM-099) — agents + CRITTERS. */}
+            <div className="absolute inset-x-0 bottom-0 border-t border-lab-border bg-lab-surface/90 backdrop-blur-sm">
+              <RosterStrip
+                world={world}
+                history={sim.history}
+                animalModels={animalModels}
+                selected={focus}
+                onSelect={handleFocus}
+              />
+            </div>
           </div>
         </main>
 
-        {/* RIGHT — Controls + Legend */}
+        {/* RIGHT — Controls + Legend (same width as before; legend collapses) */}
         <aside
           className="w-56 shrink-0 border-l border-lab-border overflow-hidden flex flex-col bg-lab-surface"
           aria-label="Simulation controls"
@@ -184,7 +345,7 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
             profiles={sim.getProfiles()}
           />
 
-          {/* Model legend at the bottom */}
+          {/* Model legend at the bottom (EM-104: collapsible) */}
           <div className="border-t border-lab-border mt-auto shrink-0">
             <ModelLegend profiles={sim.getProfiles()} />
           </div>

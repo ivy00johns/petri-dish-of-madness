@@ -11,12 +11,14 @@
  * ACTUAL model (latest routed_via, fallback profile).
  */
 
-import { useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Billboard, Html, RoundedBox } from '@react-three/drei';
+import type { ThreeEvent } from '@react-three/fiber';
+import { Billboard, Html, RoundedBox, useCursor } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Agent } from '../../types';
 import { ChatBubble, type BubbleData } from './ChatBubble';
+import { useProximity, ENTITY_LABEL_DIST } from './useProximity';
 
 export interface AnimPos {
   x: number;
@@ -33,6 +35,10 @@ interface VillagerProps {
   routedVia?: string;
   /** Active speech bubbles for this agent. */
   bubbles: BubbleData[];
+  /** EM-095: true while the camera is following this villager. */
+  focused?: boolean;
+  /** EM-095: clicked → follow this villager. */
+  onPick?: () => void;
 }
 
 const BODY_HEIGHT = 0.9;
@@ -130,9 +136,26 @@ function VillagerLabel({
   );
 }
 
-export function Villager({ agent, target, animRef, routedVia, bubbles }: VillagerProps) {
+export function Villager({ agent, target, animRef, routedVia, bubbles, focused, onPick }: VillagerProps) {
   const groupRef = useRef<THREE.Group>(null);
   const bobPhase = useRef(Math.random() * Math.PI * 2);
+  const [hovered, setHovered] = useState(false);
+  useCursor(hovered && Boolean(onPick));
+
+  // EM-102: the info card collapses when the camera is far away (it would be
+  // unreadably small and just stack on the building labels) — unless this
+  // villager is hovered or being followed (EM-095), which always reveals it.
+  const near = useProximity(
+    useCallback(() => ({ x: animRef.x, z: animRef.z }), [animRef]),
+    ENTITY_LABEL_DIST,
+  );
+  const showLabel = near || hovered || Boolean(focused);
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    if (!onPick) return;
+    e.stopPropagation();
+    onPick();
+  };
 
   const color = agent.profile_color ?? '#b0b0b0';
   const bodyColor = shade(color, 0.85);
@@ -183,7 +206,12 @@ export function Villager({ agent, target, animRef, routedVia, bubbles }: Village
   });
 
   return (
-    <group ref={groupRef}>
+    <group
+      ref={groupRef}
+      onClick={handleClick}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+      onPointerOut={() => setHovered(false)}
+    >
       {/* shadow-casting body group */}
       <group>
         {/* body */}
@@ -227,6 +255,16 @@ export function Villager({ agent, target, animRef, routedVia, bubbles }: Village
         )}
       </group>
 
+      {/* EM-095: follow indicator — a flat acid ring under the tracked
+          villager (WebGL material color mirroring --lab-acid, the same
+          in-canvas convention as the rest of the GPU palette). */}
+      {focused && (
+        <mesh position={[0, 0.05, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.55, 0.72, 28]} />
+          <meshBasicMaterial color="#c8ff00" transparent opacity={0.75} />
+        </mesh>
+      )}
+
       {/* tombstone for the departed */}
       {!agent.alive && (
         <group position={[0.55, 0, 0]}>
@@ -241,7 +279,7 @@ export function Villager({ agent, target, animRef, routedVia, bubbles }: Village
         </group>
       )}
 
-      <VillagerLabel agent={agent} routedVia={routedVia} />
+      {showLabel && <VillagerLabel agent={agent} routedVia={routedVia} />}
 
       {/* active speech bubbles, stacked above the label */}
       {bubbles.map((b, i) => (

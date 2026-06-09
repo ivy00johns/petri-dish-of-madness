@@ -1,0 +1,149 @@
+/**
+ * storySoFar (EM-094) — the always-on, ZERO-LLM "story so far" digest.
+ *
+ * A pure selector over the rolling event history + the latest world_state
+ * projection (contract frontend-inspector.md §9). It computes:
+ *   • the alive/dead roster, with death ticks recovered from agent_died events
+ *   • active-rule count + the newest active rule's text
+ *   • project/building statuses (W7 buildings)
+ *   • a "current drama" heuristic — the most recent of: extinction, conflict,
+ *     starvation warning, a death, or a rule vote in progress
+ *   • the narrator channel: newest `narrator_summary` event + count (the
+ *     OPTIONAL server-side LLM narrator, event-log.md v1.2.0 note 1 — this
+ *     selector only reads what already exists; it never asks for a recap)
+ *
+ * Everything degrades to labeled-empty values (never undefined holes) so the
+ * digest block renders in mock mode and on a fresh run alike.
+ */
+
+import type { WorldEvent, WorldState } from '../types';
+
+export interface RosterEntry {
+  id: string;
+  name: string;
+}
+
+export interface DeadEntry extends RosterEntry {
+  /** Tick of the agent_died event, when it is still inside the history window. */
+  deathTick: number | null;
+}
+
+export interface ProjectEntry {
+  id: string;
+  name: string;
+  status: string;
+  /** 0..100 build progress (meaningful while planned/under_construction). */
+  progress: number;
+}
+
+export interface DramaEntry {
+  /** Short uppercase register for the chip, e.g. "CONFLICT". */
+  label: string;
+  /** The event's feed line (fallback: its kind). */
+  text: string;
+  tick: number;
+}
+
+export interface StoryDigest {
+  aliveCount: number;
+  totalCount: number;
+  alive: RosterEntry[];
+  dead: DeadEntry[];
+  activeRuleCount: number;
+  /** Text of the newest active rule (by created_tick), or null when none. */
+  newestRuleText: string | null;
+  /** True while any rule sits in `proposed` (a vote is in progress). */
+  ruleVoteInProgress: boolean;
+  projects: ProjectEntry[];
+  drama: DramaEntry | null;
+  /** Newest narrator_summary event in the window (null = none seen). */
+  narratorLatest: WorldEvent | null;
+  narratorCount: number;
+}
+
+/** Drama register: the most recent of these kinds wins (scan is newest-first). */
+const DRAMA_LABELS: Record<string, string> = {
+  world_extinct: 'EXTINCTION',
+  conflict: 'CONFLICT',
+  agent_starving: 'STARVATION',
+  agent_died: 'DEATH',
+  rule_proposed: 'RULE VOTE',
+  rule_vote: 'RULE VOTE',
+};
+
+/**
+ * Compute the digest. `history` is the standard NEWEST-FIRST rolling window
+ * (useSimulation.history); `world` is the latest world_state (or null before
+ * the first broadcast — the digest then reports an empty-but-shaped result).
+ */
+export function storySoFar(
+  history: WorldEvent[],
+  world: WorldState | null,
+): StoryDigest {
+  const agents = world?.agents ?? [];
+
+  // Death ticks: first (newest) agent_died per actor in the window. Deaths
+  // older than the window simply have no tick — the UI labels that, it never
+  // shows a lone "?".
+  const deathTickById = new Map<string, number>();
+  let narratorLatest: WorldEvent | null = null;
+  let narratorCount = 0;
+  let drama: DramaEntry | null = null;
+
+  for (const e of history) {
+    if (e.kind === 'agent_died' && e.actor_id && !deathTickById.has(e.actor_id)) {
+      deathTickById.set(e.actor_id, e.tick);
+    }
+    if (e.kind === 'narrator_summary') {
+      narratorCount++;
+      if (!narratorLatest) narratorLatest = e;
+    }
+    if (!drama) {
+      const label = DRAMA_LABELS[e.kind];
+      if (label) {
+        drama = { label, text: e.text ?? `[${e.kind}]`, tick: e.tick };
+      }
+    }
+  }
+
+  const alive: RosterEntry[] = [];
+  const dead: DeadEntry[] = [];
+  for (const a of agents) {
+    if (a.alive) {
+      alive.push({ id: a.id, name: a.name });
+    } else {
+      dead.push({ id: a.id, name: a.name, deathTick: deathTickById.get(a.id) ?? null });
+    }
+  }
+  // Dead roster reads chronologically (unknown-tick deaths last).
+  dead.sort((x, y) => (x.deathTick ?? Number.MAX_SAFE_INTEGER) - (y.deathTick ?? Number.MAX_SAFE_INTEGER));
+
+  const rules = world?.rules ?? [];
+  const activeRules = rules.filter((r) => r.status === 'active');
+  const newestActive = activeRules.reduce<typeof activeRules[number] | null>(
+    (best, r) => (best === null || r.created_tick > best.created_tick ? r : best),
+    null,
+  );
+  const ruleVoteInProgress = rules.some((r) => r.status === 'proposed');
+
+  const projects: ProjectEntry[] = (world?.buildings ?? []).map((b) => ({
+    id: b.id,
+    name: b.name,
+    status: b.status,
+    progress: b.progress,
+  }));
+
+  return {
+    aliveCount: alive.length,
+    totalCount: agents.length,
+    alive,
+    dead,
+    activeRuleCount: activeRules.length,
+    newestRuleText: newestActive?.text ?? null,
+    ruleVoteInProgress,
+    projects,
+    drama,
+    narratorLatest,
+    narratorCount,
+  };
+}
