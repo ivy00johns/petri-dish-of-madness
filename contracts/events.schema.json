@@ -35,7 +35,7 @@
         "kind": {
           "type": "string",
           "description": "Open-ended event type (ANY string validates — intentionally NOT a JSON-Schema `enum`, so a strict validator never rejects future W6-W8 kinds). The known kinds are listed in x-known-kinds for reference. Consumers MUST tolerate kinds not listed there.",
-          "x-known-kinds": ["turn_start","perceived","memory_retrieved","llm_call","reasoning","action_chosen","action_resolved","agent_action","agent_speech","agent_moved","economy","conflict","relationship","agent_died","agent_spawned","rule_proposed","rule_vote","rule_passed","rule_rejected","memory","parse_failure","model_reassigned","random_event","control"]
+          "x-known-kinds": ["turn_start","perceived","memory_retrieved","llm_call","reasoning","action_chosen","action_resolved","agent_action","agent_speech","agent_moved","economy","conflict","relationship","agent_died","agent_spawned","rule_proposed","rule_vote","rule_passed","rule_rejected","memory","parse_failure","model_reassigned","random_event","control","structure_state_changed","project_proposed","project_funded","project_built","building_operational","building_damaged","building_destroyed"]
         },
         "actor_id": { "type": ["string","null"] },
         "actor_type": { "type": ["string","null"], "default": "human_agent", "description": "human_agent|system|god|animal. Absent/null treated as human_agent." },

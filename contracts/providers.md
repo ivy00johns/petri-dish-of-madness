@@ -68,6 +68,17 @@ class Router:
   `world.usage_caps`), NOT inside `chat()` — when a provider nears a cap, slow ticks / prefer a
   cheaper profile; never block `chat()`. Mock has no usage (`last_usage=None`).
 
+## Decision caching — W7 / EM-068
+
+A Router-level LRU cache, internal (not in the public interface). `Router.chat()` keys on
+`sha1(profile_name + json(messages))` — the messages already embed the persona + retrieved
+memory + coarse world state, so an identical key means an identical situation. On a HIT, return
+the cached text WITHOUT a network call and set the next `last_usage` snapshot's `cached=true`
+(→ `llm_call.cached=true`, tokens null, latency ~0); on a MISS, call the adapter and store the
+result. Config `world.cache` `{enabled: true (default), max_entries: 512}`. Mock is never cached
+(deterministic already). Caching never crosses world states — different world ⇒ different
+messages ⇒ different key. This halves repeated-context cost on free tiers.
+
 ## ModelProfile (config)
 
 ```yaml

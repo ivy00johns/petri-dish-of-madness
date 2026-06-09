@@ -52,9 +52,13 @@ paths:
       responses: { "200": { description: ok }, "404": { description: unknown agent }, "400": { description: unknown profile } }
   /api/agents:
     post:
-      summary: Spawn an agent
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name, profile], properties: { name: {type: string}, personality: {type: string}, profile: {type: string}, location: {type: string} } } } } }
-      responses: { "201": { description: created } }
+      summary: Spawn an agent (W7 EM-063 — god-mode immediate, or governance-gated when mode=governance)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name, profile], properties: { name: {type: string}, personality: {type: string}, profile: {type: string}, location: {type: string}, mode: { type: string, enum: [god, governance], default: god, description: "god=immediate; governance=enqueue admit_agent proposal" } } } } } }
+      responses: { "201": { description: "created (god) — emits agent_spawned{method:god}" }, "202": { description: "accepted (governance) — admit_agent proposal enqueued; agent admitted iff vote passes" } }
+  /api/buildings:
+    get:
+      summary: List buildings/structures with state (W7 EM-061) — also available in world_state.buildings
+      responses: { "200": { description: buildings, content: { application/json: { schema: { type: array, items: { type: object } } } } } }
   /api/agents/{id}:
     delete:
       summary: Kill/remove an agent

@@ -36,7 +36,19 @@ NOT a demotion. W7/W8 world features render *in* the 3D village. Encoded in
   (work in mock + live), REST = deep replay; selectors/api/types/PanelProps; mock generator must
   emit chain + rule lifecycle + relationships + usage.
 
-W7–W8 extend `world-model.md` + config — authored at each gate.
+## Contracts (W7 — LOCKED)
+
+- `world-model.md` v1.1.0 — §W7: **Building** entity = the collective-project pipeline (one
+  lifecycle planned→under_construction→operational, +damaged/abandoned/destroyed); tiered tool
+  catalog (reflex/llm + location/agreement gates); spawn modes (god/governance); decision cache.
+  Buildings live in snapshot + event log — **no new tables**. Render in the 3D village.
+- `action-protocol.schema.json` — +6 actions (propose_project/contribute_funds/build_step/repair/arson/take_offline).
+- `events.schema.json` — +structure_state_changed/project_proposed/funded/built/building_operational/damaged/destroyed.
+- `api.openapi.yaml` — POST /api/agents `mode` (god|governance) + GET /api/buildings.
+- `providers.md` — EM-068 router decision cache (sha1(profile+messages), default on).
+- `config/world.yaml` — world.buildings/spawn/cache defaults.
+
+W8 extends config + a new Animal entity — authored at the W8 gate.
 
 ## File ownership (parallel-safe — see contracts/README.md)
 

@@ -1,7 +1,12 @@
-# Contract: World Model (shared domain) — v1.0.0
+# Contract: World Model (shared domain) — v1.1.0
 
 The single source of truth for entities and mechanics. Backend implements it; frontend
 renders it; QE tests it. Changes go through the orchestrator (version bump + notify).
+
+> **v1.1.0 (W7)** adds the **Building** entity (which doubles as the collective-project
+> pipeline), a **tiered tool catalog**, ad-hoc **spawn modes**, and **decision caching**.
+> Buildings live in the world snapshot + event log — **no new SQL tables** (event-sourcing).
+> See §W7 below. These render in the **3D village** (primary view), not only the inspector.
 
 ## Entities
 
@@ -74,8 +79,88 @@ Effect semantics when `active`:
 - `relationships` map.
 
 ## Invariants (QE asserts)
-1. Credits never negative. Credits change only via work/forage/recharge/give/steal/ubi.
+1. Credits never negative. Credits change only via work/forage/recharge/give/steal/ubi **and the W7 construction sinks (contribute_funds)**.
 2. Dead agents take no turns and emit no actions.
 3. `ban_stealing` active ⇒ zero successful steals.
 4. A rule becomes `active` iff `count(votes==true) > floor(living_count/2)` at evaluation.
 5. Energy ∈ [0,100]; a passed `recharge` strictly increases energy unless already 100.
+6. **(W7)** A Building's `function` is granted ONLY while `status=="operational"`. `progress`∈[0,100], `health`∈[0,100], `funds_committed`≥0. A Building reaches `operational` iff `progress==100`. Credits spent on `contribute_funds` are conserved (leave the agent, accrue to `funds_committed`).
+
+---
+
+## §W7 — Expanded world (v1.1.0)
+
+### Building (entity; also the collective-project pipeline)
+A **project is a Building in `planned`/`under_construction`** — one entity, one lifecycle. The
+"clock tower that never got built" is a Building stuck in `under_construction` (abandoned).
+```
+Building {
+  id: str, name: str, kind: str,            # clocktower|garden|workshop|farm|library|house|monument|...
+  location: str,                            # place id
+  owner_id: str | null,                     # agent id | "public" | null
+  status: "planned"|"under_construction"|"operational"|"damaged"|"offline"|"abandoned"|"destroyed",
+  health: int (0..100), condition_label: "pristine"|"worn"|"damaged"|"ruined",
+  progress: int (0..100),
+  funds_committed: int, funds_required: int, contributors: [agent_id],
+  function: str,                            # utility while operational, e.g. "+forage" | "+energy" | "voting"
+  last_progress_tick: int, created_tick: int, updated_tick: int
+}
+```
+**State machine** (every transition emits a `structure_state_changed` event with `{building_id, from, to, reason}`):
+- `planned → under_construction` — `funds_committed >= funds_required` AND a first `build_step`.
+- `under_construction → operational` — `progress == 100`. (emits `building_operational`; function activates.)
+- `operational → damaged` — `arson`/vandalize drops `health`; `damaged → destroyed` when `health == 0`.
+- `damaged → operational` — `repair` restores `health` to 100.
+- `operational → offline` — `take_offline` (owner only); `offline → operational` — `repair`/reactivate.
+- `* → abandoned` — no `build_step`/`contribute_funds` for `buildings.abandon_after_ticks` while not operational (the realistic collective failure). Engine checks per round.
+
+Function granted ONLY while `operational` (invariant 6). A `garden`/`farm` grants `+forage` at its
+place; a `clocktower`/`monument` is cultural (no mechanical buff); `workshop` `+work_reward`; etc.
+(exact buffs in config; keep small/free-scale).
+
+### Tiered tool catalog (EM-060)
+Each action carries registry metadata `{tier, location_gate, agreement_gate}`:
+- **tier** — `reflex` (engine resolves deterministically; the LLM still *chooses* it as its one
+  turn-action, but no extra call) vs `llm` (the choice is the reasoning-heavy turn). In this sim
+  every agent turn is exactly one LLM call; tier mainly drives prompt framing + future no-LLM
+  animal reflexes (W8). Resolution is ALWAYS engine code.
+- **location_gate** — action only offered when the agent is at a place of this `kind` (e.g.
+  `propose_rule`/`vote` at `governance`; `build_step` at the building's place; `work` at `work`).
+  Gating shrinks the per-turn action list → smaller prompts (free-scale win).
+- **agreement_gate** — blocked by an active rule (e.g. `steal` by `ban_stealing`; `arson` by a
+  `ban_arson` rule if present).
+Context assembly filters `valid_actions` by these gates; `_validate_world` enforces them.
+
+### New actions (added to action-protocol.schema.json)
+| action | tier | gate | effect |
+|---|---|---|---|
+| `propose_project` | llm | — | create a Building `status=planned` `{name, kind, funds_required, function?}` at the agent's place; owner=public. emits `structure_state_changed{to:planned}` + `project_proposed`. |
+| `contribute_funds` | reflex | must afford | `args:{building_id, amount}` — move `amount` credits from agent → `funds_committed`; add to `contributors`; may flip `planned→under_construction`. emits `economy` + `project_funded`. |
+| `build_step` | reflex | at building's place, `under_construction` | `args:{building_id}` — `progress += buildings.build_step`; sets `last_progress_tick`; may flip to `operational`. emits `project_built`. |
+| `repair` | reflex | at place, `damaged`/`offline` | `args:{building_id}` — `health=100`, back to `operational`. |
+| `arson` | reflex | co-located; blocked by `ban_arson` if active | `args:{building_id}` — `health -= buildings.arson_damage`; `→damaged`/`destroyed`. crime (−trust witnesses). emits `conflict` + `structure_state_changed`. |
+| `take_offline` | reflex | owner only | `args:{building_id}` — `operational→offline`. |
+
+Existing actions keep their semantics; they gain registry tiers (movement/economy/perception =
+reflex; say/propose_rule = llm). `propose_rule` MAY gain a `ban_arson` effect (optional).
+
+### Ad-hoc spawn (EM-063)
+Two paths, selected by config `spawn.mode` (default `god`):
+- **god** — immediate: `POST /api/agents` (exists) spawns now; emits `agent_spawned{method:"god"}`. A
+  God-panel button in the control UI drives it (persona + profile picker).
+- **governance** — `POST /api/agents` with the flag enqueues an `admit_agent` proposal; the agent
+  enters only if the vote passes threshold; emits `agent_spawned{method:"governance", proposal_id}`.
+A hot-joined agent enters the round-robin at end of the current round, with empty memory; nearby
+agents get a `perceived`/`agent_spawned` so they notice the newcomer.
+
+### world_state additions
+`world.to_snapshot()` and the WS `world_state` message gain `buildings: [Building]` (and, in W8,
+`animals: [Animal]`). The 3D village renders each Building by `status`: `planned` (stake/outline),
+`under_construction` (scaffolding + progress), `operational` (finished, tinted by kind),
+`damaged` (scorched), `destroyed` (rubble). Frontend reads `buildings` from `world_state`.
+
+### Decision caching (EM-068) — see providers.md
+Router-level cache keyed on `hash(messages + profile)`; a hit returns the prior text and sets
+`llm_call.cached=true` (no network). Config `cache.enabled` (default true), small LRU. Saves
+repeated identical-context turns (free-scale). Never caches across different world state (the
+messages embed the world state, so identical-key ⇒ identical situation).
