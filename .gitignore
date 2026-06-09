@@ -44,3 +44,4 @@ coverage/
 .pytest_cache/
 htmlcov/
 .playwright-mcp/
+.playwright/
