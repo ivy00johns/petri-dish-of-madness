@@ -19,6 +19,17 @@ world:
   memory_window: 12
   attack_energy_cost: 6
 
+  # W10 / EM-085 — persist runs by default so run history + replay survive
+  # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
+  # Path rule: a RELATIVE path resolves against the repo root (the parent of
+  # this config/ directory), no matter where the backend was launched from —
+  # so this lands at <repo>/data/run.sqlite. Each restart/reset starts a NEW
+  # run row; prior runs stay on disk. Delete the file (and its -wal/-shm
+  # sidecars) to start fresh. Set ':memory:' for an ephemeral run, or export
+  # EM_DB_PATH to override without editing this file (the test suite pins
+  # EM_DB_PATH=':memory:' so pytest never touches your run history).
+  db_path: ${EM_DB_PATH:-data/run.sqlite}
+
   # W9 / EM-070 — survival pressure. When an agent's energy drops below this
   # threshold it is "starving": a one-shot `agent_starving` warning is emitted
   # (and once per turn while energy is 0, with a turns-until-death countdown),
@@ -73,7 +84,7 @@ world:
   animals:
     enabled: true
     act_every_n_ticks: 3      # an animal gets a turn every Nth tick (slower than agents)
-    llm_chance: 0.25          # P(LLM decision) on an acted tick; else a reflex micro-behavior
+    llm_chance: 0.6           # P(LLM decision) on an acted tick; else a reflex micro-behavior
     model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.

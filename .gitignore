@@ -38,6 +38,11 @@ Thumbs.db
 # (docker-compose.yml and Dockerfiles ARE committed; data volumes are not)
 docker/data/
 
+# ── Run history (W10 / EM-085) ───────────────────────────────────────────────
+# Persistent run DB (config world.db_path -> data/run.sqlite) including the
+# -wal/-shm sidecars, which the *.sqlite pattern alone would not match.
+/data/
+
 # ── Misc ─────────────────────────────────────────────────────────────────────
 *.log
 coverage/
