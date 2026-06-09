@@ -108,6 +108,9 @@ class TickLoop:
         # each consumed step resolves the oldest waiter with the post-turn tick, so
         # the API can return only once the turn has actually advanced.
         self._step_waiters: list[asyncio.Future] = []
+        # W8 — the in-flight animal cadence turn, run OFF the agent's critical
+        # path so a slow/unreachable animal LLM call never stalls a tick.
+        self._animal_task: asyncio.Task | None = None
 
         # sequence counter for WS messages
         self._seq: int = 0
@@ -199,6 +202,10 @@ class TickLoop:
             fut = self._step_waiters.pop(0)
             if not fut.done():
                 fut.set_result(self._world.tick)
+        # Drop any in-flight animal turn (it references the old world).
+        if self._animal_task is not None and not self._animal_task.done():
+            self._animal_task.cancel()
+        self._animal_task = None
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -373,10 +380,11 @@ class TickLoop:
         self._advance_round_buildings()
 
         # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
-        # each living animal takes ONE animal turn (mostly zero-LLM reflex). These
-        # are emitted as standalone animal events (no turn_id), separate from the
-        # agent round-robin, before this turn's decision-trace chain.
-        await self._act_animals()
+        # each living animal takes ONE animal turn (mostly zero-LLM reflex). It is
+        # SCHEDULED as a background task (not awaited) so a slow/unreachable animal
+        # LLM call never blocks this agent turn. Its events land asynchronously,
+        # stamped with the tick they actually resolve on.
+        self._maybe_schedule_animals()
 
         try:
             # 1. turn_start (now persisted + carries turn_id)
@@ -526,14 +534,14 @@ class TickLoop:
         if spawned_any:
             self._broadcast_world_state()
 
-    async def _act_animals(self) -> None:
-        """Slow-cadence animal scheduling (separate from the agent round-robin).
-        Every world.params.animals.act_every_n_ticks ticks, each LIVING animal takes
-        ONE animal turn via AnimalRuntime.act; its event(s) are emitted through the
-        existing _emit_event path (already stamped actor_type 'animal' + is_chaotic)
-        and pushed to agent memories so nearby agents witness the chaos. Runs at
-        most once per tick (idempotent via _last_animal_tick). NEVER crashes the
-        loop — a per-animal failure is logged and skipped."""
+    def _maybe_schedule_animals(self) -> None:
+        """Schedule the slow-cadence animal turn OFF the agent's critical path.
+
+        Every world.params.animals.act_every_n_ticks ticks (idempotent per tick),
+        fire a background task so an animal's LLM call never blocks the agent
+        turn. If a previous animal batch is still in flight we SKIP this cadence —
+        best-effort chaos: we don't queue animal turns up behind a slow provider.
+        NEVER raises (callable from the hot path)."""
         cfg = self._animals_cfg()
         if cfg is None or not getattr(cfg, "enabled", False):
             return
@@ -543,13 +551,22 @@ class TickLoop:
         every = max(1, int(getattr(cfg, "act_every_n_ticks", 3)))
         if tick % every != 0:
             return
+        if self._animal_task is not None and not self._animal_task.done():
+            return  # don't pile up behind an in-flight (possibly slow) animal turn
         self._last_animal_tick = tick
+        self._animal_task = asyncio.create_task(self._run_animal_turns(tick))
 
+    async def _run_animal_turns(self, tick: int) -> None:
+        """Body of an animal cadence turn (runs as a background task). Each LIVING
+        animal takes ONE turn via AnimalRuntime.act; its event(s) are emitted
+        through the existing _emit_event path (already stamped actor_type 'animal'
+        + is_chaotic) and pushed to agent memories so nearby agents witness the
+        chaos. NEVER crashes the loop — a per-animal failure is logged and skipped."""
         animals = self._world.living_animals()
         if not animals:
             return
         acted = False
-        # Stable order so replay is reproducible.
+        # Stable order so replay is reproducible within a batch.
         for animal in sorted(animals, key=lambda a: a.id):
             try:
                 events = await self._animal_runtime.act(animal, self._world, tick)

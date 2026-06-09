@@ -71,7 +71,27 @@ def _profiles():
     ]
 
 
-def _build(params, animal_response=None, agent_profile="mock"):
+class GatedAnimalMock:
+    """Animal provider whose chat() blocks on an asyncio.Event until released —
+    lets a test prove the agent turn does NOT wait for the animal's LLM call."""
+    name = "gemini-flash"
+    color = "#3498db"
+    last_routed_via = "gemini-flash"
+    last_usage = {"input_tokens": 5, "output_tokens": 3, "latency_ms": 1.0,
+                  "finish_reason": "stop", "cached": False}
+
+    def __init__(self, gate, response):
+        self._gate = gate
+        self._response = response
+        self.calls = 0
+
+    async def chat(self, messages, *, max_tokens, temperature):
+        self.calls += 1
+        await self._gate.wait()
+        return self._response
+
+
+def _build(params, animal_response=None, agent_profile="mock", animal_provider=None):
     agents = [
         AgentState(id="agent_ada", name="Ada", personality="", profile=agent_profile,
                    location="plaza", energy=100.0, credits=10),
@@ -81,7 +101,10 @@ def _build(params, animal_response=None, agent_profile="mock"):
     world = World(params=params, places=_places(), agents=agents)
     overrides = {}
     counting = None
-    if animal_response is not None:
+    if animal_provider is not None:
+        overrides["gemini-flash"] = animal_provider
+        counting = animal_provider
+    elif animal_response is not None:
         counting = CountingMock(animal_response)
         overrides["gemini-flash"] = counting
     router = Router(_profiles(), adapter_overrides=overrides or None, cache_enabled=False)
@@ -111,6 +134,10 @@ async def _drive(loop, world, n):
     for _ in range(n):
         agent = world.next_agent()
         await loop._execute_turn(agent)
+    # Animal turns are scheduled off the agent's critical path (non-blocking);
+    # drain the in-flight batch so assertions observe its events deterministically.
+    if loop._animal_task is not None:
+        await loop._animal_task
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -227,6 +254,38 @@ def test_animal_steal_food_moves_no_credits():
 # ──────────────────────────────────────────────────────────────────────────────
 # (free-scale) An unavailable model_profile degrades to reflex-only, zero calls
 # ──────────────────────────────────────────────────────────────────────────────
+
+def test_animal_turn_does_not_block_agent_turn():
+    """An animal's LLM turn runs OFF the agent's critical path: the agent turn
+    returns even while the animal's (gated) LLM call is still pending, and the
+    animal_action lands only after the scheduled task is awaited."""
+    import asyncio as _asyncio
+
+    gate = _asyncio.Event()
+    resp = json.dumps({"animal_thought": "nap", "action": "nap", "args": {}})
+    p = _animal_params(act_every_n_ticks=1, llm_chance=1.0)
+    world, router, loop, repo, gated, events = _build(
+        p, animal_provider=GatedAnimalMock(gate, resp))
+    cfg = WorldConfig(world=p, places=[], agents=[], animals=[AnimalSeed("cat", "Mochi", "plaza")])
+    loop.init_run(cfg)
+    events.clear()
+
+    async def _run():
+        agent = world.next_agent()
+        # Must return promptly though the animal LLM call is gated shut. With a
+        # blocking (awaited-inline) animal turn this times out instead.
+        await _asyncio.wait_for(loop._execute_turn(agent), timeout=2.0)
+        assert loop._animal_task is not None and not loop._animal_task.done()
+        assert not [e for e in events if e.get("kind") == "animal_action"], \
+            "animal turn must not have resolved while still gated"
+        # Release the animal and let its scheduled turn finish.
+        gate.set()
+        await loop._animal_task
+
+    asyncio.run(_run())
+    assert [e for e in events if e.get("kind") == "animal_action"], \
+        "animal_action should land once the gated turn is released"
+
 
 def test_unavailable_profile_falls_back_to_reflex_only():
     p = _animal_params(act_every_n_ticks=1, llm_chance=1.0, model_profile="nonexistent")
