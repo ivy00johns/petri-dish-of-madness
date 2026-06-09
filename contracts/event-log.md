@@ -1,4 +1,4 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.1.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.2.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
@@ -27,6 +27,25 @@ Lock it before building any instrumentation UI.
 >    `{tick, last_agent_id, auto_paused}` — emitted when the last living human agent
 >    dies; if `world.auto_pause_on_extinction` (default true) the loop pauses after
 >    emitting it.
+
+> **v1.2.0 (W11a, 2026-06-09 — EM-086/094):**
+> 1. **New kind `narrator_summary`** (EM-094 Narrator mode, OFF by default):
+>    `actor_type:"system"`, `actor_id:"narrator"`, `text` = the 2–3 sentence recap,
+>    `payload {from_tick, to_tick, profile, routed_via?}`. Emitted at most once per
+>    `world.narrator.every_n_ticks` (default 50) and ONLY when `world.narrator.enabled`
+>    — it consumes a real LLM call on `world.narrator.model_profile`, so it is
+>    rate-limited and never retried (a failed narrator call emits nothing; the loop
+>    must never stall on it). The always-on "story so far" digest is computed
+>    client-side from existing events and emits NOTHING.
+> 2. **Animal movement carries `payload.place`** (EM-086 note 3): `animal_action` rows
+>    whose action moves the animal MUST include the destination `payload.place`, making
+>    animal replay exact instead of `~`-approximate. Additive; consumers keep their
+>    fallback for old rows.
+> 3. **Run-scoped reads are first-class** (EM-086): every §7 read method already takes
+>    `run_id`; the REST layer now exposes it (api.openapi.yaml v1.3.0 `/api/runs` +
+>    optional `run_id` query param). Active run = `MAX(id)`, never the `status` column.
+>    Past-run geometry comes from that run's earliest snapshot `state_json`, not the
+>    live-owned `places` table.
 
 This contract is the READ + WRITE spec for the simulation's source of truth. It does
 **not** introduce a new table — it formalizes the existing `events` table

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.2.0
+  version: 1.3.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -10,6 +10,13 @@ info:
     snapshots, replay, and analytics (9-AWI + model-vs-model). These serve deep/full-history
     replay in live mode; the /inspector panels also compute from the client-side rolling
     history so they render in mock mode with no backend.
+    v1.3.0 (W11a, EM-086) adds GET /api/runs and an OPTIONAL `run_id` query param on every
+    read endpoint (events, turns, rules/history, relationships, snapshots, replay,
+    analytics). Omitted run_id = the active run (unchanged behavior). Unknown run_id = 404.
+    "Active" is determined by MAX(id), NEVER by the `status` column — crashes/hot-reloads
+    leave dead runs `running` forever (EM-086 note 1). For PAST runs, place/world geometry
+    comes from that run's earliest snapshot `state_json`, not the `places` table (which the
+    live run re-owns via INSERT OR REPLACE — EM-086 note 2).
 servers:
   - url: http://localhost:8000
 paths:
@@ -77,11 +84,29 @@ paths:
       summary: Inject a random world event (chaos knob)
       requestBody: { content: { application/json: { schema: { type: object, properties: { kind: { type: string, enum: [windfall, famine, blackout, festival], description: "optional; random if omitted" } } } } } }
       responses: { "200": { description: ok } }
-  # --- W6 read-only event-log endpoints (event-log.md §7). Run-scoped to the active run. ---
+  # --- W6 read-only event-log endpoints (event-log.md §7). Default-scoped to the active
+  # run; v1.3.0 (W11a, EM-086): every endpoint below also accepts optional `run_id`. ---
+  /api/runs:
+    get:
+      summary: List all persisted runs, newest first (W11a EM-086 — the run browser)
+      description: >
+        `is_active` is true ONLY for MAX(id) while the loop holds it; `status` is reported
+        as stored but is unreliable for liveness (see info.description). `max_tick` and
+        `event_count` come from the events table; `config_summary` is a small projection of
+        runs.config_json (agent names/profiles, seed) — never the full config blob.
+      responses:
+        "200":
+          description: runs, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RunRow' }
   /api/events:
     get:
       summary: Query the append-only event log
       parameters:
+        - { name: run_id, in: query, schema: { type: integer }, description: "scope to a past run (default: active run); 404 if unknown" }
         - { name: from_tick, in: query, schema: { type: integer } }
         - { name: to_tick, in: query, schema: { type: integer } }
         - { name: kinds, in: query, schema: { type: string }, description: "comma-separated kinds" }
@@ -94,16 +119,20 @@ paths:
   /api/turns/{turn_id}:
     get:
       summary: The full ordered decision-trace chain for one turn (EM-056)
-      parameters: [ { name: turn_id, in: path, required: true, schema: { type: string } } ]
+      parameters:
+        - { name: turn_id, in: path, required: true, schema: { type: string } }
+        - { name: run_id, in: query, schema: { type: integer } }
       responses: { "200": { description: chain, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } }
   /api/rules/history:
     get:
       summary: Governance/laws history — proposal lifecycle + downstream consequences (EM-057)
+      parameters: [ { name: run_id, in: query, schema: { type: integer } } ]
       responses: { "200": { description: rules, content: { application/json: { schema: { type: array, items: { type: object } } } } } }
   /api/relationships:
     get:
       summary: Relationship/conflict/gift events for the social graph, time-scrubbable (EM-058)
       parameters:
+        - { name: run_id, in: query, schema: { type: integer } }
         - { name: agent_id, in: query, schema: { type: string } }
         - { name: from_tick, in: query, schema: { type: integer } }
         - { name: to_tick, in: query, schema: { type: integer } }
@@ -111,6 +140,7 @@ paths:
   /api/snapshots:
     get:
       summary: List snapshot ticks (ascending)
+      parameters: [ { name: run_id, in: query, schema: { type: integer } } ]
       responses: { "200": { description: ticks, content: { application/json: { schema: { type: array, items: { type: object, properties: { tick: { type: integer } } } } } } } }
   /api/replay:
     get:
@@ -120,12 +150,15 @@ paths:
         base.tick < event.tick <= T (strict on the left; the snapshot at base.tick
         already includes all tick-base.tick events, per event-log.md v1.1.0 §boundary).
         Clients fold `events` onto `base.state` without further filtering.
-      parameters: [ { name: tick, in: query, required: true, schema: { type: integer } } ]
+      parameters:
+        - { name: tick, in: query, required: true, schema: { type: integer } }
+        - { name: run_id, in: query, schema: { type: integer } }
       responses: { "200": { description: replay, content: { application/json: { schema: { type: object, properties: { base: { type: object, properties: { tick: { type: integer }, state: { type: object } } }, events: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } } } }
   /api/analytics:
     get:
       summary: 9-AWI + model-vs-model analytics (event-log.md §7 get_analytics shape) (EM-059/067)
       parameters:
+        - { name: run_id, in: query, schema: { type: integer } }
         - { name: from_tick, in: query, schema: { type: integer } }
         - { name: to_tick, in: query, schema: { type: integer } }
       responses: { "200": { description: analytics, content: { application/json: { schema: { type: object } } } } }
@@ -135,6 +168,20 @@ paths:
       responses: { "101": { description: switching protocols } }
 components:
   schemas:
+    RunRow:
+      type: object
+      description: One persisted run (W11a EM-086). See info.description for active/places caveats.
+      properties:
+        id: { type: integer }
+        started_at: { type: string }
+        ended_at: { type: string, nullable: true }
+        status: { type: string, description: "as stored; unreliable for liveness — use is_active" }
+        is_active: { type: boolean, description: "true iff this is MAX(id) and the loop holds it" }
+        max_tick: { type: integer, description: "MAX(events.tick) for the run; 0 if no events" }
+        event_count: { type: integer }
+        config_summary:
+          type: object
+          description: "small projection of config_json: {agents: [{name, profile}], seed?}"
     EventRow:
       type: object
       description: One append-only event-log row (event-log.md §2/§7). payload is kind-specific.
