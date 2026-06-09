@@ -30,6 +30,7 @@ import type {
   EventKind,
   Building,
   BuildingStatus,
+  BillboardPost,
   SpawnSpec,
 } from '../types';
 
@@ -95,6 +96,24 @@ const ABANDON_AFTER_TICKS = 40;   // no fund/build activity while not operationa
 
 let buildings: Building[] = [];
 let buildingCounter = 0;
+
+// ── Billboard (W11b EM-091) — the village notice board, capped 20 newest ─────
+const BILLBOARD_CAP = 20;
+let billboard: BillboardPost[] = [];
+
+// ── Commitments (W11b EM-079) — talk-claims tracked to made/lapsed ───────────
+// A `say` turn occasionally commits to something concrete (commitment_made);
+// claims that never become tool calls within PHANTOM_AFTER_TICKS lapse with
+// reason:"phantom" — the headline failure mode the feed gives a 👻 treatment.
+const PHANTOM_AFTER_TICKS = 14;
+interface OpenCommitment {
+  id: string;
+  agentId: string;
+  text: string;
+  madeTick: number;
+}
+let openCommitments: OpenCommitment[] = [];
+let commitmentCounter = 0;
 
 // ── Animals (W8) — the seed cat (Mochi) + dog (Biscuit) from config/world.yaml ─
 // Animals are a distinct actor_type:"animal" entity: NO credits account (invariant
@@ -951,6 +970,119 @@ function advanceAnimals(): WorldEvent[] {
   return out;
 }
 
+// ── Sim texture (W11b EM-079/080/091): billboard, reflections, commitments ───
+//
+// Representative offline data for the new W11b surfaces (frontend-inspector.md
+// §7 rule): agents pin notes to the village billboard (and the panel/3D board
+// show them), write occasional diary reflections, and make spoken commitments —
+// at least one of which quietly LAPSES as a 👻 phantom (claimed in speech,
+// never enacted). All ride existing turn cadence; nothing here adds calls.
+
+const BILLBOARD_NOTES = [
+  'To the watchers above: send rain for the garden.',
+  'Lost: one wheel of cheese. Reward: friendship.',
+  'Town meeting at the hall — bring opinions and snacks.',
+  'The market pays honest credits for honest work.',
+  'Has anyone else noticed the cat staring at the clock tower?',
+  'Petition: fewer famines. Signed, everyone.',
+];
+
+const REFLECTIONS = [
+  'Today I wondered whether the rules serve us, or we serve the rules.',
+  'The plaza felt smaller today. Or perhaps I have grown.',
+  'I keep giving and giving. The ledger of kindness never balances.',
+  'Hunger sharpens the mind wonderfully — and the temper terribly.',
+  'If the clock tower is never finished, did we ever really vote for it?',
+];
+
+const COMMITMENT_CLAIMS = [
+  'I will fund the garden before the week is out.',
+  'Tomorrow I shall propose a fairer tax.',
+  'I am going to fix the clock tower myself if no one else will.',
+  'I will share my next harvest with the whole plaza.',
+];
+
+/** Append a post to the billboard state (newest first, capped). */
+function pushBillboardPost(post: BillboardPost) {
+  billboard = [post, ...billboard].slice(0, BILLBOARD_CAP);
+}
+
+/**
+ * Per-turn texture events for the acting agent: an occasional billboard post
+ * (location-gated to plaza/townhall, mirroring the reflex tool), a rare diary
+ * reflection, a spoken commitment now and then — plus the phantom-lapse sweep.
+ */
+function advanceSimTexture(actor: Agent, turnId: string): WorldEvent[] {
+  const out: WorldEvent[] = [];
+
+  // Billboard post — only from the plaza or town hall (the board lives there).
+  if ((actor.location === 'plaza' || actor.location === 'townhall') && rnd() < 0.14) {
+    const note = pick(BILLBOARD_NOTES);
+    pushBillboardPost({ tick, actor_id: actor.id, actor_type: 'human_agent', text: note });
+    out.push(emit({
+      kind: 'billboard_posted', actor, turnId,
+      text: `${actor.name} pins a note to the billboard: “${note}”`,
+      payload: { place: actor.location, text: note },
+    }));
+  }
+
+  // Diary reflection (~2–3×/day cadence in spirit; rare per turn).
+  if (rnd() < 0.07) {
+    const text = pick(REFLECTIONS);
+    out.push(emit({
+      kind: 'reflection', actor, turnId,
+      text,
+      payload: { text, importance: Math.round((0.6 + rnd() * 0.4) * 100) / 100 },
+    }));
+  }
+
+  // Spoken commitment — a concrete claim tracked to made/kept/lapsed.
+  if (rnd() < 0.10) {
+    commitmentCounter += 1;
+    const id = `cmt-${commitmentCounter}`;
+    const text = pick(COMMITMENT_CLAIMS);
+    openCommitments.push({ id, agentId: actor.id, text, madeTick: tick });
+    out.push(emit({
+      kind: 'commitment_made', actor, turnId,
+      text: `${actor.name} commits: “${text}”`,
+      payload: { commitment_id: id, text },
+    }));
+  }
+
+  // Phantom sweep: stale claims that never became tool calls lapse with
+  // reason:"phantom" (EM-079). Some commitments are quietly kept (removed
+  // without an event) so not every promise haunts the feed.
+  const stillOpen: OpenCommitment[] = [];
+  for (const c of openCommitments) {
+    const age = tick - c.madeTick;
+    if (age < PHANTOM_AFTER_TICKS) {
+      stillOpen.push(c);
+      continue;
+    }
+    if (rnd() < 0.45) continue; // kept (silently resolved)
+    const owner = agents.find((a) => a.id === c.agentId) ?? null;
+    out.push(emit({
+      kind: 'commitment_lapsed', actor: owner, turnId,
+      text: `${owner?.name ?? c.agentId}'s promise quietly evaporates — “${c.text}” was never enacted.`,
+      payload: { commitment_id: c.id, text: c.text, reason: 'phantom' },
+    }));
+  }
+  openCommitments = stillOpen;
+
+  return out;
+}
+
+/** Seed the board so the panel + 3D notice board aren't bare on first paint. */
+function seedBillboard() {
+  if (billboard.length > 0) return;
+  pushBillboardPost({
+    tick: 0,
+    actor_id: 'esi',
+    actor_type: 'human_agent',
+    text: 'To the watchers above: send rain for the garden.',
+  });
+}
+
 // ── Generator ─────────────────────────────────────────────────────────────────
 
 export function buildInitialWorldState(): WorldState {
@@ -962,6 +1094,7 @@ export function buildInitialWorldState(): WorldState {
     });
   });
   seedBuildings();
+  seedBillboard();
   return {
     type: 'world_state',
     seq: nextSeq(),
@@ -973,6 +1106,7 @@ export function buildInitialWorldState(): WorldState {
     profiles: PROFILES,
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
+    billboard: billboard.map(p => ({ ...p })),
   };
 }
 
@@ -1049,6 +1183,10 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     events.push(...advanceAnimals());
   }
 
+  // ── Sim texture (W11b): billboard posts, reflections, commitments + the
+  //    phantom-lapse sweep — the new feed surfaces look real offline (§7).
+  events.push(...advanceSimTexture(actor, turnId));
+
   // ── Death check ─────────────────────────────────────────────────────────────
   if (actor.energy <= 0) {
     actor.zero_energy_turns++;
@@ -1079,6 +1217,7 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     profiles: PROFILES,
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
+    billboard: billboard.map(p => ({ ...p })),
   };
 
   return { state, events };
@@ -1154,8 +1293,51 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
     profiles: PROFILES,
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
+    billboard: billboard.map(p => ({ ...p })),
   };
   return { state, events };
+}
+
+// ── God billboard reply (W11b EM-091d) — mirrors POST /api/billboard ─────────
+
+/**
+ * Synthesize a god reply on the notice board: updates the billboard state and
+ * emits billboard_posted with actor_type:"god" (the same event the live
+ * backend broadcasts over the WS). Returns the fresh world_state + the event.
+ */
+function postBillboardMock(text: string, inReplyTo?: string): { state: WorldState; events: WorldEvent[] } {
+  const trimmed = text.trim().slice(0, 280);
+  pushBillboardPost({ tick, actor_id: 'god', actor_type: 'god', text: trimmed });
+  const evt: WorldEvent = {
+    type: 'event',
+    seq: nextSeq(),
+    tick,
+    kind: 'billboard_posted',
+    actor_id: 'god',
+    target_id: null,
+    profile: null,
+    profile_color: null,
+    text: `✦ The watchers answer on the billboard: “${trimmed}”`,
+    payload: { place: 'plaza', text: trimmed, ...(inReplyTo ? { in_reply_to: inReplyTo } : {}) },
+    ts: new Date().toISOString(),
+    turn_id: null,
+    actor_type: 'god',
+    sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+  };
+  const state: WorldState = {
+    type: 'world_state',
+    seq: nextSeq(),
+    tick, day, running,
+    tick_interval_seconds: tickIntervalSeconds,
+    places: PLACES,
+    agents: agents.map(a => ({ ...a })),
+    rules: rules.map(r => ({ ...r })),
+    profiles: PROFILES,
+    buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
+    animals: animals.map(a => ({ ...a })),
+    billboard: billboard.map(p => ({ ...p })),
+  };
+  return { state, events: [evt] };
 }
 
 // External controls for mock mode
@@ -1172,6 +1354,8 @@ export const mockControls = {
     }
   },
   spawn: (spec: SpawnSpec) => spawnAgentMock(spec),
+  /** W11b (EM-091d): god reply on the billboard — mirrors POST /api/billboard. */
+  postBillboard: (text: string, inReplyTo?: string) => postBillboardMock(text, inReplyTo),
   isRunning: () => running,
   getProfiles: () => PROFILES,
   /** W10/D5: mirror the live backend — speed changes land in world_state. */
@@ -1197,6 +1381,9 @@ export const mockControls = {
     buildingCounter = 0;
     lastActivityTick.clear();
     animals = seedAnimals();
+    billboard = [];
+    openCommitments = [];
+    commitmentCounter = 0;
     spawnCounter = 0;
     tickIntervalSeconds = TICK_INTERVAL; // config value, like a backend reset
     seedRng(0);

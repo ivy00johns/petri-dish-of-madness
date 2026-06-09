@@ -315,7 +315,9 @@ export function InspectorLayout({
     archived && !replayFetching && !archive.loading && replaySnapshots.length === 0;
 
   return (
-    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
+    // EM-082 a11y: the annex is the route's main landmark (the live route's
+    // <main> is the world view inside LiveLayout).
+    <main className="flex flex-col h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
       {/* Annex header */}
       <div className="lab-header flex items-center justify-between gap-2 shrink-0">
         <span>INSPECTOR · ANALYSIS ANNEX</span>
@@ -470,7 +472,7 @@ export function InspectorLayout({
           Pick a past run in the Run Browser to replay it in archive mode.
         </p>
       </div>
-    </div>
+    </main>
   );
 }
 

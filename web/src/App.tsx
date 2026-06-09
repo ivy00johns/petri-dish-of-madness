@@ -24,11 +24,14 @@ import type { RoutingHealth } from './hooks/useRoutingHealth';
 import type { FocusTarget } from './types';
 import { Header } from './components/Header';
 import { RoutingDegradedBanner } from './components/RoutingDegradedBanner';
+import { UsageAlertBanner } from './components/UsageAlertBanner';
 import { ExtinctionBanner } from './components/ExtinctionBanner';
+import { MinWidthGate, useViewportWide } from './components/MinWidthGate';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
 import { StorySoFar } from './components/feed/StorySoFar';
+import { BillboardPanel } from './components/feed/BillboardPanel';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
@@ -65,6 +68,14 @@ export default function App() {
   // EM-072: detect a silently-collapsed model A/B from live data (assigned
   // profiles vs the routed_via models actually answering).
   const routingHealth = useRoutingHealth(world, sim.history);
+  // EM-082: below 1024px both routes render the labeled full-screen gate
+  // instead of a broken layout. The simulation hook stays mounted, so the
+  // run keeps streaming and nothing is lost while the user resizes.
+  const wide = useViewportWide();
+
+  if (!wide) {
+    return <MinWidthGate />;
+  }
 
   return (
     <div className="flex flex-col h-screen bg-lab-bg text-lab-text overflow-hidden">
@@ -76,6 +87,10 @@ export default function App() {
         connected={connected}
         mockMode={mockMode}
       />
+
+      {/* EM-083: usage alerts surface on BOTH routes (amber, dismissible,
+          re-armed by each new window's event). */}
+      <UsageAlertBanner history={sim.history} />
 
       {/* ── Routed body ─────────────────────────────────────────── */}
       <Routes>
@@ -209,6 +224,9 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
           aria-label="Story digest and live event feed"
         >
           <StorySoFar world={world} history={sim.history} />
+          {/* W11b (EM-091c): the notice-board panel rides under the digest —
+              collapsible so the feed keeps its vertical budget. */}
+          <BillboardPanel world={world} history={sim.history} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             <EventFeed events={events} />
           </div>
@@ -342,6 +360,8 @@ function LiveLayout({ sim, routingHealth }: { sim: Sim; routingHealth: RoutingHe
             onReassign={sim.reassignModel}
             onInject={sim.injectEvent}
             onSpawn={sim.spawnAgent}
+            onBillboardReply={sim.postBillboard}
+            mockMode={sim.mockMode}
             profiles={sim.getProfiles()}
           />
 

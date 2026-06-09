@@ -33,6 +33,7 @@ import { Ground } from './Ground';
 import { Scenery } from './Scenery';
 import { Building } from './Building';
 import { Structure } from './Structure';
+import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
@@ -98,6 +99,19 @@ interface FocusPoint {
 type CamMode = 'free' | 'follow' | 'transit' | 'reset';
 
 /**
+ * EM-082 a11y: respect prefers-reduced-motion in the 3D view — the idle
+ * auto-rotate drift is a pure nicety and is disabled for motion-sensitive
+ * users (programmed follow/zoom still work; they're user-initiated).
+ */
+function prefersReducedMotion(): boolean {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * CameraDirector — owns the OrbitControls and the programmed camera motion
  * (EM-095). It mutates `controls.target` (and translates the camera by the
  * same delta, so the framing is preserved) toward the resolved focus point
@@ -120,6 +134,8 @@ function CameraDirector({
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const modeRef = useRef<CamMode>('free');
   const focusRef = useRef<FocusTarget | null>(focus);
+  // EM-082: the idle auto-rotate is a motion nicety — off under reduced motion.
+  const reducedMotionRef = useRef(prefersReducedMotion());
 
   // Focus changes select the programmed mode.
   useEffect(() => {
@@ -164,8 +180,9 @@ function CameraDirector({
     const cam = state.camera;
     const mode = modeRef.current;
 
-    // The idle auto-rotate drift pauses while a programmed motion runs.
-    controls.autoRotate = mode === 'free';
+    // The idle auto-rotate drift pauses while a programmed motion runs — and
+    // stays OFF entirely under prefers-reduced-motion (EM-082).
+    controls.autoRotate = mode === 'free' && !reducedMotionRef.current;
 
     // Frame-rate-aware smoothing factor (≈ settles in well under a second).
     const k = 1 - Math.pow(0.002, delta);
@@ -233,7 +250,7 @@ function CameraDirector({
       // plane (not screen space), bounded by the per-frame target clamp above.
       enablePan
       screenSpacePanning={false}
-      autoRotate
+      autoRotate={!reducedMotionRef.current}
       autoRotateSpeed={0.4}
       enableDamping
       dampingFactor={0.08}
@@ -382,6 +399,32 @@ export function CozyWorld({
     [buildingSpots],
   );
 
+  // W11b (EM-091a): the notice board sits at a stable satellite spot near the
+  // plaza (id 'plaza', falling back to the first social place). No plaza in
+  // this world → no board (graceful: procgen towns always have a social hub).
+  const noticeSpot = useMemo(() => {
+    const plaza =
+      (places ?? []).find((p) => p.id === 'plaza') ??
+      (places ?? []).find((p) => p.kind === 'social');
+    if (!plaza) return null;
+    const c = placeToWorld(plaza);
+    return { plazaId: plaza.id, ...buildingSpot(c, 'notice-board', 4.2) };
+  }, [places]);
+
+  // The newest billboard post for the board's in-canvas label (author resolved
+  // from the live roster; god replies flagged so the label takes the god ink).
+  const newestPost = useMemo<NoticeBoardPost | null>(() => {
+    const posts = world?.billboard ?? [];
+    if (posts.length === 0) return null;
+    let top = posts[0];
+    for (const p of posts) if (p.tick > top.tick) top = p;
+    const god = top.actor_type === 'god';
+    const author = god
+      ? 'the watchers'
+      : world?.agents.find((a) => a.id === top.actor_id)?.name ?? top.actor_id;
+    return { text: top.text, author, god };
+  }, [world]);
+
   // EM-095: where is the focus target RIGHT NOW. Agents/animals read the live
   // animated positions (the same refs the renderer lerps), so a follow tracks
   // the walking villager, not its last place center. 'place' ids may be a
@@ -431,6 +474,8 @@ export function CozyWorld({
           critterMap={critterMap}
           placeCenters={placeCenters}
           buildingSpots={buildingSpots}
+          noticeSpot={noticeSpot}
+          newestPost={newestPost}
           focus={focus}
           onPick={onPick}
         />
@@ -463,6 +508,8 @@ function Scene({
   critterMap,
   placeCenters,
   buildingSpots,
+  noticeSpot,
+  newestPost,
   focus,
   onPick,
 }: {
@@ -475,6 +522,10 @@ function Scene({
   critterMap: React.MutableRefObject<Map<string, CritterPos>>;
   placeCenters: Map<string, { x: number; z: number }>;
   buildingSpots: Array<{ building: NonNullable<WorldState['buildings']>[number]; x: number; z: number }>;
+  /** W11b (EM-091a): where the notice board stands (null = no plaza). */
+  noticeSpot: { plazaId: string; x: number; z: number } | null;
+  /** Newest billboard post for the board's label (null = bare board). */
+  newestPost: NoticeBoardPost | null;
   focus: FocusTarget | null;
   onPick?: (target: FocusTarget) => void;
 }) {
@@ -550,6 +601,17 @@ function Scene({
           onPick={onPick ? (id) => onPick({ type: 'place', id }) : undefined}
         />
       ))}
+
+      {/* W11b (EM-091a): the village notice board at the plaza — its label
+          shows the newest post (proximity-gated like every other label). */}
+      {noticeSpot && (
+        <NoticeBoard
+          x={noticeSpot.x}
+          z={noticeSpot.z}
+          newest={newestPost}
+          onPick={onPick ? () => onPick({ type: 'place', id: noticeSpot.plazaId }) : undefined}
+        />
+      )}
 
       {/* W7: living structures/projects, rendered by status near their place. */}
       {buildingSpots.map(({ building, x, z }) => (

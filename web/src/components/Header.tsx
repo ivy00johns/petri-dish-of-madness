@@ -26,16 +26,12 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
 
   return (
     <header className="flex items-center justify-between px-4 py-2 border-b border-lab-border bg-lab-surface shrink-0">
-      {/* Title */}
+      {/* Title — the page's single h1 (EM-082 heading hierarchy). */}
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-1">
-          <span className="font-mono text-sm font-bold tracking-widest text-lab-acid uppercase">
-            PETRI DISH
-          </span>
-          <span className="font-mono text-sm font-bold tracking-widest text-lab-text uppercase">
-            OF MADNESS
-          </span>
-        </div>
+        <h1 className="m-0 flex items-center gap-1 font-mono text-sm font-bold tracking-widest uppercase">
+          <span className="text-lab-acid">PETRI DISH</span>
+          <span className="text-lab-text">OF MADNESS</span>
+        </h1>
         <span className="font-mono text-[10px] text-lab-dim border border-lab-border px-1 py-px hidden sm:inline">
           CHAOS LAB v1
         </span>

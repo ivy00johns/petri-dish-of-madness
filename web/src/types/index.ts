@@ -118,6 +118,32 @@ export interface ModelProfile {
 }
 
 // ============================================================
+// Billboard (W11b EM-091) — the village notice board. The engine exposes
+// `world.billboard` (capped at the 20 newest posts) in to_snapshot/world_state;
+// god replies arrive with actor_type:"god". Optional so a pre-W11b backend
+// (or an old snapshot) stays valid.
+// ============================================================
+
+export interface BillboardPost {
+  tick: number;
+  actor_id: string;
+  actor_type: ActorType | string;
+  text: string;
+}
+
+// ============================================================
+// Persona library (W11b EM-092) — GET /api/personas card shape
+// (api.openapi.yaml v1.4.0). Picking one prefills the spawn form.
+// ============================================================
+
+export interface Persona {
+  name: string;
+  archetype: string;
+  personality: string;
+  suggested_profile: string;
+}
+
+// ============================================================
 // WebSocket message types — match contracts/events.schema.json
 // ============================================================
 
@@ -138,6 +164,9 @@ export interface WorldState {
   // W8: the roaming chaos critters (cat + dog). Optional so a pre-W8 backend (or
   // a snapshot predating animals) stays valid; the 3D village renders each one.
   animals?: Animal[];
+  // W11b (EM-091): the notice-board posts, newest capped at 20. Optional so a
+  // pre-W11b backend stays valid; the panel/3D board derive from history then.
+  billboard?: BillboardPost[];
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -173,6 +202,18 @@ export type EventKind =
   | 'animal_spawned'
   | 'animal_action'
   | 'animal_died'
+  // W11b (event-log.md v1.3.0 note 1) — sim-texture kinds, all free-scale:
+  // billboard_posted {place, text, in_reply_to?} (god replies actor_type:"god"),
+  // reflection {text, importance} (diary), commitment_made {commitment_id, text},
+  // commitment_lapsed {commitment_id, text, reason:"phantom"|"expired"},
+  // usage_alert {provider, metric:"rpd"|"tpd", pct, limit}, plus the EM-101
+  // run-fork lineage event.
+  | 'billboard_posted'
+  | 'reflection'
+  | 'commitment_made'
+  | 'commitment_lapsed'
+  | 'usage_alert'
+  | 'run_forked'
   // W11a (EM-094, event-log.md v1.2.0 note 1) — the optional LLM narrator's
   // periodic recap: actor_type:"system", actor_id:"narrator", text = the 2–3
   // sentence recap, payload {from_tick, to_tick, profile, routed_via?}. Only
@@ -231,6 +272,12 @@ export interface SpawnSpec {
   profile: string;
   location: string;
   mode: SpawnMode;
+  /**
+   * W11b (EM-092): the persona-library card this spawn came from. Sent ONLY
+   * while the prefilled fields are untouched (the backend prefills server-side;
+   * explicit fields win) — an edited form omits it and sends the fields alone.
+   */
+  persona?: string;
 }
 
 // ============================================================

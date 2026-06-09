@@ -73,7 +73,8 @@ export function StorySoFar({ world, history }: StorySoFarProps) {
       aria-label="Story so far"
     >
       <div className="lab-header flex items-center justify-between gap-2">
-        <span>STORY SO FAR</span>
+        {/* EM-082 a11y: a real heading for the digest section. */}
+        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">STORY SO FAR</h2>
         <button
           type="button"
           onClick={() => setNarratorOn((v) => !v)}

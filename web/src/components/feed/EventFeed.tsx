@@ -55,6 +55,15 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   animal_spawned:   '🐾',
   animal_action:    '🐾',
   animal_died:      '🐾',
+  // W11b sim texture (event-log.md v1.3.0): the notice board, the diary, and
+  // commitments. commitment_lapsed defaults to ⌛ (expired); the FeedEntry
+  // overrides it with the 👻 phantom treatment when reason:"phantom".
+  billboard_posted:  '📌',
+  reflection:        '✎',
+  commitment_made:   '⚑',
+  commitment_lapsed: '⌛',
+  usage_alert:       '⚠',
+  run_forked:        '⑂',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
   // category so these don't flood the live feed.
   perceived:        '◌',
@@ -112,11 +121,17 @@ const CATEGORIES: FeedCategory[] = [
   { key: 'economy', label: 'Economy', icon: '¢', kinds: ['economy'] },
   { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'conflict', 'agent_died', 'agent_spawned', 'agent_starving', 'world_extinct'] },
   { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory'] },
+  // W11b (EM-091): the notice board gets its own chip — also the contract's
+  // suggested feed-filter affordance for billboard traffic.
+  { key: 'board',   label: 'Board',   icon: '📌', kinds: ['billboard_posted'] },
+  // W11b (EM-079/080): the inner-life channel — diary reflections + spoken
+  // commitments (made / kept / 👻 phantom-lapsed).
+  { key: 'diary',   label: 'Diary',   icon: '✎', kinds: ['reflection', 'commitment_made', 'commitment_lapsed'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory', 'run_forked'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
-  { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure'] },
+  { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure', 'usage_alert'] },
   // Decision-trace chain (event-log.md §3). DEFAULT-MUTED: these are the
   // inspector's substrate, not live-feed reading material. Dissect them in the
   // /inspector annex; here they're collapsed so the feed isn't flooded.
@@ -174,18 +189,40 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
   // profile_color, a survival alarm must not blend into the agent's color.
   const starving = event.kind === 'agent_starving';
   const extinct = event.kind === 'world_extinct';
+  // W11b (EM-091): a billboard post by the watchers reads in GOD INK — the
+  // violet register the god panel already owns — never an agent color.
+  const godPost = event.kind === 'billboard_posted' && event.actor_type === 'god';
+  // W11b (EM-080): diary reflections take the muted-italic diary idiom.
+  const reflection = event.kind === 'reflection';
+  // W11b (EM-079): a phantom-lapsed commitment — claimed in speech, never
+  // enacted — gets the 👻 treatment (the headline failure mode).
+  const phantom =
+    event.kind === 'commitment_lapsed' && event.payload?.reason === 'phantom';
+  // W11b (EM-083): usage alerts read in the warn register like other alarms.
+  const usageAlert = event.kind === 'usage_alert';
+  // W11b (EM-087): a renewal of an already-active law (rule_passed carrying
+  // payload.renewed) renders RENEWED, distinct from a fresh PASSED.
+  const renewed = event.kind === 'rule_passed' && event.payload?.renewed === true;
   const color = animal
     ? ANIMAL_MAGENTA
-    : starving
-      ? 'var(--lab-warn)'
-      : extinct
-        ? 'var(--lab-danger)'
-        : event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? 'var(--marker-trace)';
+    : godPost
+      ? 'var(--lab-god)'
+      : starving || usageAlert
+        ? 'var(--lab-warn)'
+        : extinct
+          ? 'var(--lab-danger)'
+          : event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? 'var(--marker-trace)';
   // The hover profile badge alpha-appends hex digits, so it only renders with a
   // hex source (the agent's data-driven profile color / a kind fallback) — the
   // var()-register warning kinds keep the agent's own color on the badge.
   const badgeColor = event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? null;
-  const icon = animal ? '🐾' : KIND_ICON[event.kind] ?? '·';
+  const icon = animal
+    ? '🐾'
+    : phantom
+      ? '👻'
+      : renewed
+        ? '↻'
+        : KIND_ICON[event.kind] ?? '·';
   // Chat-first (contract §9 priority clarification): dialogue is the
   // centerpiece — speech rows read slightly larger with inline speaker/model
   // attribution, so the conversation scans without hovering.
@@ -207,7 +244,7 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
     >
       {/* Icon */}
       <span
-        className="flex-none font-mono text-xs w-4 text-center mt-px shrink-0"
+        className={`flex-none font-mono text-xs w-4 text-center mt-px shrink-0 ${phantom ? 'phantom-drift' : ''}`}
         style={{ color }}
         aria-hidden="true"
       >
@@ -218,12 +255,17 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
       <div className="flex-1 min-w-0">
         <span
           className={`font-mono leading-relaxed break-words ${speech ? 'text-[13px]' : 'text-xs'} ${
-            starving
+            starving || usageAlert
               ? 'text-lab-warn font-semibold'
               : extinct
                 ? 'text-lab-danger font-bold uppercase tracking-wide'
-                : 'text-lab-text'
+                : reflection || phantom
+                  ? 'text-lab-muted italic'
+                  : godPost
+                    ? 'font-semibold'
+                    : 'text-lab-text'
           }`}
+          style={godPost ? { color: 'var(--lab-god-bright)' } : undefined}
         >
           {event.text ?? `[${event.kind}]`}
         </span>
@@ -237,6 +279,39 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
             title={`spoken by a ${event.profile} villager`}
           >
             {event.profile}
+          </span>
+        )}
+
+        {/* W11b (EM-091): the watchers' replies carry the GOD ink chip. */}
+        {godPost && (
+          <span
+            className="ml-1.5 font-mono text-[9px] font-bold px-1 py-px border rounded-sm align-middle whitespace-nowrap uppercase tracking-wider"
+            style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+            title="Posted by the watchers (god mode) — agents will see it on the notice board"
+          >
+            ✦ god
+          </span>
+        )}
+
+        {/* W11b (EM-079): the phantom-commitment chip — promised aloud, never
+            enacted. A 👻 haunts the line so the failure mode is legible. */}
+        {phantom && (
+          <span
+            className="ml-1.5 font-mono text-[9px] px-1 py-px border border-lab-border-bright text-lab-muted rounded-sm align-middle whitespace-nowrap uppercase tracking-wider"
+            title="Phantom commitment — claimed in speech, but no matching tool call ever happened. All talk."
+          >
+            👻 phantom
+          </span>
+        )}
+
+        {/* W11b (EM-087): renewal of an active law ≠ a fresh enactment. */}
+        {renewed && (
+          <span
+            className="ml-1.5 font-mono text-[9px] font-bold px-1 py-px border rounded-sm align-middle whitespace-nowrap uppercase tracking-wider"
+            style={{ color: 'var(--marker-governance)', borderColor: 'var(--marker-governance)' }}
+            title="Renewed — re-proposing an identical active law extends it; it never stacks."
+          >
+            ↻ renewed
           </span>
         )}
 
@@ -406,7 +481,8 @@ export function EventFeed({ events }: EventFeedProps) {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="lab-header flex items-center justify-between">
-        <span>EVENT STREAM</span>
+        {/* EM-082 a11y: a real heading so the feed lands in the page outline. */}
+        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">EVENT STREAM</h2>
         <div className="flex items-center gap-2">
           <span className="text-lab-muted text-[10px]">
             {events.length === 0
@@ -491,6 +567,7 @@ export function EventFeed({ events }: EventFeedProps) {
         {scrolledAway && (
           <button
             onClick={jumpToNewest}
+            title="Jump back to the newest events (re-pins the feed)"
             className="absolute top-2 left-1/2 -translate-x-1/2 z-10 cursor-pointer
                        font-mono text-[10px] px-2 py-1 rounded-full
                        bg-lab-chrome border border-lab-acid text-lab-acid

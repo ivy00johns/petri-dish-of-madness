@@ -1,10 +1,17 @@
 /**
  * ControlPanel — start/pause/step, speed, inject-event,
  * and the marquee per-agent model reassign feature.
+ *
+ * W11b additions: the spawn form gains the persona-library picker (EM-092),
+ * the god panel gains REPLY ON BILLBOARD (EM-091d, optimistic-free — the post
+ * appears when the WS broadcasts it), and the ACTIVE RULES strip groups
+ * identical-effect laws into one ×N row, expandable to instances (EM-087).
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
-import type { WorldState, ModelProfile, SpawnSpec, SpawnMode } from '../../types';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import type { WorldState, ModelProfile, Rule, SpawnSpec, SpawnMode } from '../../types';
+import { PersonaPicker, usePersonaLibrary } from './PersonaPicker';
+import type { PersonaRow } from '../../inspector/api';
 
 interface ControlPanelProps {
   world: WorldState | null;
@@ -18,6 +25,10 @@ interface ControlPanelProps {
   onInject: (kind?: string) => void;
   /** Ad-hoc spawn (W7 EM-063): god (immediate) or governance (proposal). */
   onSpawn: (spec: SpawnSpec) => void;
+  /** W11b (EM-091d): god reply on the billboard (≤280 chars, no local echo). */
+  onBillboardReply: (text: string) => void;
+  /** W11b (EM-092): mock mode renders the persona picker's no-backend state. */
+  mockMode: boolean;
   profiles: ModelProfile[];
 }
 
@@ -179,10 +190,12 @@ function ReassignRow({
 function SpawnForm({
   world,
   profiles,
+  mockMode,
   onSpawn,
 }: {
   world: WorldState | null;
   profiles: ModelProfile[];
+  mockMode: boolean;
   onSpawn: (spec: SpawnSpec) => void;
 }) {
   const places = world?.places ?? [];
@@ -197,6 +210,31 @@ function SpawnForm({
   const [mode, setMode] = useState<SpawnMode>('god');
   const [justSpawned, setJustSpawned] = useState<string | null>(null);
 
+  // ── W11b (EM-092): persona picker state ─────────────────────────────────
+  // Picking a card prefills name/personality/profile (still editable). The
+  // spawn sends `persona` ONLY while the prefilled fields are untouched —
+  // any edit flips to explicit fields (the backend honors explicit over
+  // persona anyway; we just don't send a stale persona name).
+  const personaState = usePersonaLibrary(mockMode);
+  const [picked, setPicked] = useState<PersonaRow | null>(null);
+  const [editedSincePick, setEditedSincePick] = useState(false);
+
+  const handlePickPersona = useCallback((p: PersonaRow | null) => {
+    setPicked(p);
+    setEditedSincePick(false);
+    if (p) {
+      setName(p.name);
+      setPersonality(p.personality);
+      // Preselect the suggested profile only when this run actually has it.
+      if (p.suggested_profile && profiles.some((m) => m.name === p.suggested_profile)) {
+        setProfile(p.suggested_profile);
+      }
+    }
+  }, [profiles]);
+
+  /** Wraps a prefilled-field setter so edits invalidate the persona send. */
+  const touch = useCallback(() => setEditedSincePick(true), []);
+
   // Keep the dropdowns valid if the world arrives after first render.
   if (!profile && defaultProfile) setProfile(defaultProfile);
   if (!location && defaultLocation) setLocation(defaultLocation);
@@ -206,6 +244,7 @@ function SpawnForm({
   // (no hardcoded hex literal — design-token-guard clean).
   const swatch = selectedProfile?.color ?? null;
   const canSpawn = name.trim().length > 0 && !!profile && !!location;
+  const sendPersona = picked !== null && !editedSincePick;
 
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
@@ -217,17 +256,42 @@ function SpawnForm({
         profile,
         location,
         mode,
+        // EM-092: persona name rides along only while untouched.
+        ...(sendPersona && picked ? { persona: picked.name } : {}),
       });
       setJustSpawned(name.trim());
       setName('');
       setPersonality('');
+      setPicked(null);
+      setEditedSincePick(false);
       window.setTimeout(() => setJustSpawned(null), 2200);
     },
-    [canSpawn, name, personality, profile, location, mode, onSpawn],
+    [canSpawn, name, personality, profile, location, mode, onSpawn, sendPersona, picked],
   );
 
   return (
     <form className="p-2 space-y-2" onSubmit={handleSubmit} aria-label="Spawn a new agent">
+      {/* W11b (EM-092): persona library cards — prefill, stay editable. */}
+      <PersonaPicker
+        state={personaState}
+        selected={picked?.name ?? null}
+        profiles={profiles}
+        onPick={handlePickPersona}
+      />
+      {picked && (
+        <p className="m-0 font-mono text-[9px] leading-snug" role="status">
+          {sendPersona ? (
+            <span className="text-lab-acid">
+              spawning as persona “{picked.name}” — edit any field to go freeform
+            </span>
+          ) : (
+            <span className="text-lab-muted">
+              edited since picking “{picked.name}” — explicit fields will be sent
+            </span>
+          )}
+        </p>
+      )}
+
       {/* Name */}
       <div className="space-y-1">
         <label htmlFor="spawn-name" className="block font-mono text-[10px] text-lab-muted uppercase tracking-wider">
@@ -237,7 +301,7 @@ function SpawnForm({
           id="spawn-name"
           type="text"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => { setName(e.target.value); touch(); }}
           placeholder="e.g. Fenn"
           maxLength={24}
           className="lab-input w-full text-[11px]"
@@ -253,7 +317,7 @@ function SpawnForm({
         <textarea
           id="spawn-personality"
           value={personality}
-          onChange={(e) => setPersonality(e.target.value)}
+          onChange={(e) => { setPersonality(e.target.value); touch(); }}
           placeholder="Short persona (≤280 chars)…"
           maxLength={280}
           rows={2}
@@ -275,7 +339,7 @@ function SpawnForm({
           <select
             id="spawn-profile"
             value={profile}
-            onChange={(e) => setProfile(e.target.value)}
+            onChange={(e) => { setProfile(e.target.value); touch(); }}
             className={`lab-select flex-1 text-[10px] ${swatch ? '' : 'text-lab-text'}`}
             style={swatch ? { color: swatch } : undefined}
           >
@@ -362,6 +426,152 @@ function SpawnForm({
   );
 }
 
+/**
+ * BillboardReply (W11b EM-091d) — "REPLY ON BILLBOARD": the god affordance
+ * that answers agent petitions on the notice board. ≤280 chars; the send is
+ * OPTIMISTIC-FREE by contract — no local echo, the post appears when the
+ * backend broadcasts the billboard_posted (actor_type:"god") WS event.
+ */
+function BillboardReply({ onPost }: { onPost: (text: string) => void }) {
+  const [text, setText] = useState('');
+  const [sent, setSent] = useState(false);
+  const sentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+  }, []);
+
+  const trimmed = text.trim();
+  const canSend = trimmed.length > 0;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSend) return;
+    onPost(trimmed);
+    setText('');
+    setSent(true);
+    if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+    sentTimerRef.current = setTimeout(() => setSent(false), 3000);
+  };
+
+  return (
+    <form className="p-2 space-y-1.5" onSubmit={handleSubmit} aria-label="Reply on the village billboard">
+      <div className="flex items-baseline justify-between">
+        <label
+          htmlFor="billboard-reply"
+          className="font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          📌 Reply on billboard
+        </label>
+        <span className="font-mono text-[9px] text-lab-dim tabular-nums" aria-hidden="true">
+          {text.length}/280
+        </span>
+      </div>
+      <textarea
+        id="billboard-reply"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Answer the village's petitions…"
+        maxLength={280}
+        rows={2}
+        className="lab-input w-full text-[11px] resize-none leading-snug"
+      />
+      <button
+        type="submit"
+        className="lab-btn lab-btn-secondary w-full"
+        disabled={!canSend}
+        aria-label="Post the god reply to the billboard"
+      >
+        ✦ POST TO BOARD
+      </button>
+      {sent ? (
+        <p className="m-0 font-mono text-[9px] text-lab-acid leading-snug" role="status" aria-live="polite">
+          sent — it appears on the board when the world broadcasts it (no local echo).
+        </p>
+      ) : (
+        <p className="m-0 font-mono text-[9px] text-lab-dim leading-snug">
+          Agents read the board at the plaza &amp; town hall; your ink shows as ✦ god.
+        </p>
+      )}
+    </form>
+  );
+}
+
+/**
+ * GroupedActiveRules (W11b EM-087) — the live rules strip. Identical-effect
+ * ACTIVE rules collapse into ONE row with a ×N stack badge; expanding it
+ * lists the instances (tick + proposer). Pairs with the backend's
+ * renewal-not-stacking semantics — and renders historical stacks (the 3×UBI
+ * runs) sanely too.
+ */
+function GroupedActiveRules({ rules, world }: { rules: Rule[]; world: WorldState | null }) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+
+  const nameOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of world?.agents ?? []) m.set(a.id, a.name);
+    return m;
+  }, [world]);
+
+  const groups = useMemo(() => {
+    const byEffect = new Map<string, Rule[]>();
+    for (const r of rules) {
+      const list = byEffect.get(r.effect) ?? [];
+      list.push(r);
+      byEffect.set(r.effect, list);
+    }
+    return [...byEffect.entries()];
+  }, [rules]);
+
+  const toggle = (effect: string) =>
+    setExpanded((cur) => {
+      const next = new Set(cur);
+      if (next.has(effect)) next.delete(effect);
+      else next.add(effect);
+      return next;
+    });
+
+  return (
+    <>
+      {groups.map(([effect, instances]) => {
+        const label = effect.toUpperCase().replace(/_/g, ' ');
+        const stacked = instances.length > 1;
+        const open = expanded.has(effect);
+        return (
+          <div key={effect} className="border-l-2 border-lab-acid pl-2 py-0.5">
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono text-[10px] text-lab-acid">{label}</span>
+              {stacked && (
+                <button
+                  type="button"
+                  onClick={() => toggle(effect)}
+                  aria-expanded={open}
+                  aria-label={`${label}: ${instances.length} identical active rules — ${open ? 'collapse' : 'expand'} the instances`}
+                  title={`${instances.length} identical-effect rules are active (renewals extend, they shouldn't stack) — click for instances`}
+                  className="font-mono text-[9px] font-bold px-1 py-px border border-lab-acid text-lab-acid
+                             bg-lab-acid/10 rounded-sm cursor-pointer hover:bg-lab-acid/20 transition-colors"
+                >
+                  ×{instances.length} {open ? '▾' : '▸'}
+                </button>
+              )}
+            </div>
+            {stacked && open && (
+              <ul className="m-0 mt-0.5 p-0 list-none space-y-0.5">
+                {instances.map((r) => (
+                  <li key={r.id} className="font-mono text-[9px] text-lab-muted leading-snug">
+                    <span className="text-lab-dim">└─</span> T{r.created_tick} ·{' '}
+                    {nameOf.get(r.proposer_id) ?? r.proposer_id}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 export function ControlPanel({
   world,
   onStart,
@@ -372,6 +582,8 @@ export function ControlPanel({
   onReassign,
   onInject,
   onSpawn,
+  onBillboardReply,
+  mockMode,
   profiles,
 }: ControlPanelProps) {
   const [speed, setSpeed] = useState(world?.tick_interval_seconds ?? 2);
@@ -534,10 +746,14 @@ export function ControlPanel({
 
       {/* ── God Panel: spawn a villager (W7 EM-063) ──────────────── */}
       <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god">
-        <span className="text-lab-god-bright">✦ GOD PANEL</span>
-        <span className="font-mono text-[9px] text-lab-muted opacity-70">SPAWN</span>
+        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">✦ GOD PANEL</h2>
+        <span className="font-mono text-[9px] text-lab-muted opacity-70">SPAWN · REPLY</span>
       </div>
-      <SpawnForm world={world} profiles={profiles} onSpawn={onSpawn} />
+      <SpawnForm world={world} profiles={profiles} mockMode={mockMode} onSpawn={onSpawn} />
+
+      {/* ── God Panel: REPLY ON BILLBOARD (W11b EM-091d) ─────────── */}
+      <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
+      <BillboardReply onPost={onBillboardReply} />
 
       {/* ── Status ──────────────────────────────────────────────── */}
       {world && (
@@ -570,19 +786,15 @@ export function ControlPanel({
         </>
       )}
 
-      {/* ── Active Rules ────────────────────────────────────────── */}
+      {/* ── Active Rules — identical-effect laws group into ×N (EM-087) ── */}
       {world && world.rules.length > 0 && (
         <>
           <div className="lab-header mt-0.5">ACTIVE RULES</div>
           <div className="p-2 space-y-1">
-            {world.rules.filter(r => r.status === 'active').map(rule => (
-              <div
-                key={rule.id}
-                className="font-mono text-[10px] text-lab-acid border-l-2 border-lab-acid pl-2 py-0.5"
-              >
-                {rule.effect.toUpperCase().replace('_', ' ')}
-              </div>
-            ))}
+            <GroupedActiveRules
+              rules={world.rules.filter(r => r.status === 'active')}
+              world={world}
+            />
             {world.rules.filter(r => r.status === 'proposed').map(rule => (
               <div
                 key={rule.id}

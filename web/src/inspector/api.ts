@@ -84,9 +84,27 @@ export interface RunRow {
   /** MAX(events.tick) for the run; 0 if no events. */
   max_tick: number;
   event_count: number;
+  /** W11b (EM-101): parent run id when this run was forked; null/absent otherwise.
+   *  Optional so pre-W11b fixtures/backends stay type-valid. */
+  forked_from?: number | null;
+  /** W11b (EM-101): the parent tick the fork branched from; null/absent otherwise. */
+  forked_at_tick?: number | null;
   /** Small projection of runs.config_json: {agents: [{name, profile}], seed?}. */
   config_summary: { agents?: RunConfigAgent[]; seed?: number } & Record<string, unknown>;
 }
+
+/** One persona-library card (api.openapi.yaml v1.4.0 GET /api/personas). */
+export interface PersonaRow {
+  name: string;
+  archetype: string;
+  personality: string;
+  suggested_profile: string;
+}
+
+/** Result of POST /api/runs/fork (EM-101). Failures stay labeled, never thrown. */
+export type ForkResult =
+  | { ok: true; runId: number | null }
+  | { ok: false; status: number | null; message: string };
 
 /** Query params accepted by GET /api/events (api.openapi.yaml v1.3.0). */
 export interface EventsQuery {
@@ -217,6 +235,8 @@ export const inspectorApi = {
         is_active: raw.is_active === true,
         max_tick: typeof raw.max_tick === 'number' ? raw.max_tick : 0,
         event_count: typeof raw.event_count === 'number' ? raw.event_count : 0,
+        forked_from: typeof raw.forked_from === 'number' ? raw.forked_from : null,
+        forked_at_tick: typeof raw.forked_at_tick === 'number' ? raw.forked_at_tick : null,
         config_summary: isObject(raw.config_summary)
           ? (raw.config_summary as RunRow['config_summary'])
           : {},
@@ -295,6 +315,63 @@ export const inspectorApi = {
     })}`;
     const data = await getJson<unknown>(path, {});
     return isObject(data) ? data : {};
+  },
+
+  /**
+   * GET /api/personas — the persona library (W11b EM-092). Returns `null`
+   * when the backend is unreachable / pre-W11b (no endpoint) so the spawn
+   * form can render its labeled "no backend" state instead of conflating
+   * failure with "empty library" (which returns `[]`).
+   */
+  async personas(): Promise<PersonaRow[] | null> {
+    const data = await getJsonOrNull('/api/personas');
+    if (!Array.isArray(data)) return null;
+    const rows: PersonaRow[] = [];
+    for (const raw of data) {
+      if (!isObject(raw) || typeof raw.name !== 'string' || raw.name.length === 0) continue;
+      rows.push({
+        name: raw.name,
+        archetype: typeof raw.archetype === 'string' ? raw.archetype : '',
+        personality: typeof raw.personality === 'string' ? raw.personality : '',
+        suggested_profile: typeof raw.suggested_profile === 'string' ? raw.suggested_profile : '',
+      });
+    }
+    return rows;
+  },
+
+  /**
+   * POST /api/runs/fork {run_id, tick} (W11b EM-101) — fork a past run at
+   * tick T into a NEW paused run. 201 → {ok:true, runId}; 400 (bad tick) /
+   * 404 (unknown run) / network failure → a labeled {ok:false} result so the
+   * Run Browser renders the failure inline, never a throw.
+   */
+  async forkRun(runId: number, tick: number): Promise<ForkResult> {
+    try {
+      const res = await fetch('/api/runs/fork', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ run_id: runId, tick }),
+      });
+      if (!res.ok) {
+        const message =
+          res.status === 404
+            ? `run #${runId} not found on the backend`
+            : res.status === 400
+              ? `tick ${tick} is out of range for run #${runId}`
+              : `fork failed (HTTP ${res.status})`;
+        return { ok: false, status: res.status, message };
+      }
+      let newRunId: number | null = null;
+      try {
+        const body = (await res.json()) as unknown;
+        if (isObject(body) && typeof body.run_id === 'number') newRunId = body.run_id;
+      } catch {
+        // 201 with an unparsable body still forked — refresh will surface it.
+      }
+      return { ok: true, runId: newRunId };
+    } catch {
+      return { ok: false, status: null, message: 'backend unreachable — fork not sent' };
+    }
   },
 
   /**

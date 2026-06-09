@@ -14,6 +14,12 @@
  * to live. A per-run "cmp" toggle picks TWO runs for the cross-run AWI
  * comparison (RunComparison, rendered inline above the list).
  *
+ * W11b (EM-101): archived rows get FORK — an inline tick input (defaulting
+ * to the run's max_tick) that POSTs /api/runs/fork; on 201 the list refreshes
+ * (the new run lands on top, newest-first) and a notice names it. Any run
+ * with `forked_from` wears a lineage chip "↩ #N @ tick T". Failures (404 /
+ * 400 / unreachable) render inline, labeled — never thrown.
+ *
  * §7 empty-state rules: loading, fetch-failure ("no backend — live session
  * only"), and zero-runs states are all labeled — never a blank or a crash.
  * Mock mode short-circuits the fetch entirely. Token-only styling.
@@ -43,6 +49,19 @@ export default function RunBrowser({ mockMode, selectedRunId, onSelectRun }: Run
   const [reloadKey, setReloadKey] = useState(0);
   /** Compare picks, oldest pick first; capped at two. */
   const [compareIds, setCompareIds] = useState<number[]>([]);
+  /** EM-101: "forked run #A @ T → run #B" notice after a successful fork. */
+  const [forkNotice, setForkNotice] = useState<string | null>(null);
+
+  // A successful fork refreshes the list (the new run is MAX(id), so it
+  // surfaces at the top, newest-first) and announces what was created.
+  const handleForked = useCallback((sourceId: number, tick: number, newRunId: number | null) => {
+    setForkNotice(
+      newRunId !== null
+        ? `forked run #${sourceId} @ tick ${tick} → run #${newRunId} created (paused — press play to run it)`
+        : `forked run #${sourceId} @ tick ${tick} — new run created (paused); it tops the refreshed list`,
+    );
+    setReloadKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     if (mockMode) return; // labeled no-backend state below; nothing to fetch
@@ -79,7 +98,7 @@ export default function RunBrowser({ mockMode, selectedRunId, onSelectRun }: Run
   return (
     <section className="lab-panel flex flex-col" aria-label="Run browser (EM-086)">
       <div className="lab-header flex items-center justify-between gap-2">
-        <span>Run Browser</span>
+        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">Run Browser</h2>
         <span className="flex items-center gap-2 font-mono text-[10px] text-lab-dim normal-case tracking-normal">
           <span>EM-086 · archive &amp; compare</span>
           {!mockMode && (
@@ -94,6 +113,27 @@ export default function RunBrowser({ mockMode, selectedRunId, onSelectRun }: Run
           )}
         </span>
       </div>
+
+      {/* EM-101: post-fork notice (dismissible). */}
+      {forkNotice && (
+        <div
+          role="status"
+          className="flex items-center gap-2 px-3 py-1.5 border-b border-lab-acid bg-lab-acid/10"
+        >
+          <span className="font-mono text-[10px] text-lab-acid" aria-hidden="true">⑂</span>
+          <span className="flex-1 min-w-0 font-mono text-[10px] text-lab-acid leading-snug">
+            {forkNotice}
+          </span>
+          <button
+            type="button"
+            onClick={() => setForkNotice(null)}
+            aria-label="Dismiss the fork notice"
+            className="shrink-0 font-mono text-[9px] px-1.5 border border-lab-acid text-lab-acid hover:bg-lab-acid/20"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Cross-run AWI comparison, once two runs are picked. */}
       {compareRuns.length === 2 && (
@@ -138,6 +178,7 @@ export default function RunBrowser({ mockMode, selectedRunId, onSelectRun }: Run
                 else onSelectRun(run);
               }}
               onToggleCompare={() => toggleCompare(run.id)}
+              onForked={handleForked}
             />
           ))}
         </ul>
@@ -154,16 +195,44 @@ function RunListRow({
   comparing,
   onView,
   onToggleCompare,
+  onForked,
 }: {
   run: RunRow;
   viewing: boolean;
   comparing: boolean;
   onView: () => void;
   onToggleCompare: () => void;
+  /** EM-101: a fork of this run succeeded (newRunId null = unparsable 201). */
+  onForked: (sourceId: number, tick: number, newRunId: number | null) => void;
 }) {
   const roster: RunConfigAgent[] = Array.isArray(run.config_summary.agents)
     ? run.config_summary.agents
     : [];
+
+  // ── EM-101 fork affordance (archived rows): inline tick input → POST ──────
+  const [forkOpen, setForkOpen] = useState(false);
+  const [forkTick, setForkTick] = useState(String(run.max_tick));
+  const [forking, setForking] = useState(false);
+  const [forkError, setForkError] = useState<string | null>(null);
+
+  const submitFork = async () => {
+    const tick = Number(forkTick);
+    if (!Number.isInteger(tick) || tick < 0 || tick > run.max_tick) {
+      setForkError(`tick must be an integer in 0–${run.max_tick}`);
+      return;
+    }
+    setForking(true);
+    setForkError(null);
+    const result = await inspectorApi.forkRun(run.id, tick);
+    setForking(false);
+    if (result.ok) {
+      setForkOpen(false);
+      onForked(run.id, tick, result.runId);
+    } else {
+      setForkError(result.message);
+    }
+  };
+
   return (
     <li className={`px-3 py-2 flex flex-col gap-1.5 ${viewing ? 'bg-lab-chrome' : ''}`}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -180,6 +249,17 @@ function RunListRow({
         ) : (
           <span className="font-mono text-[9px] px-1.5 py-0.5 border border-lab-border text-lab-muted uppercase tracking-wider">
             archived
+          </span>
+        )}
+
+        {/* EM-101: lineage chip — this run was forked from another. */}
+        {typeof run.forked_from === 'number' && (
+          <span
+            className="font-mono text-[9px] px-1.5 py-0.5 border border-lab-border-bright text-lab-text uppercase tracking-wider"
+            title={`Forked from run #${run.forked_from}${run.forked_at_tick != null ? ` at tick ${run.forked_at_tick}` : ''} — its tick-0 state is the parent's replayed state.`}
+          >
+            ↩ #{run.forked_from}
+            {run.forked_at_tick != null && <span className="text-lab-muted normal-case"> @ tick {run.forked_at_tick}</span>}
           </span>
         )}
 
@@ -215,6 +295,27 @@ function RunListRow({
           cmp
         </button>
 
+        {/* EM-101: FORK — archived runs only (the live run is still writing). */}
+        {!run.is_active && (
+          <button
+            type="button"
+            onClick={() => {
+              setForkOpen((v) => !v);
+              setForkTick(String(run.max_tick));
+              setForkError(null);
+            }}
+            aria-expanded={forkOpen}
+            className={`font-mono text-[9px] px-1.5 py-0.5 border uppercase tracking-wider ${
+              forkOpen
+                ? 'border-lab-acid text-lab-acid bg-lab-acid/10'
+                : 'border-lab-border text-lab-muted hover:text-lab-text hover:border-lab-border-bright'
+            }`}
+            title="Fork this run at a tick into a NEW paused run (POST /api/runs/fork)."
+          >
+            ⑂ fork
+          </button>
+        )}
+
         <button
           type="button"
           onClick={onView}
@@ -234,6 +335,52 @@ function RunListRow({
           {run.is_active ? 'live' : viewing ? 'viewing ⏎' : 'view'}
         </button>
       </div>
+
+      {/* EM-101: the inline fork form — tick defaults to max_tick. */}
+      {forkOpen && (
+        <div className="flex flex-wrap items-center gap-2 border border-lab-border rounded-sm px-2 py-1.5 bg-lab-bg">
+          <label
+            htmlFor={`fork-tick-${run.id}`}
+            className="font-mono text-[9px] uppercase tracking-wider text-lab-muted"
+          >
+            fork at tick
+          </label>
+          <input
+            id={`fork-tick-${run.id}`}
+            type="number"
+            min={0}
+            max={run.max_tick}
+            value={forkTick}
+            onChange={(e) => setForkTick(e.target.value)}
+            disabled={forking}
+            className="lab-input w-20 text-[10px] py-0.5 tabular-nums"
+          />
+          <span className="font-mono text-[9px] text-lab-dim tabular-nums">/ {run.max_tick}</span>
+          <button
+            type="button"
+            onClick={() => void submitFork()}
+            disabled={forking}
+            className="font-mono text-[9px] font-bold px-2 py-0.5 border border-lab-acid text-lab-acid bg-lab-acid/10 hover:bg-lab-acid/20 uppercase tracking-wider disabled:opacity-40"
+            aria-label={`Fork run ${run.id} at the chosen tick`}
+          >
+            {forking ? 'forking…' : '⑂ fork run'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setForkOpen(false)}
+            disabled={forking}
+            aria-label="Cancel the fork"
+            className="font-mono text-[9px] px-1.5 py-0.5 border border-lab-border text-lab-muted hover:text-lab-text"
+          >
+            ✕
+          </button>
+          {forkError && (
+            <span role="alert" className="basis-full font-mono text-[9px] text-lab-warn leading-snug">
+              ⚠ {forkError}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Agent roster from config_summary: name + profile chip. */}
       {roster.length > 0 ? (
