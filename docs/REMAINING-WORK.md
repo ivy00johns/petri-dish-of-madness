@@ -96,7 +96,20 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-082 | P2 | W11 | frontend | audit §D1,D6 | Mobile decision (stacked read-only layout OR explicit min-width gate) + semantic headings / a11y pass | open | — |
 | EM-083 | P3 | W11 | backend | audit §B13 / research-v2 §bench | Make `blackout` event effect real; benchmark alerts on EM-067 usage data (>70% RPD/TPD → warn) | open | — |
 
-_Next free ID: EM-084._
+| EM-084 | P1 | W10 | frontend | user 2026-06-09 | Reset/new-run button in UI (extinction banner CTA + control panel) wired to existing `POST /api/control/reset` — no more service restarts | open | — |
+| EM-085 | P1 | W10 | infra | user 2026-06-09 | Persist runs by default: file `db_path` (`data/run.sqlite`) in config/world.yaml + gitignore `data/` — runs currently die with the process (`:memory:`) | open | — |
+| EM-086 | P2 | W11 | frontend | user 2026-06-09 | Run browser: list past runs (`GET /api/runs` + run_id-scoped reads), load any run into the inspector, cross-run AWI comparison ("what changed between sessions") | open | — |
+| EM-087 | P2 | W11 | backend | user 2026-06-09 | Duplicate-law semantics: engine allows re-proposing an already-ACTIVE effect → stacks of identical active laws (verified: only `proposed` status is guarded, world.py:473-476). Decide reject-vs-amend/renew + group repeats in governance UI | open | — |
+
+| EM-088 | P1 | W10 | frontend | user 2026-06-09 | Live feed survives refresh: seed the `/` EventFeed from the EM-069 backfilled history (last N events) instead of starting empty at WS connect | open | — |
+
+| EM-089 | P2 | W10 | frontend | user 2026-06-09 | Surface animal model identity: critter label/panel shows `animals.model_profile` (+ routed_via when an LLM served the turn); feed/chaos-feed distinguishes 🧠 LLM decisions from reflex micro-behaviors | open | — |
+
+| EM-090 | P2 | W10 | config | user 2026-06-09 | Expand model roster: +4 FreeLLMAPI profiles chosen for provider diversity (groq-llama, cerebras-glm, mistral-small, kimi) — one exhausted tier can't collapse the A/B; ids verified in live catalog | done | orch |
+
+| EM-091 | P2 | W11 | backend | user 2026-06-09 / research-v2 §tools | Village billboard: 🟢 reflex `post_billboard`/`read_billboard` tools (post text rides the same LLM turn — zero extra calls), `billboard_posted` events, physical notice board in the 3D village + panel/feed surface, god-panel "respond/grant" affordance for agent petitions to the watchers; counts toward Public Expression AWI | open | — |
+
+_Next free ID: EM-092._
 
 ## Notes
 
@@ -120,6 +133,15 @@ _Next free ID: EM-084._
   must cover the step BEFORE follow-through too: make non-talk tools salient enough that
   intentions become `propose_project`/`build_step` calls, and log talk-only "phantom
   commitments" (claimed in speech, never enacted) as a visible failure mode.
+- **EM-086 implementation notes (from EM-085 verification, 2026-06-09):** (1) run `status`
+  is unreliable for "active" — restarts/hot-reloads never call `end_run`, so dead runs stay
+  `running` forever; the run browser must treat `MAX(id)` (or latest `started_at`) as active.
+  (2) the `places` table is keyed on bare place id with `INSERT OR REPLACE`, so each run
+  re-owns the rows — prior runs' places must come from their tick-0 snapshot `state_json`
+  (or composite-key the table `(run_id, id)`). `agents`/`rules` use uuid ids and are safe.
+  (3) Animal wander `animal_action` events carry no destination `place` — per-tick animal
+  replay is approximate (`~`-flagged in the UI); emitting `payload.place` on animal moves
+  would make it exact (small additive backend change, pairs well with EM-086).
 - **EM-069–EM-083 (v2.1 audit plan)** entered 2026-06-09 via `plan-intake` from
   `docs/audit-2026-06-09.md` (companion UX detail: `docs/ux-review-2026-06-09.md`). They open
   **W9–W11** (Make v2 true → Trust & hygiene → New texture). **W9 (EM-069–074) is the gate**:
