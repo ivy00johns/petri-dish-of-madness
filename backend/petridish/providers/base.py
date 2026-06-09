@@ -21,6 +21,13 @@ class Provider(Protocol):
     # adapter after a successful chat() call; None until then. Part of the
     # interface so callers can surface the real model per turn.
     last_routed_via: str | None
+    # W6 / EM-067 — token + timing usage of the last successful chat() call.
+    # Shape (null-tolerant; Gemini free tier often omits token counts):
+    #   {"input_tokens": int|None, "output_tokens": int|None,
+    #    "latency_ms": float, "finish_reason": str|None, "cached": bool}
+    # None for Mock and until the first successful call / on error. Surfaced
+    # alongside last_routed_via so the runtime can populate the llm_call span.
+    last_usage: dict | None
 
     async def chat(
         self,

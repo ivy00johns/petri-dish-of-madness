@@ -11,6 +11,8 @@ import random
 from datetime import datetime, timezone
 from typing import Callable, Any
 
+from dataclasses import asdict, is_dataclass
+
 from .world import World, AgentState
 from ..agents.runtime import AgentRuntime
 from ..persistence.repository import SQLiteRepository
@@ -18,6 +20,21 @@ from ..providers.router import Router
 from ..config.loader import WorldConfig
 
 log = logging.getLogger(__name__)
+
+
+def _world_params_json(world_params: object) -> dict:
+    """JSON-ready view of WorldParams for the runs config blob.
+
+    Public (non-underscore) attrs only; nested dataclasses (e.g. usage_caps,
+    EM-067) are expanded to plain dicts so json.dumps never chokes on a
+    dataclass instance."""
+    out: dict = {}
+    for k in vars(world_params):
+        if k.startswith("_"):
+            continue
+        v = getattr(world_params, k)
+        out[k] = asdict(v) if is_dataclass(v) and not isinstance(v, type) else v
+    return out
 
 # Random event templates
 RANDOM_EVENTS = {
@@ -79,6 +96,13 @@ class TickLoop:
 
         # sequence counter for WS messages
         self._seq: int = 0
+
+        # EM-067 cap-aware throttle: effective slowdown multiplier applied to the
+        # continuous-run sleep. 1.0 = no slowdown. Recomputed each turn from
+        # recent llm_call usage ONLY when world.usage_caps.enabled (default OFF).
+        self._usage_slowdown: float = 1.0
+        # De-dupe usage_sampled emission: last tick a profile was sampled at.
+        self._usage_sampled_at: dict[str, int] = {}
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -173,10 +197,7 @@ class TickLoop:
         self._runtime._memory.clear()
 
         # New DB run
-        cfg_json = json.dumps({
-            "world": {k: getattr(config.world, k) for k in vars(config.world)
-                      if not k.startswith("_")},
-        })
+        cfg_json = json.dumps({"world": _world_params_json(config.world)})
         if self._run_id:
             try:
                 self._repo.end_run(self._run_id)
@@ -195,13 +216,7 @@ class TickLoop:
 
     def init_run(self, config: WorldConfig) -> None:
         """One-time initialization (called at startup, not async)."""
-        cfg_json = json.dumps({
-            "world": {
-                k: getattr(config.world, k)
-                for k in vars(config.world)
-                if not k.startswith("_")
-            },
-        })
+        cfg_json = json.dumps({"world": _world_params_json(config.world)})
         self._run_id = self._repo.start_run(cfg_json)
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
@@ -250,7 +265,9 @@ class TickLoop:
                 self._paused = True
                 self._world.running = False
             elif not self._paused:
-                interval = self._world.tick_interval_seconds
+                # EM-067: cap-aware throttle lengthens the effective interval when
+                # a profile nears its usage cap (1.0 = no slowdown / caps disabled).
+                interval = self._world.tick_interval_seconds * self._usage_slowdown
                 await asyncio.sleep(max(0.01, interval))
 
     async def _execute_turn(self, agent: AgentState) -> None:
@@ -365,6 +382,10 @@ class TickLoop:
             if interval and world.tick % interval == 0:
                 self._save_snapshot(world.tick)
 
+            # EM-067 cap-aware throttle (config-gated, DEFAULT OFF). Reads recent
+            # llm_call usage, may emit usage_sampled + set the slowdown factor.
+            self._apply_usage_caps(run_id)
+
             # Broadcast updated world state
             self._broadcast_world_state()
         finally:
@@ -381,7 +402,14 @@ class TickLoop:
             trace = {}
         perceived = trace.get("perceived", {}) or {}
         memory = trace.get("memory", {}) or {}
-        llm = trace.get("llm", {}) or {}
+        # EM-067: one llm_call row per attempt. `llm_attempts` is a list of
+        # per-attempt span dicts (attempt 1, then attempt 2 on a retry). Fall
+        # back to the single legacy `llm` dict, then to one empty span — so the
+        # OTel keys are ALWAYS emitted with present-but-null values.
+        llm_attempts = trace.get("llm_attempts")
+        if not isinstance(llm_attempts, list) or not llm_attempts:
+            legacy = trace.get("llm")
+            llm_attempts = [legacy if isinstance(legacy, dict) else {}]
         reasoning = trace.get("reasoning", {}) or {}
         chosen = trace.get("action_chosen", {}) or {}
 
@@ -409,24 +437,15 @@ class TickLoop:
                 "window": memory.get("window"),
             },
         })
-        self._emit_event({
-            **base, "kind": "llm_call",
-            "text": f"{agent.name} consults {profile_name}.",
-            "payload": {
-                "gen_ai.request.model": llm.get("gen_ai.request.model", profile_name),
-                "gen_ai.response.model": llm.get("gen_ai.response.model"),
-                "gen_ai.usage.input_tokens": (llm.get("usage") or {}).get("input_tokens")
-                if isinstance(llm.get("usage"), dict) else None,
-                "gen_ai.usage.output_tokens": (llm.get("usage") or {}).get("output_tokens")
-                if isinstance(llm.get("usage"), dict) else None,
-                "latency_ms": llm.get("latency_ms"),
-                "gen_ai.response.finish_reasons": (
-                    [llm["finish_reason"]] if llm.get("finish_reason") else None
-                ),
-                "cached": llm.get("cached", False),
-                "attempt": llm.get("attempt", 1),
-            },
-        })
+        # EM-067: emit one llm_call per attempt (attempt 1, then 2 on a retry),
+        # each carrying its own usage, all under this turn's turn_id.
+        for llm in llm_attempts:
+            llm = llm if isinstance(llm, dict) else {}
+            self._emit_event({
+                **base, "kind": "llm_call",
+                "text": f"{agent.name} consults {profile_name}.",
+                "payload": self._llm_call_payload(profile_name, llm),
+            })
         self._emit_event({
             **base, "kind": "reasoning",
             "text": f"{agent.name} reasons about what to do.",
@@ -445,6 +464,29 @@ class TickLoop:
                 "tier": chosen.get("tier", "llm"),
             },
         })
+
+    @staticmethod
+    def _llm_call_payload(profile_name: str, llm: dict) -> dict:
+        """Build one llm_call OTel-GenAI payload from a per-attempt span dict.
+
+        The exact key set is pinned by event-log.md §3.4 and asserted by the W5
+        gate — usage tokens stay present-but-null when the provider has none
+        (Mock), but every key is always present. `usage` (when a dict) carries
+        real input/output token counts captured by the provider adapter (W6).
+        """
+        usage = llm.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        finish_reason = llm.get("finish_reason")
+        return {
+            "gen_ai.request.model": llm.get("gen_ai.request.model", profile_name),
+            "gen_ai.response.model": llm.get("gen_ai.response.model"),
+            "gen_ai.usage.input_tokens": usage.get("input_tokens"),
+            "gen_ai.usage.output_tokens": usage.get("output_tokens"),
+            "latency_ms": llm.get("latency_ms"),
+            "gen_ai.response.finish_reasons": [finish_reason] if finish_reason else None,
+            "cached": llm.get("cached", False),
+            "attempt": llm.get("attempt", 1),
+        }
 
     def _sim_time(self, tick: int) -> float:
         """Simulation seconds for a tick (event-log.md §2)."""
@@ -518,6 +560,92 @@ class TickLoop:
                 save(run_id, tick, state_json)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("snapshot save failed at tick %s: %s", tick, exc)
+
+    def _apply_usage_caps(self, run_id: int) -> None:
+        """Cap-aware throttle policy (EM-067). Config-gated via world.usage_caps,
+        DEFAULT OFF so existing tests/behavior are unchanged.
+
+        When enabled: aggregate the recent `llm_call` rows over a sliding window
+        of `period_ticks`, per request model (profile). If a profile's request
+        count or token total crosses `near_threshold` of its rpd/tpd cap, emit a
+        `usage_sampled` event (actor_type 'system', once per profile per window)
+        and set the effective tick slowdown. Throttling NEVER blocks chat()
+        (contracts/providers.md): it only slows ticks.
+        """
+        caps = getattr(self._world.params, "usage_caps", None)
+        if caps is None or not getattr(caps, "enabled", False):
+            self._usage_slowdown = 1.0
+            return
+
+        try:
+            period = max(1, int(getattr(caps, "period_ticks", 100)))
+            from_tick = max(0, self._world.tick - period)
+            rows = self._repo.get_events(
+                run_id, from_tick=from_tick, kinds=["llm_call"], order="asc"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("usage_caps aggregation failed: %s", exc)
+            self._usage_slowdown = 1.0
+            return
+
+        # Aggregate requests + tokens per profile from the llm_call payloads.
+        agg: dict[str, dict[str, int]] = {}
+        for r in rows:
+            payload = r.get("payload", {}) or {}
+            profile = payload.get("gen_ai.request.model") or r.get("profile")
+            if not profile:
+                continue
+            slot = agg.setdefault(profile, {"requests": 0, "tokens": 0})
+            slot["requests"] += 1
+            inp = payload.get("gen_ai.usage.input_tokens") or 0
+            out = payload.get("gen_ai.usage.output_tokens") or 0
+            try:
+                slot["tokens"] += int(inp) + int(out)
+            except (TypeError, ValueError):
+                pass
+
+        rpd = getattr(caps, "rpd", None)
+        tpd = getattr(caps, "tpd", None)
+        threshold = float(getattr(caps, "near_threshold", 0.8))
+        slowdown_factor = float(getattr(caps, "slowdown_factor", 1.0))
+
+        any_near = False
+        for profile, slot in agg.items():
+            req_frac = (slot["requests"] / rpd) if rpd else 0.0
+            tok_frac = (slot["tokens"] / tpd) if tpd else 0.0
+            near = (rpd and req_frac >= threshold) or (tpd and tok_frac >= threshold)
+            if not near:
+                continue
+            any_near = True
+            # Emit usage_sampled at most once per profile per sliding window.
+            last = self._usage_sampled_at.get(profile, -(10**9))
+            if self._world.tick - last >= period:
+                self._usage_sampled_at[profile] = self._world.tick
+                self._emit_event({
+                    "kind": "usage_sampled",
+                    "actor_type": "system",
+                    "actor_id": None,
+                    "profile": profile,
+                    "text": (
+                        f"{profile} is near its usage cap "
+                        f"(req {slot['requests']}/{rpd or '∞'}, "
+                        f"tok {slot['tokens']}/{tpd or '∞'})."
+                    ),
+                    "payload": {
+                        "profile": profile,
+                        "window_ticks": period,
+                        "requests": slot["requests"],
+                        "tokens": slot["tokens"],
+                        "rpd": rpd,
+                        "tpd": tpd,
+                        "request_fraction": round(req_frac, 4),
+                        "token_fraction": round(tok_frac, 4),
+                        "near_threshold": threshold,
+                    },
+                })
+
+        # Slow ticks while any profile is near a cap; otherwise run full speed.
+        self._usage_slowdown = slowdown_factor if (any_near and slowdown_factor > 1.0) else 1.0
 
     # ──────────────────────────────────────────────────────────────────────────
     # Chaos: random event injection

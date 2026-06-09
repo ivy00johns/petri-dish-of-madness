@@ -96,3 +96,37 @@ authored at W6 against the read API. **No `any`; `tsc -b` must stay green.**
 - Header nav switches routes; route change unmounts/remounts `CozyWorld` cleanly (no leak).
 - `WorldEvent` carries `turn_id`/`actor_type`/`sim_time`; `tsc -b` + `vite build` green.
 - `design-token-guard` clean (no inline styles / hardcoded colors).
+
+## 7. W6 data contract (the panels)
+
+**Primary data source = the client-side rolling history**, NOT the backend. The panels compute
+from `useSimulation.history` (`WorldEvent[]`, the 5,000-cap ref from §3) via pure selectors, so
+they render in **mock mode with no backend** and in live mode alike. The REST read endpoints
+(`api.openapi.yaml` v1.1.0) are the **deep-replay** source: full history beyond the rolling
+window, and `seekTick` in live mode. A panel must degrade gracefully (empty-but-labeled state)
+when its data isn't present yet — never a blank or a crash.
+
+Files (all under `web/src/inspector/`, all token-only, no `any`, `tsc -b` green):
+- `api.ts` — typed fetch client for `/api/events|turns/{id}|rules/history|relationships|snapshots|replay|analytics`. Response rows are `EventRow` (api.openapi.yaml component).
+- `types.ts` — view-models: `TurnTrace` (ordered chain + parsed spans), `GovTimelineEntry`
+  (rule_id, proposer, status path, votes, downstream[]), `SocialGraphData` ({nodes:{id,label,color}, edges:{source,target,type,trust}}), `AwiSummary` (the §7 analytics dict, typed), `ReplayFrame` (world state at a tick).
+- `selectors.ts` — PURE functions over `WorldEvent[]` (+ snapshots): `turnTrace(events,turnId)`,
+  `governanceTimeline(events)`, `socialGraph(events,agents,atTick)`, `awiSummary(events,range)`,
+  `replayStateAt(events,snapshots,tick)`. Same logic the backend `get_*` methods use, client-side.
+- Shared **`currentTick`** state lives in `InspectorLayout`; `ReplayScrubber` drives it; the
+  other panels re-project at `currentTick` (scrub once, everything follows).
+
+Panels (one file each — parallel-safe; `InspectorLayout` imports all five from fixed paths):
+- `ReplayScrubber.tsx` (EM-055), `DecisionTrace.tsx` (EM-056), `GovernanceHistory.tsx` (EM-057),
+  `SocialGraph.tsx` (EM-058, `react-force-graph-2d`), `AWIDashboard.tsx` (EM-059, `uplot` +
+  `@observablehq/plot`). Freeze the force sim after layout settles; stop chart animation when a
+  panel isn't visible; Canvas2D for the replay map (never the 3D scene).
+
+**Mock generator (`web/src/mock/generator.ts`) MUST emit representative data** so the panels look
+real offline: the per-turn decision-trace chain (the 6 chain kinds with populated payloads incl.
+`llm_call` usage), a rule lifecycle (propose → vote → pass/reject with a visible downstream
+effect), and relationship/conflict/gift events. Without this the inspector is empty in the demo.
+
+Libraries added at W6: `react-force-graph-2d`, `uplot`, `@observablehq/plot`. Quality gates for
+the wave: `tsc -b` + `vite build` green, `design-token-guard` clean, and `render-sanity` PASS on
+`/` AND `/inspector` (every panel shows real-looking data, no lone `?`/`undefined`/empty shells).

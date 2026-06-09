@@ -27,7 +27,16 @@ NOT a demotion. W7/W8 world features render *in* the 3D village. Encoded in
 - `events.schema.json` v1.1.0 — turn_id/actor_type/sim_time + chain kinds; open-enum forward-compat.
 - `README.md` (NEW) — domain rules, file ownership, per-agent notes.
 
-W6–W8 extend `api.openapi.yaml`, `world-model.md`, `providers.md`, config — authored at each gate.
+## Contracts (W6 — LOCKED)
+
+- `api.openapi.yaml` v1.1.0 — 7 read endpoints over the §7 interface (events/turns/rules-history/
+  relationships/snapshots/replay/analytics) + `EventRow` component.
+- `providers.md` v1.1.0 — `last_usage` capture (EM-067) + per-attempt `llm_call` rows + cap policy.
+- `frontend-inspector.md` §7 — W6 data contract: panels compute from client-side rolling history
+  (work in mock + live), REST = deep replay; selectors/api/types/PanelProps; mock generator must
+  emit chain + rule lifecycle + relationships + usage.
+
+W7–W8 extend `world-model.md` + config — authored at each gate.
 
 ## File ownership (parallel-safe — see contracts/README.md)
 
@@ -46,6 +55,19 @@ persistence → `persistence/**` · backend → `engine,agents,api,run.py` · pr
 - [ ] `ux-review` — subjective pass after UI waves.
 - [ ] `playwright` — E2E (route switch / WebGL unmount; inspector flows).
 - [ ] `deployment-checklist` — final, if shipping.
+
+## Live-run findings (fix at W6 gate)
+
+- **Optional decision-trace fields can fail a turn (regression, mine).** Observed live: agents
+  hit `schema error: '...' is too long` → idle fallback when a model echoes a long memory line
+  into the EM-066 `memories_used` field (W5 set item maxLength 160; real memory lines run ~190+).
+  Fix: optional trace fields (`perceived_summary`/`memories_used`/`reasoning`) must NEVER fail a
+  turn — truncate/drop over-long values before validation, validate the ACTION separately. Touch
+  runtime.py inline ACTION_SCHEMA + action-protocol.schema.json. **First task at W6 gate.**
+- **Models hallucinate world features** (an "oak tree", a "community garden") and fail to act on
+  them (`unknown place 'None'`). Not a bug — motivates W7 (collective projects + buildings let
+  them actually build it). No fix; it's the design pull toward W7.
+- Per-attempt `llm_call` rows confirmed emitting live (two `consults` rows on a retried turn). ✓
 
 ## Wave gate log
 

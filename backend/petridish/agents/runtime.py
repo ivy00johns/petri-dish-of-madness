@@ -182,6 +182,30 @@ def _validate_schema(action_dict: dict) -> str | None:
         return str(exc.message)
 
 
+# Optional EM-066 decision-trace / cosmetic fields. A verbose model that overflows
+# one of these caps must NOT lose its whole turn to an idle fallback — we TRUNCATE
+# them in place before schema validation rather than reject the action. (Behavioral
+# args — target/place/amount — are still validated strictly.)
+_TRACE_TEXT_CAPS = {"thought": 500, "mood": 40, "perceived_summary": 600, "reasoning": 1200}
+_MEMORIES_ITEM_CAP = 160
+_MEMORIES_MAX = 12
+
+
+def _sanitize_optional_trace_fields(action_dict: dict) -> None:
+    """Truncate optional trace fields in place so they can never fail a turn."""
+    for key, cap in _TRACE_TEXT_CAPS.items():
+        val = action_dict.get(key)
+        if isinstance(val, str) and len(val) > cap:
+            action_dict[key] = val[:cap]
+    mem = action_dict.get("memories_used")
+    if mem is not None:
+        if isinstance(mem, list):
+            action_dict["memories_used"] = [str(m)[:_MEMORIES_ITEM_CAP] for m in mem[:_MEMORIES_MAX]]
+        else:
+            # Wrong type entirely — drop it rather than fail the turn.
+            action_dict.pop("memories_used", None)
+
+
 def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str | None:
     """Returns an error string or None if world-legal."""
     action = action_dict.get("action")
@@ -475,10 +499,15 @@ class AgentRuntime:
             agent, self.world, recent_events, self.world.params
         )
 
+        # Per-attempt llm metadata, collected in attempt order (EM-067). Each
+        # entry becomes ONE `llm_call` row in the loop, all sharing this turn_id.
+        llm_attempts: list[dict] = []
+
         # First attempt
         action_dict, parse_error, llm_meta = await self._call_and_parse(
             profile_name, messages, max_tokens, temperature, agent, attempt=1
         )
+        llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
         if parse_error and action_dict is None:
             # One retry with error fed back
@@ -496,20 +525,9 @@ class AgentRuntime:
             action_dict, parse_error, llm_meta = await self._call_and_parse(
                 profile_name, retry_messages, max_tokens, temperature, agent, attempt=2
             )
+            llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
         routed = self.router.last_routed_via(profile_name)
-
-        # Build the llm_call trace span (OTel GenAI attribute names). usage stays
-        # null in W5 — providers don't capture tokens until W6.
-        llm_trace = {
-            "gen_ai.request.model": profile_name,
-            "gen_ai.response.model": routed,
-            "usage": None,
-            "latency_ms": llm_meta.get("latency_ms"),
-            "finish_reason": None,
-            "cached": False,
-            "attempt": llm_meta.get("attempt", 1),
-        }
 
         if action_dict is None:
             # Second failure or ProviderError: idle + log. Still return a trace so
@@ -520,7 +538,7 @@ class AgentRuntime:
             trace = {
                 "perceived": {**perceived, "perceived_summary": None},
                 "memory": memory,
-                "llm": llm_trace,
+                "llm_attempts": llm_attempts,
                 "reasoning": {
                     "reasoning": None,
                     "perceived_summary": None,
@@ -576,7 +594,7 @@ class AgentRuntime:
         trace = {
             "perceived": {**perceived, "perceived_summary": perceived_summary},
             "memory": memory,
-            "llm": llm_trace,
+            "llm_attempts": llm_attempts,
             "reasoning": {
                 "reasoning": reasoning,
                 "perceived_summary": perceived_summary,
@@ -593,6 +611,27 @@ class AgentRuntime:
 
         return result_event
 
+    def _llm_attempt_span(self, profile_name: str, meta: dict) -> dict:
+        """Build ONE llm_call trace span from a per-attempt `meta` (EM-067).
+
+        The loop turns each of these into an `llm_call` event row. Token usage
+        comes from the provider's `last_usage` snapshot captured in
+        `_call_and_parse`; it is None for Mock (and failed attempts), in which
+        case input/output tokens + finish_reason stay null but the OTel keys are
+        still emitted with present-but-null values by the loop.
+        """
+        usage = meta.get("usage")
+        usage = usage if isinstance(usage, dict) else None
+        return {
+            "gen_ai.request.model": profile_name,
+            "gen_ai.response.model": meta.get("routed_via"),
+            "usage": usage,
+            "latency_ms": meta.get("latency_ms"),
+            "finish_reason": usage.get("finish_reason") if usage else None,
+            "cached": bool(usage.get("cached")) if usage else False,
+            "attempt": meta.get("attempt", 1),
+        }
+
     async def _call_and_parse(
         self,
         profile_name: str,
@@ -605,10 +644,21 @@ class AgentRuntime:
         """
         Call the model and parse+validate the response.
         Returns (action_dict, error_string, llm_meta).
-        action_dict is None on failure. llm_meta carries decision-trace metadata
-        for the `llm_call` span: {"attempt": int, "latency_ms": float|None}.
+        action_dict is None on failure. llm_meta carries the per-attempt
+        decision-trace metadata for ONE `llm_call` span. Captured PER ATTEMPT
+        because the adapter's `last_routed_via`/`last_usage` are overwritten by
+        the next call — so a retry's metadata would otherwise clobber attempt 1.
+          {"attempt": int, "latency_ms": float|None,
+           "routed_via": str|None, "usage": dict|None}
+        `usage` is the provider's last_usage snapshot (None for Mock / on error),
+        and `latency_ms` falls back to the provider's measured value when present.
         """
-        meta: dict = {"attempt": attempt, "latency_ms": None}
+        meta: dict = {
+            "attempt": attempt,
+            "latency_ms": None,
+            "routed_via": None,
+            "usage": None,
+        }
         started = time.perf_counter()
         try:
             text = await self.router.chat(
@@ -617,18 +667,34 @@ class AgentRuntime:
             )
         except ProviderError as exc:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+            # On error the adapter may still expose the routed model from a prior
+            # call; usage stays None for a failed attempt.
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
             log.warning("ProviderError for %s: %s", agent.name, exc)
             return None, f"provider_error: {exc.detail}", meta
         except Exception as exc:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
             log.error("Unexpected error calling %s: %s", profile_name, exc)
             return None, f"unexpected_error: {exc}", meta
 
-        meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        # Snapshot adapter state IMMEDIATELY after a successful call, before any
+        # retry can overwrite it. usage is None for Mock; prefer the provider's
+        # own latency measurement, falling back to our wall-clock timing.
+        usage = self.router.last_usage(profile_name)
+        meta["usage"] = usage
+        meta["routed_via"] = self.router.last_routed_via(profile_name)
+        if isinstance(usage, dict) and usage.get("latency_ms") is not None:
+            meta["latency_ms"] = usage["latency_ms"]
+        else:
+            meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
         action_dict = _extract_first_json(text)
         if action_dict is None:
             return None, f"no valid JSON object in response: {text[:200]!r}", meta
+
+        # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
+        _sanitize_optional_trace_fields(action_dict)
 
         schema_error = _validate_schema(action_dict)
         if schema_error:

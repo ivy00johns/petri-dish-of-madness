@@ -3,7 +3,7 @@
  * Falls back to mock mode automatically if WS fails or VITE_MOCK=1.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { WorldState, WorldEvent, WSMessage, ModelProfile } from '../types';
 import { buildInitialWorldState, generateTick, mockControls } from '../mock/generator';
 
@@ -23,6 +23,8 @@ export interface SimulationState {
    * deeper window for replay/trace/graph/dashboard (wired at W6).
    */
   history: WorldEvent[];
+  /** Latest tick observed (the inspector scrubber's right edge). */
+  maxTick: number;
   connected: boolean;
   mockMode: boolean;
 }
@@ -35,6 +37,13 @@ export interface SimulationControls {
   reassignModel: (agentId: string, profile: string) => void;
   injectEvent: (kind?: string) => void;
   getProfiles: () => ModelProfile[];
+  /**
+   * Inspector scrub control (frontend-inspector.md §3). In MOCK mode the
+   * panels re-project from `history` at the chosen tick (this is a no-op on the
+   * live feed). In LIVE mode this is where a deep `api.replay(tick)` fetch can
+   * hang at W6; it pauses the loop so the projection is stable while scrubbing.
+   */
+  seekTick: (tick: number) => void;
 }
 
 export function useSimulation(): SimulationState & SimulationControls {
@@ -319,10 +328,36 @@ export function useSimulation(): SimulationState & SimulationControls {
     return world?.profiles ?? mockControls.getProfiles();
   }, [world]);
 
+  // Latest tick observed — from the live world projection or the deepest event
+  // in history (whichever is further along). Drives the inspector scrubber.
+  const maxTick = useMemo(() => {
+    let max = world?.tick ?? 0;
+    for (const e of history) if (e.tick > max) max = e.tick;
+    return max;
+  }, [world, history]);
+
+  // Inspector scrub control. The inspector panels project from `history` purely
+  // client-side, so in mock mode scrubbing needs no engine call — but a scrub
+  // implies "stop advancing the live edge", so we pause the loop. In live mode
+  // this is the W6 hook point for a deep `api.replay(tick)` fetch; pausing keeps
+  // the projection stable. Kept additive — existing behavior is unchanged.
+  const seekTick = useCallback((tick: number) => {
+    void tick; // panels re-project from `history`; nothing to mutate here yet.
+    if (mockMode) {
+      mockControls.pause();
+      stopMockLoop();
+    } else {
+      apiPost('/api/control/pause');
+      // W6: fetch `api.replay(tick)` to materialize state beyond the rolling
+      // window. Until then the inspector projects from `history` client-side.
+    }
+  }, [mockMode, apiPost, stopMockLoop]);
+
   return {
     world,
     events,
     history,
+    maxTick,
     connected,
     mockMode,
     start,
@@ -332,5 +367,6 @@ export function useSimulation(): SimulationState & SimulationControls {
     reassignModel,
     injectEvent,
     getProfiles,
+    seekTick,
   };
 }

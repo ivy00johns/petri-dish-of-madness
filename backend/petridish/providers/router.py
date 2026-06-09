@@ -103,6 +103,13 @@ class Router:
         this profile's persistent adapter, or None if unknown."""
         return getattr(self._adapters.get(profile_name), "last_routed_via", None)
 
+    def last_usage(self, profile_name: str) -> dict | None:
+        """Return the token/timing usage of the last successful chat() for this
+        profile's persistent adapter, or None if unknown / not captured (Mock).
+        Shape per contracts/providers.md §Usage capture:
+        {input_tokens, output_tokens, latency_ms, finish_reason, cached}."""
+        return getattr(self._adapters.get(profile_name), "last_usage", None)
+
     async def health(self, profile_name: str) -> bool:
         profile = self._profiles.get(profile_name)
         if profile is None:

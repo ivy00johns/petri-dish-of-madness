@@ -19,6 +19,20 @@ world:
   memory_window: 12
   attack_energy_cost: 6
 
+  # W6 / EM-067 — cap-aware throttle (optional, DEFAULT OFF). When enabled, the
+  # tick loop aggregates recent llm_call usage per model profile over a sliding
+  # window of `period_ticks`; a profile crossing `near_threshold` of its rpd/tpd
+  # cap emits a `usage_sampled` event and (if slowdown_factor > 1) lengthens the
+  # effective tick interval. Throttling never blocks a model call — it only slows
+  # ticks. Leave `enabled: false` to keep the default fast, uncapped behavior.
+  usage_caps:
+    enabled: false
+    rpd: null            # requests/day cap per profile (null = uncapped)
+    tpd: null            # tokens/day cap per profile   (null = uncapped)
+    period_ticks: 100    # sliding window the cap is measured over
+    slowdown_factor: 1.0 # interval multiplier when near a cap (1.0 = no slowdown)
+    near_threshold: 0.8  # fraction of a cap that counts as "near"
+
 places:
   - { id: plaza,    name: Central Plaza, x: 500, y: 500, kind: social,     description: "Open square where everyone mingles." }
   - { id: market,   name: Market,        x: 750, y: 400, kind: work,       description: "Earn credits by working." }

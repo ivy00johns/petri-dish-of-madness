@@ -1,10 +1,15 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.0.0
+  version: 1.1.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
+    v1.1.0 (W6) adds read-only endpoints over the append-only event log (event-log.md §7)
+    that power the /inspector annex: events, turn traces, rule history, relationships,
+    snapshots, replay, and analytics (9-AWI + model-vs-model). These serve deep/full-history
+    replay in live mode; the /inspector panels also compute from the client-side rolling
+    history so they render in mock mode with no backend.
 servers:
   - url: http://localhost:8000
 paths:
@@ -60,7 +65,73 @@ paths:
       summary: Inject a random world event (chaos knob)
       requestBody: { content: { application/json: { schema: { type: object, properties: { kind: { type: string, enum: [windfall, famine, blackout, festival], description: "optional; random if omitted" } } } } } }
       responses: { "200": { description: ok } }
+  # --- W6 read-only event-log endpoints (event-log.md §7). Run-scoped to the active run. ---
+  /api/events:
+    get:
+      summary: Query the append-only event log
+      parameters:
+        - { name: from_tick, in: query, schema: { type: integer } }
+        - { name: to_tick, in: query, schema: { type: integer } }
+        - { name: kinds, in: query, schema: { type: string }, description: "comma-separated kinds" }
+        - { name: actor_id, in: query, schema: { type: string } }
+        - { name: turn_id, in: query, schema: { type: string } }
+        - { name: after_seq, in: query, schema: { type: integer }, description: "keyset pagination (seq > after_seq)" }
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: asc } }
+      responses: { "200": { description: events, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } }
+  /api/turns/{turn_id}:
+    get:
+      summary: The full ordered decision-trace chain for one turn (EM-056)
+      parameters: [ { name: turn_id, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: chain, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } }
+  /api/rules/history:
+    get:
+      summary: Governance/laws history — proposal lifecycle + downstream consequences (EM-057)
+      responses: { "200": { description: rules, content: { application/json: { schema: { type: array, items: { type: object } } } } } }
+  /api/relationships:
+    get:
+      summary: Relationship/conflict/gift events for the social graph, time-scrubbable (EM-058)
+      parameters:
+        - { name: agent_id, in: query, schema: { type: string } }
+        - { name: from_tick, in: query, schema: { type: integer } }
+        - { name: to_tick, in: query, schema: { type: integer } }
+      responses: { "200": { description: timeline, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } }
+  /api/snapshots:
+    get:
+      summary: List snapshot ticks (ascending)
+      responses: { "200": { description: ticks, content: { application/json: { schema: { type: array, items: { type: object, properties: { tick: { type: integer } } } } } } } }
+  /api/replay:
+    get:
+      summary: Replay materials for tick T — nearest prior snapshot + events to fold forward (EM-055)
+      parameters: [ { name: tick, in: query, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: replay, content: { application/json: { schema: { type: object, properties: { base: { type: object, properties: { tick: { type: integer }, state: { type: object } } }, events: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } } } }
+  /api/analytics:
+    get:
+      summary: 9-AWI + model-vs-model analytics (event-log.md §7 get_analytics shape) (EM-059/067)
+      parameters:
+        - { name: from_tick, in: query, schema: { type: integer } }
+        - { name: to_tick, in: query, schema: { type: integer } }
+      responses: { "200": { description: analytics, content: { application/json: { schema: { type: object } } } } }
   /ws:
     get:
       summary: WebSocket event stream (see events.schema.json). Documented here for discoverability.
       responses: { "101": { description: switching protocols } }
+components:
+  schemas:
+    EventRow:
+      type: object
+      description: One append-only event-log row (event-log.md §2/§7). payload is kind-specific.
+      properties:
+        seq: { type: integer }
+        run_id: { type: integer }
+        tick: { type: integer }
+        sim_time: { type: number, nullable: true }
+        kind: { type: string }
+        actor_id: { type: string, nullable: true }
+        actor_type: { type: string }
+        target_id: { type: string, nullable: true }
+        profile: { type: string, nullable: true }
+        turn_id: { type: string, nullable: true }
+        text: { type: string, nullable: true }
+        payload: { type: object }
+        ts: { type: string }

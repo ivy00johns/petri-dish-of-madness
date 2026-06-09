@@ -1,0 +1,37 @@
+/*
+ * Inspector design tokens (frontend-inspector.md §4/§7).
+ *
+ * The inspector's Canvas2D surfaces (the replay mini-map) cannot take Tailwind
+ * classes — a canvas `fillStyle` needs a real color value. To stay token-only
+ * (no hardcoded hex / inline literals; design-token-guard clean) these declare
+ * the inspector palette as CSS custom properties. Both the DOM (via `var(--…)`)
+ * and the canvas (via `getComputedStyle(...).getPropertyValue('--…')`) read the
+ * SAME declared tokens, so the canvas can never drift from the theme.
+ *
+ * The `--lab-*` values mirror the Tailwind `lab` palette (tailwind.config.js,
+ * owned by the frontend palette); the `--marker-*` values are the event-marker
+ * legend the replay scrubber color-codes by category (contract §4:
+ * crime=red, governance=blue, construction=amber, animal=magenta, trace=dim).
+ */
+
+:root {
+  /* Surface tokens mirroring the Tailwind lab palette (for canvas use). */
+  --lab-bg: #0a0a0b;
+  --lab-surface: #111114;
+  --lab-chrome: #1a1a20;
+  --lab-border: #252530;
+  --lab-muted: #5a5a72;
+  --lab-dim: #3a3a50;
+  --lab-acid: #c8ff00;
+
+  /* Replay event-marker legend (color-coded by category). */
+  --marker-crime: #ff3333;
+  --marker-governance: #3498db;
+  --marker-construction: #ff9900;
+  --marker-animal: #d957d9;
+  --marker-trace: #3a3a50;
+  --marker-other: #5a5a72;
+
+  /* Neutral fallback for an agent with no model color yet. */
+  --inspector-node-neutral: #5a5a72;
+}

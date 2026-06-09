@@ -95,6 +95,12 @@ class ModelProfile:
     color: str = "#888888"
     base_url: str = ""
     api_key_env: str = ""
+    # W6 / EM-067 — optional cost metadata (additive, backward-compatible).
+    # `is_free_tier` flags profiles routed through a free proxy/tier (so the
+    # throttle/cost views can prefer them); `cost_per_1k` is a coarse blended
+    # USD cost per 1k tokens for the model, used only for display/analytics.
+    is_free_tier: bool = False
+    cost_per_1k: float | None = None
 
     def api_key(self) -> str | None:
         if self.api_key_env:
@@ -126,6 +132,30 @@ class AgentConfig:
 
 
 @dataclass
+class UsageCaps:
+    """W6 / EM-067 — cap-aware throttle policy (config `world.usage_caps`).
+
+    DEFAULT OFF (`enabled=False`) so existing tests/behavior are unchanged.
+    When enabled, the tick loop aggregates recent `llm_call` usage per profile
+    over a sliding window of `period_ticks`; a profile near its cap emits a
+    `usage_sampled` event (actor_type 'system') and may lengthen the effective
+    tick interval. Throttling never blocks chat() (contracts/providers.md).
+
+      rpd          — requests/day cap (per profile), None = no request cap.
+      tpd          — tokens/day cap  (per profile), None = no token cap.
+      period_ticks — sliding window (in ticks) the cap is measured over.
+      slowdown_factor — multiplier applied to the tick interval when near a cap.
+      near_threshold  — fraction (0..1) of a cap that counts as "near".
+    """
+    enabled: bool = False
+    rpd: int | None = None
+    tpd: int | None = None
+    period_ticks: int = 100
+    slowdown_factor: float = 1.0
+    near_threshold: float = 0.8
+
+
+@dataclass
 class WorldParams:
     agent_count: int = 5
     tick_interval_seconds: float = 0.5
@@ -147,6 +177,9 @@ class WorldParams:
     # tests, but a real run that wants replay must point at a file (config world.db_path).
     snapshot_interval_ticks: int = 25
     db_path: str = ":memory:"
+    # W6 / EM-067 — optional cap-aware throttle policy. Default OFF (disabled)
+    # so existing tests/behavior are unchanged; only the tick loop reads it.
+    usage_caps: UsageCaps = field(default_factory=UsageCaps)
 
 
 @dataclass
@@ -185,6 +218,12 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
     profiles = []
     for p in raw.get("profiles", []):
         p = _interp_dict(p)
+        cost_raw = p.get("cost_per_1k")
+        cost_per_1k: float | None
+        try:
+            cost_per_1k = float(cost_raw) if cost_raw is not None else None
+        except (TypeError, ValueError):
+            cost_per_1k = None
         profiles.append(ModelProfile(
             name=p["name"],
             adapter=p["adapter"],
@@ -194,8 +233,35 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
             color=p.get("color", "#888888"),
             base_url=p.get("base_url", ""),
             api_key_env=p.get("api_key_env", ""),
+            is_free_tier=bool(p.get("is_free_tier", False)),
+            cost_per_1k=cost_per_1k,
         ))
     return profiles
+
+
+def _parse_usage_caps(raw: dict | None) -> UsageCaps:
+    """Parse the optional `world.usage_caps` block. Absent/empty → disabled
+    defaults (backward-compatible). Null int caps stay None (no cap)."""
+    if not isinstance(raw, dict):
+        return UsageCaps()
+
+    def _opt_int(key: str) -> int | None:
+        v = raw.get(key)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    return UsageCaps(
+        enabled=bool(raw.get("enabled", False)),
+        rpd=_opt_int("rpd"),
+        tpd=_opt_int("tpd"),
+        period_ticks=int(raw.get("period_ticks", 100)),
+        slowdown_factor=float(raw.get("slowdown_factor", 1.0)),
+        near_threshold=float(raw.get("near_threshold", 0.8)),
+    )
 
 
 def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
@@ -218,6 +284,7 @@ def _parse_world(raw: dict) -> tuple[WorldParams, list[PlaceConfig], list[AgentC
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
         db_path=str(_interpolate(w.get("db_path", ":memory:"))),
+        usage_caps=_parse_usage_caps(w.get("usage_caps")),
     )
 
     places = [

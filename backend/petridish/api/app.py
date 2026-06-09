@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -378,3 +378,104 @@ async def inject_event(body: InjectBody = InjectBody()):
         return {"status": "ok", **result}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# W6 read-only event-log endpoints (api.openapi.yaml v1.1.0 / event-log.md §7).
+# These surface the repository §7 query methods over the active run
+# (_loop._run_id). With no active run/repo they return empty arrays / empty
+# payloads with 200 — never 500 — so the /inspector annex degrades gracefully.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _active_run_id() -> int | None:
+    """The run_id of the active run, or None when nothing is initialized yet."""
+    if _loop is None:
+        return None
+    return _loop._run_id
+
+
+@app.get("/api/events")
+async def get_events(
+    from_tick: int | None = Query(default=None),
+    to_tick: int | None = Query(default=None),
+    kinds: str | None = Query(default=None, description="comma-separated kinds"),
+    actor_id: str | None = Query(default=None),
+    turn_id: str | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    order: str = Query(default="asc"),
+):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    kind_list = [k for k in kinds.split(",") if k] if kinds else None
+    return _repo.get_events(
+        run_id,
+        from_tick=from_tick,
+        to_tick=to_tick,
+        kinds=kind_list,
+        actor_id=actor_id,
+        turn_id=turn_id,
+        after_seq=after_seq,
+        limit=limit,
+        order=order,
+    )
+
+
+@app.get("/api/turns/{turn_id}")
+async def get_turn_trace(turn_id: str):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_turn_trace(run_id, turn_id)
+
+
+@app.get("/api/rules/history")
+async def get_rule_history():
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_rule_history(run_id)
+
+
+@app.get("/api/relationships")
+async def get_relationships(
+    agent_id: str | None = Query(default=None),
+    from_tick: int | None = Query(default=None),
+    to_tick: int | None = Query(default=None),
+):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_relationship_timeline(
+        run_id, agent_id=agent_id, from_tick=from_tick, to_tick=to_tick
+    )
+
+
+@app.get("/api/snapshots")
+async def get_snapshots():
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return []
+    return _repo.get_snapshots(run_id)
+
+
+@app.get("/api/replay")
+async def get_replay(tick: int = Query(...)):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return {"base": None, "events": []}
+    base = _repo.nearest_snapshot(run_id, tick)
+    events = _repo.get_events(run_id, to_tick=tick, order="asc")
+    return {"base": base, "events": events}
+
+
+@app.get("/api/analytics")
+async def get_analytics(
+    from_tick: int | None = Query(default=None),
+    to_tick: int | None = Query(default=None),
+):
+    run_id = _active_run_id()
+    if _repo is None or run_id is None:
+        return {}
+    return _repo.get_analytics(run_id, from_tick=from_tick, to_tick=to_tick)
