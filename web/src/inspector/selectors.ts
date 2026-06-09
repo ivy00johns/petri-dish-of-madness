@@ -1059,6 +1059,100 @@ export function agentEconomyAt(events: WorldEvent[]): Map<string, AgentEconomySa
   return out;
 }
 
+// ── W11a (EM-086) — archive-mode agent roster, reconstructed from events ─────
+
+/**
+ * Build an Agent[] for an ARCHIVED run purely from its fetched events plus the
+ * RunRow.config_summary roster (frontend-inspector.md §8). The live `world`
+ * prop describes the ACTIVE run, so in archive mode the panels need a roster
+ * reconstructed from the selected run's own data:
+ *
+ *   • Seed from config_summary.agents ({name, profile} — name doubles as id).
+ *   • Sweep the run's events (ascending): any human_agent actor joins the
+ *     roster; `e.profile` fills the model attribution; `agent_died` flips
+ *     `alive`; `agent_moved` tracks location; the LATEST `turn_start`
+ *     {energy, credits} sample (+ own action_resolved deltas, via
+ *     agentEconomyAt) provides final-economy values.
+ *   • `profile_color` resolves from the live profile legend by NAME — model
+ *     profiles are stable config across runs; a renamed profile simply gets
+ *     the neutral token at the view layer (data stays color-literal-free).
+ *
+ * Pure; tolerant of an empty run (returns just the config roster, or []).
+ */
+export function archiveAgents(
+  events: WorldEvent[],
+  roster: Array<{ name: string; profile: string | null }> = [],
+  profiles: ModelProfile[] = [],
+): Agent[] {
+  const colorByProfile = new Map<string, string>();
+  for (const p of profiles) if (p.name && p.color) colorByProfile.set(p.name, p.color);
+
+  const byId = new Map<string, Agent>();
+  const ensure = (id: string, name?: string, profile?: string | null): Agent => {
+    let a = byId.get(id);
+    if (!a) {
+      a = {
+        id,
+        name: name ?? id,
+        personality: '',
+        profile: profile ?? '',
+        profile_color: profile ? colorByProfile.get(profile) : undefined,
+        location: '',
+        energy: 0,
+        credits: 0,
+        mood: '—',
+        alive: true,
+        zero_energy_turns: 0,
+        beliefs: [],
+        relationships: {},
+      };
+      byId.set(id, a);
+    }
+    return a;
+  };
+
+  for (const r of roster) {
+    if (r.name) ensure(r.name, r.name, r.profile ?? null);
+  }
+
+  for (const e of ascending(events)) {
+    if (!e.actor_id) continue;
+    // Only human agents populate the roster (animals/system/god are not Agent
+    // rows); tolerate a missing actor_type on kinds that imply an agent actor.
+    const agentImplied =
+      e.kind in CHAIN_ORDER ||
+      e.kind === 'agent_died' ||
+      e.kind === 'agent_moved' ||
+      e.kind === 'agent_speech';
+    const isAgent = e.actor_type === 'human_agent' || (e.actor_type == null && agentImplied);
+    if (!isAgent) continue;
+    const a = ensure(e.actor_id);
+    if (e.profile && !a.profile) {
+      a.profile = e.profile;
+      a.profile_color = colorByProfile.get(e.profile);
+    }
+    if (e.kind === 'agent_died') a.alive = false;
+    if (e.kind === 'agent_moved') {
+      const to =
+        str(payload(e)['place']) ?? str(payload(e)['to']) ?? str(payload(e)['location']) ?? e.target_id;
+      if (to) a.location = to;
+    }
+  }
+
+  // Final energy/credits from the run's own turn samples (exact at turn
+  // granularity; agents that never acted keep the 0 defaults).
+  const economy = agentEconomyAt(events);
+  for (const [id, sample] of economy) {
+    const a = byId.get(id);
+    if (a) {
+      a.energy = sample.energy;
+      a.credits = sample.credits;
+    }
+  }
+
+  return [...byId.values()];
+}
+
 // ── Replay markers (EM-055) — color-coded by type, for the timeline ──────────
 
 export type MarkerCategory = 'crime' | 'governance' | 'construction' | 'animal' | 'trace' | 'other';

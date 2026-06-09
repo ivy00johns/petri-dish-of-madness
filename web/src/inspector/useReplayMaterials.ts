@@ -140,23 +140,38 @@ export function materialsToSnapshot(m: ReplayMaterials): ReplaySnapshot | null {
  * Fetch replay materials for `tick` while `enabled`. Returns the latest
  * materials (or null when disabled / not yet fetched) and a fetching flag the
  * layout surfaces as a labeled notice.
+ *
+ * W11a (EM-086): an optional `runId` scopes the /api/replay call to a past run
+ * (archive mode). The per-tick cache is keyed by (runId, tick), so toggling
+ * live ⇄ archive can never serve one run's snapshot for another.
  */
 export function useReplayMaterials(
   enabled: boolean,
   tick: number,
+  runId?: number | null,
 ): { materials: ReplayTickMaterials | null; fetching: boolean } {
   const [materials, setMaterials] = useState<ReplayTickMaterials | null>(null);
   const [fetching, setFetching] = useState(false);
   const reqRef = useRef(0);
-  const cacheRef = useRef(new Map<number, ReplayTickMaterials>());
+  const cacheRef = useRef(new Map<string, ReplayTickMaterials>());
+  const lastRunRef = useRef<number | null>(runId ?? null);
 
   useEffect(() => {
+    // Crossing a run boundary DROPS the held materials immediately — another
+    // run's snapshot must never be folded while the new fetch is in flight
+    // (EM-086 "no stale data bleeding in"). Within a run, the previous tick's
+    // materials are intentionally kept for scrub smoothness.
+    if ((runId ?? null) !== lastRunRef.current) {
+      lastRunRef.current = runId ?? null;
+      setMaterials(null);
+    }
     if (!enabled) {
       setMaterials(null);
       setFetching(false);
       return;
     }
-    const cached = cacheRef.current.get(tick);
+    const cacheKey = `${runId ?? 'live'}:${tick}`;
+    const cached = cacheRef.current.get(cacheKey);
     if (cached) {
       setMaterials(cached);
       setFetching(false);
@@ -166,7 +181,7 @@ export function useReplayMaterials(
     let alive = true;
     const timer = setTimeout(() => {
       setFetching(true);
-      void inspectorApi.replay(tick).then((m) => {
+      void inspectorApi.replay(tick, runId ?? undefined).then((m) => {
         if (!alive || req !== reqRef.current) return;
         const out: ReplayTickMaterials = {
           tick,
@@ -175,7 +190,7 @@ export function useReplayMaterials(
         };
         // Only cache useful materials so a transient failure retries later.
         if (out.snapshot !== null || out.events.length > 0) {
-          cacheRef.current.set(tick, out);
+          cacheRef.current.set(cacheKey, out);
           if (cacheRef.current.size > CACHE_MAX) {
             const oldest = cacheRef.current.keys().next().value;
             if (oldest !== undefined) cacheRef.current.delete(oldest);
@@ -189,7 +204,7 @@ export function useReplayMaterials(
       alive = false;
       clearTimeout(timer);
     };
-  }, [enabled, tick]);
+  }, [enabled, tick, runId]);
 
   return { materials: enabled ? materials : null, fetching: enabled && fetching };
 }

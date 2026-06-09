@@ -129,19 +129,32 @@ export default function SocialGraph(props: PanelProps) {
     return () => obs.disconnect();
   }, []);
 
-  // Pause the render loop on unmount (leak-free, like the annex demands).
-  // Audit C5: the ref MUST be read INSIDE the cleanup — at effect setup
-  // fgRef.current is still undefined (the graph mounts after), so capturing it
-  // there made the pause a no-op and the rAF loop survived route unmount.
+  const nodeCount = projection.nodes.length;
+  const edgeCount = projection.edges.length;
+  const aliveCount = projection.nodes.filter((n) => n.alive).length;
+  const ready = size.w > 0 && size.h > 0 && nodeCount >= 2;
+
+  // Pause the render loop when the graph unmounts (leak-free, like the annex
+  // demands). EM-097 / W10-QA-1: reading `fgRef.current` inside an unmount
+  // cleanup was DEAD CODE — React 18 detaches forwarded refs (the
+  // useImperativeHandle handle is nulled) in the commit mutation phase,
+  // BEFORE passive effect cleanups run, so the read always saw null. And the
+  // old C5 capture-at-mount was equally dead: with `[]` deps the effect ran
+  // while `ready` was still false (the graph wasn't rendered yet), so it
+  // captured undefined. The fix is a CAPTURED-INSTANCE cleanup keyed on
+  // `ready`: when `ready` flips true the graph mounts in the same commit and
+  // its ref is attached before passive effects fire, so the capture is real —
+  // and the closure-held instance survives React's ref detach, so the
+  // teardown call actually runs (at route unmount AND whenever `ready` drops).
   useEffect(() => {
+    if (!ready) return;
+    const fg = fgRef.current;
     return () => {
-      // Intentional: fgRef holds the ForceGraph instance (assigned AFTER this
-      // effect runs), not a React-rendered node — reading it at teardown IS
-      // the fix; capturing it at setup is the C5 bug.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      fgRef.current?.pauseAnimation();
+      // Braced: pauseAnimation() returns the chainable instance, which a
+      // cleanup must not return.
+      fg?.pauseAnimation();
     };
-  }, []);
+  }, [ready]);
 
   // ── interaction: spotlight a node's ties ───────────────────────────────────
   const activeId = pinnedId ?? hoverId;
@@ -256,11 +269,6 @@ export default function SocialGraph(props: PanelProps) {
     setSettled(true);
     fgRef.current?.zoomToFit(400, 24);
   }, []);
-
-  const nodeCount = projection.nodes.length;
-  const edgeCount = projection.edges.length;
-  const aliveCount = projection.nodes.filter((n) => n.alive).length;
-  const ready = size.w > 0 && size.h > 0 && nodeCount >= 2;
 
   return (
     <section className="lab-panel flex flex-col h-full min-h-[16rem]" aria-label="Social graph (EM-058)">

@@ -77,10 +77,12 @@ function useOnScreen<T extends Element>(ref: React.RefObject<T | null>): boolean
 }
 
 // ── number formatting helpers ────────────────────────────────────────────────
-function pct(n: number): string {
+// Exported (W11a EM-086): RunComparison reuses these so cross-run numbers read
+// exactly like the live AWI dashboard's.
+export function pct(n: number): string {
   return `${Math.round(n * 100)}%`;
 }
-function compact(n: number): string {
+export function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(Math.round(n));
@@ -91,12 +93,12 @@ function topEntries(rec: Record<string, number>, limit = 4): Array<[string, numb
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit);
 }
-function sumValues(rec: Record<string, number>): number {
+export function sumValues(rec: Record<string, number>): number {
   let s = 0;
   for (const v of Object.values(rec)) s += v;
   return s;
 }
-function avgValues(rec: Record<string, number>): number {
+export function avgValues(rec: Record<string, number>): number {
   const vals = Object.values(rec);
   if (vals.length === 0) return 0;
   return sumValues(rec) / vals.length;
