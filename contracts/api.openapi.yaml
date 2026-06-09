@@ -112,6 +112,23 @@ paths:
         "201": { description: "forked — {run_id} of the new run" }
         "400": { description: bad tick or overrides }
         "404": { description: unknown run }
+  /api/billboard:
+    post:
+      summary: Post a god/watcher reply on the village billboard (W11b EM-091)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, maxLength: 280 }
+                in_reply_to: { type: string, description: "optional reference to a prior post" }
+      responses:
+        "201": { description: "posted — emits billboard_posted with actor_type god" }
+        "422": { description: empty/whitespace/over-280 }
+        "503": { description: world not initialized }
   /api/personas:
     get:
       summary: Persona library — config-defined character cards (W11b EM-092)
