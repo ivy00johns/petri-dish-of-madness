@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.3.0
+  version: 1.4.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -86,6 +86,49 @@ paths:
       responses: { "200": { description: ok } }
   # --- W6 read-only event-log endpoints (event-log.md §7). Default-scoped to the active
   # run; v1.3.0 (W11a, EM-086): every endpoint below also accepts optional `run_id`. ---
+  /api/runs/fork:
+    post:
+      summary: Fork a past run at tick T into a NEW run (W11b EM-101)
+      description: >
+        Restores `World.from_snapshot(replay(T))` of the source run, applies optional
+        `place_overrides` (replace the town geometry — the multi-city experiment), starts
+        a new run with `forked_from`/`forked_at_tick` lineage, and pauses it (the user
+        presses play). 404 unknown run; 400 tick out of range / invalid overrides.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [run_id, tick]
+              properties:
+                run_id: { type: integer }
+                tick: { type: integer }
+                place_overrides:
+                  type: array
+                  description: optional full replacement places list (same shape as config world.places)
+                  items: { type: object }
+      responses:
+        "201": { description: "forked — {run_id} of the new run" }
+        "400": { description: bad tick or overrides }
+        "404": { description: unknown run }
+  /api/personas:
+    get:
+      summary: Persona library — config-defined character cards (W11b EM-092)
+      responses:
+        "200":
+          description: personas from config/personas.yaml
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    archetype: { type: string }
+                    personality: { type: string }
+                    suggested_profile: { type: string }
   /api/runs:
     get:
       summary: List all persisted runs, newest first (W11a EM-086 — the run browser)
@@ -179,6 +222,8 @@ components:
         is_active: { type: boolean, description: "true iff this is MAX(id) and the loop holds it" }
         max_tick: { type: integer, description: "MAX(events.tick) for the run; 0 if no events" }
         event_count: { type: integer }
+        forked_from: { type: integer, nullable: true, description: "parent run id (W11b EM-101)" }
+        forked_at_tick: { type: integer, nullable: true }
         config_summary:
           type: object
           description: "small projection of config_json: {agents: [{name, profile}], seed?}"

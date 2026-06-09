@@ -1,4 +1,4 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.2.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.3.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
@@ -27,6 +27,32 @@ Lock it before building any instrumentation UI.
 >    `{tick, last_agent_id, auto_paused}` — emitted when the last living human agent
 >    dies; if `world.auto_pause_on_extinction` (default true) the loop pauses after
 >    emitting it.
+
+> **v1.3.0 (W11b, 2026-06-09 — EM-079/080/081/083/091/100/101/103):**
+> 1. **New kinds (all free-scale — none adds an LLM call):**
+>    `billboard_posted {place, text, in_reply_to?}` — the post text rides the SAME turn's
+>    model response (EM-066 pattern); god replies use `actor_type:"god"`.
+>    `reflection {text, importance}` — diary entry captured from the same single model
+>    response, requested in-prompt ONLY when the importance threshold trips (~2–3×/day);
+>    never a separate call.
+>    `commitment_made {commitment_id, text}` / `commitment_lapsed {commitment_id, text,
+>    reason:"phantom"|"expired"}` — `phantom` = claimed in speech, never enacted (EM-079).
+>    `usage_alert {provider, metric:"rpd"|"tpd", pct, limit}` — emitted once per
+>    provider/metric/window on crossing 70% of a configured cap (EM-083; reads EM-067
+>    usage rows).
+> 2. **Rule feed text is human-readable (EM-100):** `rule_proposed/rule_vote/rule_passed/
+>    rule_rejected` `text` leads with the rule's text + effect ("'Everyone deserves a
+>    basic income' (ubi) PASSED"), never the bare uuid hex; the id stays in `payload`.
+> 3. **Overhearing (EM-081) adds NO kinds and NO calls:** overheard speech enters ≤2
+>    co-located listeners' next-turn `perceived` context (flagged `overheard:true` in
+>    that chain event's payload); any immediate reaction is reflex-only.
+> 4. **Run forking (EM-101):** `runs` gains nullable `forked_from` + `forked_at_tick`.
+>    A forked run's tick-0 state = `World.from_snapshot(replay(T))` of the parent
+>    (+ optional `place_overrides`); its first event records the lineage. RunRow
+>    (api.openapi 1.4.0) surfaces both fields.
+> 5. **`blackout` is real (EM-083):** the random event now applies a concrete effect
+>    (recharge disabled at affected places for N ticks), surfaced via the existing
+>    `random_event` + `structure_state_changed` kinds.
 
 > **v1.2.0 (W11a, 2026-06-09 — EM-086/094):**
 > 1. **New kind `narrator_summary`** (EM-094 Narrator mode, OFF by default):

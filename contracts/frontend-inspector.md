@@ -1,6 +1,9 @@
-# Contract: Frontend Routing & the Inspector Annex — v1.2.0
+# Contract: Frontend Routing & the Inspector Annex — v1.3.0
 
 **Wave:** W5 (EM-053). **Owner:** frontend-agent.
+
+> **v1.3.0 (W11b, 2026-06-09):** adds §10 (billboard, personas, governance grouping,
+> usage alerts, mobile gate + a11y, fork affordance). NORMATIVE for W11b.
 
 > **v1.2.0 (W11a, 2026-06-09 — EM-086/093/094/095/096/099):** adds §8 (run browser) and
 > §9 (live-view layout, scroll, summary, critters, camera). Both NORMATIVE for W11a.
@@ -212,3 +215,32 @@ the wave: `tsc -b` + `vite build` green, `design-token-guard` clean, and `render
 - **EM-097:** SocialGraph unmount cleanup must not read a React-18-detached ref —
   capture the instance in the effect closure (or delete the dead path); un-xfail the
   pinned test.
+
+## 10. W11b — Billboard, personas, governance grouping, alerts, a11y, fork
+
+- **EM-091 billboard:** a physical notice board mesh in the 3D village (at the plaza)
+  whose in-canvas label shows the newest post; `billboard_posted` events render in the
+  feed with a 📌 idiom; a billboard panel (live view, near the digest or as a feed
+  filter) lists recent posts newest-first with author + model chip. **God affordance:**
+  the control panel gets a "REPLY ON BILLBOARD" input that POSTs a god reply (backend
+  surface per api/world contract) rendered distinctly (god ink) — agent petitions to
+  the watchers get answerable.
+- **EM-092 personas:** the spawn form offers a persona picker fed by `GET /api/personas`
+  (card: name, archetype, one-line personality, suggested profile pre-selected) alongside
+  the existing freeform fields; picking a persona prefills and stays editable. Empty
+  library / no backend → labeled state, freeform unaffected.
+- **EM-087 governance grouping:** identical-effect ACTIVE rules group into one row with
+  a ×N stack badge (expandable to instances with their ticks/proposers) in the
+  governance panel + rules strip; pairs with the backend reject/renew semantics —
+  surface `renewed` outcomes distinctly from `passed`.
+- **EM-083 usage alerts:** `usage_alert` events raise a dismissible banner (same idiom
+  as routing-degraded, amber) "provider X at NN% of daily cap"; auto-clears next window.
+- **EM-082 decision = min-width gate + a11y pass:** below 1024px, `/` and `/inspector`
+  render a labeled full-screen gate ("desktop required — the lab needs ≥1024px") instead
+  of a broken layout. A11y: semantic landmarks/headings hierarchy, aria-labels on all
+  icon-only controls, visible focus states, prefers-reduced-motion respected for
+  feed/camera animation.
+- **EM-101 fork affordance:** in the Run Browser, each archived run row gets FORK →
+  prompts for tick (default max_tick) → `POST /api/runs/fork` → on 201, refresh the runs
+  list and show the new run (with its `forked_from ↩ #N @tick` lineage chip, also shown
+  for any forked run).
