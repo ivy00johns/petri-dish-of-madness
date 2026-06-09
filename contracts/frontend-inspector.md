@@ -1,6 +1,25 @@
-# Contract: Frontend Routing & the Inspector Annex — v1.0.0
+# Contract: Frontend Routing & the Inspector Annex — v1.1.0
 
 **Wave:** W5 (EM-053). **Owner:** frontend-agent.
+
+> **v1.1.0 (W9, 2026-06-09 — audit §C1/C4/C8/D2, EM-069):** §7's deep-replay clause is
+> now NORMATIVE, not aspirational — `inspectorApi` with zero consumers is a contract
+> violation. Requirements:
+> 1. **Backfill on mount (live mode):** `InspectorLayout` seeds its history from
+>    `GET /api/events` (keyset-paginated via `after_seq`, ascending) and merges the WS
+>    rolling history on top, deduped by `seq`. After a fresh page load mid-run, every
+>    panel renders the FULL run, not just events since connect.
+> 2. **Scrub uses replay materials:** seeking to tick T beyond what client history can
+>    project uses `GET /api/replay?tick=T` (`base.state` + delta per api.openapi.yaml
+>    v1.2.0) through the SAME `replayStateAt` selector. Fold boundary is strict-left
+>    (`base.tick < e.tick <= T`) per event-log.md v1.1.0.
+> 3. **`onSeekTick` is wired:** `App.tsx` passes the simulation hook's `seekTick` into
+>    `InspectorLayout`; while scrubbed (not pinned to live), panels project at the
+>    scrub tick and MUST NOT bleed live-edge data into their views.
+> 4. **Empty states are mandatory** (§7 already says so): any panel state with no data
+>    renders a labeled explanation (e.g. "no events at this tick — history loading /
+>    out of window"), never a blank region. Mock mode (no backend) must keep working —
+>    every fetch degrades to the rolling history.
 
 ## 0. Framing (read this first)
 

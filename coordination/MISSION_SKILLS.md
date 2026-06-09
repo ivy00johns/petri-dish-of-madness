@@ -25,3 +25,15 @@ Every box ends ✅ (invoked, artifact path) or with a one-line deferral reason.
 - `repo-deep-dive` — DONE-EQUIVALENT: reference project (Emergence-World) already analyzed via Explore agent during brainstorming; findings folded into the spec.
 - `llm-wiki` — DEFERRED: project knowledge lives in the living-plan docs (START-HERE/BUILD-PLAN/REMAINING-WORK); a wiki is redundant for a build this size.
 - `security-review` / `code-review` — run as post-build second pass (Phase C) if time permits; low surface (local, no auth, no PII).
+
+## W9 — "Make v2 true" (source: BUILD-PLAN.md §Wave 9, scanned 2026-06-09)
+
+The W9 mission text names no external skills explicitly; orchestrator defaults apply.
+
+- [ ] `contract-author` — contract DELTAS to four existing W5/W6 contracts authored inline
+      by orchestrator (small amendments to locked contracts, not greenfield authoring).
+- [ ] `render-sanity` / live-browser pass — orchestrator runs Playwright verification
+      against the W9 exit criteria post-QA-gate (this wave's changes are conduct +
+      panels, no new routes).
+- [ ] `design-token-guard` — diff-scoped source check at the wave gate (UI files touched).
+- [ ] `git-commit` — per-milestone commits on `build/w9-make-v2-true`.

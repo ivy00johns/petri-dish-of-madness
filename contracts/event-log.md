@@ -1,8 +1,32 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.0.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.1.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.1.0 (W9, 2026-06-09 — audit §B1/B6/B8/C4, EM-070/071/073):**
+> 1. **`llm_call` emission is per-attempt, exactly once per attempt.** EM-067's
+>    per-attempt emission REPLACED the W5 final-attempt emission; emitting both (two
+>    identical rows for one attempt) is a contract violation. One network attempt (or
+>    one cache hit) ⇒ exactly one `llm_call` row.
+> 2. **Animal turns get their OWN `turn_id`** (`uuid4().hex` per animal turn). Animal
+>    events MUST NOT inherit a human agent's in-flight `turn_id` — the engine must not
+>    default-stamp the current agent-turn correlation id onto events emitted by
+>    concurrent animal/system tasks. `get_turn_trace(agent_turn_id)` returns only that
+>    agent's chain.
+> 3. **Snapshot boundary semantics (normative):** a snapshot at tick `S` is the state
+>    AFTER all tick-`S` events have applied. `replay(T)` = nearest snapshot `S ≤ T`
+>    + fold events with `S < e.tick ≤ T` (strict on the left). Producers and consumers
+>    (backend `/api/replay`, frontend `replayStateAt`) MUST agree on this. Snapshots
+>    additionally serialize the scheduler state needed for a faithful projection:
+>    `round`, turn order, and turn index (W9; previously omitted).
+> 4. **New kinds (W9, EM-070/071):** `agent_starving`
+>    `{energy, turns_until_death, threshold}` — emitted when an agent's energy crosses
+>    `world.starving_warn_threshold` (default 25) downward, and once per turn while
+>    energy is 0 with the countdown; `text` is a feed-readable warning. `world_extinct`
+>    `{tick, last_agent_id, auto_paused}` — emitted when the last living human agent
+>    dies; if `world.auto_pause_on_extinction` (default true) the loop pauses after
+>    emitting it.
 
 This contract is the READ + WRITE spec for the simulation's source of truth. It does
 **not** introduce a new table — it formalizes the existing `events` table

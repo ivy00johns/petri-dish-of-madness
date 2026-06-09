@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.1.0
+  version: 1.2.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -106,7 +106,12 @@ paths:
       responses: { "200": { description: ticks, content: { application/json: { schema: { type: array, items: { type: object, properties: { tick: { type: integer } } } } } } } }
   /api/replay:
     get:
-      summary: Replay materials for tick T — nearest prior snapshot + events to fold forward (EM-055)
+      summary: Replay materials for tick T — nearest prior snapshot + the fold-forward delta (EM-055)
+      description: >
+        v1.2.0 (W9, audit §B7): `events` contains ONLY the delta — rows with
+        base.tick < event.tick <= T (strict on the left; the snapshot at base.tick
+        already includes all tick-base.tick events, per event-log.md v1.1.0 §boundary).
+        Clients fold `events` onto `base.state` without further filtering.
       parameters: [ { name: tick, in: query, required: true, schema: { type: integer } } ]
       responses: { "200": { description: replay, content: { application/json: { schema: { type: object, properties: { base: { type: object, properties: { tick: { type: integer }, state: { type: object } } }, events: { type: array, items: { $ref: '#/components/schemas/EventRow' } } } } } } } }
   /api/analytics:
