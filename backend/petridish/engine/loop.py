@@ -64,10 +64,14 @@ RANDOM_EVENTS = {
             setattr(a, "energy", max(0.0, a.energy - 10)) for a in world.living_agents()
         ],
     },
+    # W11b / EM-083 — blackout is REAL: recharge is disabled at the affected
+    # places for world.blackout_ticks (default 10). Applied via
+    # world.apply_blackout in inject_random_event (it needs to emit the
+    # structure_state_changed events alongside the random_event).
     "blackout": {
         "kind": "random_event",
-        "text": "Blackout! Energy recharge costs double this round.",
-        "_effect": lambda world: None,  # Handled by noting event; TODO: apply temporarily
+        "text": "Blackout! The power fails — recharge is disabled at affected places.",
+        "_effect": lambda world: None,  # special-cased in inject_random_event
     },
     "festival": {
         "kind": "random_event",
@@ -298,6 +302,8 @@ class TickLoop:
         self._world.pending_spawn_events = []
         # W8 — clear animals; the seed critters are re-spawned below.
         self._world.animals = {}
+        # W11b — clear the billboard for the fresh run.
+        self._world.billboard = []
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0
@@ -308,8 +314,17 @@ class TickLoop:
         self._world._round_start = True
         self._last_building_round = 0
 
-        # Clear agent memories
-        self._runtime._memory.clear()
+        # W11b / EM-098 — regenerate the procgen town for the fresh run when
+        # world.procgen.enabled (no-op for the hand-authored town).
+        self._world.apply_procgen()
+
+        # Clear agent memories + W11b cognition state (commitments, importance
+        # accumulators, pending overheard lines).
+        reset_state = getattr(self._runtime, "reset_state", None)
+        if callable(reset_state):
+            reset_state()
+        else:  # pragma: no cover - legacy runtime
+            self._runtime._memory.clear()
 
         # W9 — reset per-run survival/extinction tracking (EM-070/071).
         self._starving_warned.clear()
@@ -439,6 +454,15 @@ class TickLoop:
         # governance-spawn events queued by an admit_agent rule that just passed.
         # Emitted as standalone system events (no turn_id) before this turn's chain.
         self._advance_round_buildings()
+
+        # W11b / EM-083 — restore power at places whose blackout window elapsed
+        # (standalone system events, outside this turn's chain).
+        try:
+            for evt in self._world.expire_blackouts():
+                evt.setdefault("turn_id", None)
+                self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("blackout expiry failed: %s", exc)
 
         # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
         # each living animal takes ONE animal turn (mostly zero-LLM reflex). It is
@@ -1000,15 +1024,21 @@ class TickLoop:
             "profile_color": profile_color,
         }
 
+        perceived_payload = {
+            "visible_agents": perceived.get("visible_agents", []),
+            "nearby_places": perceived.get("nearby_places", []),
+            "overheard": perceived.get("overheard", []),
+            "perceived_summary": perceived.get("perceived_summary"),
+        }
+        # W11b / EM-081 — overheard speech consumed this turn rides the perceived
+        # chain event's payload, each line flagged overheard:true (additive key;
+        # the legacy `overheard` seq list is unchanged).
+        if perceived.get("overheard_speech"):
+            perceived_payload["overheard_speech"] = perceived["overheard_speech"]
         self._emit_event({
             **base, "kind": "perceived",
             "text": f"{agent.name} perceives the scene.",
-            "payload": {
-                "visible_agents": perceived.get("visible_agents", []),
-                "nearby_places": perceived.get("nearby_places", []),
-                "overheard": perceived.get("overheard", []),
-                "perceived_summary": perceived.get("perceived_summary"),
-            },
+            "payload": perceived_payload,
         })
         self._emit_event({
             **base, "kind": "memory_retrieved",
@@ -1256,21 +1286,43 @@ class TickLoop:
         if template is None:
             raise ValueError(f"Unknown event kind: {kind!r}")
 
-        effect_fn = template.get("_effect")
-        if effect_fn:
-            effect_fn(self._world)
+        text = template["text"]
+        payload: dict = {"event_kind": kind}
+        extra_events: list[dict] = []
+
+        if kind == "blackout":
+            # W11b / EM-083 — a REAL blackout: disable recharge at the affected
+            # places for world.blackout_ticks; surface per-place
+            # structure_state_changed events alongside the random_event.
+            place_ids, until, extra_events = self._world.apply_blackout()
+            names = ", ".join(
+                self._world.places[pid].name for pid in place_ids
+                if pid in self._world.places
+            ) or "nowhere"
+            text = (
+                f"Blackout! The power fails at {names} — recharge disabled "
+                f"until tick {until}."
+            )
+            payload.update({"places": place_ids, "until_tick": until})
+        else:
+            effect_fn = template.get("_effect")
+            if effect_fn:
+                effect_fn(self._world)
 
         evt = {
             "kind": template["kind"],
             "actor_id": None,
             "profile": None,
             "profile_color": None,
-            "text": template["text"],
-            "payload": {"event_kind": kind},
+            "text": text,
+            "payload": payload,
         }
         self._emit_event(evt)
+        for extra in extra_events:
+            extra.setdefault("turn_id", None)
+            self._emit_event(extra)
         self._broadcast_world_state()
-        return {"kind": kind, "text": template["text"]}
+        return {"kind": kind, "text": text}
 
     def current_snapshot(self) -> dict:
         """Return the current world_state dict (for /api/state)."""
