@@ -1,12 +1,16 @@
 /**
- * Scenery — low-poly charm scattered across the ground via instancing:
- * grass tufts, flower dots, and a handful of rounded trees. Counts are modest
- * (a few hundred max) to stay at 60fps. Placement is deterministic (seeded)
- * and avoids the immediate footprint of each place.
+ * Scenery — low-poly ground charm scattered via instancing: grass tufts and
+ * flower dots. Counts are modest (a few hundred max) to stay at 60fps.
+ * Placement is deterministic (seeded) and avoids the immediate footprint of
+ * each place.
  *
  * EM-111 (materials only): everything renders with the shared cached
  * warm-toon materials (toon.ts). Instanced batches share ONE material each —
  * passed via the `material` prop so instancing keeps working unchanged.
+ *
+ * EM-118: the old 16 individual trees moved to Foliage.tsx as a ~60-tree
+ * instanced treeline with LOD; town props live in Props.tsx. Both mount in
+ * CozyWorld next to this component.
  */
 
 import { useMemo } from 'react';
@@ -28,7 +32,8 @@ interface Scatter {
 
 const GRASS_COUNT = 220;
 const FLOWER_COUNT = 90;
-const TREE_COUNT = 16;
+// EM-118: grass warmed a touch toward the golden-hour terrain greens.
+const GRASS_GREEN = '#7bab54';
 const FLOWER_COLORS = ['#ff6f91', '#ffd166', '#f8f0fb', '#9b8cff'];
 
 function scatter(
@@ -109,10 +114,6 @@ export function Scenery({ places }: SceneryProps) {
     () => scatter(GRASS_COUNT, 'grass', places, 2.2, SIZE * 1.5),
     [places],
   );
-  const trees = useMemo(
-    () => scatter(TREE_COUNT, 'tree', places, 4.5, SIZE * 1.4),
-    [places],
-  );
 
   // Flowers split by color so each color is its own instanced batch.
   const flowerBatches = useMemo(() => {
@@ -126,7 +127,7 @@ export function Scenery({ places }: SceneryProps) {
   return (
     <group>
       {/* grass tufts — small green cones */}
-      <Instances items={grass} yOffset={0.18} material={toonMaterial('#6fae5a')}>
+      <Instances items={grass} yOffset={0.18} material={toonMaterial(GRASS_GREEN)}>
         <coneGeometry args={[0.14, 0.45, 5]} />
       </Instances>
 
@@ -140,25 +141,6 @@ export function Scenery({ places }: SceneryProps) {
         >
           <sphereGeometry args={[0.13, 8, 8]} />
         </Instances>
-      ))}
-
-      {/* rounded trees — trunk + canopy, rendered individually (low count) */}
-      {trees.map((t, i) => (
-        <group key={i} position={[t.x, 0, t.z]} rotation={[0, t.rot, 0]} scale={t.scale}>
-          <mesh position={[0, 0.7, 0]} castShadow material={toonMaterial('#7a5230')}>
-            <cylinderGeometry args={[0.18, 0.26, 1.4, 8]} />
-          </mesh>
-          <mesh
-            position={[0, 2.0, 0]}
-            castShadow
-            material={toonMaterial(i % 2 ? '#5fa05f' : '#6fb56f')}
-          >
-            <sphereGeometry args={[1.0, 14, 14]} />
-          </mesh>
-          <mesh position={[0.4, 2.5, 0.2]} castShadow material={toonMaterial('#67ad67')}>
-            <sphereGeometry args={[0.6, 12, 12]} />
-          </mesh>
-        </group>
       ))}
     </group>
   );

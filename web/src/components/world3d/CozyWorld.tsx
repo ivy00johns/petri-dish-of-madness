@@ -31,6 +31,8 @@ import * as THREE from 'three';
 import type { WorldState, WorldEvent, FocusTarget } from '../../types';
 import { Ground } from './Ground';
 import { Scenery } from './Scenery';
+import { Foliage } from './Foliage';
+import { TownProps } from './Props';
 import { Building } from './Building';
 import { Structure } from './Structure';
 import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
@@ -615,6 +617,9 @@ function Scene({
 
       <Ground places={places} />
       <Scenery places={places} />
+      {/* EM-118: instanced treeline (LOD) + lived-in town props. */}
+      <Foliage places={places} />
+      <TownProps places={places} />
 
       {places.map((p) => (
         <Building
