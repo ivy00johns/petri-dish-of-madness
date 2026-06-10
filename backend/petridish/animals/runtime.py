@@ -213,6 +213,7 @@ def _role_card(animal: Animal) -> dict[str, Any]:
 
 from ..agents.runtime import (  # noqa: E402  (intentional reuse)
     _extract_first_json,
+    _looks_truncated,
     _retry_max_tokens,
 )
 
@@ -433,7 +434,10 @@ class AnimalRuntime:
         # ONE retry with the error fed back; a length-truncated first attempt
         # (reasoning-model reroute) retries with a boosted token budget,
         # mirroring the agent runtime.
-        retry_tokens = _retry_max_tokens(max_tokens, meta.get("usage"))
+        retry_tokens = _retry_max_tokens(
+            max_tokens, meta.get("usage"),
+            truncated=bool(meta.get("truncated_json")),
+        )
         retry_messages = messages + [
             {"role": "assistant", "content": "(previous response could not be parsed)"},
             {"role": "user", "content": (
@@ -492,14 +496,27 @@ class AnimalRuntime:
 
         action_dict = _extract_first_json(text)
         if action_dict is None:
+            # Mirror the agent runtime: structural truncation verdict for the
+            # retry-budget boost, and evict the garbage from the router cache
+            # so it can't replay into the retry/next turn.
+            meta["truncated_json"] = _looks_truncated(text)
+            self._forget_response(profile_name, messages)
             return None, meta
         self._sanitize(action_dict)
         try:
             jsonschema.validate(action_dict, ANIMAL_ACTION_SCHEMA)
         except jsonschema.ValidationError as exc:
             log.debug("Animal action schema error (attempt %s): %s", attempt, exc.message)
+            self._forget_response(profile_name, messages)
             return None, meta
         return action_dict, meta
+
+    def _forget_response(self, profile_name: str, messages: list[dict]) -> None:
+        """Evict a failed response from the router's decision cache (guarded
+        getattr: duck-typed test routers don't implement forget())."""
+        forget = getattr(self.router, "forget", None)
+        if callable(forget):
+            forget(profile_name, messages)
 
     @staticmethod
     def _sanitize(action_dict: dict) -> None:

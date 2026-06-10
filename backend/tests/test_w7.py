@@ -751,6 +751,28 @@ def test_cache_identical_messages_hit_invokes_adapter_once():
     assert router.last_routed_via("count") == "real-model-x"
 
 
+def test_cache_forget_evicts_entry():
+    """forget(profile, messages) drops the exact cached entry so a response
+    that failed to parse/validate is never replayed (run 126: cached=true
+    served the same truncated JSON back into a turn)."""
+    router, ad = _counting_router()
+    msgs = [{"role": "system", "content": "world snapshot ALPHA"}]
+
+    asyncio.run(router.chat("count", msgs, max_tokens=10, temperature=0.0))
+    assert ad.calls == 1
+
+    router.forget("count", msgs)
+
+    # Same request again → the adapter is re-invoked (entry gone), and other
+    # keys are untouched.
+    asyncio.run(router.chat("count", msgs, max_tokens=10, temperature=0.0))
+    assert ad.calls == 2, "forgotten entry must not serve a cache HIT"
+
+    # Forgetting an unknown key / uncacheable profile is a harmless no-op.
+    router.forget("count", [{"role": "system", "content": "never cached"}])
+    router.forget("no-such-profile", msgs)
+
+
 def test_cache_different_messages_invokes_adapter_again():
     router, ad = _counting_router()
     asyncio.run(router.chat("count", [{"role": "system", "content": "ALPHA"}],

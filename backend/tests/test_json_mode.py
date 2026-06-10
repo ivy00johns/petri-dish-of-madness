@@ -261,3 +261,162 @@ async def test_run_turn_retries_length_truncation_with_boosted_budget():
 
     assert router.calls == [512, 2048]
     assert event["kind"] != "parse_failure"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# (F) Truncation with a LYING finish_reason ('stop'). Run 126: lanes rerouted to
+#     mistral-medium cut output mid-JSON at ~400-600 tokens (under the 1024 cap)
+#     while reporting finish_reason='stop', so the (E) length boost never fired
+#     and the same truncated reply was even replayed FROM CACHE (cached=true).
+#     Defenses: progressive prefix repair (salvage the turn with zero extra
+#     calls), structural truncation detection feeding the retry boost, and
+#     cache eviction of any response that fails to parse/validate.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Cleo's actual failing shape from run 126: cut right after a key, before its
+# value — the one-shot close/balance leaves a keyless dangle and fails.
+_CLEO_DANGLING_KEY = """{
+ "action": "contribute_funds",
+ "args": {
+ "building_id": "bld_405fdabf",
+ "amount": 2
+ },
+ "mood": "determined",
+ "thought": "The Golden Apple Festival and Community Orchard must happen!",
+ "perceived_summary": "Bram and Ada are enthusiastic about pooling credits.",
+ "memories_used": """
+
+
+def test_repair_salvages_dangling_key():
+    from petridish.agents.runtime import _extract_first_json
+
+    parsed = _extract_first_json(_CLEO_DANGLING_KEY)
+    assert parsed is not None
+    assert parsed["action"] == "contribute_funds"
+    assert parsed["args"] == {"building_id": "bld_405fdabf", "amount": 2}
+    assert parsed["mood"] == "determined"
+
+
+def test_repair_backtracks_past_unparseable_tail():
+    from petridish.agents.runtime import _extract_first_json
+
+    # Cut mid-escape inside a nested string AND after a dangling key — needs
+    # more than one backtracking step.
+    frag = '{"action": "say", "args": {"text": "hi"}, "mood": "calm", "thought": '
+    parsed = _extract_first_json(frag)
+    assert parsed is not None
+    assert parsed["action"] == "say"
+
+    # A comma inside a string value must NOT be used as a cut point.
+    frag2 = '{"action": "say", "args": {"text": "one, two, three'
+    parsed2 = _extract_first_json(frag2)
+    assert parsed2 is not None
+    assert parsed2["args"]["text"].startswith("one, two")
+
+
+def test_looks_truncated_structural_verdict():
+    from petridish.agents.runtime import _looks_truncated
+
+    assert _looks_truncated('{"action": "say", "args": {"text": "cut off he')
+    assert _looks_truncated('{"action": "contribute_funds", "memories_used": ')
+    # Complete object (even if elsewhere malformed) / no JSON at all → False.
+    assert not _looks_truncated('{"action": "idle", "args": {}}')
+    assert not _looks_truncated("pure prose, no JSON anywhere")
+    assert not _looks_truncated('prose then {"action": "idle", "args": {}} more')
+
+
+def test_retry_max_tokens_boosts_on_structural_truncation():
+    from petridish.agents.runtime import _retry_max_tokens
+
+    # finish_reason lies ('stop') but the structure says truncated → boost.
+    assert _retry_max_tokens(512, {"finish_reason": "stop"}, truncated=True) == 2048
+    assert _retry_max_tokens(1024, None, truncated=True) == 4096
+    # No structural truncation, no length → unchanged (back-compat).
+    assert _retry_max_tokens(512, {"finish_reason": "stop"}, truncated=False) == 512
+
+
+class _StopTruncationRouter:
+    """Duck-typed Router for the mistral-medium 'stop' lie: attempt 1 returns
+    JSON cut mid-object with finish_reason='stop'; attempt 2 returns a valid
+    action. Records max_tokens per call and any forget() evictions."""
+
+    def __init__(self):
+        self.calls: list[int] = []
+        self.forgotten: list[str] = []
+        self._usage: dict | None = None
+
+    def profile_name_for(self, agent_id, agent_profile):
+        return agent_profile
+
+    def get_profile(self, name):
+        return None  # runtime falls back to max_tokens=512
+
+    async def chat(self, profile_name, messages, *, max_tokens, temperature):
+        self.calls.append(max_tokens)
+        if len(self.calls) == 1:
+            self._usage = {"input_tokens": 1559, "output_tokens": 492,
+                           "latency_ms": 1.0, "finish_reason": "stop",
+                           "cached": False}
+            # Unrepairable truncation: cut inside the first key.
+            return '{"act'
+        self._usage = {"input_tokens": 1600, "output_tokens": 20,
+                       "latency_ms": 1.0, "finish_reason": "stop",
+                       "cached": False}
+        return _VALID_ACTION_JSON
+
+    def forget(self, profile_name, messages):
+        self.forgotten.append(profile_name)
+
+    def last_usage(self, profile_name):
+        return self._usage
+
+    def last_routed_via(self, profile_name):
+        return "mistral/mistral-medium-latest"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_boosts_budget_on_stop_truncation_and_forgets_cache():
+    from petridish.agents.runtime import AgentRuntime
+
+    agent, world = _world_with_agent()
+    router = _StopTruncationRouter()
+    runtime = AgentRuntime(world, router)
+
+    event = await runtime.run_turn(agent)
+
+    # The 'stop' lie must not suppress the boost — structure says truncated.
+    assert router.calls == [512, 2048]
+    assert event["kind"] != "parse_failure"
+    # The unparseable attempt-1 response was evicted from the decision cache.
+    assert router.forgotten == ["test"]
+
+
+class _AlwaysGarbageRouter(_StopTruncationRouter):
+    """Both attempts return unsalvageable prose — the turn dies, and the final
+    parse_failure payload must carry the FULL raw response for forensics."""
+
+    async def chat(self, profile_name, messages, *, max_tokens, temperature):
+        self.calls.append(max_tokens)
+        self._usage = {"input_tokens": 1559, "output_tokens": 492,
+                       "latency_ms": 1.0, "finish_reason": "stop",
+                       "cached": False}
+        return "We must reason about this carefully. " * 20  # no JSON, >400 chars
+
+
+@pytest.mark.asyncio
+async def test_parse_failure_payload_carries_full_raw_response():
+    from petridish.agents.runtime import AgentRuntime
+
+    agent, world = _world_with_agent()
+    router = _AlwaysGarbageRouter()
+    runtime = AgentRuntime(world, router)
+
+    event = await runtime.run_turn(agent)
+    evt = event["_multi"][0] if "_multi" in event else event
+
+    assert evt["kind"] == "parse_failure"
+    raw = evt["payload"]["raw_response"]
+    assert len(raw) > 400  # full text, not the 400-char feed snippet
+    assert raw == "We must reason about this carefully. " * 20
+    # Both failed attempts were evicted from the cache.
+    assert router.forgotten == ["test", "test"]

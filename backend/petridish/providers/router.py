@@ -240,6 +240,16 @@ class Router:
                 self._cache.popitem(last=False)  # evict least-recently-used
         return text
 
+    def forget(self, profile_name: str, messages: list[dict]) -> None:
+        """Evict the decision-cache entry for this exact (profile, messages),
+        if present. The runtime calls this when a response fails to parse or
+        validate — a truncated/garbage reply must never be replayed from cache
+        (cached=true was observed serving the same broken JSON back into a
+        turn, run 126). No-op for uncacheable profiles or unknown keys."""
+        if not self._cacheable(profile_name):
+            return
+        self._cache.pop(_cache_key(profile_name, messages), None)
+
     def clear_cache(self) -> None:
         """Flush the decision cache + pending HIT snapshots (W9, audit B12).
         Called on world reset so prior-run decisions never serve into a new run."""

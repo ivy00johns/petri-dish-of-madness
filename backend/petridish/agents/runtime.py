@@ -69,6 +69,9 @@ ACTION_SCHEMA = {
                 "repair", "arson", "take_offline",
                 # W11b / EM-091 — billboard reflex tools (plaza/townhall only).
                 "post_billboard", "read_billboard",
+                # PROTOTYPE (god-channel) — answer the active proclamation (the
+                # threaded return path; offered only while a decree is live).
+                "answer_proclamation",
             ],
         },
         "args": {"type": "object", "default": {}},
@@ -107,6 +110,10 @@ ACTION_SCHEMA = {
              "building_id": {"type": "string"},
          }}}}},
         {"if": {"properties": {"action": {"const": "post_billboard"}}},
+         "then": {"properties": {"args": {"required": ["text"], "properties": {
+             "text": {"type": "string", "maxLength": 280},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
          }}}}},
@@ -160,6 +167,10 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # turn's response args (zero extra LLM calls).
     "post_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
     "read_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
+    # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
+    # god's voice is omnipresent); offered only when a decree is live (see
+    # _assemble_context), enforced by _validate_world.
+    "answer_proclamation": {"tier": "reflex", "location_gate": None,         "agreement_gate": None},
 }
 
 
@@ -239,14 +250,10 @@ def _strip_code_fences(text: str) -> str:
     return t.strip()
 
 
-def _repair_truncated(frag: str) -> dict | None:
-    """Best-effort parse of a JSON object that was cut off mid-output.
-
-    Free models routed through the proxy often run out of tokens partway
-    through (typically inside a trailing string value). We close any open
-    string, drop a dangling trailing comma/colon, and balance the open
-    braces/brackets, then try to parse. Returns None if still unparseable.
-    """
+def _close_and_balance(frag: str) -> dict | None:
+    """One-shot close of a cut-off JSON fragment: close an open string (dropping
+    a trailing half-escape), strip a dangling comma/colon, balance the open
+    braces/brackets, then try to parse. Returns None if still unparseable."""
     stack: list[str] = []
     in_str = False
     esc = False
@@ -269,6 +276,8 @@ def _repair_truncated(frag: str) -> dict | None:
 
     repaired = frag
     if in_str:
+        if esc:
+            repaired = repaired[:-1]          # cut landed mid-escape: drop the \
         repaired += '"'                       # close a dangling string
     repaired = re.sub(r"[,:]\s*$", "", repaired.rstrip())  # drop trailing , or :
     for opener in reversed(stack):
@@ -277,6 +286,51 @@ def _repair_truncated(frag: str) -> dict | None:
         return json.loads(repaired)
     except json.JSONDecodeError:
         return None
+
+
+def _comma_positions_outside_strings(frag: str) -> list[int]:
+    """Indices of every `,` that is not inside a string — the member boundaries
+    a truncated object can be safely cut back to."""
+    positions: list[int] = []
+    in_str = False
+    esc = False
+    for i, ch in enumerate(frag):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == ",":
+            positions.append(i)
+    return positions
+
+
+def _repair_truncated(frag: str) -> dict | None:
+    """Best-effort parse of a JSON object that was cut off mid-output.
+
+    Free models routed through the proxy cut output partway through — even
+    with finish_reason='stop' (mistral-medium reroute observed live, run 126).
+    First try closing/balancing the fragment in place. If that fails (e.g. the
+    cut landed right after a key, leaving `"memories_used": ` with no value),
+    backtrack member by member: cut the fragment at each comma outside strings,
+    last to first, and re-balance until a prefix parses. Salvaging the prefix
+    keeps the action/args (which lead the object) and costs zero extra LLM
+    calls; a prefix that lost a required arg still fails schema/world
+    validation and falls through to the normal retry.
+    """
+    repaired = _close_and_balance(frag)
+    if repaired is not None:
+        return repaired
+    for pos in reversed(_comma_positions_outside_strings(frag)):
+        repaired = _close_and_balance(frag[:pos])
+        if repaired is not None:
+            return repaired
+    return None
 
 
 def _extract_first_json(text: str) -> dict | None:
@@ -330,6 +384,41 @@ def _extract_first_json(text: str) -> dict | None:
     return _repair_truncated(frag)
 
 
+def _looks_truncated(text: str) -> bool:
+    """True when the response opens a JSON object that never closes — the model
+    intended JSON and was cut off mid-output.
+
+    Deliberately ignores the reported finish_reason: rerouted models lie about
+    it (mistral-medium returns 'stop' on output it truncated at ~500 tokens,
+    run 126), so truncation must be detected structurally. Only meaningful on
+    a response that already failed to parse."""
+    text = _strip_code_fences(text)
+    start = text.find("{")
+    if start == -1:
+        return False
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in text[start:]:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                return False  # a complete (if malformed) object exists
+    return True
+
+
 def _no_json_error(text: str, finish_reason: str | None) -> str:
     """Diagnostic message for a response containing no parseable JSON object.
 
@@ -347,7 +436,9 @@ def _no_json_error(text: str, finish_reason: str | None) -> str:
 _LENGTH_RETRY_TOKEN_FLOOR = 2048
 
 
-def _retry_max_tokens(max_tokens: int, usage: dict | None) -> int:
+def _retry_max_tokens(
+    max_tokens: int, usage: dict | None, *, truncated: bool = False
+) -> int:
     """Token budget for the one parse-failure retry.
 
     The proxy can silently reroute a lane to a reasoning model (nemotron /
@@ -357,8 +448,14 @@ def _retry_max_tokens(max_tokens: int, usage: dict | None) -> int:
     way, turn after turn, until the agent starves on idle fallbacks. When the
     first attempt died of length, give the retry room to finish thinking and
     still emit the object. Same number of calls; only the cap moves.
+
+    `truncated` covers the lanes that lie: mistral-medium reroutes report
+    finish_reason='stop' on output they cut mid-JSON (run 126), so the caller
+    passes the structural verdict from `_looks_truncated` as well.
     """
-    if isinstance(usage, dict) and usage.get("finish_reason") == "length":
+    if truncated or (
+        isinstance(usage, dict) and usage.get("finish_reason") == "length"
+    ):
         return max(max_tokens * 4, _LENGTH_RETRY_TOKEN_FLOOR)
     return max_tokens
 
@@ -644,6 +741,14 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if action == "post_billboard" and not str(args.get("text") or "").strip():
             return "post_billboard requires text"
 
+    # ── PROTOTYPE (god-channel) — answer the active proclamation ───────────────
+    elif action == "answer_proclamation":
+        active = getattr(world, "active_proclamation", None)
+        if not (callable(active) and active()):
+            return "there is no active proclamation to answer"
+        if not str(args.get("text") or "").strip():
+            return "answer_proclamation requires text"
+
     return None
 
 
@@ -767,6 +872,15 @@ def _assemble_context(
             "(everyone, and the watchers, can read it)")
         valid_actions.append(
             f"read_billboard - read the latest billboard posts ({len(board)} on the board)")
+
+    # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
+    # Offered to EVERY agent (no location gate) whenever a decree is live, so the
+    # god's word can be answered back from anywhere — the two-way half of the loop.
+    _active_proc_offer = getattr(world, "active_proclamation", None)
+    if callable(_active_proc_offer) and _active_proc_offer():
+        valid_actions.append(
+            "answer_proclamation (text) - answer the god's proclamation directly; "
+            "your reply is threaded under it for the watchers to see")
 
     # Recent events summary
     event_lines = []
@@ -1272,9 +1386,13 @@ class AgentRuntime:
         llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
         if parse_error and action_dict is None:
-            # One retry with error fed back; a length-truncated first attempt
-            # (reasoning-model reroute) retries with a boosted token budget.
-            retry_tokens = _retry_max_tokens(max_tokens, llm_meta.get("usage"))
+            # One retry with error fed back; a truncated first attempt retries
+            # with a boosted token budget — whether the provider admitted it
+            # (finish_reason='length') or lied (mistral 'stop' cuts, run 126).
+            retry_tokens = _retry_max_tokens(
+                max_tokens, llm_meta.get("usage"),
+                truncated=bool(llm_meta.get("truncated_json")),
+            )
             retry_messages = messages + [
                 {"role": "assistant", "content": "(previous response could not be parsed)"},
                 {
@@ -1300,6 +1418,12 @@ class AgentRuntime:
             payload: dict = {"reason": parse_error or "parse_failure"}
             if routed is not None:
                 payload["routed_via"] = routed
+            # Forensics: the feed text caps the snippet at 400 chars, which hid
+            # HOW these responses were malformed. Keep the final attempt's full
+            # raw text in the payload (bounded) so live failures yield fixtures.
+            raw = llm_meta.get("raw_text")
+            if isinstance(raw, str) and raw:
+                payload["raw_response"] = raw[:8000]
             trace = {
                 "perceived": {**perceived, "perceived_summary": None},
                 "memory": memory,
@@ -1503,6 +1627,12 @@ class AgentRuntime:
         action_dict = _extract_first_json(text)
         if action_dict is None:
             finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
+            # Structural truncation verdict for the retry-budget boost (the
+            # reported finish_reason can be a lying 'stop'), plus the full raw
+            # text for the final parse_failure event's forensics.
+            meta["truncated_json"] = _looks_truncated(text)
+            meta["raw_text"] = text
+            self._forget_response(profile_name, messages)
             return None, _no_json_error(text, finish_reason), meta
 
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
@@ -1510,13 +1640,25 @@ class AgentRuntime:
 
         schema_error = _validate_schema(action_dict)
         if schema_error:
+            self._forget_response(profile_name, messages)
             return None, f"schema error: {schema_error}", meta
 
         world_error = _validate_world(action_dict, agent, self.world)
         if world_error:
+            self._forget_response(profile_name, messages)
             return None, f"world error: {world_error}", meta
 
         return action_dict, None, meta
+
+    def _forget_response(self, profile_name: str, messages: list[dict]) -> None:
+        """Evict this request from the router's decision cache after a failed
+        parse/validation. A bad response replayed from cache turns one dead
+        turn into many (cached=true was observed serving the same truncated
+        JSON back into a turn, run 126). Guarded getattr: duck-typed test
+        routers don't implement forget()."""
+        forget = getattr(self.router, "forget", None)
+        if callable(forget):
+            forget(profile_name, messages)
 
     def _apply_action(
         self,
@@ -1834,6 +1976,11 @@ class AgentRuntime:
                             f"({len(posts)} recent post{'s' if len(posts) != 1 else ''}).",
                     "payload": {"action": "read_billboard",
                                 "posts": posts, "thought": thought}}
+
+        # ── PROTOTYPE (god-channel) — answer the active proclamation ────────────
+        elif action == "answer_proclamation":
+            result = self.world.answer_proclamation(agent, args.get("text", ""))
+            return _emit_world_result(result, base, thought)
 
         else:
             return {**base, "kind": "agent_action",
