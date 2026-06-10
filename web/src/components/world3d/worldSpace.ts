@@ -156,7 +156,11 @@ export function humanizeKind(kind: string): string {
  * market stall is never labeled "Monument".
  */
 export function buildingStyle(kind: string): BuildingStyle {
-  const exact = BUILDING_STYLES[kind];
+  // Own-property check: kinds are model-authored strings — 'constructor' etc.
+  // must not resolve through the prototype chain.
+  const exact = Object.prototype.hasOwnProperty.call(BUILDING_STYLES, kind)
+    ? BUILDING_STYLES[kind]
+    : undefined;
   if (exact) return exact;
   const lower = kind.toLowerCase();
   const tag = humanizeKind(kind);
@@ -225,7 +229,10 @@ const VARIANT_KEYWORDS: ReadonlyArray<readonly [readonly string[], VariantKey]> 
  * rest fall back to the neutral `generic` silhouette.
  */
 export function operationalVariant(kind: string): VariantKey {
-  const exact = EXACT_VARIANTS[kind];
+  // Own-property check: see buildingStyle — prototype members are not variants.
+  const exact = Object.prototype.hasOwnProperty.call(EXACT_VARIANTS, kind)
+    ? EXACT_VARIANTS[kind]
+    : undefined;
   if (exact) return exact;
   const lower = kind.toLowerCase();
   for (const [keywords, variant] of VARIANT_KEYWORDS) {

@@ -160,6 +160,16 @@ describe('operationalVariant (EM-122)', () => {
     expect(operationalVariant('community')).toBe('generic');
     expect(operationalVariant('')).toBe('generic');
   });
+
+  it('prototype-member kinds never resolve through the prototype chain', () => {
+    // Kinds are model-authored strings — these crashed the canvas pre-guard.
+    for (const evil of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(operationalVariant(evil)).toBe('generic');
+      const style = buildingStyle(evil);
+      expect(typeof style.body).toBe('string');
+      expect(style.body.startsWith('#')).toBe(true);
+    }
+  });
 });
 
 // ── EM-122: healthTint ───────────────────────────────────────────────────────
