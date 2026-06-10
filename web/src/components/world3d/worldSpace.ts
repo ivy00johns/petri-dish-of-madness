@@ -2,16 +2,21 @@
  * worldSpace — shared constants & helpers for the cozy 3D village.
  *
  * World mapping (per the build contract):
- *   SIZE = 40
+ *   SIZE = 66
  *   worldX = (place.x / 1000 - 0.5) * SIZE
  *   worldZ = (place.y / 1000 - 0.5) * SIZE
  * Ground is the XZ plane, Y is up.
+ *
+ * Wave C (EM-149): SIZE retuned 40 → 66 so the 15-place district town
+ * breathes — intra-district spacing (≥60 logical) lands at ~4 world units,
+ * comfortably past the 4.2 slot-ring pitch, and district centroids (≥250
+ * logical) sit ~16.5 apart. The mapping math itself is unchanged.
  */
 
 import type { Place, PlaceKind, WorldEvent } from '../../types';
 
 /** Edge length of the village ground plane in world units. */
-export const SIZE = 40;
+export const SIZE = 66;
 
 /** Convert a place's logical (0..1000) x to world X. */
 export function toWorldX(x: number): number {

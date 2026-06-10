@@ -1,11 +1,14 @@
 /**
- * foliageLayout tests (EM-118) — the contract invariants for the instanced
- * treeline + town props:
+ * foliageLayout tests (EM-118, lane-aware since EM-149) — the contract
+ * invariants for the instanced treeline + town props:
  *   • determinism: same places → byte-identical layout across calls
  *   • clearance: no tree within 10 of any place center; wild props ≥ BAND_MAX
- *     from every center; near props (lamps/benches) on their own place's snug
- *     inner ring (below SLOT_BASE_RADIUS — outside their own slot band) and
- *     ≥ NEIGHBOR_FLOOR from every other center
+ *     from every center; benches on their own place's snug inner ring (below
+ *     SLOT_BASE_RADIUS) and ≥ NEIGHBOR_FLOOR from every other center
+ *   • lane corridors: pathSegments is townLayout's lane graph (the single
+ *     source of truth — Wave C) and every non-lamp item stays PATH_CLEAR off
+ *     every lane centerline; lamps LINE the lanes, never sit on one, and obey
+ *     the lamp clearance law (≥ NEIGHBOR_FLOOR, never inside a slot band)
  *   • variant distribution sanity: every tree variant present
  *   • counts within the contract bounds (trees 50–80, total instances ≲400)
  */
@@ -13,6 +16,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Place } from '../../types';
 import { placeToWorld } from './worldSpace';
+import { computeTownLayout } from './townLayout';
 import {
   layoutTrees,
   splitByLod,
@@ -21,11 +25,11 @@ import {
   layoutFences,
   layoutMushrooms,
   layoutWildScatter,
+  lampSpotValid,
   TREE_COUNT,
   TREE_SPACING,
   TREE_LOD_RADIUS,
   BAND_MAX,
-  NEAR_RING_MIN,
   NEAR_RING_MAX,
   NEIGHBOR_FLOOR,
   PATH_HALF_WIDTH,
@@ -41,8 +45,27 @@ import {
   type ScatterItem,
 } from './foliageLayout';
 
-/** A representative procgen-ish town: hub plaza + four satellite places. */
+/** The Wave C 15-place district town (mirrors config/world.yaml). */
 const PLACES: Place[] = [
+  { id: 'plaza', name: 'Central Plaza', x: 500, y: 500, kind: 'social', district: 'core', description: '' },
+  { id: 'well', name: 'The Old Well', x: 510, y: 420, kind: 'social', district: 'core', description: '' },
+  { id: 'market', name: 'Market', x: 750, y: 400, kind: 'work', district: 'market', description: '' },
+  { id: 'forge', name: 'The Ember Forge', x: 840, y: 340, kind: 'work', district: 'market', description: '' },
+  { id: 'workshop', name: "Tinker's Workshop", x: 820, y: 470, kind: 'work', district: 'market', description: '' },
+  { id: 'townhall', name: 'Town Hall', x: 250, y: 350, kind: 'governance', district: 'civic', description: '' },
+  { id: 'archive', name: 'The Records Hall', x: 180, y: 260, kind: 'governance', district: 'civic', description: '' },
+  { id: 'home', name: 'Hearth', x: 300, y: 650, kind: 'home', district: 'residential', description: '' },
+  { id: 'rosehip_cottage', name: 'Rosehip Cottage', x: 210, y: 640, kind: 'home', district: 'residential', description: '' },
+  { id: 'mossy_row', name: 'Mossy Row', x: 250, y: 740, kind: 'home', district: 'residential', description: '' },
+  { id: 'lantern_loft', name: 'Lantern Loft', x: 340, y: 740, kind: 'home', district: 'residential', description: '' },
+  { id: 'commons', name: 'The Commons', x: 500, y: 750, kind: 'wild', district: 'farm', description: '' },
+  { id: 'willow_pond', name: 'Willow Pond', x: 610, y: 690, kind: 'wild', district: 'farm', description: '' },
+  { id: 'orchard', name: 'Bramble Orchard', x: 640, y: 790, kind: 'wild', district: 'farm', description: '' },
+  { id: 'farmstead', name: 'Sunfall Farmstead', x: 730, y: 700, kind: 'work', district: 'farm', description: '' },
+];
+
+/** A pre-Wave-C, districtless town (fallback clustering path). */
+const LEGACY: Place[] = [
   { id: 'plaza', name: 'Plaza', x: 500, y: 500, kind: 'social', description: '' },
   { id: 'market', name: 'Market', x: 760, y: 420, kind: 'work', description: '' },
   { id: 'hall', name: 'Town Hall', x: 420, y: 760, kind: 'governance', description: '' },
@@ -57,14 +80,14 @@ function distToCenters(it: { x: number; z: number }): number[] {
 }
 
 /**
- * Near-prop invariant: the prop sits on SOME place's snug inner ring
- * (NEAR_RING_MIN..NEAR_RING_MAX — entirely below that place's slot band) and
- * keeps ≥ NEIGHBOR_FLOOR from every other place center.
+ * Near-prop invariant (benches): the prop sits on SOME place's snug inner
+ * ring (below that place's slot band) and keeps ≥ NEIGHBOR_FLOOR from every
+ * other place center.
  */
 function nearPropSafe(it: { x: number; z: number }): boolean {
   const ds = distToCenters(it);
   const own = Math.min(...ds);
-  if (own < NEAR_RING_MIN || own > NEAR_RING_MAX) return false;
+  if (own < 3.2 || own > NEAR_RING_MAX) return false;
   return ds.every((d) => d === own || d >= NEIGHBOR_FLOOR);
 }
 
@@ -88,6 +111,23 @@ describe('foliageLayout determinism', () => {
     layoutLamps(PLACES);
     layoutWildScatter(ROCK_COUNT, 'rock', PLACES);
     expect(layoutTrees(PLACES)).toEqual(a);
+  });
+});
+
+describe('lane corridors come from townLayout (EM-149 single source of truth)', () => {
+  it('pathSegments returns EXACTLY the townLayout lane graph', () => {
+    const lanes = computeTownLayout(PLACES).lanes;
+    const segs = pathSegments(PLACES);
+    expect(segs).toEqual(
+      lanes.map((l) => ({ ax: l.ax, az: l.az, bx: l.bx, bz: l.bz })),
+    );
+    expect(segs.length).toBeGreaterThanOrEqual(PLACES.length - 1);
+  });
+
+  it('also tracks the lanes for districtless legacy towns', () => {
+    const lanes = computeTownLayout(LEGACY).lanes;
+    expect(pathSegments(LEGACY).length).toBe(lanes.length);
+    expect(pathSegments(LEGACY).length).toBeGreaterThanOrEqual(LEGACY.length - 1);
   });
 });
 
@@ -133,20 +173,16 @@ describe('tree clearance + counts (contract §B3)', () => {
 });
 
 describe('prop clearance (own slot band avoided; neighbors respected)', () => {
-  it('keeps lamps snug on their own ring, below the slot band', () => {
-    const lamps = layoutLamps(PLACES);
-    expect(lamps.length).toBeGreaterThan(0);
-    expect(lamps.length).toBeLessThanOrEqual(MAX_LAMPS);
-    for (const l of lamps) expect(nearPropSafe(l)).toBe(true);
-  });
-
-  it('keeps benches on the plaza inner ring, below the slot band', () => {
+  it('keeps benches on a social place inner ring, below the slot band', () => {
     const benches = layoutBenches(PLACES);
     expect(benches.length).toBeGreaterThan(0);
-    const plaza = placeToWorld(PLACES[0]);
+    const socials = PLACES.filter((p) => p.kind === 'social').map(placeToWorld);
     for (const b of benches) {
       expect(nearPropSafe(b)).toBe(true);
-      expect(Math.hypot(plaza.x - b.x, plaza.z - b.z)).toBeLessThanOrEqual(NEAR_RING_MAX);
+      const nearest = Math.min(
+        ...socials.map((s) => Math.hypot(s.x - b.x, s.z - b.z)),
+      );
+      expect(nearest).toBeLessThanOrEqual(NEAR_RING_MAX);
     }
   });
 
@@ -163,9 +199,9 @@ describe('prop clearance (own slot band avoided; neighbors respected)', () => {
     }
   });
 
-  it('keeps every non-lamp item out of the path corridors', () => {
+  it('keeps every non-lamp item out of the lane corridors', () => {
     const segs = pathSegments(PLACES);
-    expect(segs.length).toBe(PLACES.length - 1); // hub → each other place
+    expect(segs.length).toBeGreaterThan(0);
     const nonLamp: ScatterItem[] = [
       ...layoutTrees(PLACES),
       ...layoutBenches(PLACES),
@@ -180,25 +216,41 @@ describe('prop clearance (own slot band avoided; neighbors respected)', () => {
     }
   });
 
-  it('keeps lamps beside the ribbons — lining a path, never on one', () => {
+  it('keeps lamps beside the lane strips — lining a lane, never on one', () => {
     const segs = pathSegments(PLACES);
     const lamps = layoutLamps(PLACES);
     expect(lamps.length).toBeGreaterThan(0);
+    expect(lamps.length).toBeLessThanOrEqual(MAX_LAMPS);
     for (const l of lamps) {
       const d = distToNearestPath(l.x, l.z, segs);
-      // off the ribbon proper…
+      // off the strip proper…
       expect(d).toBeGreaterThanOrEqual(PATH_HALF_WIDTH);
-      // …but actually LINING a path, not floating in a field
+      // …but actually LINING a lane, not floating in a field
       expect(d).toBeLessThanOrEqual(2.5);
+      // and obeying the lamp clearance law (structures + slot bands)
+      expect(lampSpotValid(l.x, l.z, CENTERS)).toBe(true);
     }
   });
 
-  it('clusters mushrooms near the wild place', () => {
-    const wild = placeToWorld(PLACES[4]);
+  it('lines lanes with lamps in legacy (districtless) towns too', () => {
+    const lamps = layoutLamps(LEGACY);
+    const segs = pathSegments(LEGACY);
+    expect(lamps.length).toBeGreaterThan(0);
+    for (const l of lamps) {
+      expect(distToNearestPath(l.x, l.z, segs)).toBeGreaterThanOrEqual(PATH_HALF_WIDTH);
+      expect(distToNearestPath(l.x, l.z, segs)).toBeLessThanOrEqual(2.5);
+    }
+  });
+
+  it('clusters mushrooms near the wild places', () => {
+    const wilds = PLACES.filter((p) => p.kind === 'wild').map(placeToWorld);
     const mushrooms = layoutMushrooms(PLACES);
     expect(mushrooms.length).toBeGreaterThan(0);
     for (const m of mushrooms) {
-      expect(Math.hypot(wild.x - m.x, wild.z - m.z)).toBeLessThanOrEqual(BAND_MAX + 5.1);
+      const nearest = Math.min(
+        ...wilds.map((w) => Math.hypot(w.x - m.x, w.z - m.z)),
+      );
+      expect(nearest).toBeLessThanOrEqual(BAND_MAX + 5.1);
     }
   });
 });
@@ -229,9 +281,12 @@ describe('instance budget (contract: total NEW instances ≲400)', () => {
   });
 
   it('respects the configured prop count caps', () => {
-    expect(layoutBenches(PLACES).length).toBeLessThanOrEqual(BENCHES_PER_PLAZA);
-    expect(layoutFences(PLACES).length).toBeLessThanOrEqual(FENCE_SEGMENTS_PER_HOME);
+    const socials = PLACES.filter((p) => p.kind === 'social').length;
+    const homes = PLACES.filter((p) => p.kind === 'home').length;
+    expect(layoutBenches(PLACES).length).toBeLessThanOrEqual(BENCHES_PER_PLAZA * socials);
+    expect(layoutFences(PLACES).length).toBeLessThanOrEqual(FENCE_SEGMENTS_PER_HOME * homes);
     expect(layoutMushrooms(PLACES).length).toBeLessThanOrEqual(MUSHROOM_COUNT);
+    expect(layoutLamps(PLACES).length).toBeLessThanOrEqual(MAX_LAMPS);
   });
 });
 
@@ -244,8 +299,9 @@ describe('degenerate worlds', () => {
     expect(layoutMushrooms([]).length).toBeGreaterThan(0); // falls back to scatter
   });
 
-  it('handles a single place (no paths → no lamps)', () => {
+  it('handles a single place (no lanes → no lamps)', () => {
     const solo = [PLACES[0]];
+    expect(pathSegments(solo)).toEqual([]);
     expect(layoutLamps(solo)).toEqual([]);
     const trees = layoutTrees(solo);
     const c = placeToWorld(solo[0]);
