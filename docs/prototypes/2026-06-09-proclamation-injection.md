@@ -1,10 +1,11 @@
-# Prototype — God-channel: proclaim + answer (2026-06-09)
+# Prototype — God-channel: proclaim, answer, name the town (2026-06-09)
 
-**Branch:** `fix/reasoning-model-token-exhaustion` · **Status:** working, all backend tests green (264 passed)
+**Branch:** `fix/reasoning-model-token-exhaustion` · **Status:** working, all backend tests green (275 passed)
 
-> Two slices landed: (1) the loud **proclamation injection** (god → every agent),
+> Three slices landed: (1) the loud **proclamation injection** (god → every agent),
 > committed as `31265e5`; (2) the threaded **return path** (`answer_proclamation`,
-> agent → god). This doc covers both.
+> agent → god), committed as `1f763db`; (3) **`name_town`** — naming the town by
+> consensus vote. This doc covers all three.
 
 ## Why
 
@@ -19,18 +20,18 @@ god's word is guaranteed to reach the whole world. It reuses the EM-081 overhear
 pattern — **zero extra LLM calls**, the injection rides the turn each agent was
 already taking (free-scale / subscription-only safe).
 
-These are the first two slices of the approved design
-(`The God Channel + Town Editing`). The **move/demolish** verbs and a `name_town`
-affordance are the next slices, not in this prototype.
+These are the first three slices of the approved design
+(`The God Channel + Town Editing`). The **move/demolish** verbs are the next
+slice, not in this prototype.
 
 ## What changed
 
 | File | Change |
 |---|---|
-| `backend/petridish/engine/world.py` | New `world.proclamations` state; `active_proclamation()` (newest = active decree); `post_proclamation_as_god(text)` → `proclamation_posted` event; **`answer_proclamation(agent, text)`** → threads the reply into the active proclamation's `replies` and returns a `proclamation_answered` event (parse_failure if no decree / empty text). Serialized in `to_snapshot()` and restored in `from_snapshot()` (exact round-trip, replies included). |
-| `backend/petridish/agents/runtime.py` | `_assemble_context` injects a `📜 THE GOD HAS PROCLAIMED` block under `=== NEEDS ===`, and **offers `answer_proclamation` in VALID ACTIONS whenever a decree is live** (no location gate). `answer_proclamation` added to the action enum + arg schema (`text` required) + `TOOL_REGISTRY` (reflex) + `_validate_world` (requires an active decree + text) + the dispatch chain. |
+| `backend/petridish/engine/world.py` | New `world.proclamations` state; `active_proclamation()`; `post_proclamation_as_god(text)` → `proclamation_posted`; **`answer_proclamation(agent, text)`** → threads the reply and returns `proclamation_answered`. New `world.town_name` + **`name_town`** governance effect: `action_propose_rule` accepts it (carrying the name on the rule payload, exempt from renewal), and `_on_rule_activated` sets `town_name` + parks a `town_named` event when the vote passes. Serialized in `to_snapshot()`/`from_snapshot()` (exact round-trip, replies + town_name included). |
+| `backend/petridish/agents/runtime.py` | `_assemble_context` injects the `📜 THE GOD HAS PROCLAIMED` block under `=== NEEDS ===`, offers `answer_proclamation` whenever a decree is live (no location gate), and renders a `Town:` header line (the name, or a nudge to `name_town` when unnamed). `answer_proclamation` + `name_town` wired through the action enum / arg schema / `TOOL_REGISTRY` / `_validate_world` / dispatch; `propose_rule` plumbs the `name` arg through. |
 | `backend/petridish/api/app.py` | New `POST /api/proclaim {text}` (god surface), mirroring `/api/billboard`: calls the engine seam, emits `proclamation_posted`, broadcasts world state. 503 not-initialized / 422 empty-or-too-long. |
-| `backend/tests/test_proclamation.py` | New — 9 unit tests (see below). |
+| `backend/tests/test_proclamation.py` | New — 13 unit tests (see below). |
 
 ## How it works
 
@@ -60,6 +61,14 @@ affordance are the next slices, not in this prototype.
    god: "…"`). So you get a legible exchange — the decree and its answers grouped —
    in both the feed and `world_state.proclamations`. Still zero extra LLM calls: the
    answer rides the agent's own turn.
+5. **Naming the town is by consensus**, not decree. An agent at a governance place
+   proposes `propose_rule(effect="name_town", name="Hopewell", text="…")`; when the
+   vote passes (the existing majority threshold), `_on_rule_activated` sets
+   `world.town_name` and parks a `town_named` event. The name then rides every
+   prompt's `Town:` header; an unnamed town shows a nudge toward `name_town`. A later
+   passing name supersedes the old one (it's a one-shot rename, exempt from the
+   UBI-style renewal guard). So the god can *ask* "name the town," but the town
+   *decides* — proclaim → answers → a naming vote → a committed name.
 
 ## Try it
 
@@ -99,16 +108,28 @@ Return path:
   a live decree + non-empty text.
 - `test_replies_round_trip_through_snapshot` — threaded replies survive snapshot/fork.
 
-Full suite: **264 passed**.
+Naming (consensus):
+
+- `test_naming_the_town_by_vote_sets_the_name_and_emits` — a passing `name_town` vote
+  sets `town_name` and parks the `town_named` event.
+- `test_name_town_requires_a_name` — a nameless naming proposal is rejected (world +
+  validator).
+- `test_a_new_name_supersedes_the_old_one_not_a_renewal` — a second naming activates
+  and overwrites (not swallowed as a renewal).
+- `test_town_name_surfaces_in_prompt_and_round_trips` — unnamed shows the nudge; Cy
+  (at the town hall) is offered `name_town`; after the vote the `Town:` header shows
+  it; snapshot round-trips it.
+
+Full suite: **275 passed**.
 
 ## Honest gaps (deferred, by design)
 
-- **No `name_town` affordance.** The request now reaches them *and* they can answer —
-  but there's still no verb to actually *set* a town name, so "name the town" yields
-  an answered exchange (suggestions threaded under the decree), not a committed name,
-  until that affordance lands. Likely the next slice.
-- **No UI.** The data flows to `world_state.proclamations` and the feed gets a
-  `proclamation_posted` event, but there's no god-panel "PROCLAIM" button and the
-  frontend event registry doesn't know the new kind yet (generic fallback render).
+- **No UI.** The data flows to `world_state` (`proclamations`, `town_name`) and the
+  feed gets `proclamation_posted` / `proclamation_answered` / `town_named` events,
+  but there's no god-panel "PROCLAIM" button and the frontend event registry doesn't
+  know the new kinds yet (generic fallback render).
+- **Stale active `name_town` rules.** A rename leaves the previous (applied)
+  `name_town` rule in `status="active"`, so the active-rules list can show more than
+  one over time. Harmless (`town_name` reflects the latest), cosmetic only.
 - **No contract version bump** (api / event-log / events.schema). This is a
   prototype on the branch; the contract changes belong with the full spec.

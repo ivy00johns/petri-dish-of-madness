@@ -28,6 +28,7 @@ def _world() -> World:
     places = [
         PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social"),
         PlaceState(id="market", name="Market", x=10, y=0, kind="work"),
+        PlaceState(id="townhall", name="Town Hall", x=0, y=10, kind="governance"),
     ]
     agents = [
         AgentState(id="ada", name="Ada", personality="", profile="mock",
@@ -36,6 +37,9 @@ def _world() -> World:
         # must still reach him; an opt-in billboard note never would.
         AgentState(id="bo", name="Bo", personality="", profile="mock",
                    location="market", energy=80.0, credits=20),
+        # Cy stands at the town hall — where propose_rule (incl. name_town) is offered.
+        AgentState(id="cy", name="Cy", personality="", profile="mock",
+                   location="townhall", energy=80.0, credits=20),
     ]
     return World(params=_params(), places=places, agents=agents)
 
@@ -157,3 +161,65 @@ def test_replies_round_trip_through_snapshot():
     assert restored.to_snapshot()["proclamations"] == snap["proclamations"]
     assert [r["text"] for r in restored.active_proclamation()["replies"]] == \
         ["Hopewell.", "No, Lastditch."]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# name_town — naming the town by CONSENSUS vote (the existing governance path).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _pass_rule(world, effect, text, name=None):
+    """Propose `effect` (as Ada) and pass it with Ada + Bo voting yes."""
+    ok, reason, rule = world.action_propose_rule(
+        world.agents["ada"], effect, text, name=name)
+    assert ok, reason
+    world.action_vote(world.agents["ada"], rule.id, True)
+    world.action_vote(world.agents["bo"], rule.id, True)
+    return rule
+
+
+def test_naming_the_town_by_vote_sets_the_name_and_emits():
+    world = _world()
+    assert world.town_name == ""
+    rule = _pass_rule(world, "name_town", "Let us be Hopewell.", name="Hopewell")
+
+    assert world.rules[rule.id].status == "active"
+    assert world.town_name == "Hopewell"
+    # The town_named event is parked in the governance outbox (the loop drains it).
+    evts = world.drain_spawn_events()
+    assert any(e["kind"] == "town_named" and e["payload"]["name"] == "Hopewell"
+               for e in evts)
+
+
+def test_name_town_requires_a_name():
+    world = _world()
+    ok, reason, rule = world.action_propose_rule(
+        world.agents["ada"], "name_town", "Name us something.", name="  ")
+    assert not ok and rule is None
+    # the runtime validator rejects it too
+    act = {"action": "propose_rule", "args": {"effect": "name_town", "text": "x"}}
+    assert _validate_world(act, world.agents["ada"], world) is not None
+
+
+def test_a_new_name_supersedes_the_old_one_not_a_renewal():
+    world = _world()
+    _pass_rule(world, "name_town", "Hopewell it is.", name="Hopewell")
+    assert world.town_name == "Hopewell"
+
+    rule2 = _pass_rule(world, "name_town", "On reflection, Lastditch.", name="Lastditch")
+    assert world.rules[rule2.id].status == "active"   # NOT "renewed"
+    assert world.town_name == "Lastditch"
+
+
+def test_town_name_surfaces_in_prompt_and_round_trips():
+    world = _world()
+    # Unnamed → the prompt nudges toward name_town, and Cy (at the town hall) is
+    # actually offered the propose_rule line carrying name_town.
+    assert "this town has no name yet" in _system_prompt(world, world.agents["ada"])
+    assert "name_town" in _system_prompt(world, world.agents["cy"])
+
+    _pass_rule(world, "name_town", "Hopewell.", name="Hopewell")
+    assert "Town: Hopewell" in _system_prompt(world, world.agents["bo"])
+
+    snap = world.to_snapshot()
+    assert snap["town_name"] == "Hopewell"
+    assert World.from_snapshot(snap, params=_params()).town_name == "Hopewell"

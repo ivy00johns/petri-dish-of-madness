@@ -420,6 +420,11 @@ class World:
         # reach the whole world. Each entry: {id, tick, text, replies:[]}; the
         # NEWEST entry is the active decree. Serialized in to_snapshot().
         self.proclamations: list[dict] = []
+        # PROTOTYPE (god-channel) — the town's name, set by CONSENSUS: an agent
+        # proposes a `name_town` rule (propose_rule) and it takes effect when the
+        # vote passes (_on_rule_activated). Empty = unnamed. Serialized in
+        # to_snapshot() so the frontend/header can show it.
+        self.town_name: str = ""
 
         self.tick: int = 0
         self.day: int = 0
@@ -685,13 +690,23 @@ class World:
     # ──────────────────────────────────────────────────────────────────────────
 
     def action_propose_rule(
-        self, agent: AgentState, effect: str, text: str
+        self, agent: AgentState, effect: str, text: str, name: str | None = None
     ) -> tuple[bool, str, RuleState | None]:
         # W9 / EM-073 B3: ban_arson included so the arson ban is reachable via
         # governance (enforcement already gates arson in the runtime validator).
-        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
+        # PROTOTYPE (god-channel): name_town — naming the town by consensus vote.
+        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
+                         "ban_arson", "name_town"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
+        # name_town carries the proposed name on the payload (like admit_agent);
+        # a naming proposal is meaningless without one.
+        payload: dict[str, Any] = {}
+        if effect == "name_town":
+            name = str(name or "").strip()[:60]
+            if not name:
+                return False, "name_town requires a name", None
+            payload = {"name": name}
         # Duplicate guard: only one OPEN proposal per effect at a time.
         for rule in self.rules.values():
             if rule.effect == effect and rule.status == "proposed":
@@ -700,7 +715,9 @@ class World:
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
         # (civic ritual is the charm) but tagged renewal_of; on passing it
         # refreshes the existing rule instead of activating a duplicate.
-        active = self._active_rule(effect)
+        # EXCEPTION: name_town is a one-shot RENAME, not a stackable law — each
+        # naming is fresh (a new name supersedes the old), never a renewal.
+        active = self._active_rule(effect) if effect != "name_town" else None
         rule = RuleState(
             id=str(uuid.uuid4())[:8],
             effect=effect,
@@ -708,6 +725,7 @@ class World:
             proposer_id=agent.id,
             created_tick=self.tick,
             renewal_of=active.id if active is not None else None,
+            payload=payload,
         )
         self.rules[rule.id] = rule
         return True, "ok", rule
@@ -730,7 +748,9 @@ class World:
                 # active, refresh THAT rule (renewed_at gains the tick) instead
                 # of stacking a second active copy. Invariant: the world never
                 # holds two simultaneously-active identical effects.
-                existing = self._active_rule(rule.effect)
+                # name_town is a one-shot rename, not a stackable law — it never
+                # "renews"; a passing name supersedes whatever the town was called.
+                existing = self._active_rule(rule.effect) if rule.effect != "name_town" else None
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
                     existing.renewed_at.append(self.tick)
@@ -749,7 +769,25 @@ class World:
         `agent_spawned{method:governance, proposal_id}` event in the outbox for the
         runtime/api layer to drain and emit. Other effects (ubi/work_bonus/...) are
         passive and read elsewhere, so nothing to do here."""
-        if rule.effect != "admit_agent" or rule.applied:
+        if rule.applied:
+            return
+        # PROTOTYPE (god-channel) — name_town: a passing naming vote sets the
+        # town's name and parks a `town_named` event in the outbox (drained +
+        # emitted by the loop's _flush_spawn_events, same path as governance spawn).
+        if rule.effect == "name_town":
+            name = (rule.payload or {}).get("name")
+            rule.applied = True
+            if name:
+                self.town_name = str(name)
+                self.pending_spawn_events.append({
+                    "kind": "town_named",
+                    "actor_id": "system",
+                    "actor_type": "system",
+                    "text": f"🏛 By vote, the town is now named {self.town_name}.",
+                    "payload": {"name": self.town_name, "proposal_id": rule.id},
+                })
+            return
+        if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
         name = spec.get("name")
@@ -1593,6 +1631,8 @@ class World:
                 {**p, "replies": [dict(r) for r in p.get("replies", [])]}
                 for p in self.proclamations
             ],
+            # PROTOTYPE (god-channel) — the consensus-set town name ("" = unnamed).
+            "town_name": self.town_name,
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1777,4 +1817,6 @@ class World:
             }
             for i, p in enumerate((state.get("proclamations") or [])[-cls.PROCLAMATION_CAP:])
         ]
+        # PROTOTYPE (god-channel) — the consensus-set town name.
+        world.town_name = str(state.get("town_name", "") or "")
         return world

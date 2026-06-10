@@ -646,9 +646,13 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     elif action == "propose_rule":
         effect = args.get("effect")
         # W9 / EM-073 B3: ban_arson is proposable (mirrors world.action_propose_rule).
-        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
+        # PROTOTYPE (god-channel): name_town — name the town by consensus vote.
+        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
+                         "ban_arson", "name_town"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
+        if effect == "name_town" and not str(args.get("name") or "").strip():
+            return "name_town requires a name (args.name = the town's new name)"
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -837,7 +841,7 @@ def _assemble_context(
         valid_actions.append("(work requires a work place)")
     # Governance actions are gated to a governance place.
     if _gate_ok("propose_rule"):
-        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson")
+        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town (name_town also needs name=<the town's new name>; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
@@ -1003,9 +1007,18 @@ def _assemble_context(
   carry on — but you have heard it, and so has everyone else.
 """
 
+    # PROTOTYPE (god-channel) — the town's name (consensus-set via name_town), or a
+    # nudge that it has none yet so agents know the affordance exists.
+    _town = (getattr(world, "town_name", "") or "").strip()
+    town_line = (
+        f"Town: {_town}" if _town
+        else "Town: (this town has no name yet — name it with propose_rule effect=name_town)"
+    )
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
 Tick: {world.tick}
+{town_line}
 Personality: {agent.personality}
 
 === YOUR STATUS ===
@@ -1838,7 +1851,9 @@ class AgentRuntime:
         elif action == "propose_rule":
             effect = args.get("effect", "")
             text = args.get("text", "")
-            ok, reason, rule = self.world.action_propose_rule(agent, effect, text)
+            # PROTOTYPE (god-channel) — name_town carries the proposed name.
+            name = args.get("name")
+            ok, reason, rule = self.world.action_propose_rule(agent, effect, text, name)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)
