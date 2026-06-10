@@ -35,6 +35,7 @@ import {
   ANIMAL_CHAOS_MAGENTA,
 } from './worldSpace';
 import { useProximity, ENTITY_LABEL_DIST } from './useProximity';
+import { toonMaterial } from './toon';
 
 export interface CritterPos {
   x: number;
@@ -168,40 +169,31 @@ function CatBody({ style, accent }: { style: AnimalStyle; accent: string }) {
   return (
     <group>
       {/* torso */}
-      <RoundedBox args={[0.34, 0.3, 0.62]} radius={0.13} smoothness={3} position={[0, 0.34, 0]} castShadow receiveShadow>
-        <meshStandardMaterial color={style.body} roughness={0.7} />
-      </RoundedBox>
+      <RoundedBox args={[0.34, 0.3, 0.62]} radius={0.13} smoothness={3} position={[0, 0.34, 0]} castShadow receiveShadow material={toonMaterial(style.body)} />
       {/* lighter belly */}
-      <RoundedBox args={[0.26, 0.16, 0.5]} radius={0.08} smoothness={3} position={[0, 0.24, 0.02]} castShadow>
-        <meshStandardMaterial color={style.belly} roughness={0.75} />
-      </RoundedBox>
+      <RoundedBox args={[0.26, 0.16, 0.5]} radius={0.08} smoothness={3} position={[0, 0.24, 0.02]} castShadow material={toonMaterial(style.belly)} />
       {/* head */}
-      <mesh position={[0, 0.5, 0.34]} castShadow>
+      <mesh position={[0, 0.5, 0.34]} castShadow material={toonMaterial(style.body)}>
         <sphereGeometry args={[0.2, 16, 16]} />
-        <meshStandardMaterial color={style.body} roughness={0.6} />
       </mesh>
       {/* pointed upright ears */}
       {[-0.11, 0.11].map((ex) => (
-        <mesh key={ex} position={[ex, 0.66, 0.32]} rotation={[0, 0, ex < 0 ? 0.2 : -0.2]} castShadow>
+        <mesh key={ex} position={[ex, 0.66, 0.32]} rotation={[0, 0, ex < 0 ? 0.2 : -0.2]} castShadow material={toonMaterial(accent)}>
           <coneGeometry args={[0.07, 0.16, 4]} />
-          <meshStandardMaterial color={accent} roughness={0.6} />
         </mesh>
       ))}
       {/* eyes */}
       {[-0.07, 0.07].map((ex) => (
-        <mesh key={ex} position={[ex, 0.52, 0.5]}>
+        <mesh key={ex} position={[ex, 0.52, 0.5]} material={toonMaterial('#241b14')}>
           <sphereGeometry args={[0.032, 8, 8]} />
-          <meshStandardMaterial color="#241b14" />
         </mesh>
       ))}
       {/* long curling tail */}
-      <mesh position={[0, 0.46, -0.4]} rotation={[0.9, 0, 0]} castShadow>
+      <mesh position={[0, 0.46, -0.4]} rotation={[0.9, 0, 0]} castShadow material={toonMaterial(style.body)}>
         <cylinderGeometry args={[0.04, 0.05, 0.5, 8]} />
-        <meshStandardMaterial color={style.body} roughness={0.7} />
       </mesh>
-      <mesh position={[0, 0.62, -0.5]} castShadow>
+      <mesh position={[0, 0.62, -0.5]} castShadow material={toonMaterial(accent)}>
         <sphereGeometry args={[0.06, 10, 10]} />
-        <meshStandardMaterial color={accent} roughness={0.7} />
       </mesh>
       <Legs color={style.body} />
     </group>
@@ -222,46 +214,36 @@ function DogBody({
   return (
     <group>
       {/* chunkier torso */}
-      <RoundedBox args={[0.42, 0.36, 0.66]} radius={0.16} smoothness={3} position={[0, 0.36, 0]} castShadow receiveShadow>
-        <meshStandardMaterial color={style.body} roughness={0.75} />
-      </RoundedBox>
+      <RoundedBox args={[0.42, 0.36, 0.66]} radius={0.16} smoothness={3} position={[0, 0.36, 0]} castShadow receiveShadow material={toonMaterial(style.body)} />
       {/* belly */}
-      <RoundedBox args={[0.32, 0.18, 0.54]} radius={0.09} smoothness={3} position={[0, 0.26, 0.02]} castShadow>
-        <meshStandardMaterial color={style.belly} roughness={0.8} />
-      </RoundedBox>
+      <RoundedBox args={[0.32, 0.18, 0.54]} radius={0.09} smoothness={3} position={[0, 0.26, 0.02]} castShadow material={toonMaterial(style.belly)} />
       {/* head — a touch bigger + a snout */}
-      <mesh position={[0, 0.52, 0.36]} castShadow>
+      <mesh position={[0, 0.52, 0.36]} castShadow material={toonMaterial(style.body)}>
         <sphereGeometry args={[0.23, 16, 16]} />
-        <meshStandardMaterial color={style.body} roughness={0.65} />
       </mesh>
-      <mesh position={[0, 0.46, 0.56]} castShadow>
+      <mesh position={[0, 0.46, 0.56]} castShadow material={toonMaterial(style.belly)}>
         <RoundedBoxImpostor />
-        <meshStandardMaterial color={style.belly} roughness={0.7} />
       </mesh>
       {/* nose */}
-      <mesh position={[0, 0.48, 0.64]}>
+      <mesh position={[0, 0.48, 0.64]} material={toonMaterial('#2a201a')}>
         <sphereGeometry args={[0.05, 10, 10]} />
-        <meshStandardMaterial color="#2a201a" roughness={0.5} />
       </mesh>
       {/* floppy droop ears */}
       {[-0.2, 0.2].map((ex) => (
-        <mesh key={ex} position={[ex, 0.56, 0.32]} rotation={[0.2, 0, ex < 0 ? 0.5 : -0.5]} castShadow>
+        <mesh key={ex} position={[ex, 0.56, 0.32]} rotation={[0.2, 0, ex < 0 ? 0.5 : -0.5]} castShadow material={toonMaterial(accent)}>
           <RoundedBoxEar />
-          <meshStandardMaterial color={accent} roughness={0.7} />
         </mesh>
       ))}
       {/* eyes */}
       {[-0.08, 0.08].map((ex) => (
-        <mesh key={ex} position={[ex, 0.55, 0.54]}>
+        <mesh key={ex} position={[ex, 0.55, 0.54]} material={toonMaterial('#241b14')}>
           <sphereGeometry args={[0.035, 8, 8]} />
-          <meshStandardMaterial color="#241b14" />
         </mesh>
       ))}
       {/* short stubby wagging tail */}
       <group ref={tailRef} position={[0, 0.5, -0.34]}>
-        <mesh position={[0, 0.08, -0.06]} rotation={[-0.7, 0, 0]} castShadow>
+        <mesh position={[0, 0.08, -0.06]} rotation={[-0.7, 0, 0]} castShadow material={toonMaterial(style.body)}>
           <cylinderGeometry args={[0.05, 0.07, 0.26, 8]} />
-          <meshStandardMaterial color={style.body} roughness={0.75} />
         </mesh>
       </group>
       <Legs color={style.body} />
@@ -280,9 +262,8 @@ function Legs({ color }: { color: string }) {
   return (
     <>
       {feet.map(([fx, fz], i) => (
-        <mesh key={i} position={[fx, 0.1, fz]} castShadow>
+        <mesh key={i} position={[fx, 0.1, fz]} castShadow material={toonMaterial(color)}>
           <cylinderGeometry args={[0.055, 0.06, 0.2, 6]} />
-          <meshStandardMaterial color={color} roughness={0.8} />
         </mesh>
       ))}
     </>
@@ -303,14 +284,15 @@ function RoundedBoxEar() {
 
 function ChaosCollar() {
   return (
-    <mesh position={[0, 0.4, 0.24]} rotation={[Math.PI / 2.2, 0, 0]}>
+    <mesh
+      position={[0, 0.4, 0.24]}
+      rotation={[Math.PI / 2.2, 0, 0]}
+      material={toonMaterial(ANIMAL_CHAOS_MAGENTA, {
+        emissive: ANIMAL_CHAOS_MAGENTA,
+        emissiveIntensity: 0.7,
+      })}
+    >
       <torusGeometry args={[0.18, 0.035, 10, 20]} />
-      <meshStandardMaterial
-        color={ANIMAL_CHAOS_MAGENTA}
-        emissive={ANIMAL_CHAOS_MAGENTA}
-        emissiveIntensity={0.7}
-        roughness={0.4}
-      />
     </mesh>
   );
 }

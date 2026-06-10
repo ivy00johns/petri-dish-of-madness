@@ -18,9 +18,9 @@
 import { useCallback, useState } from 'react';
 import { Billboard, RoundedBox, Text, useCursor } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
-import * as THREE from 'three';
 import { MiniMarker } from './Building';
 import { useProximity, PLACE_LABEL_DIST } from './useProximity';
+import { toonMaterial } from './toon';
 
 /** The newest post, resolved by the caller (author name + god flag). */
 export interface NoticeBoardPost {
@@ -83,37 +83,42 @@ export function NoticeBoard({ x, z, newest, onPick }: NoticeBoardProps) {
     >
       {/* two support posts */}
       {[-0.95, 0.95].map((px) => (
-        <mesh key={px} position={[px, 0.95, 0]} castShadow>
+        <mesh key={px} position={[px, 0.95, 0]} castShadow material={toonMaterial(WOOD_POST)}>
           <cylinderGeometry args={[0.08, 0.1, 1.9, 8]} />
-          <meshStandardMaterial color={WOOD_POST} roughness={1} />
         </mesh>
       ))}
 
       {/* the board itself */}
-      <RoundedBox args={[2.3, 1.25, 0.12]} radius={0.04} smoothness={2} position={[0, 1.5, 0]} castShadow>
-        <meshStandardMaterial color={WOOD_BOARD} roughness={0.95} />
-      </RoundedBox>
+      <RoundedBox
+        args={[2.3, 1.25, 0.12]}
+        radius={0.04}
+        smoothness={2}
+        position={[0, 1.5, 0]}
+        castShadow
+        material={toonMaterial(WOOD_BOARD)}
+      />
 
       {/* little shingle roof so notes survive the rain */}
-      <mesh position={[0, 2.28, 0]} rotation={[0, 0, 0]} castShadow>
+      <mesh position={[0, 2.28, 0]} rotation={[0, 0, 0]} castShadow material={toonMaterial(WOOD_ROOF)}>
         <boxGeometry args={[2.6, 0.08, 0.5]} />
-        <meshStandardMaterial color={WOOD_ROOF} roughness={1} />
       </mesh>
 
       {/* pinned papers — the newest one tinted god-violet when the watchers
-          posted last, so the board itself hints who spoke. */}
-      <mesh position={[-0.55, 1.55, 0.075]} rotation={[0, 0, 0.06]}>
+          posted last, so the board itself hints who spoke. (Front-face only is
+          fine: the solid board occludes them from behind.) */}
+      <mesh
+        position={[-0.55, 1.55, 0.075]}
+        rotation={[0, 0, 0.06]}
+        material={toonMaterial(newest?.god ? PAPER_GOD : PAPER)}
+      >
         <planeGeometry args={[0.55, 0.7]} />
-        <meshStandardMaterial color={newest?.god ? PAPER_GOD : PAPER} roughness={0.9} side={THREE.DoubleSide} />
       </mesh>
-      <mesh position={[0.35, 1.45, 0.075]} rotation={[0, 0, -0.08]}>
+      <mesh position={[0.35, 1.45, 0.075]} rotation={[0, 0, -0.08]} material={toonMaterial(PAPER)}>
         <planeGeometry args={[0.6, 0.5]} />
-        <meshStandardMaterial color={PAPER} roughness={0.9} side={THREE.DoubleSide} />
       </mesh>
       {/* a red pin on the newest note */}
-      <mesh position={[-0.55, 1.86, 0.1]}>
+      <mesh position={[-0.55, 1.86, 0.1]} material={toonMaterial(PIN)}>
         <sphereGeometry args={[0.045, 8, 8]} />
-        <meshStandardMaterial color={PIN} roughness={0.6} />
       </mesh>
 
       {/* proximity-gated label: title + newest-post snippet (EM-091a). */}

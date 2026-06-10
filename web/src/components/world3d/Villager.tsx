@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import type { Agent } from '../../types';
 import { ChatBubble, type BubbleData } from './ChatBubble';
 import { useProximity, ENTITY_LABEL_DIST } from './useProximity';
+import { toonMaterial } from './toon';
 
 export interface AnimPos {
   x: number;
@@ -195,7 +196,7 @@ export function Villager({ agent, target, animRef, routedVia, bubbles, focused, 
     // Face direction of travel.
     if (moving) {
       const targetYaw = Math.atan2(dx, dz);
-      let cur = g.rotation.y;
+      const cur = g.rotation.y;
       let diff = targetYaw - cur;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
@@ -214,7 +215,8 @@ export function Villager({ agent, target, animRef, routedVia, bubbles, focused, 
     >
       {/* shadow-casting body group */}
       <group>
-        {/* body */}
+        {/* body — cached warm-toon material; ghosts get the transparent
+            variant (a distinct cache entry, EM-111) */}
         <RoundedBox
           args={[0.6, BODY_HEIGHT, 0.5]}
           radius={0.22}
@@ -222,34 +224,30 @@ export function Villager({ agent, target, animRef, routedVia, bubbles, focused, 
           position={[0, BODY_HEIGHT / 2 + 0.05, 0]}
           castShadow
           receiveShadow
-        >
-          <meshStandardMaterial
-            color={bodyColor}
-            roughness={0.7}
-            transparent={!agent.alive}
-            opacity={agent.alive ? 1 : 0.4}
-          />
-        </RoundedBox>
+          material={toonMaterial(
+            bodyColor,
+            agent.alive ? {} : { transparent: true, opacity: 0.4 },
+          )}
+        />
         {/* head */}
-        <mesh position={[0, HEAD_Y, 0]} castShadow>
+        <mesh
+          position={[0, HEAD_Y, 0]}
+          castShadow
+          material={toonMaterial(
+            color,
+            agent.alive ? {} : { transparent: true, opacity: 0.4 },
+          )}
+        >
           <sphereGeometry args={[0.34, 18, 18]} />
-          <meshStandardMaterial
-            color={color}
-            roughness={0.55}
-            transparent={!agent.alive}
-            opacity={agent.alive ? 1 : 0.4}
-          />
         </mesh>
         {/* little eyes (only when alive) */}
         {agent.alive && (
           <>
-            <mesh position={[0.12, HEAD_Y + 0.04, 0.3]}>
+            <mesh position={[0.12, HEAD_Y + 0.04, 0.3]} material={toonMaterial('#241b14')}>
               <sphereGeometry args={[0.05, 8, 8]} />
-              <meshStandardMaterial color="#241b14" />
             </mesh>
-            <mesh position={[-0.12, HEAD_Y + 0.04, 0.3]}>
+            <mesh position={[-0.12, HEAD_Y + 0.04, 0.3]} material={toonMaterial('#241b14')}>
               <sphereGeometry args={[0.05, 8, 8]} />
-              <meshStandardMaterial color="#241b14" />
             </mesh>
           </>
         )}
@@ -268,13 +266,11 @@ export function Villager({ agent, target, animRef, routedVia, bubbles, focused, 
       {/* tombstone for the departed */}
       {!agent.alive && (
         <group position={[0.55, 0, 0]}>
-          <mesh position={[0, 0.45, 0]} castShadow>
+          <mesh position={[0, 0.45, 0]} castShadow material={toonMaterial('#9aa0a6')}>
             <boxGeometry args={[0.5, 0.9, 0.14]} />
-            <meshStandardMaterial color="#9aa0a6" roughness={1} />
           </mesh>
-          <mesh position={[0, 0.95, 0]} castShadow>
+          <mesh position={[0, 0.95, 0]} castShadow material={toonMaterial('#9aa0a6')}>
             <cylinderGeometry args={[0.25, 0.25, 0.14, 16, 1, false, 0, Math.PI]} />
-            <meshStandardMaterial color="#9aa0a6" roughness={1} />
           </mesh>
         </group>
       )}
