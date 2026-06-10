@@ -195,7 +195,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-142 | P1 | W12 | backend | user 2026-06-10 | Over-cap behavioral strings dead-turned agents (Cleo: 60-char propose_project `function` vs cap 40; Bram: 300-char billboard vs 280): `_ARG_STRING_CAPS` in `_normalize_args` truncates display-text args to their schema caps instead of failing the turn | done | wave-A 2026-06-10 |
 
-_Next free ID: EM-143._
+| EM-143 | P2 | W13 | backend | user 2026-06-10 | God-spawn critters: god console "add critter" affordance (species picker) + `POST /api/god/spawn_animal {species, name?}` registering the animal live in AnimalRuntime; expand the species roster beyond cat/dog (squirrel, …) with `ANIMAL_STYLES` entries + per-species chaos flavor; population cap so chaos stays affordable (animal turns are reflex/off-critical-path — free-scale holds) | open | — |
+
+_Next free ID: EM-144._
 
 ## Notes
 
