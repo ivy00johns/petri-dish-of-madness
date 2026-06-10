@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Any
 
 from typing import Callable
@@ -22,6 +22,18 @@ log = logging.getLogger(__name__)
 
 # W7 / EM-068 — default bound on the Router decision cache (config: world.cache.max_entries).
 _DEFAULT_CACHE_MAX = 512
+
+# ── EM-135 — reroute-aware lane health ────────────────────────────────────────
+# The proxy silently reroutes profiles to models that truncate (reasoning CoT
+# eats the budget; mistral-medium cuts mid-JSON while reporting 'stop' — runs
+# 102/126). The runtimes report every parse attempt's outcome; once a profile's
+# recent window shows repeated truncations, the FIRST attempt gets the same
+# token boost the parse-failure retry uses instead of burning a call at a cap
+# that keeps cutting. The window flushes naturally (deque maxlen): a full
+# window of clean outcomes clears the flag with no extra bookkeeping.
+_LANE_WINDOW = 6                  # outcomes remembered per profile
+_LANE_TRUNCATION_TRIGGER = 2      # truncations in window that flag the lane
+_LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_FLOOR
 
 
 def _cache_key(profile_name: str, messages: list[dict]) -> str:
@@ -121,6 +133,16 @@ class Router:
             for p in profiles
         })
         self._usage_alert_sink: Callable[[dict], None] | None = None
+
+        # ── EM-135 — reroute-aware lane health ─────────────────────────────────
+        # Per-profile deque of the last _LANE_WINDOW parse outcomes, reported by
+        # the runtimes via note_parse_outcome(). In-memory only — cleared by
+        # clear_cache() on world reset so prior-run truncation evidence never
+        # boosts a new run's budgets. last routed_via recorded alongside for
+        # lane_health() introspection.
+        # profile_name -> deque[{"parsed": bool, "truncated": bool}]
+        self._lane_outcomes: dict[str, deque[dict]] = {}
+        self._lane_routed_via: dict[str, str | None] = {}
 
     def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
         """Register the callback that receives `usage_alert` payloads
@@ -251,10 +273,64 @@ class Router:
         self._cache.pop(_cache_key(profile_name, messages), None)
 
     def clear_cache(self) -> None:
-        """Flush the decision cache + pending HIT snapshots (W9, audit B12).
-        Called on world reset so prior-run decisions never serve into a new run."""
+        """Flush the decision cache + pending HIT snapshots (W9, audit B12),
+        plus the EM-135 lane-health windows — prior-run truncation evidence
+        must never boost a new run's budgets. Called on world reset so
+        prior-run decisions never serve into a new run."""
         self._cache.clear()
         self._pending_cached.clear()
+        self._lane_outcomes.clear()
+        self._lane_routed_via.clear()
+
+    # ── EM-135 — reroute-aware lane health ─────────────────────────────────────
+
+    def note_parse_outcome(
+        self, profile_name: str, *, parsed: bool, truncated: bool
+    ) -> None:
+        """Record one runtime parse outcome for this profile's lane (EM-135).
+
+        Called by the runtimes after every parse attempt. A response salvaged
+        by truncation REPAIR still reports truncated=True — the lane is still
+        cutting output; salvage hides it from the feed, not from health
+        tracking. The window is a deque(maxlen=_LANE_WINDOW), so a full window
+        of clean outcomes flushes a bad streak automatically."""
+        window = self._lane_outcomes.setdefault(
+            profile_name, deque(maxlen=_LANE_WINDOW)
+        )
+        window.append({"parsed": bool(parsed), "truncated": bool(truncated)})
+        # routed_via at the time of the outcome — introspection only.
+        self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
+
+    def _lane_boosted(self, profile_name: str) -> bool:
+        """True when this profile's outcome window shows enough truncations to
+        flag the lane as known-bad (≥ _LANE_TRUNCATION_TRIGGER)."""
+        window = self._lane_outcomes.get(profile_name)
+        if not window:
+            return False
+        truncations = sum(1 for o in window if o.get("truncated"))
+        return truncations >= _LANE_TRUNCATION_TRIGGER
+
+    def first_attempt_max_tokens(self, profile_name: str, base: int) -> int:
+        """Attempt-1 token budget for this profile (EM-135). A known-bad lane
+        (see _lane_boosted) gets the SAME boost formula the parse-failure retry
+        uses (agents.runtime._retry_max_tokens: max(base * 4, 2048)) so the
+        first attempt stops failing at a cap the lane keeps cutting. Healthy
+        lanes return `base` unchanged; recovery is automatic via the window."""
+        if self._lane_boosted(profile_name):
+            return max(base * 4, _LANE_BOOST_FLOOR)
+        return base
+
+    def lane_health(self) -> dict:
+        """Introspection snapshot (EM-135): profile -> {window, boosted,
+        last_routed_via}. For a future UI; no API/event consumers this wave."""
+        return {
+            profile: {
+                "window": [dict(o) for o in window],
+                "boosted": self._lane_boosted(profile),
+                "last_routed_via": self._lane_routed_via.get(profile),
+            }
+            for profile, window in self._lane_outcomes.items()
+        }
 
     def last_routed_via(self, profile_name: str) -> str | None:
         """Return the model the proxy actually routed the last request to for

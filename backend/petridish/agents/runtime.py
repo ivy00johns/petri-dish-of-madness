@@ -693,7 +693,10 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                     f"building '{building_id}' is planned but not fully funded "
                     f"({committed}/{required}) — contribute_funds first"
                 )
-        elif status != "under_construction":
+        # Wave A / EM-132: `damaged` passes through — the world redirects the
+        # build_step to a repair (the intent is unambiguous; failing the turn
+        # over the verb choice was a live dead-turn trap, run ~109).
+        elif status not in ("under_construction", "damaged"):
             return f"building '{building_id}' is {status}, not under_construction"
         b_loc = _building_field(building, "location")
         if b_loc != agent.location:
@@ -1390,9 +1393,16 @@ class AgentRuntime:
         # entry becomes ONE `llm_call` row in the loop, all sharing this turn_id.
         llm_attempts: list[dict] = []
 
-        # First attempt
+        # First attempt — EM-135: a lane whose recent outcome window shows
+        # repeated truncations gets the boosted budget UP FRONT instead of
+        # burning attempt 1 at a cap the lane keeps cutting. Guarded getattr:
+        # duck-typed test routers don't implement first_attempt_max_tokens.
+        attempt_tokens = max_tokens
+        first_budget = getattr(self.router, "first_attempt_max_tokens", None)
+        if callable(first_budget):
+            attempt_tokens = first_budget(profile_name, max_tokens)
         action_dict, parse_error, llm_meta = await self._call_and_parse(
-            profile_name, messages, max_tokens, temperature, agent, attempt=1
+            profile_name, messages, attempt_tokens, temperature, agent, attempt=1
         )
         llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
@@ -1636,12 +1646,21 @@ class AgentRuntime:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
         action_dict = _extract_first_json(text)
+        # EM-135 — report this attempt's parse outcome to the router's lane
+        # health. Truncation is judged structurally on the RAW text even when
+        # extraction SUCCEEDED: a response that parsed only via truncation
+        # repair still means the lane is cutting output — salvage hides it
+        # from the feed, not from health tracking.
+        truncated = _looks_truncated(text)
+        self._note_parse_outcome(
+            profile_name, parsed=action_dict is not None, truncated=truncated
+        )
         if action_dict is None:
             finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
             # Structural truncation verdict for the retry-budget boost (the
             # reported finish_reason can be a lying 'stop'), plus the full raw
             # text for the final parse_failure event's forensics.
-            meta["truncated_json"] = _looks_truncated(text)
+            meta["truncated_json"] = truncated
             meta["raw_text"] = text
             self._forget_response(profile_name, messages)
             return None, _no_json_error(text, finish_reason), meta
@@ -1670,6 +1689,16 @@ class AgentRuntime:
         forget = getattr(self.router, "forget", None)
         if callable(forget):
             forget(profile_name, messages)
+
+    def _note_parse_outcome(
+        self, profile_name: str, *, parsed: bool, truncated: bool
+    ) -> None:
+        """Report one parse attempt's outcome to the router's lane-health
+        window (EM-135). Guarded getattr: duck-typed test routers don't
+        implement note_parse_outcome()."""
+        note = getattr(self.router, "note_parse_outcome", None)
+        if callable(note):
+            note(profile_name, parsed=parsed, truncated=truncated)
 
     def _apply_action(
         self,

@@ -425,8 +425,17 @@ class AnimalRuntime:
         max_tokens = profile.max_tokens if profile else 256
         temperature = profile.temperature if profile else 0.9
 
+        # EM-135 — lane-health first-attempt budget (mirrors the agent runtime):
+        # a profile whose recent outcome window shows repeated truncations
+        # starts at the boosted cap instead of burning attempt 1. Guarded
+        # getattr: duck-typed test routers don't implement it.
+        attempt_tokens = max_tokens
+        first_budget = getattr(self.router, "first_attempt_max_tokens", None)
+        if callable(first_budget):
+            attempt_tokens = first_budget(profile_name, max_tokens)
+
         action_dict, meta = await self._call_and_parse(
-            profile_name, messages, max_tokens, temperature, attempt=1
+            profile_name, messages, attempt_tokens, temperature, attempt=1
         )
         if action_dict is not None:
             return action_dict, meta
@@ -495,11 +504,18 @@ class AnimalRuntime:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
         action_dict = _extract_first_json(text)
+        # EM-135 — report the attempt's parse outcome to the router's lane
+        # health, truncation judged structurally on the RAW text even when
+        # extraction succeeded via repair (mirror the agent runtime).
+        truncated = _looks_truncated(text)
+        self._note_parse_outcome(
+            profile_name, parsed=action_dict is not None, truncated=truncated
+        )
         if action_dict is None:
             # Mirror the agent runtime: structural truncation verdict for the
             # retry-budget boost, and evict the garbage from the router cache
             # so it can't replay into the retry/next turn.
-            meta["truncated_json"] = _looks_truncated(text)
+            meta["truncated_json"] = truncated
             self._forget_response(profile_name, messages)
             return None, meta
         self._sanitize(action_dict)
@@ -517,6 +533,15 @@ class AnimalRuntime:
         forget = getattr(self.router, "forget", None)
         if callable(forget):
             forget(profile_name, messages)
+
+    def _note_parse_outcome(
+        self, profile_name: str, *, parsed: bool, truncated: bool
+    ) -> None:
+        """Report one parse attempt's outcome to the router's lane-health
+        window (EM-135; guarded getattr, mirrors the agent runtime)."""
+        note = getattr(self.router, "note_parse_outcome", None)
+        if callable(note):
+            note(profile_name, parsed=parsed, truncated=truncated)
 
     @staticmethod
     def _sanitize(action_dict: dict) -> None:
