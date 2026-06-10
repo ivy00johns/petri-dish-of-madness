@@ -503,6 +503,100 @@ def _sanitize_optional_trace_fields(action_dict: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Behavioral-arg normalization (EM-140) — meet the models where they are.
+#
+# Live runs showed two failure classes that burned whole turns on world errors
+# the model could never fix from feedback alone:
+#   · move_to with the destination under a different key (destination/to/…) or
+#     a JSON null → "unknown place 'None'" (55× in run 139's DB).
+#   · social/economy actions targeting agents by NAME ('Ada') while the world
+#     keys agents by id ('agent_ada_…') — and the prompt itself lists names, so
+#     names are the only thing the model CAN send (119× across the run).
+# Normalization rewrites args in place BEFORE validation: alias keys collapse
+# onto the canonical key, None-ish strings are dropped, place ids match
+# case-insensitively, and agent names resolve to ids (preferring living,
+# co-located agents; ties broken deterministically by id). Anything that still
+# doesn't resolve falls through to the strict validators unchanged.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_NONEISH_STRINGS = {"", "none", "null", "nil"}
+
+# Alias precedence: the canonical key first, then the synonyms models actually
+# produce. First non-empty value wins.
+_PLACE_ALIAS_KEYS = ("place", "place_id", "destination", "location", "to", "target")
+_TARGET_ALIAS_KEYS = ("target", "target_id", "agent", "agent_id", "who", "name")
+_TARGETED_ACTIONS = frozenset(
+    {"give", "steal", "insult", "attack", "whisper", "set_relationship"}
+)
+
+
+def _noneish(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, str) and value.strip().lower() in _NONEISH_STRINGS
+    )
+
+
+def _first_real_arg(args: dict, keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if not _noneish(args.get(key)):
+            return args[key]
+    return None
+
+
+def _resolve_agent_target(raw: str, agent: AgentState, world: World) -> str | None:
+    """Resolve a display name to an agent id, or None when nothing matches.
+    Exact ids pass through untouched by the caller, so this only sees misses."""
+    wanted = raw.strip().lower()
+    candidates = [
+        a for a in world.agents.values()
+        if a.id != agent.id and a.name.strip().lower() == wanted
+    ]
+    if not candidates:
+        return None
+    best = (
+        [a for a in candidates if a.alive and a.location == agent.location]
+        or [a for a in candidates if a.alive]
+        or candidates
+    )
+    return min(best, key=lambda a: a.id).id
+
+
+def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
+    """Rewrite behavioral args in place so well-intentioned-but-misshapen
+    responses validate instead of dying. Never raises; never invents a value
+    the model didn't supply."""
+    action = action_dict.get("action")
+    args = action_dict.get("args")
+    if not isinstance(args, dict):
+        action_dict["args"] = args = {}
+
+    if action == "move_to":
+        place = _first_real_arg(args, _PLACE_ALIAS_KEYS)
+        if isinstance(place, str):
+            place = place.strip()
+            if place not in world.places:
+                by_lower = {pid.lower(): pid for pid in world.places}
+                place = by_lower.get(place.lower(), place)
+            args["place"] = place
+        elif _noneish(args.get("place")):
+            # A null/None-string place reads better as MISSING than as the
+            # literal place 'None' in the validator's feedback.
+            args.pop("place", None)
+
+    elif action in _TARGETED_ACTIONS:
+        target = _first_real_arg(args, _TARGET_ALIAS_KEYS)
+        if isinstance(target, str):
+            target = target.strip()
+            if target and target not in world.agents:
+                resolved = _resolve_agent_target(target, agent, world)
+                if resolved is not None:
+                    target = resolved
+            args["target"] = target
+        elif _noneish(args.get("target")):
+            args.pop("target", None)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Building accessors (read the world-core building store defensively).
 #
 # world.buildings is owned by world-core-agent (a dict[str, BuildingState] mirroring
@@ -563,6 +657,27 @@ def _emit_world_result(result: Any, base: dict, thought: str = "") -> dict:
             "payload": {"error": "bad_world_result"}}
 
 
+def _validate_target(args: dict, agent: AgentState, world: World, action: str) -> str | None:
+    """Shared target check for agent-on-agent actions. Names have already been
+    resolved to ids by `_normalize_args`, so a miss here is genuinely unknown —
+    the feedback names who IS reachable so the retry can self-correct."""
+    target_id = args.get("target")
+    if not target_id:
+        return f"{action} requires target"
+    target = world.agents.get(target_id)
+    if target is None:
+        here = [
+            a.name for a in world.agents.values()
+            if a.alive and a.id != agent.id and a.location == agent.location
+        ]
+        return f"unknown target '{target_id}'. Agents at your location: {here if here else 'none'}"
+    if not target.alive:
+        return f"target '{target.name}' is dead"
+    if target.location != agent.location:
+        return f"target '{target.name}' is not at your location"
+    return None
+
+
 def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str | None:
     """Returns an error string or None if world-legal."""
     action = action_dict.get("action")
@@ -593,44 +708,31 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return f"recharge costs {cost} credits but you have {agent.credits}"
 
     elif action == "give":
-        target_id = args.get("target")
         amount = args.get("amount", 0)
-        if not target_id:
-            return "give requires target"
-        target = world.agents.get(target_id)
-        if target is None or not target.alive:
-            return f"target '{target_id}' not found or dead"
-        if target.location != agent.location:
-            return f"target '{target_id}' is not at your location"
+        target_error = _validate_target(args, agent, world, "give")
+        if target_error:
+            return target_error
         if agent.credits < amount:
             return f"insufficient credits: have {agent.credits}, need {amount}"
 
     elif action == "steal":
         if world.has_active_rule("ban_stealing"):
             return "ban_stealing rule is active — steal is forbidden"
-        target_id = args.get("target")
-        if not target_id:
-            return "steal requires target"
-        target = world.agents.get(target_id)
-        if target is None or not target.alive:
-            return f"target '{target_id}' not found or dead"
-        if target.location != agent.location:
-            return f"target '{target_id}' is not at your location"
+        target_error = _validate_target(args, agent, world, "steal")
+        if target_error:
+            return target_error
 
     elif action in ("insult", "attack", "whisper", "set_relationship"):
-        target_id = args.get("target")
-        if not target_id:
-            return f"{action} requires target"
-        target = world.agents.get(target_id)
-        if target is None or not target.alive:
-            return f"target '{target_id}' not found or dead"
-        if target.location != agent.location:
-            return f"target '{target_id}' is not at your location"
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
 
     elif action == "move_to":
         place_id = args.get("place")
+        known = list(world.places.keys())
+        if not isinstance(place_id, str) or not place_id.strip():
+            return f"move_to requires args.place — choose one of {known}"
         if place_id not in world.places:
-            known = list(world.places.keys())
             return f"unknown place '{place_id}'. Known: {known}"
 
     elif action == "vote":
@@ -832,7 +934,11 @@ def _assemble_context(
         return place_kind == loc
 
     valid_actions: list[str] = []
-    valid_actions.append("idle, forage, recharge, move_to, remember")
+    valid_actions.append("idle, forage, recharge, remember")
+    # EM-140 — move_to's arg was undocumented, so models guessed key names
+    # (destination/to/null) and burned turns on 'unknown place' world errors.
+    valid_actions.append(
+        f"move_to (place) - go to one of: {', '.join(world.places.keys())}")
     valid_actions.append("say (text) - speak to everyone here")
     if co_located:
         target_names = ", ".join(a.name for a in co_located)
@@ -1470,6 +1576,15 @@ class AgentRuntime:
             raw = llm_meta.get("raw_text")
             if isinstance(raw, str) and raw:
                 payload["raw_response"] = raw[:8000]
+            # EM-140 forensics: when the JSON parsed but validation rejected it,
+            # keep WHAT was rejected — run 139's 'unknown place None' class was
+            # undiagnosable without the offending args.
+            rejected = llm_meta.get("rejected_action")
+            if isinstance(rejected, dict):
+                payload["rejected_action"] = {
+                    "action": rejected.get("action"),
+                    "args": rejected.get("args"),
+                }
             trace = {
                 "perceived": {**perceived, "perceived_summary": None},
                 "memory": memory,
@@ -1692,14 +1807,20 @@ class AgentRuntime:
 
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
         _sanitize_optional_trace_fields(action_dict)
+        # EM-140 — collapse arg aliases (destination→place) and resolve agent
+        # names to ids BEFORE validation, so a well-intentioned response isn't
+        # a dead turn over key spelling the prompt never specified.
+        _normalize_args(action_dict, agent, self.world)
 
         schema_error = _validate_schema(action_dict)
         if schema_error:
+            meta["rejected_action"] = action_dict
             self._forget_response(profile_name, messages)
             return None, f"schema error: {schema_error}", meta
 
         world_error = _validate_world(action_dict, agent, self.world)
         if world_error:
+            meta["rejected_action"] = action_dict
             self._forget_response(profile_name, messages)
             return None, f"world error: {world_error}", meta
 
