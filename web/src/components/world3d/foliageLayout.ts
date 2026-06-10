@@ -22,19 +22,22 @@
  *   • WILD props (fences, bushes, mushrooms, rocks) keep ≥ BAND_MAX (10.5)
  *     from every place center.
  *
- * Path-clearance model (orchestrator gate feedback — contract-level):
- *   Ground.tsx draws dirt-path ribbons (width 1.4) from the social hub to
- *   every other place. `pathSegments` mirrors that exact geometry here.
+ * Lane-clearance model (Wave C / EM-149 — townLayout is the single source of
+ * truth for the lane network; the old hub-spoke mirror is gone):
+ *   Ground.tsx draws the lane strips from townLayout's graph (spine 2.3 wide,
+ *   connectors 1.55). `pathSegments` here returns the SAME segments, so all
+ *   corridor clearances track the real lanes.
  *   • NON-LAMP items (trees, bushes, rocks, mushrooms, fences, benches) are
- *     rejected within PATH_CLEAR (= half-width 0.7 + 0.6 margin) of ANY
- *     ribbon's centerline (point-to-segment distance).
- *   • LAMPS are the deliberate exception: they LINE the paths, placed at
- *     LAMP_PATH_OFFSET (half-width + 0.8) beside the ribbon, alternating
- *     sides per spoke — never on the ribbon proper.
+ *     rejected within PATH_CLEAR (= max half-width 1.15 + 0.6 margin) of ANY
+ *     lane's centerline (point-to-segment distance).
+ *   • LAMPS are the deliberate exception: they LINE the lanes, placed at
+ *     LAMP_PATH_OFFSET (half-width + 0.8) beside the strip near each lane
+ *     end, alternating sides per lane — never on the strip proper.
  */
 
 import type { Place } from '../../types';
 import { SIZE, placeToWorld, hashUnit, type WorldPoint } from './worldSpace';
+import { computeTownLayout, LANE_WIDTHS } from './townLayout';
 
 // ── Contract constants ───────────────────────────────────────────────────────
 
@@ -42,12 +45,13 @@ import { SIZE, placeToWorld, hashUnit, type WorldPoint } from './worldSpace';
 export const TREE_PLACE_CLEAR = 10.5;
 /** Minimum tree-to-tree spacing so canopies don't merge into blobs. */
 export const TREE_SPACING = 2.4;
-/** Target treeline size (contract bound: ~50–80). */
-export const TREE_COUNT = 60;
-/** Tree scatter spread (square of side TREE_SPREAD centered on the village). */
+/** Target treeline size (contract bound: ~50–80; bumped for the SIZE-66 town). */
+export const TREE_COUNT = 72;
+/** Tree scatter spread (square of side TREE_SPREAD centered on the village) —
+ *  scales with SIZE, so the treeline keeps framing the bigger Wave C town. */
 export const TREE_SPREAD = SIZE * 1.5;
 /** Trees within this distance of world origin render at full detail (LOD). */
-export const TREE_LOD_RADIUS = 26;
+export const TREE_LOD_RADIUS = 34;
 
 /** The forbidden building-slot band around every place center: props must be
  *  ≤ BAND_MIN (snug against the place) or ≥ BAND_MAX (outside the rings). */
@@ -64,19 +68,21 @@ export const NEIGHBOR_FLOOR = 3.7;
 export const LAMP_RING_RADIUS = 4.15;
 export const BENCH_RING_RADIUS = 3.9;
 
-/** Half the dirt-path ribbon width Ground.tsx draws (planeGeometry [len, 1.4]). */
-export const PATH_HALF_WIDTH = 0.7;
-/** Non-lamp items keep this far from every path centerline (half + 0.6 margin). */
+/** Half the WIDEST lane strip Ground.tsx draws (townLayout spine, 2.3 wide) —
+ *  clearances are conservative against the spine so connectors are covered. */
+export const PATH_HALF_WIDTH = LANE_WIDTHS.spine / 2;
+/** Non-lamp items keep this far from every lane centerline (half + 0.6 margin). */
 export const PATH_CLEAR = PATH_HALF_WIDTH + 0.6;
-/** Lamps line the paths from just beside the ribbon (half-width + 0.8). */
+/** Lamps line the lanes from just beside the strip (half-width + 0.8). */
 export const LAMP_PATH_OFFSET = PATH_HALF_WIDTH + 0.8;
 /** Fence arcs sit just outside the slot band. */
 export const FENCE_RING_RADIUS = 11.2;
 
-/** Conservative prop counts (contract: total NEW instances ≲400). */
-export const MAX_LAMPS = 14;
+/** Conservative prop counts (contract: total NEW instances ≲400 — the Wave C
+ *  town has 4 homes and 2 social places, so per-place counts come down). */
+export const MAX_LAMPS = 18;
 export const BENCHES_PER_PLAZA = 3;
-export const FENCE_SEGMENTS_PER_HOME = 7;
+export const FENCE_SEGMENTS_PER_HOME = 5;
 export const BUSH_COUNT = 22;
 export const ROCK_COUNT = 16;
 export const MUSHROOM_COUNT = 14;
@@ -124,7 +130,7 @@ function clearOfAll(x: number, z: number, centers: WorldPoint[], minClear: numbe
   return centers.every((c) => dist(c, x, z) >= minClear);
 }
 
-// ── Path corridors (mirrors Ground.tsx exactly) ──────────────────────────────
+// ── Lane corridors (townLayout is the single source of truth — EM-149) ──────
 
 export interface PathSeg {
   ax: number;
@@ -134,20 +140,17 @@ export interface PathSeg {
 }
 
 /**
- * The dirt-path centerlines Ground.tsx draws: social hub (falling back to the
- * first place) → every other place. Must stay in lockstep with Ground.tsx's
- * path derivation.
+ * The lane centerlines Ground.tsx draws — the EXACT townLayout graph (spine +
+ * connectors, post-avoidance-routing), so every corridor clearance below
+ * tracks the real lanes. Pure + deterministic, like everything here.
  */
 export function pathSegments(places: Place[]): PathSeg[] {
-  if (places.length < 2) return [];
-  const hub = places.find((p) => p.kind === 'social') ?? places[0];
-  const hubW = placeToWorld(hub);
-  return places
-    .filter((p) => p.id !== hub.id)
-    .map((p) => {
-      const w = placeToWorld(p);
-      return { ax: hubW.x, az: hubW.z, bx: w.x, bz: w.z };
-    });
+  return computeTownLayout(places).lanes.map((l) => ({
+    ax: l.ax,
+    az: l.az,
+    bx: l.bx,
+    bz: l.bz,
+  }));
 }
 
 /** Point-to-segment distance on the XZ plane. */
@@ -282,53 +285,70 @@ export function layoutMushrooms(places: Place[]): ScatterItem[] {
   return out;
 }
 
-// ── Lamps (gateway lights flanking the dirt paths) ───────────────────────────
+// ── Lamps (gateway lights flanking the lanes) ────────────────────────────────
 
 /**
- * Lamp posts LINE the dirt paths Ground draws from the social hub to every
- * other place: one at each spoke's hub end and one at its far-place end, set
- * deliberately BESIDE the ribbon — LAMP_PATH_OFFSET (half-width + 0.8) out
- * from the centerline, alternating sides per spoke — on the LAMP_RING_RADIUS
- * ring of their own place (below SLOT_BASE_RADIUS). Candidates failing the
- * near-prop clearance, or landing on ANY ribbon proper (a different spoke's,
- * say), are dropped.
+ * Lamp-spot validity against the place clearance model: never within
+ * NEIGHBOR_FLOOR of any place center (the structure itself), and never inside
+ * the NEAREST place's building-slot band (BAND_MIN..BAND_MAX) where projects
+ * rise — end-of-lane lamps land on the snug LAMP_RING_RADIUS ring
+ * (< BAND_MIN) of the lane's terminal place; mid-lane lamps sit ≥ BAND_MAX
+ * out. The band rule binds the OWN (nearest) place only: in the dense Wave C
+ * districts every inner ring is blanketed by some neighbor's 5.0–10.5 band,
+ * so a strict all-places band rule is unsatisfiable (same bound the near-prop
+ * law documents above) — NEIGHBOR_FLOOR is the cross-place guard.
+ */
+export function lampSpotValid(x: number, z: number, centers: WorldPoint[]): boolean {
+  let own = Infinity;
+  for (const c of centers) {
+    const d = Math.hypot(c.x - x, c.z - z);
+    if (d < NEIGHBOR_FLOOR) return false;
+    if (d < own) own = d;
+  }
+  return own <= BAND_MIN || own >= BAND_MAX;
+}
+
+/**
+ * Lamp posts LINE the lanes Ground draws from townLayout's graph: one near
+ * each lane end, set deliberately BESIDE the strip — LAMP_PATH_OFFSET
+ * (half-width + 0.8) out from the centerline, alternating sides per lane —
+ * pulled in along the lane so a lamp at a place-terminated lane end sits on
+ * that place's LAMP_RING_RADIUS ring (below SLOT_BASE_RADIUS), exactly like
+ * the old spoke gateways. Candidates failing the lamp clearance law, or
+ * landing on ANY lane strip proper (a crossing lane's, say), are dropped.
  */
 export function layoutLamps(places: Place[]): ScatterItem[] {
   if (places.length < 2) return [];
-  const hub = places.find((p) => p.kind === 'social') ?? places[0];
-  const hubW = placeToWorld(hub);
   const centers = places.map(placeToWorld);
   const segs = pathSegments(places);
   const out: ScatterItem[] = [];
+  // distance along the lane that puts an end lamp on the terminal place ring
+  const ringIn = Math.sqrt(LAMP_RING_RADIUS ** 2 - LAMP_PATH_OFFSET ** 2);
 
-  const push = (x: number, z: number, own: WorldPoint) => {
+  const push = (x: number, z: number) => {
     if (out.length >= MAX_LAMPS) return;
-    if (!nearPropValid(x, z, own, centers)) return;
-    // beside the ribbon by construction, but never ON any other ribbon either
+    if (!lampSpotValid(x, z, centers)) return;
+    // beside its own strip by construction, but never ON any strip
     if (distToNearestPath(x, z, segs) < PATH_HALF_WIDTH + 0.1) return;
     out.push({ x, z, scale: 1, rot: 0 });
   };
 
-  places
-    .filter((p) => p.id !== hub.id)
-    .forEach((p, si) => {
-      const w = placeToWorld(p);
-      const dx = hubW.x - w.x;
-      const dz = hubW.z - w.z;
-      const len = Math.hypot(dx, dz) || 1;
-      const ux = dx / len;
-      const uz = dz / len;
-      // perpendicular set-out so the lamp flanks (never blocks) the ribbon
-      const px = -uz * LAMP_PATH_OFFSET;
-      const pz = ux * LAMP_PATH_OFFSET;
-      const side = si % 2 === 0 ? 1 : -1;
-      // distance along the spoke that keeps the lamp on its own place ring
-      const ringIn = Math.sqrt(LAMP_RING_RADIUS ** 2 - LAMP_PATH_OFFSET ** 2);
-      // far-place gateway lamp
-      push(w.x + ux * ringIn + px * side, w.z + uz * ringIn + pz * side, w);
-      // hub-end lamp
-      push(hubW.x - ux * ringIn + px * side, hubW.z - uz * ringIn + pz * side, hubW);
-    });
+  segs.forEach((s, si) => {
+    const dx = s.bx - s.ax;
+    const dz = s.bz - s.az;
+    const len = Math.hypot(dx, dz) || 1;
+    if (len < ringIn + 0.8) return; // too short to set a lamp in from the end
+    const ux = dx / len;
+    const uz = dz / len;
+    // perpendicular set-out so the lamp flanks (never blocks) the strip
+    const side = si % 2 === 0 ? 1 : -1;
+    const px = -uz * LAMP_PATH_OFFSET * side;
+    const pz = ux * LAMP_PATH_OFFSET * side;
+    // a-end lamp
+    push(s.ax + ux * ringIn + px, s.az + uz * ringIn + pz);
+    // b-end lamp (only if the lane is long enough for both)
+    if (len >= ringIn * 2) push(s.bx - ux * ringIn + px, s.bz - uz * ringIn + pz);
+  });
 
   return out;
 }

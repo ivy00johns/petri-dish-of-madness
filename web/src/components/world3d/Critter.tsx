@@ -2,10 +2,17 @@
  * Critter — the W8 Animal renderer: a roaming cat or dog in the cozy village.
  *
  * Animals are a DISTINCT entity type (world-model.md §W8), not human agents:
- * they share the world mechanically but act impulsively. Here they're charming
- * low-poly critters that WANDER near their place on a slow, looping path (not
- * the ring-distributed villager layout — animals roam). Species are visually
- * distinct:
+ * they share the world mechanically but act impulsively. They WANDER near
+ * their place on a slow, looping path (not the ring-distributed villager
+ * layout — animals roam).
+ *
+ * Body (EM-124): cats and dogs render the rigged Quaternius GLBs
+ * (CHARACTER_MODELS.cat / .dog) through <CharacterModel> — 'Idle' at rest,
+ * crossfade to 'Walk' while the wander lerp is in flight. The Wave B
+ * procedural bodies stay as the <Suspense> fallback (contract rule 7), as the
+ * dead-critter pose, and as the body for ANY OTHER species (EM-143's
+ * god-spawned squirrels etc. have no GLB yet — characterAnim.critterModelFor
+ * returns null and the procedural critter renders):
  *   cat → slim body, pointed upright ears, a long curling tail.
  *   dog → chunkier body, floppy droop ears, a short stubby wagging tail.
  *
@@ -15,16 +22,15 @@
  * magenta as the Animal Chaos Feed + the replay timeline markers, so the chaos
  * register agrees across the 3D village and the 2D inspector.
  *
- * All geometry is procedural (drei <RoundedBox>, spheres, cones) — no external
- * assets. Colors are WebGL material colors (THREE.Color), explicitly OUTSIDE the
- * CSS design-token system (same convention as Building/Structure/Villager: the
+ * Colors are WebGL material colors (THREE.Color), explicitly OUTSIDE the CSS
+ * design-token system (same convention as Building/Structure/Villager: the
  * GPU scene owns its warm palette; design-token-guard governs DOM/CSS only).
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
-import { Billboard, Html, RoundedBox, useCursor } from '@react-three/drei';
+import { Billboard, Html, RoundedBox, useCursor, useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Animal } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
@@ -36,6 +42,15 @@ import {
 } from './worldSpace';
 import { useProximity, ENTITY_LABEL_DIST } from './useProximity';
 import { toonMaterial } from './toon';
+import { CharacterModel, CharacterModelBoundary, type MotionState } from './Villager';
+import { CHARACTER_MODELS } from './assets/models';
+import {
+  critterModelFor,
+  nextMoving,
+  stepYaw,
+  yawTowards,
+  CRITTER_MOVE,
+} from './characterAnim';
 
 export interface CritterPos {
   x: number;
@@ -65,6 +80,10 @@ interface CritterProps {
 const LABEL_Y = 1.5;
 // Radius the critter roams around its place center.
 const WANDER_RADIUS = 3.2;
+
+// Warm the GLTF cache for the critter models (preload de-dupes by url).
+if (CHARACTER_MODELS.cat) useGLTF.preload(CHARACTER_MODELS.cat.url);
+if (CHARACTER_MODELS.dog) useGLTF.preload(CHARACTER_MODELS.dog.url);
 
 /** The floating info card above a critter: name, species, mood, energy —
  *  and (EM-089) the model profile it consults, in the profile's color (the
@@ -280,6 +299,55 @@ function RoundedBoxEar() {
   return <boxGeometry args={[0.1, 0.2, 0.04]} />;
 }
 
+/**
+ * The Wave B procedural critter — now the Suspense fallback, the dead-critter
+ * pose, and the body for species without a GLB. Owns its own trotting bob and
+ * the dog's tail wag on a local group (the GLB clips animate themselves, so
+ * neither effect belongs on the shared parent group).
+ */
+function ProceduralCritterBody({
+  animal,
+  style,
+  accent,
+  motion,
+}: {
+  animal: Animal;
+  style: AnimalStyle;
+  accent: string;
+  motion: React.MutableRefObject<MotionState>;
+}) {
+  const bodyRef = useRef<THREE.Group>(null);
+  const tailRef = useRef<THREE.Group>(null);
+  const bobPhase = useRef(hashUnit(animal.id) * Math.PI * 2);
+
+  useFrame((_, delta) => {
+    const b = bodyRef.current;
+    if (!b) return;
+    if (!animal.alive) {
+      b.position.y = 0;
+      return;
+    }
+    // Trotting bob.
+    const moving = motion.current.moving;
+    bobPhase.current += delta * (moving ? 9 : 2.4);
+    b.position.y = Math.abs(Math.sin(bobPhase.current)) * (moving ? 0.08 : 0.03);
+    // Dog tail wag (only when a dog, tailRef present).
+    if (tailRef.current) {
+      tailRef.current.rotation.y = Math.sin(bobPhase.current * 1.6) * 0.5;
+    }
+  });
+
+  return (
+    <group ref={bodyRef}>
+      {animal.species === 'cat' ? (
+        <CatBody style={style} accent={accent} />
+      ) : (
+        <DogBody style={style} accent={accent} tailRef={tailRef} />
+      )}
+    </group>
+  );
+}
+
 // ── A magenta accent collar for chaotic critters ──────────────────────────────
 
 function ChaosCollar() {
@@ -299,7 +367,7 @@ function ChaosCollar() {
 
 export function Critter({ animal, center, animRef, chaotic, model, focused, onPick }: CritterProps) {
   const groupRef = useRef<THREE.Group>(null);
-  const tailRef = useRef<THREE.Group>(null);
+  const motion = useRef<MotionState>({ moving: false });
   const [hovered, setHovered] = useState(false);
   useCursor(hovered && Boolean(onPick));
 
@@ -316,7 +384,6 @@ export function Critter({ animal, center, animRef, chaotic, model, focused, onPi
     e.stopPropagation();
     onPick();
   };
-  const bobPhase = useRef(hashUnit(animal.id) * Math.PI * 2);
   // A stable phase offset + speed for the wander loop, seeded from the id so
   // each critter roams its own path (deterministic, no per-frame allocation).
   const wanderSeed = useMemo(() => hashUnit(animal.id + ':wander'), [animal.id]);
@@ -324,12 +391,15 @@ export function Critter({ animal, center, animRef, chaotic, model, focused, onPi
 
   const style = useMemo(() => animalStyle(animal.species), [animal.species]);
   const accent = style.accent;
+  // Species → rigged GLB; unknown species (god-spawned etc.) stay procedural.
+  const spec = critterModelFor(animal.species);
 
   useFrame((_, delta) => {
     const g = groupRef.current;
     if (!g) return;
 
     if (!animal.alive) {
+      motion.current.moving = false;
       g.position.set(animRef.x, 0, animRef.z);
       g.rotation.x = -Math.PI / 2.4; // curled over, resting
       g.rotation.z = 0.3;
@@ -350,30 +420,21 @@ export function Critter({ animal, center, animRef, chaotic, model, focused, onPi
 
     const dx = targetX - animRef.x;
     const dz = targetZ - animRef.z;
-    const moving = Math.hypot(dx, dz) > 0.02;
+    const dist = Math.hypot(dx, dz);
+    // Hysteresis (start 0.02 / stop 0.008) — same anti-flicker treatment as
+    // villagers, scaled to the critter wander epsilon.
+    motion.current.moving = nextMoving(motion.current.moving, dist, CRITTER_MOVE);
 
     g.position.x = animRef.x;
     g.position.z = animRef.z;
+    g.position.y = 0; // bob lives on the procedural body, clips animate the GLB
 
-    // Trotting bob.
-    bobPhase.current += delta * (moving ? 9 : 2.4);
-    g.position.y = Math.abs(Math.sin(bobPhase.current)) * (moving ? 0.08 : 0.03);
-
-    // Face direction of travel.
-    if (moving) {
-      const yaw = Math.atan2(dx, dz);
-      let diff = yaw - g.rotation.y;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      g.rotation.y += diff * Math.min(1, delta * 6);
+    // Face direction of travel (smoothed, wrap-aware); idle keeps last facing.
+    if (motion.current.moving) {
+      g.rotation.y = stepYaw(g.rotation.y, yawTowards(dx, dz), delta, 6);
     }
     g.rotation.x = 0;
     g.rotation.z = 0;
-
-    // Dog tail wag (only when a dog, tailRef present).
-    if (tailRef.current) {
-      tailRef.current.rotation.y = Math.sin(bobPhase.current * 1.6) * 0.5;
-    }
   });
 
   return (
@@ -383,10 +444,25 @@ export function Critter({ animal, center, animRef, chaotic, model, focused, onPi
       onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
       onPointerOut={() => setHovered(false)}
     >
-      {animal.species === 'cat' ? (
-        <CatBody style={style} accent={accent} />
+      {/* body: rigged GLB for cat/dog when alive (procedural critter as the
+          streaming fallback — contract rule 7); dead critters and unmodeled
+          species keep the Wave B procedural body. */}
+      {animal.alive && spec ? (
+        <CharacterModelBoundary
+          fallback={
+            <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
+          }
+        >
+          <Suspense
+            fallback={
+              <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
+            }
+          >
+            <CharacterModel spec={spec} motion={motion} />
+          </Suspense>
+        </CharacterModelBoundary>
       ) : (
-        <DogBody style={style} accent={accent} tailRef={tailRef} />
+        <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
       )}
 
       {chaotic && animal.alive && <ChaosCollar />}

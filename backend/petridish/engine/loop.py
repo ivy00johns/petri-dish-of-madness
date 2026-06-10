@@ -276,6 +276,7 @@ class TickLoop:
             PlaceState(
                 id=p.id, name=p.name, x=p.x, y=p.y,
                 kind=p.kind, description=p.description,
+                district=p.district,  # Wave C / EM-147 — optional, additive
             )
             for p in config.places
         ]

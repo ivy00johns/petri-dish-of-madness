@@ -106,6 +106,12 @@ class PlaceState:
     # W11b / EM-083 — real blackout: recharge is disabled at this place while
     # world.tick < blackout_until_tick. 0 = powered.
     blackout_until_tick: int = 0
+    # Wave C / EM-147 — optional district tag (core|market|residential|civic|
+    # farm in the hand-authored town; free-form by contract). ADDITIVE: default
+    # None, serialized only when set, so pre-Wave-C snapshots and procgen
+    # output are byte-identical. The frontend groups places by district for
+    # zone tinting + lane adjacency; absent → coordinate clustering fallback.
+    district: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -119,6 +125,8 @@ class PlaceState:
         }
         if self.capacity is not None:
             d["capacity"] = self.capacity
+        if self.district is not None:
+            d["district"] = self.district
         return d
 
 
@@ -1926,6 +1934,9 @@ class World:
                 description=str(d.get("description", "")),
                 capacity=(_int(d["capacity"]) if d.get("capacity") is not None else None),
                 blackout_until_tick=_int(d.get("blackout_until_tick")),
+                # Wave C / EM-147 — optional district; pre-Wave-C snapshots
+                # lack the key and restore as None (back-compat by contract).
+                district=(str(d["district"]) if d.get("district") is not None else None),
             )
             for d in (place_dicts or [])
             if isinstance(d, dict) and d.get("id")

@@ -66,11 +66,31 @@ world:
   attack_energy_cost: 6
 
 places:
-  - { id: plaza,    name: "Central Plaza", x: 500, y: 500, kind: social,     description: "Open square where everyone mingles." }
-  - { id: market,   name: "Market",        x: 750, y: 400, kind: work,       description: "Earn credits by working." }
-  - { id: townhall, name: "Town Hall",     x: 250, y: 350, kind: governance, description: "Propose and vote on rules." }
-  - { id: commons,  name: "The Commons",   x: 500, y: 750, kind: wild,       description: "Forage for scraps." }
-  - { id: home,     name: "Hearth",        x: 300, y: 650, kind: home,       description: "Rest and recharge." }
+  # Wave C / EM-147 — the district town (~15 places over the existing five
+  # kinds). MUST stay in sync with config/world.yaml's places block. The five
+  # original ids (plaza/market/townhall/commons/home) survive with their kinds
+  # so old snapshots and agent locations stay valid; `district` is the one
+  # additive optional key (core/market/residential/civic/farm).
+  # core — the heart of town
+  - { id: plaza,           name: "Central Plaza",     x: 500, y: 500, kind: social,     district: core,        description: "Open square where everyone mingles." }
+  - { id: well,            name: "The Old Well",      x: 510, y: 420, kind: social,     district: core,        description: "Mossy stone well where the day's gossip is drawn up with the water." }
+  # market — the working east end
+  - { id: market,          name: "Market",            x: 750, y: 400, kind: work,       district: market,      description: "Earn credits by working." }
+  - { id: forge,           name: "The Ember Forge",   x: 840, y: 340, kind: work,       district: market,      description: "Sparks and hammer-song; the smith pays good coin for steady hands." }
+  - { id: workshop,        name: "Tinker's Workshop", x: 820, y: 470, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
+  # civic — the quiet north-west
+  - { id: townhall,        name: "Town Hall",         x: 250, y: 350, kind: governance, district: civic,       description: "Propose and vote on rules." }
+  - { id: archive,         name: "The Records Hall",  x: 180, y: 260, kind: governance, district: civic,       description: "Dusty shelves of town ledgers, old maps, and older grievances." }
+  # residential — lamplit lanes to the south-west
+  - { id: home,            name: "Hearth",            x: 300, y: 650, kind: home,       district: residential, description: "Rest and recharge." }
+  - { id: rosehip_cottage, name: "Rosehip Cottage",   x: 210, y: 640, kind: home,       district: residential, description: "A snug cottage wrapped in climbing roses. Rest and recharge." }
+  - { id: mossy_row,       name: "Mossy Row",         x: 250, y: 740, kind: home,       district: residential, description: "A crooked lane of moss-roofed homes. Rest and recharge." }
+  - { id: lantern_loft,    name: "Lantern Loft",      x: 340, y: 740, kind: home,       district: residential, description: "An attic room above the lane, warm with lamplight. Rest and recharge." }
+  # farm — the wild south-east edge
+  - { id: commons,         name: "The Commons",       x: 500, y: 750, kind: wild,       district: farm,        description: "Forage for scraps." }
+  - { id: willow_pond,     name: "Willow Pond",       x: 610, y: 690, kind: wild,       district: farm,        description: "Still water under trailing willows; frogs, reeds, and easy foraging." }
+  - { id: orchard,         name: "Bramble Orchard",   x: 640, y: 790, kind: wild,       district: farm,        description: "Crab apples and brambles at the town's edge; sweet pickings in season." }
+  - { id: farmstead,       name: "Sunfall Farmstead", x: 730, y: 700, kind: work,       district: farm,        description: "Fields and a weathered barn; honest work from dawn to dusk." }
 
 agents:
   - { name: Ada,  personality: "Pragmatic engineer; values fairness, distrusts freeloaders.", profile: mock, location: plaza }
@@ -127,6 +147,11 @@ class PlaceConfig:
     y: int
     kind: str
     description: str = ""
+    # Wave C / EM-147 — optional district tag (core|market|residential|civic|
+    # farm in the hand-authored town). ADDITIVE: default None so pre-Wave-C
+    # configs parse unchanged. Kinds stay the existing five
+    # (social/work/governance/home/wild) — district only groups them.
+    district: str | None = None
 
 
 @dataclass
@@ -681,6 +706,8 @@ def _parse_world(
             y=int(p["y"]),
             kind=p["kind"],
             description=p.get("description", ""),
+            # Wave C / EM-147 — optional district tag; absent → None.
+            district=(str(p["district"]) if p.get("district") is not None else None),
         )
         for p in raw.get("places", [])
     ]

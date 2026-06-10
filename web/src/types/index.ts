@@ -11,6 +11,10 @@ export interface Place {
   y: number;
   kind: PlaceKind;
   description: string;
+  // Wave C (EM-147, additive): the district this place belongs to
+  // (core/market/civic/residential/farm). Optional/null so pre-Wave-C
+  // snapshots stay valid; townLayout falls back to coordinate clustering.
+  district?: string | null;
 }
 
 export type RelationshipType = 'ally' | 'rival' | 'neutral' | 'friend' | 'enemy';

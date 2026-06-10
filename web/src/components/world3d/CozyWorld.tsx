@@ -41,7 +41,13 @@ import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
 import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, SIZE } from './worldSpace';
 import { GOLDEN_HOUR } from './toon';
+import { preloadHeroModels } from './assets/Model';
 import type { AnimalModelId } from '../../lib/animalIdentity';
+
+// Wave C (EM-148/149): warm the GLB cache for the hero set (place anchors,
+// buildings, villager, cat/dog) ONCE at module scope — the Suspense
+// fallbacks cover the in-flight window.
+preloadHeroModels();
 
 // How recent an animal's last chaotic event must be (in seq distance from the
 // newest event) for the critter to still wear its magenta chaos accent. This
@@ -71,8 +77,8 @@ const BUBBLE_LIFETIME_MS = 5200;
 const MAX_BUBBLES_PER_AGENT = 3;
 const SPEECH_TRUNCATE = 120;
 
-// ── EM-095 camera constants ───────────────────────────────────────────────────
-const DEFAULT_CAMERA = new THREE.Vector3(24, 22, 24);
+// ── EM-095 camera constants (retuned for the SIZE-66 Wave C town, EM-149) ───
+const DEFAULT_CAMERA = new THREE.Vector3(38, 33, 38);
 const DEFAULT_TARGET = new THREE.Vector3(0, 1.5, 0);
 /** The orbit target stays within this XZ box (pan bounds over the village). */
 const PAN_BOUND = SIZE * 0.75;
@@ -258,7 +264,7 @@ function CameraDirector({
       enableDamping
       dampingFactor={0.08}
       minDistance={14}
-      maxDistance={60}
+      maxDistance={100}
       minPolarAngle={0.25}
       maxPolarAngle={Math.PI / 2.3}
       target={[DEFAULT_TARGET.x, DEFAULT_TARGET.y, DEFAULT_TARGET.z]}
@@ -475,7 +481,7 @@ export function CozyWorld({
         shadows
         dpr={[1, 2]}
         gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
-        camera={{ position: [24, 22, 24], fov: 42, near: 0.1, far: 400 }}
+        camera={{ position: [38, 33, 38], fov: 42, near: 0.1, far: 400 }}
       >
         <color attach="background" args={[GOLDEN_HOUR.background]} />
         {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
@@ -598,22 +604,25 @@ function Scene({
       {/* Faint warm ambient only — the directional must dominate so the toon
           bands read; it also keeps shadows warm, never black. */}
       <ambientLight intensity={0.15} color={GOLDEN_HOUR.ambient} />
+      {/* EM-149: shadow frustum + fog distances widened with SIZE 40 → 66 so
+          the whole district town casts shadows and isn't swallowed by haze.
+          Same low golden-hour sun ANGLE, scaled out to cover the town. */}
       <directionalLight
-        position={[18, 9, 8]}
+        position={[27, 13.5, 12]}
         intensity={2.2}
         color={GOLDEN_HOUR.sun}
         castShadow
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
         shadow-camera-near={1}
-        shadow-camera-far={70}
-        shadow-camera-left={-32}
-        shadow-camera-right={32}
-        shadow-camera-top={32}
-        shadow-camera-bottom={-32}
+        shadow-camera-far={130}
+        shadow-camera-left={-52}
+        shadow-camera-right={52}
+        shadow-camera-top={52}
+        shadow-camera-bottom={-52}
         shadow-bias={-0.0004}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 45, 95]} />
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 70, 160]} />
 
       <Ground places={places} />
       <Scenery places={places} />

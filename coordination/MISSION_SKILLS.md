@@ -90,3 +90,14 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] design-token check — diff is world3d canvas + backend only (zero CSS/token files touched); WebGL hexes exempt per established convention and centralized in worldSpace.ts/toon.ts.
 - [x] `ux-review` — scoped subjective pass by orchestrator at both gates (look reads golden-hour; long shadows + banding verified; user co-reviewed live). Full-skill repo-wide pass still owed on merged main per the W11b deferral note.
 - [x] `git-commit` conventions — per-item commits at gates by orchestrator.
+
+## Wave C — "a town, not a diorama" (source: wave-c spec + ledger EM-147/148/149/150/124, user GO 2026-06-10 "I want my new UI")
+- [x] `plan-intake` — spec filed as EM-147–150 + EM-124 rescope before the build (`0eff959`).
+- [x] `orchestrator` — contract-first wave on `build/wave-c-real-city` (stacked on PR #8); contract `contracts/wave-c.md`; 2 implement waves (C1∥C2, C3∥C4∥C5) + QE.
+- [x] asset acquisition — CC0 kits acquired headlessly + license-verified before vendoring (KayKit Medieval Hexagon + Adventurers via GitHub, Kenney Fantasy Town direct zip, Quaternius cat/dog via poly.pizza); 14 GLBs, 3.65 MB; all recorded in `ASSET_LICENSES.md`. `nano-banana` not invoked — real models replaced the need for concept imagery (wave-b frames remain the art target).
+- [x] `frontend-design` / `ui-ux-pro-max` — design direction carried by the frozen wave-c spec + Wave B art direction (Direction 1); look-dev call (lane strips vs road tiles) decided in-browser by C3 per contract §12.
+- [x] QE gate — `coordination/qa-report.json` proceed=true (contract 5, coverage 5, security 5, regression 4); 9 adversarial probe families ALL CONFIRMED-OK, zero bugs; 4 MINORs recorded. Backend 367 / web 376 / build clean / 60fps measured.
+- [x] render-level verification — orchestrator Playwright pass after each wave (15-place town live at gate 1; full GLB town + lanes + animated characters at gate 2, console 0 errors both); QE independent browser pass with click-to-focus. Evidence: `docs/build-evidence/wave-c-gate2-town-live.jpeg`, `wave-c3-home-view.png`, `qe-wave-c-*.jpeg`.
+- [x] design-token check — diff is world3d canvas + backend config only; WebGL hexes exempt per the established convention (centralized in worldSpace.ts/townLayout.ts/toon.ts).
+- [x] `git-commit` conventions — per-item commits at gates by orchestrator (agents did not commit).
+- [ ] `ux-review` full-skill repo-wide pass — STILL OWED on merged main (standing deferral since W11b; now covers W9–WaveC surface).
