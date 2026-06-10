@@ -197,7 +197,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-143 | P2 | W13 | backend | user 2026-06-10 | God-spawn critters: god console "add critter" affordance (species picker) + `POST /api/god/spawn_animal {species, name?}` registering the animal live in AnimalRuntime; expand the species roster beyond cat/dog (squirrel, …) with `ANIMAL_STYLES` entries + per-species chaos flavor; population cap so chaos stays affordable (animal turns are reflex/off-critical-path — free-scale holds) | open | — |
 
-_Next free ID: EM-144._
+| EM-144 | P2 | W12 | frontend | user 2026-06-10 | Stale starvation banner: "[STARVATION] ⚠ Bram is starving — energy 22/100 (below 25)" stayed up after Bram recharged back above the threshold (seen T105) — the warning should derive from live agent energy (clear when energy ≥ threshold, or re-derive per world_state), not latch on the last starvation event | open | — |
+
+_Next free ID: EM-145._
 
 ## Notes
 
