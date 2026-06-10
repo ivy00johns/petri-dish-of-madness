@@ -37,7 +37,7 @@ import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, SIZE } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, SIZE } from './worldSpace';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // How recent an animal's last chaotic event must be (in seq distance from the
@@ -383,15 +383,26 @@ export function CozyWorld({
     return m;
   }, [places]);
 
-  // W7: each Building sits at a stable satellite spot near its place center, so
-  // a project rises NEXT TO the existing structure rather than on top of it.
+  // W7/EM-131: buildings sharing a place are laid out on deterministic slot
+  // rings around the place center (sorted by id; radius grows with count), so
+  // a project rises NEXT TO the existing structure — and next to its sibling
+  // projects — rather than piling onto the place anchor.
   const buildings = world?.buildings;
   const buildingSpots = useMemo(() => {
-    const center = { x: 0, z: 0 };
-    return (buildings ?? []).map((b) => {
-      const c = placeCenters.get(b.location) ?? center;
-      return { building: b, ...buildingSpot(c, b.id) };
+    const fallback = { x: 0, z: 0 };
+    const list = buildings ?? [];
+    const idsByPlace = new Map<string, string[]>();
+    list.forEach((b) => {
+      const ids = idsByPlace.get(b.location) ?? [];
+      ids.push(b.id);
+      idsByPlace.set(b.location, ids);
     });
+    const spotById = new Map<string, { x: number; z: number }>();
+    for (const [loc, ids] of idsByPlace) {
+      const c = placeCenters.get(loc) ?? fallback;
+      for (const [id, pt] of slotLayout(c, ids)) spotById.set(id, pt);
+    }
+    return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? fallback) }));
   }, [buildings, placeCenters]);
 
   const buildingSpotById = useMemo(

@@ -13,7 +13,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldEvent, WorldState } from '../../types';
-import { storySoFar } from '../../lib/storySoFar';
+import { projectReadout, storySoFar } from '../../lib/storySoFar';
 
 interface StorySoFarProps {
   world: WorldState | null;
@@ -58,14 +58,10 @@ export function StorySoFar({ world, history }: StorySoFarProps) {
     .map((d) => `${d.name} (${d.deathTick !== null ? `T${d.deathTick}` : 'tick unknown'})`)
     .join(', ');
 
-  // Project readout: name + status (+ progress while it's rising).
-  const projectLine = digest.projects
-    .map((p) =>
-      p.status === 'under_construction' || p.status === 'planned'
-        ? `${p.name} ${p.progress}% ${p.status === 'planned' ? 'planned' : 'building'}`
-        : `${p.name} ${p.status}`,
-    )
-    .join(' · ');
+  // Project readout (EM-139): live projects named with progress, the settled
+  // long tail aggregated to counts — enumerating every building ever built
+  // made day-200 worlds' digest unscrollable.
+  const projectLine = projectReadout(digest.projects);
 
   return (
     <section

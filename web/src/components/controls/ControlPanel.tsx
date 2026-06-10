@@ -6,11 +6,16 @@
  * the god panel gains REPLY ON BILLBOARD (EM-091d, optimistic-free — the post
  * appears when the WS broadcasts it), and the ACTIVE RULES strip groups
  * identical-effect laws into one ×N row, expandable to instances (EM-087).
+ *
+ * Wave A.2 (EM-138): the god section reorganizes into the GOD CONSOLE — three
+ * labeled groups: WORLD EVENTS (the inject controls), INTERVENE (bless/grant/
+ * whisper on one living agent), and VOICE (the billboard reply).
  */
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import type { WorldState, ModelProfile, Rule, SpawnSpec, SpawnMode } from '../../types';
+import type { WorldState, ModelProfile, Rule, SpawnSpec, SpawnMode, Agent } from '../../types';
 import { PersonaPicker, usePersonaLibrary } from './PersonaPicker';
+import { inspectorApi } from '../../inspector/api';
 import type { PersonaRow } from '../../inspector/api';
 
 interface ControlPanelProps {
@@ -498,6 +503,171 @@ function BillboardReply({ onPost }: { onPost: (text: string) => void }) {
 }
 
 /**
+ * GodGroupLabel (Wave A.2 EM-138) — one GOD CONSOLE group heading, in the
+ * established god ink (the --lab-god-* tokens BillboardReply already wears).
+ */
+function GodGroupLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="px-2 pt-2 font-mono text-[9px] font-semibold uppercase tracking-widest"
+      style={{ color: 'var(--lab-god-bright)' }}
+      role="heading"
+      aria-level={3}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * GodIntervene (Wave A.2 EM-136/137/138) — the GOD CONSOLE's INTERVENE group:
+ * pick a LIVING agent, then BLESS (+25 energy), GRANT (+10 credits), or
+ * WHISPER a one-shot line (≤280) into their next context. OPTIMISTIC-FREE
+ * like the billboard reply — no local echo; the god_intervention /
+ * whisper_posted event arrives via the WS feed. Buttons disable while a
+ * request is in flight; failures render inline via the labeled-result idiom
+ * (godIntervene/godWhisper never throw).
+ */
+function GodIntervene({ agents }: { agents: Agent[] }) {
+  const [agentId, setAgentId] = useState('');
+  const [whisper, setWhisper] = useState('');
+  const [busy, setBusy] = useState<null | 'bless' | 'grant' | 'whisper'>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const sentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+  }, []);
+
+  // Living-agents only by contract; a death (or world arriving late) falls
+  // back to the first living agent rather than holding a stale selection.
+  const selectedId = agents.some((a) => a.id === agentId) ? agentId : (agents[0]?.id ?? '');
+  const selected = agents.find((a) => a.id === selectedId);
+  const canWhisper = whisper.trim().length > 0;
+
+  const runAction = useCallback(
+    async (action: 'bless' | 'grant' | 'whisper') => {
+      if (!selectedId || busy) return;
+      setBusy(action);
+      setError(null);
+      setSent(null);
+      const result =
+        action === 'whisper'
+          ? await inspectorApi.godWhisper(selectedId, whisper)
+          : await inspectorApi.godIntervene(
+              action === 'bless' ? 'bless_energy' : 'grant_credits',
+              selectedId,
+            );
+      setBusy(null);
+      if (result.ok) {
+        if (action === 'whisper') setWhisper('');
+        setSent(
+          action === 'whisper'
+            ? 'whispered — it rides their next turn (no local echo).'
+            : 'done — the ✦ god event arrives via the feed (no local echo).',
+        );
+        if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+        sentTimerRef.current = setTimeout(() => setSent(null), 3000);
+      } else {
+        setError(result.message);
+      }
+    },
+    [selectedId, busy, whisper],
+  );
+
+  if (agents.length === 0) {
+    return (
+      <div className="p-2 font-mono text-xs text-lab-dim text-center">
+        NO LIVE AGENTS
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-2 space-y-1.5">
+      {/* Target agent — living only. */}
+      <select
+        value={selectedId}
+        onChange={(e) => setAgentId(e.target.value)}
+        className="lab-select w-full text-[10px]"
+        aria-label="Agent to intervene on"
+      >
+        {agents.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name} · ⚡{Math.round(a.energy)} · ₡{a.credits}
+          </option>
+        ))}
+      </select>
+
+      {/* BLESS / GRANT — amounts are the backend defaults (+25 / +10). */}
+      <div className="grid grid-cols-2 gap-1.5">
+        <button
+          type="button"
+          className="lab-btn lab-btn-secondary"
+          onClick={() => void runAction('bless')}
+          disabled={busy !== null}
+          aria-label={`Bless ${selected?.name ?? 'the agent'} with +25 energy`}
+        >
+          {busy === 'bless' ? '…' : '☀ BLESS +25⚡'}
+        </button>
+        <button
+          type="button"
+          className="lab-btn lab-btn-secondary"
+          onClick={() => void runAction('grant')}
+          disabled={busy !== null}
+          aria-label={`Grant ${selected?.name ?? 'the agent'} +10 credits`}
+        >
+          {busy === 'grant' ? '…' : '✦ GRANT +10₡'}
+        </button>
+      </div>
+
+      {/* WHISPER — one-shot context injection, billboard-capped at 280. */}
+      <div className="flex items-baseline justify-between">
+        <label
+          htmlFor="god-whisper"
+          className="font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          🜁 Whisper
+        </label>
+        <span className="font-mono text-[9px] text-lab-dim tabular-nums" aria-hidden="true">
+          {whisper.length}/280
+        </span>
+      </div>
+      <textarea
+        id="god-whisper"
+        value={whisper}
+        onChange={(e) => setWhisper(e.target.value)}
+        placeholder="A voice only they can hear…"
+        maxLength={280}
+        rows={2}
+        className="lab-input w-full text-[11px] resize-none leading-snug"
+      />
+      <button
+        type="button"
+        className="lab-btn lab-btn-secondary w-full"
+        onClick={() => void runAction('whisper')}
+        disabled={busy !== null || !canWhisper}
+        aria-label={`Whisper to ${selected?.name ?? 'the agent'}`}
+      >
+        {busy === 'whisper' ? '…' : '🜁 WHISPER'}
+      </button>
+
+      {error && (
+        <p role="alert" className="m-0 font-mono text-[9px] text-lab-warn leading-snug">
+          ⚠ {error}
+        </p>
+      )}
+      {sent && (
+        <p className="m-0 font-mono text-[9px] text-lab-acid leading-snug" role="status" aria-live="polite">
+          {sent}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
  * GroupedActiveRules (W11b EM-087) — the live rules strip. Identical-effect
  * ACTIVE rules collapse into ONE row with a ×N stack badge; expanding it
  * lists the instances (tick + proposer). Pairs with the backend's
@@ -712,8 +882,14 @@ export function ControlPanel({
         )}
       </div>
 
-      {/* ── Inject Event ────────────────────────────────────────── */}
-      <div className="lab-header mt-0.5">CHAOS KNOB</div>
+      {/* ── GOD CONSOLE (Wave A.2 EM-138): three labeled groups ──── */}
+      <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god">
+        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">✦ GOD CONSOLE</h2>
+        <span className="font-mono text-[9px] text-lab-muted opacity-70">WORLD · INTERVENE · VOICE</span>
+      </div>
+
+      {/* Group 1 — WORLD EVENTS: the inject controls, unchanged behavior. */}
+      <GodGroupLabel>WORLD EVENTS</GodGroupLabel>
       <div className="p-2 space-y-1.5">
         <div className="flex gap-1.5">
           <select
@@ -744,16 +920,22 @@ export function ControlPanel({
         </button>
       </div>
 
+      {/* Group 2 — INTERVENE: bless/grant/whisper one living agent (EM-136/137). */}
+      <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
+      <GodGroupLabel>INTERVENE</GodGroupLabel>
+      <GodIntervene agents={liveAgents} />
+
+      {/* Group 3 — VOICE: the billboard reply (W11b EM-091d), behavior unchanged. */}
+      <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
+      <GodGroupLabel>VOICE</GodGroupLabel>
+      <BillboardReply onPost={onBillboardReply} />
+
       {/* ── God Panel: spawn a villager (W7 EM-063) ──────────────── */}
       <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god">
         <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">✦ GOD PANEL</h2>
-        <span className="font-mono text-[9px] text-lab-muted opacity-70">SPAWN · REPLY</span>
+        <span className="font-mono text-[9px] text-lab-muted opacity-70">SPAWN</span>
       </div>
       <SpawnForm world={world} profiles={profiles} mockMode={mockMode} onSpawn={onSpawn} />
-
-      {/* ── God Panel: REPLY ON BILLBOARD (W11b EM-091d) ─────────── */}
-      <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
-      <BillboardReply onPost={onBillboardReply} />
 
       {/* ── Status ──────────────────────────────────────────────── */}
       {world && (

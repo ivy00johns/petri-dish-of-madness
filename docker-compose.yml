@@ -29,6 +29,9 @@ services:
     volumes:
       # Mount config dir so profiles/world can be edited without rebuilding.
       - ./config:/app/config:ro
+      # Named volume for run history (data/run.sqlite) so past runs survive
+      # container recreation. Declared under top-level `volumes:` below.
+      - backend_data:/app/data
     env_file:
       - path: .env
         required: false
@@ -81,3 +84,8 @@ services:
 
 volumes:
   ollama_data:
+  # backend_data — backend run history (data/run.sqlite). Keeps every past run
+  # and the /inspector Run Browser archive across `docker compose down` and
+  # container recreation. Swap for a bind mount (./data:/app/data) on the
+  # backend service if you prefer host-visible files.
+  backend_data:

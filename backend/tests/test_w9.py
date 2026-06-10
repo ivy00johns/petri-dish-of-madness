@@ -844,6 +844,8 @@ async def test_ban_arson_proposable_passes_and_blocks_arson():
         {"action": "arson", "args": {"building_id": "bld_hall"}},
         {"action": "arson", "args": {"building_id": "bld_hall"}},  # the retry
     ])
+    # Civic actions are gated to the governance place — stand at the town hall.
+    next(iter(world.agents.values())).location = "townhall"
     run_id = loop._run_id
     world.buildings["bld_hall"] = Building(
         id="bld_hall", name="Town Hall", kind="clocktower", location="market",
@@ -872,6 +874,8 @@ def test_world_propose_rule_accepts_ban_arson_effect():
     """World core: ban_arson is in valid_effects (was unreachable pre-W9)."""
     loop, world, _, _, _ = _make_loop(agent_count=1)
     agent = next(iter(world.agents.values()))
+    # Civic actions are gated to the governance place — stand at the town hall.
+    agent.location = "townhall"
     ok, reason, rule = world.action_propose_rule(agent, "ban_arson", "no fires")
     assert ok and rule is not None and rule.effect == "ban_arson", reason
 

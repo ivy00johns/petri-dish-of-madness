@@ -364,15 +364,15 @@ docker compose up -d
 
 The web container (nginx) proxies `/api` and `/ws` to the backend, so no CORS configuration is needed. The frontend is served on **port 8080** in production.
 
-Platforms: Railway, Fly.io, Render, any VPS with Docker. **Runs persist by default** to `data/run.sqlite` — inside the container that lands at `/app/data`, which is ephemeral unless you mount it. To keep run history (and the `/inspector` Run Browser's archive) across container recreation, add a volume:
+Platforms: Railway, Fly.io, Render, any VPS with Docker. **Runs persist by default** to `data/run.sqlite` — inside the container that lands at `/app/data`, and the compose file ships a named volume (`backend_data`) mounted there, so run history (and the `/inspector` Run Browser's archive) survives container recreation out of the box. Prefer host-visible files? Swap it for a bind mount:
 
 ```yaml
 # docker-compose override for the backend service
 volumes:
-  - ./data:/app/data        # or a named volume
+  - ./data:/app/data        # instead of the default backend_data named volume
 ```
 
-Skipping the volume still works — you just lose past runs whenever the container is recreated.
+To wipe run history entirely, tear down with `docker compose down -v` (removes named volumes too).
 
 ---
 

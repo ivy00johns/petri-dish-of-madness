@@ -24,12 +24,17 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 > banners (EM-107). Backend 252 / frontend 150 tests. Gate log: `coordination/
 > W11B_BUILD.md`; results: `BUILD_RESULTS_W11B.md`. **W9–W11 complete. Open: EM-106 (compose
 > data/ volume), EM-108 (governance location gate) — both small, unscheduled.**
+> **v3 (Village→Civilization) filed 2026-06-09** via `plan-intake` from
+> `docs/research/deep-research-v3.md` — **EM-109–128**, opening **W12–W14**. Every hard
+> prereq already shipped in W11a/W11b (fork/resume EM-101, persona library EM-092,
+> procgen+housing EM-098, reflection EM-080, run browser EM-086), so v3 is unblocked. Build
+> order per user: **deepen the first city before founding a second.**
 
 ## Format & conventions
 
 - **ID** — `EM-###`. Stable, never reused. New items take the next free number.
 - **Priority** — `P0` (blocks the wave) · `P1` (needed for v1, not blocking) · `P2` (nice-to-have) · `P3` (deferred-ish).
-- **Wave** — `W0`–`W11` (see `BUILD-PLAN.md`). W0–W4 shipped (v1); W5–W8 shipped (v2); W9–W11 are the audit-driven v2.1 plan.
+- **Wave** — `W0`–`W14` (see `BUILD-PLAN.md`). W0–W4 shipped (v1); W5–W8 shipped (v2); W9–W11 shipped (v2.1 audit-driven); W12–W14 are the v3 Village→Civilization plan.
 - **Area** — `infra` · `contracts` · `backend` · `providers` · `persistence` · `frontend` · `qe`.
 - **Source** — where it came from. New items from reports enter via `plan-intake`.
 - **Status** — `open` · `in-progress` · `blocked` · `done`.
@@ -143,13 +148,54 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-105 | P2 | W11 | frontend | user 2026-06-09 | Expandable feed column: user-resizable width via drag handle on the feed/world boundary (persisted in localStorage), with sane min/max so the village never collapses; pairs with the EM-096 layout | done | — |
 
-| EM-106 | P3 | — | infra | docs-agent W11b | docker-compose: ship a named volume for `data/` on the backend service by default (runs persist to data/run.sqlite since W10; README documents the manual override, compose should just do it) | open | — |
+| EM-106 | P3 | — | infra | docs-agent W11b | docker-compose: ship a named volume for `data/` on the backend service by default (runs persist to data/run.sqlite since W10; README documents the manual override, compose should just do it) | done | wave-A 2026-06-10 |
 
 | EM-107 | P1 | W11 | frontend | user 2026-06-09 | Banner mount/unmount reflows the whole app ("zooms in and out", eye strain) — routing-degraded/recovered + usage-alert banners must not shift layout: overlay them (or reserve the row) with a reduced-motion-safe fade, so appearance/clearing never moves content | done | — |
 
-| EM-108 | P3 | — | backend | qa W11b | Governance location gate is prompt-only: `_validate_world` never location-checks `propose_rule`/`vote` despite the TOOL_REGISTRY comment claiming resolution-time enforcement — a prompt-ignoring model can legislate from anywhere. Enforce at resolution (match the billboard gate pattern) | open | — |
+| EM-108 | P3 | — | backend | qa W11b | Governance location gate is prompt-only: `_validate_world` never location-checks `propose_rule`/`vote` despite the TOOL_REGISTRY comment claiming resolution-time enforcement — a prompt-ignoring model can legislate from anywhere. Enforce at resolution (match the billboard gate pattern) | done | wave-A 2026-06-10 |
 
-_Next free ID: EM-109._
+| EM-109 | P0 | W12 | persistence | research-v3 | Multi-city data model: `cities`/`city_links`/`agent_location` tables + a 2nd settlement rendered on the 2D map; ONE tick loop + per-city context scoping so prompt size stays flat (free-scale). Keystone unblocking travel/trade/diplomacy/parallel-worlds | open | — |
+| EM-110 | P0 | W12 | backend | research-v3 | Reflex `travel_to(city)` → `in_transit_to`/`transit_arrival_tick` (agent off-board, zero LLM calls until `agent_arrived`); migration re-points credits/skills/memories(top-K)/relationship edges to the new `city_id`. Deps EM-109 | open | — |
+| EM-111 | P0 | W12 | frontend | research-v3 | Art win #1: warm CC0 HDRI (`<Environment>`) + `MeshToonMaterial` 3-tone ramp (NearestFilter, no mipmaps) + drei `<AccumulativeShadows>` on existing geometry. Isolated from engine, most shareable demo; CC0-only + `CREDITS.md`/`ASSET_LICENSES.md` | open | — |
+| EM-112 | P0 | W12 | backend | research-v3 | Parallel-worlds runner: `runs.model_family` + "seed all agents from family X" casting + **sequential** tournament (snapshot→next, never concurrent — protects FreeLLMAPI free tiers) + run-browser entry. Deps EM-101 ✅, EM-092 ✅, EM-086 ✅ | open | — |
+| EM-113 | P1 | W12 | backend | research-v3 | Relationship depth schema: `type`(friend/partner/family/mentor/rival/feud)/`strength`(float)/`valence`/`since_tick`; changes are reflex consequences of existing talk/give/steal/vote; typed+colored edges in the social graph. Precondition for children/factions/diplomacy | open | — |
+| EM-114 | P1 | W12 | backend | research-v3 | Lightweight children: partner-above-threshold + reflex consent → reflex `child_spawned` casts a blended persona (traits crossed from parents) on a **cheaper routed model**, acting every N ticks; hard population cap (~12–16), births gated by housing + credits. Deps EM-092 ✅, EM-113 | open | — |
+| EM-115 | P1 | W12 | backend | research-v3 | City-growth slice: one collective project (existing propose→fund→build pipeline) instantiates a new instanced building when funded; town visibly gains a building (replay scrubber). Reflex/deterministic given completed projects — no extra LLM calls | open | — |
+| EM-116 | P1 | W13 | backend | research-v3 | Inter-city trade caravans: reflex `send_caravan(to_city, goods, credits)` → `trade_dispatched`, reflex settlement on arrival (`trade_settled`); optional lightweight `merchant` actor_type on cheaper/less-frequent calls. Deps EM-109, EM-110 | open | — |
+| EM-117 | P1 | W13 | backend | research-v3 | Diplomacy via governance: city-scoped treaties/alliances/rivalries ratified by each city's ~70% vote threshold; relationship edges gain `scope` (agent-agent vs city-city); bundles shipped governance texture (EM-079/087/100/103). Deps EM-109, EM-113 | open | — |
+| EM-118 | P1 | W13 | frontend | research-v3 | Art phase 2: instanced trees/foliage (KayKit Forest / Quaternius Nature) via drei `<Instances>`/`<Merged>` + LOD `<Detailed>`; hold ≥60fps alongside 2D instrumentation. Deps EM-111 | open | — |
+| EM-119 | P1 | W13 | frontend | research-v3 | Model-Family Arena: side-by-side cross-run AWI sparklines per family + civilization-outcome cards (population/laws/buildings/crimes/credits) on the existing uPlot/Observable Plot stack — the Gemini-vs-Claude crime/culture contrast demo. Deps EM-112, EM-086 ✅ | open | — |
+| EM-120 | P2 | W13 | backend | research-v3 | Factions + feuds + reputation: `factions`/`faction_membership` tables, reputation = derived per-agent aggregate; faction hulls on the graph + reputation column in the agent strip. Extends EM-113 | open | — |
+| EM-121 | P2 | W13 | frontend | research-v3 | Multi-city camera (rescoped): zoom-to-city / follow-agent-across-cities + reset-view for the multi-settlement view. Base orbit/pan/zoom-to-place (EM-095 ✅) + label declutter (EM-102 ✅) already shipped W11a — this is the multi-city delta only | open | — |
+| EM-122 | P2 | W14 | frontend | research-v3 | Art phase 3: buildings-per-place-kind mesh swap (KayKit Hexagon / Kenney Fantasy Town) wired to the building-state model + procgen layout; distinct building types per zone. Deps EM-098 ✅, EM-115 | open | — |
+| EM-123 | P2 | W14 | backend | research-v3 | City-growth depth: `neighborhoods` table + `places.neighborhood_id`/`zone_kind`(residential/market/civic/industrial/farm)/`tier`; zoned districts grow as megaprojects complete. Deps EM-115 | open | — |
+| EM-124 | P2 | W14 | frontend | research-v3 | Art phase 4 (rescoped): 3D character mesh swap (KayKit Adventurers / Quaternius Modular) with per-model color tint. Pets-in-sidebar (EM-099 ✅) already shipped W11a — character swap only | open | — |
+| EM-125 | P2 | W14 | backend | research-v3 | Reflection-driven society: importance-threshold reflection (**consumes** EM-080 ✅) occasionally upgrades a relationship type (cheap, throttled LLM touch) and triggers reflection-driven migration. Deps EM-080 ✅, EM-113 | open | — |
+| EM-126 | P3 | W14 | backend | research-v3 | Generational depth: life stages/aging (child→adult→elder cadence + tool unlocks), inheritance of credits/relationships/grudges on death, lineage tree in the inspector. Deps EM-114 | open | — |
+| EM-127 | P3 | W14 | frontend | research-v3 | Art phase 5: day/night + seasons + particles (chimney smoke, fireflies) + sparing `<Bloom>`/`<Vignette>` + filmic tone mapping (`antialias:false`, post handles AA). Deps EM-111 | open | — |
+| EM-128 | P3 | W14 | frontend | research-v3 | Population-dynamics + culture-drift AWI metrics compared across model families (population/laws/culture charts per family). Deps EM-112, EM-126 | open | — |
+
+| EM-129 | P2 | W12 | backend | user 2026-06-09 | Humanize agent-built building names: raw snake_case args render verbatim in 3D labels + feed ("prepare_beds", "village_fair") — `action_propose_project` should derive a display name (underscores→spaces, title case) while keeping the raw string in payload; trim/reject empty or identifier-only names | done | wave-A 2026-06-10 |
+| EM-130 | P2 | W12 | frontend | user 2026-06-09 | Every unknown building kind renders as "Monument": `buildingStyle()` falls back to the monument palette/tag, so a market stall is labeled Monument — add a neutral "Building" fallback style and map common emergent kinds (stall/market/pavilion/inn/…) onto existing palettes | done | wave-A 2026-06-10 |
+| EM-131 | P2 | W12 | frontend | user 2026-06-09 | Building placement overlap: new projects spawn at `agent.location`, so meshes pile onto the same spot and labels collide again at plaza density (EM-102 declutter insufficient once the town grows) — slot/offset placement around the place + a declutter second pass for dense clusters. Pairs with EM-115 city-growth slice | done | wave-A 2026-06-10 |
+
+| EM-132 | P2 | W12 | backend | user 2026-06-09 | `build_step` on a damaged building wastes the turn ("is damaged, not under_construction" → idle fallback) — auto-redirect build_step→repair when status=damaged (intent is unambiguous), or surface building status in the prompt so models pick repair themselves | done | wave-A 2026-06-10 |
+| EM-133 | P2 | W12 | backend | user 2026-06-09 | Funding overshoot: `action_contribute_funds` accepts unlimited credits with no clamp at `funds_required` (booth hit 12/5) — clamp contributions to the remaining gap (refund/reject overflow with guidance); overspent credits matter when recharge costs 2 and agents starve | done | wave-A 2026-06-10 |
+| EM-134 | P3 | W12 | backend | user 2026-06-09 | Animal-damage cooldown: `animal_damage_building` has no rate limit — same critter re-damaged the same booth twice in 6 ticks, immediately after a repair. Per-building cooldown ticks (or diminishing chance) so new builds aren't perma-griefed; keep the chaos, lose the lock | done | wave-A 2026-06-10 |
+| EM-135 | P2 | W12 | backend | user 2026-06-09 | Reroute-aware lane health ("smarter routing"): the proxy silently reroutes lanes to models with incompatible output behavior (reasoning CoT eats budget; mistral-medium cuts mid-JSON reporting 'stop' — runs 102/126). Hotfixes salvage individual turns (repair/boost/cache-evict, `fix/reasoning-model-token-exhaustion`); the durable fix is per-`routed_via` health tracking in the Router — remember which routed models truncate/fail-to-parse and adapt (first-attempt budget bump per lane, or deprioritize/quarantine a lane that keeps mangling JSON). Zero standing extra calls; observability via existing `llm_call` rows | done | wave-A 2026-06-10 |
+| EM-136 | P1 | W12 | backend | user 2026-06-10 | Targeted god interventions: every god lever is world-wide (windfall/famine/blackout/festival hit ALL agents) — user watched an agent starve with no way to help it. Engine seam `world.god_intervene(kind, agent_id, amount)` for `bless_energy` / `grant_credits` (clamped, reflex, zero LLM) + `POST /api/god/intervene`; emits `god_intervention` (actor_type god, target_id) in god ink | done | wave-A 2026-06-10 |
+| EM-137 | P1 | W12 | backend | user 2026-06-10 | God whisper (targeted proclamation): one-shot context injection into ONE agent's next prompt (proclamation mechanics, single-target, consumed on delivery) — the precision tool ("go recharge, now"). `world.post_whisper_as_god(agent_id, text)` + `POST /api/god/whisper`; feed shows "✦ god whispers to {name}" in god ink | done | wave-A 2026-06-10 |
+| EM-138 | P1 | W12 | frontend | user 2026-06-10 | God panel revamp: ControlPanel god section becomes a grouped GOD CONSOLE — (1) world events (existing 4 injects), (2) per-agent intervention row (agent selector → BLESS +energy / GRANT +credits / WHISPER text), (3) voice tools (billboard reply + proclamation, existing). Consumes EM-136/137; god-ink styling throughout | done | wave-A 2026-06-10 |
+
+| EM-139 | P1 | W12 | frontend | user 2026-06-10 | Story-digest PROJECTS line was unbounded: day-197 run enumerated ~50 destroyed projects as one wall of text, making the feed unscrollable — live projects named (capped at 3, +N more), settled statuses aggregated to counts (`projectReadout`, lib/storySoFar.ts) | done | wave-A 2026-06-10 |
+
+| EM-140 | P1 | W12 | backend | user 2026-06-10 | Behavioral-arg normalization: run 189 burned 55 turns on `move_to` with the place under a guessed key/null ("unknown place 'None'" — the prompt never documented the arg) and 119 turns on social actions targeting agents by NAME while the world keys by id (the prompt lists names). Fix: `_normalize_args` collapses alias keys (destination→place, case-insensitive places) and resolves names→ids (living/co-located preferred); prompt now documents `move_to (place)` with the place list; clearer validator feedback; `rejected_action` forensics in parse_failure payloads | done | wave-A 2026-06-10 |
+
+| EM-141 | P1 | W12 | frontend | user 2026-06-10 | Inspector archive view died on building-heavy runs: socialGraph folded conflict/economy events with a BUILDING target_id into relationship edges, d3-force threw "node not found: bld_…" 50× and the run-189 view never loaded — edges now filtered to agent-node endpoints (selectors.ts) | done | wave-A 2026-06-10 |
+
+| EM-142 | P1 | W12 | backend | user 2026-06-10 | Over-cap behavioral strings dead-turned agents (Cleo: 60-char propose_project `function` vs cap 40; Bram: 300-char billboard vs 280): `_ARG_STRING_CAPS` in `_normalize_args` truncates display-text args to their schema caps instead of failing the turn | done | wave-A 2026-06-10 |
+
+_Next free ID: EM-143._
 
 ## Notes
 
@@ -190,3 +236,21 @@ _Next free ID: EM-109._
   while planning a festival). `audit §Xn` source refs point at the theme/finding IDs inside
   the audit doc. No new entry was filed for frontend tests — that folds into the still-open
   EM-043 (see above).
+- **EM-109–128 (v3 Village→Civilization)** entered 2026-06-09 via `plan-intake` from
+  `docs/research/deep-research-v3.md`. They open **W12–W14** (breadth slice → depth pass 1 →
+  depth pass 2); six headline features (multi-city, parallel model-family worlds, city growth,
+  deeper relationships, lightweight children, cozy-art overhaul) shipped **breadth-first**, each
+  EM-### an independently demo-able PR. The report authored these as EM-105–124; all were
+  **renumbered to EM-109–128** (EM-105–108 were taken by W11a/W11b in the interim) and internal
+  deps remapped. Several report "pull-forward" deps had already shipped: **EM-086** (run browser/
+  cross-run AWI), **EM-095** (camera nav), **EM-096** (layout), **EM-099** (pets), **EM-102**
+  (label declutter) — so **EM-121** (camera) and **EM-124** (character swap) were **rescoped to
+  their multi-city / mesh-swap deltas only**, and **EM-125** kept as a **consumer** of (not a
+  duplicate of) the shipped reflection work (EM-080). **All hard prerequisites are already done**
+  (EM-101 fork/resume, EM-092 persona library, EM-098 procgen+housing, EM-080 reflection,
+  governance texture EM-079/087/100/103) — v3 is unblocked at the foundation. **Sequencing (user
+  2026-06-09):** depth-first on the *first* city — grow and change it, make it "be more things"
+  (EM-115 city-growth, EM-122 buildings-per-kind, EM-123 neighborhoods/zoning, all riding shipped
+  EM-098) — *before* founding a second settlement (EM-109/110 multi-city), inverting the report's
+  "multi-city is the keystone" recommendation. Multi-city + multi-world were promoted out of
+  `docs/FUTURE.md` per its convention.

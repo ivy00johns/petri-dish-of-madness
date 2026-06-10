@@ -7,7 +7,7 @@
  * event-log.md v1.2.0 note 1).
  */
 import { describe, expect, it, beforeEach } from 'vitest';
-import { storySoFar } from './storySoFar';
+import { projectReadout, storySoFar } from './storySoFar';
 import { agent, building, ev, resetSeq, world } from '../test-utils/fixtures';
 import type { Rule, WorldEvent } from '../types';
 
@@ -184,5 +184,55 @@ describe('storySoFar — narrator channel', () => {
     const d = storySoFar(newestFirst([ev({ kind: 'agent_speech', tick: 1 })]), world());
     expect(d.narratorCount).toBe(0);
     expect(d.narratorLatest).toBeNull();
+  });
+});
+
+describe('projectReadout (EM-139) — bounded digest line', () => {
+  const p = (id: string, status: string, progress = 0, name = id) =>
+    ({ id, name, status, progress });
+
+  it('names live projects with progress and aggregates the settled tail to counts', () => {
+    const line = projectReadout([
+      p('b1', 'under_construction', 20, "Bram's Midnight Chatter Revival"),
+      p('b2', 'operational', 100, 'Gossip Stage'),
+      p('b3', 'operational', 100, 'Phoenix Pavilion'),
+      ...Array.from({ length: 47 }, (_, i) => p(`d${i}`, 'destroyed', 100, `Ruin ${i}`)),
+      p('a1', 'abandoned', 40, 'Old Fountain'),
+    ]);
+    expect(line).toBe(
+      "Bram's Midnight Chatter Revival 20% building · 2 operational · 1 abandoned · 47 destroyed",
+    );
+    // The 47 ruins are NEVER enumerated by name.
+    expect(line).not.toContain('Ruin');
+  });
+
+  it('caps named live projects and counts the overflow', () => {
+    const line = projectReadout([
+      p('b1', 'planned', 0, 'A'),
+      p('b2', 'under_construction', 10, 'B'),
+      p('b3', 'under_construction', 60, 'C'),
+      p('b4', 'planned', 0, 'D'),
+      p('b5', 'under_construction', 90, 'E'),
+    ]);
+    expect(line).toBe('A 0% planned · B 10% building · C 60% building · +2 more in progress');
+  });
+
+  it('stays bounded: 200 mixed projects produce a short line, not a wall', () => {
+    const many = Array.from({ length: 200 }, (_, i) =>
+      p(`x${i}`, i % 3 === 0 ? 'destroyed' : i % 3 === 1 ? 'operational' : 'damaged', 100, `Name ${i}`),
+    );
+    const line = projectReadout(many);
+    expect(line.length).toBeLessThan(120);
+    expect(line).toContain('operational');
+    expect(line).toContain('destroyed');
+    expect(line).toContain('damaged');
+  });
+
+  it('surfaces unknown future statuses as counts instead of dropping them', () => {
+    expect(projectReadout([p('z', 'haunted', 100, 'Spooky Mill')])).toBe('1 haunted');
+  });
+
+  it('returns an empty string for no projects (component shows its labeled empty state)', () => {
+    expect(projectReadout([])).toBe('');
   });
 });

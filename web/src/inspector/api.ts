@@ -106,6 +106,14 @@ export type ForkResult =
   | { ok: true; runId: number | null }
   | { ok: false; status: number | null; message: string };
 
+/** Result of a god-console POST (wave-a2 EM-138). Labeled, never thrown. */
+export type GodActionResult =
+  | { ok: true }
+  | { ok: false; status: number | null; message: string };
+
+/** The two targeted-intervention kinds (wave-a2 EM-136). */
+export type GodInterveneKind = 'bless_energy' | 'grant_credits';
+
 /** Query params accepted by GET /api/events (api.openapi.yaml v1.3.0). */
 export interface EventsQuery {
   /** EM-086: scope to a past run (serialized `run_id`); omitted = active run. */
@@ -195,6 +203,37 @@ function qs(params: Record<string, string | number | undefined>): string {
 /** Coerce an unknown array-ish JSON value into a typed row array. */
 function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
+}
+
+/**
+ * Shared POST for the god console (wave-a2 EM-138): labeled ok/failure with a
+ * status-mapped message (the forkRun idiom) — 422 = validation (unknown/dead
+ * agent, bad amount, empty text), 503 = world not initialized. Never throws.
+ */
+async function postGodAction(
+  path: string,
+  body: Record<string, unknown>,
+  what: string,
+): Promise<GodActionResult> {
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const message =
+        res.status === 422
+          ? `${what} rejected — unknown/dead agent or invalid input (HTTP 422)`
+          : res.status === 503
+            ? 'the world is not initialized yet (HTTP 503)'
+            : `${what} failed (HTTP ${res.status})`;
+      return { ok: false, status: res.status, message };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, status: null, message: `backend unreachable — ${what} not sent` };
+  }
 }
 
 // ── Typed read client ────────────────────────────────────────────────────────
@@ -372,6 +411,38 @@ export const inspectorApi = {
     } catch {
       return { ok: false, status: null, message: 'backend unreachable — fork not sent' };
     }
+  },
+
+  /**
+   * POST /api/god/intervene {kind, agent_id, amount?} (wave-a2 EM-136/138) —
+   * targeted god intervention on a LIVING agent. `amount` omitted = the
+   * backend's defaults (+25 energy / +10 credits). Optimistic-free: the
+   * god_intervention event arrives via the WS feed; this returns only the
+   * labeled ok/failure for the console's inline error treatment.
+   */
+  async godIntervene(
+    kind: GodInterveneKind,
+    agentId: string,
+    amount?: number,
+  ): Promise<GodActionResult> {
+    return postGodAction(
+      '/api/god/intervene',
+      { kind, agent_id: agentId, ...(amount !== undefined ? { amount } : {}) },
+      'intervention',
+    );
+  },
+
+  /**
+   * POST /api/god/whisper {agent_id, text} (wave-a2 EM-137/138) — queue a
+   * one-shot line into the agent's NEXT context. Capped at 280 chars here,
+   * mirroring the billboard cap. The whisper_posted event arrives via the WS.
+   */
+  async godWhisper(agentId: string, text: string): Promise<GodActionResult> {
+    return postGodAction(
+      '/api/god/whisper',
+      { agent_id: agentId, text: text.trim().slice(0, 280) },
+      'whisper',
+    );
   },
 
   /**

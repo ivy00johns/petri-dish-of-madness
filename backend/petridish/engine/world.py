@@ -30,6 +30,24 @@ def _truncate(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _humanize_project_name(raw: str) -> str:
+    """EM-129 — derive a display name from a model-authored project name.
+    Models often emit snake_case identifiers ("prepare_beds", "village_fair"):
+    underscores/hyphens become spaces, whitespace collapses, and an
+    all-lowercase identifier-ish result is Title Cased ("Prepare Beds").
+    Already-styled names ("Bram's Market Stall") pass through untouched.
+    Returns "" when nothing displayable survives (empty / punctuation-only /
+    single character) so the caller can fall back. Capped at 60 (the existing
+    Building.name cap)."""
+    text = re.sub(r"[_\-]+", " ", str(raw or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 2 or not re.search(r"[a-z0-9]", text, re.IGNORECASE):
+        return ""
+    if re.fullmatch(r"[a-z0-9 ]+", text):
+        text = text.title()
+    return text[:60]
+
+
 @dataclass
 class RelationshipState:
     type: str = "neutral"  # ally|rival|neutral|friend|enemy
@@ -186,6 +204,11 @@ class Building:
     # commemorates (its name fuzzy-matched an active/proposed rule's text).
     # At most ONE commemorative monument per rule. None for ordinary buildings.
     commemorates: str | None = None
+    # EM-134 — last tick an ANIMAL successfully damaged this building. Internal
+    # cooldown bookkeeping only: NOT serialized in to_dict() (non-contract
+    # field), so snapshots and events are unchanged. The sentinel sits far in
+    # the past so the FIRST animal hit always lands (keep the chaos).
+    last_animal_damage_tick: int = -(10 ** 9)
 
     @property
     def condition_label(self) -> str:
@@ -414,6 +437,23 @@ class World:
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
         self.billboard: list[dict] = []
+        # PROTOTYPE (god-channel) — loud-tier god proclamations, distinct from the
+        # opt-in billboard. While a proclamation is active it rides EVERY agent's
+        # prompt (runtime._assemble_context), so the god's word is guaranteed to
+        # reach the whole world. Each entry: {id, tick, text, replies:[]}; the
+        # NEWEST entry is the active decree. Serialized in to_snapshot().
+        self.proclamations: list[dict] = []
+        # PROTOTYPE (god-channel) — the town's name, set by CONSENSUS: an agent
+        # proposes a `name_town` rule (propose_rule) and it takes effect when the
+        # vote passes (_on_rule_activated). Empty = unnamed. Serialized in
+        # to_snapshot() so the frontend/header can show it.
+        self.town_name: str = ""
+        # EM-137 (god console) — one-shot god whispers awaiting delivery, keyed
+        # by agent id. post_whisper_as_god queues lines here; the runtime pops
+        # the target's queue into its NEXT prompt (_assemble_context) exactly
+        # once. Deliberately NOT serialized in to_snapshot(): a whisper is
+        # ephemeral by design, so a restore simply drops undelivered ones.
+        self.pending_whispers: dict[str, list[str]] = {}
 
         self.tick: int = 0
         self.day: int = 0
@@ -678,14 +718,46 @@ class World:
     # Governance
     # ──────────────────────────────────────────────────────────────────────────
 
+    # EM-108 — civic actions are location-gated at RESOLUTION time, mirroring
+    # the billboard gate (billboard_here): the prompt already hides
+    # propose_rule/vote away from governance places, but a prompt-ignoring
+    # model must not legislate from anywhere.
+    GOVERNANCE_GATE_MESSAGE = "civic actions happen at the town hall — move there first"
+
+    def governance_here(self, place_id: str) -> bool:
+        """EM-108 — true when civic actions (propose_rule / vote) are reachable
+        from this place: its kind is "governance" (the procgen invariant makes
+        the first governance place id "townhall", but the gate is on kind,
+        never the hardcoded id). Worlds with NO governance place at all
+        (legacy / hand-rolled layouts) are exempt — civic life cannot require
+        a town hall that does not exist."""
+        p = self.places.get(place_id)
+        if p is not None and p.kind == "governance":
+            return True
+        return not any(pl.kind == "governance" for pl in self.places.values())
+
     def action_propose_rule(
-        self, agent: AgentState, effect: str, text: str
+        self, agent: AgentState, effect: str, text: str, name: str | None = None
     ) -> tuple[bool, str, RuleState | None]:
+        # EM-108 — only AgentState actors are location-bound; god paths
+        # (enqueue_admit_agent / post_*_as_god) never come through here.
+        if not self.governance_here(agent.location):
+            return False, self.GOVERNANCE_GATE_MESSAGE, None
         # W9 / EM-073 B3: ban_arson included so the arson ban is reachable via
         # governance (enforcement already gates arson in the runtime validator).
-        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
+        # PROTOTYPE (god-channel): name_town — naming the town by consensus vote.
+        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
+                         "ban_arson", "name_town"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
+        # name_town carries the proposed name on the payload (like admit_agent);
+        # a naming proposal is meaningless without one.
+        payload: dict[str, Any] = {}
+        if effect == "name_town":
+            name = str(name or "").strip()[:60]
+            if not name:
+                return False, "name_town requires a name", None
+            payload = {"name": name}
         # Duplicate guard: only one OPEN proposal per effect at a time.
         for rule in self.rules.values():
             if rule.effect == effect and rule.status == "proposed":
@@ -694,7 +766,9 @@ class World:
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
         # (civic ritual is the charm) but tagged renewal_of; on passing it
         # refreshes the existing rule instead of activating a duplicate.
-        active = self._active_rule(effect)
+        # EXCEPTION: name_town is a one-shot RENAME, not a stackable law — each
+        # naming is fresh (a new name supersedes the old), never a renewal.
+        active = self._active_rule(effect) if effect != "name_town" else None
         rule = RuleState(
             id=str(uuid.uuid4())[:8],
             effect=effect,
@@ -702,6 +776,7 @@ class World:
             proposer_id=agent.id,
             created_tick=self.tick,
             renewal_of=active.id if active is not None else None,
+            payload=payload,
         )
         self.rules[rule.id] = rule
         return True, "ok", rule
@@ -710,6 +785,9 @@ class World:
         self, agent: AgentState, rule_id: str, choice: bool
     ) -> tuple[bool, str, str | None]:
         """Returns (success, reason, new_status_if_changed)."""
+        # EM-108 — same resolution-time location gate as action_propose_rule.
+        if not self.governance_here(agent.location):
+            return False, self.GOVERNANCE_GATE_MESSAGE, None
         rule = self.rules.get(rule_id)
         if rule is None:
             return False, f"unknown rule {rule_id!r}", None
@@ -724,7 +802,9 @@ class World:
                 # active, refresh THAT rule (renewed_at gains the tick) instead
                 # of stacking a second active copy. Invariant: the world never
                 # holds two simultaneously-active identical effects.
-                existing = self._active_rule(rule.effect)
+                # name_town is a one-shot rename, not a stackable law — it never
+                # "renews"; a passing name supersedes whatever the town was called.
+                existing = self._active_rule(rule.effect) if rule.effect != "name_town" else None
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
                     existing.renewed_at.append(self.tick)
@@ -743,7 +823,25 @@ class World:
         `agent_spawned{method:governance, proposal_id}` event in the outbox for the
         runtime/api layer to drain and emit. Other effects (ubi/work_bonus/...) are
         passive and read elsewhere, so nothing to do here."""
-        if rule.effect != "admit_agent" or rule.applied:
+        if rule.applied:
+            return
+        # PROTOTYPE (god-channel) — name_town: a passing naming vote sets the
+        # town's name and parks a `town_named` event in the outbox (drained +
+        # emitted by the loop's _flush_spawn_events, same path as governance spawn).
+        if rule.effect == "name_town":
+            name = (rule.payload or {}).get("name")
+            rule.applied = True
+            if name:
+                self.town_name = str(name)
+                self.pending_spawn_events.append({
+                    "kind": "town_named",
+                    "actor_id": "system",
+                    "actor_type": "system",
+                    "text": f"🏛 By vote, the town is now named {self.town_name}.",
+                    "payload": {"name": self.town_name, "proposal_id": rule.id},
+                })
+            return
+        if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
         name = spec.get("name")
@@ -922,7 +1020,18 @@ class World:
             funds_required = max(0, int(funds_required))
         except (TypeError, ValueError):
             funds_required = 0
-        rule = self._commemorated_rule(name)
+        # EM-129 — Building.name stores a humanized DISPLAY name (snake_case →
+        # "Title Case"); junk names fall back to "<Agent>'s <Kind>" (kind
+        # humanized the same way; junk kind → "Project"). The raw model arg is
+        # preserved in the project_proposed payload as raw_name (additive).
+        # `kind` itself stays a raw key — the frontend maps it (EM-130).
+        raw_name = str(name)[:60]
+        display_name = _humanize_project_name(name)
+        if not display_name:
+            display_name = (
+                f"{agent.name}'s {_humanize_project_name(kind) or 'Project'}"[:60]
+            )
+        rule = self._commemorated_rule(display_name)
         if rule is not None:
             already = any(
                 b.commemorates == rule.id and b.status != "destroyed"
@@ -931,12 +1040,12 @@ class World:
             if already:
                 return self._fail_event(
                     agent.id, "propose_project", "commemorative_duplicate",
-                    f"{agent.name}'s proposal {str(name)[:60]!r} honors the law "
+                    f"{agent.name}'s proposal {display_name!r} honors the law "
                     f"\"{_truncate(rule.text)}\" — but a monument to that rule "
                     f"already stands. One monument per law; propose something new.")
         building = Building(
             id=f"bld_{str(uuid.uuid4())[:8]}",
-            name=str(name)[:60],
+            name=display_name,
             kind=str(kind)[:30],
             location=agent.location,
             owner_id="public",
@@ -961,6 +1070,7 @@ class World:
             "payload": {
                 "building_id": building.id,
                 "name": building.name,
+                "raw_name": raw_name,
                 "kind": building.kind,
                 "location": building.location,
                 "funds_required": funds_required,
@@ -994,28 +1104,45 @@ class World:
             return self._fail_event(
                 agent.id, "contribute_funds", "amount must be positive",
                 f"{agent.name} tried to contribute a non-positive amount.")
-        if agent.credits < amount:
+        # EM-133 — clamp the contribution at the remaining funding gap so
+        # funds_committed can never overshoot funds_required (the 12/5 booth).
+        # Only the clamped amount leaves the agent; a zero gap fails softly
+        # with guidance (costing nothing) instead of swallowing credits.
+        gap = max(0, building.funds_required - building.funds_committed)
+        if gap == 0:
+            return self._fail_event(
+                agent.id, "contribute_funds", "already fully funded",
+                f"{building.name} is already fully funded — it needs build_step now.")
+        applied = min(amount, gap)
+        if agent.credits < applied:
             return self._fail_event(
                 agent.id, "contribute_funds",
-                f"insufficient credits: have {agent.credits}, need {amount}",
-                f"{agent.name} cannot afford to contribute {amount} credits.")
+                f"insufficient credits: have {agent.credits}, need {applied}",
+                f"{agent.name} cannot afford to contribute {applied} credits.")
 
-        agent.credits -= amount
-        building.funds_committed += amount
+        agent.credits -= applied
+        building.funds_committed += applied
         if agent.id not in building.contributors:
             building.contributors.append(agent.id)
         building.updated_tick = self.tick
 
+        clamp_note = (
+            f" (offered {amount}; clamped at the remaining gap)"
+            if applied < amount else ""
+        )
         economy_evt = {
             "kind": "economy",
             "actor_id": agent.id,
             "target_id": building.id,
-            "text": f"{agent.name} contributes {amount} credits to {building.name}.",
+            "text": f"{agent.name} contributes {applied} credits to "
+                    f"{building.name}{clamp_note}.",
             "payload": {
                 "action": "contribute_funds",
                 "building_id": building.id,
-                "amount": amount,
-                "credits_delta": -amount,
+                "amount": applied,
+                "amount_requested": amount,
+                "amount_applied": applied,
+                "credits_delta": -applied,
                 "funds_committed": building.funds_committed,
                 "funds_required": building.funds_required,
             },
@@ -1062,6 +1189,19 @@ class World:
             return self._fail_event(
                 agent.id, "build_step", f"cannot build a {building.status} structure",
                 f"{agent.name} cannot build {building.name} ({building.status}).")
+        # EM-132 — a build_step aimed at a DAMAGED building is unambiguous
+        # intent to fix it: redirect to the existing repair path (no wasted
+        # turn, no duplicated repair logic) and make the switch legible in the
+        # feed. Other invalid statuses keep failing above/below as before.
+        if building.status == "damaged":
+            result = self.action_repair(agent, building_id)
+            for evt in result.get("_multi", []):
+                if evt.get("kind") == "economy":
+                    evt["text"] = (
+                        f"{agent.name} went to build {building.name}, found it "
+                        f"damaged, and switched to repairing it instead.")
+                    evt["payload"]["redirected_from"] = "build_step"
+            return result
 
         events: list[dict] = []
         # A first build_step on a fully-funded planned building begins construction.
@@ -1329,6 +1469,162 @@ class World:
         }
 
     # ──────────────────────────────────────────────────────────────────────────
+    # PROTOTYPE — god proclamations (the LOUD tier of the god↔town channel).
+    # A billboard note is opt-in: an agent must stand at the plaza and choose
+    # read_billboard. A proclamation is the opposite — the active one is injected
+    # into every agent's prompt each turn (see runtime._assemble_context), so the
+    # god's word reaches the whole world with zero extra LLM calls.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    PROCLAMATION_CAP = 20            # newest proclamations kept
+
+    def active_proclamation(self) -> dict | None:
+        """The current decree — the newest proclamation, or None. This is the one
+        that rides every agent's prompt until the god issues another."""
+        return self.proclamations[-1] if self.proclamations else None
+
+    def post_proclamation_as_god(self, text: str) -> dict:
+        """God-mode LOUD post: a proclamation heard by the whole world. The api
+        layer (POST /api/proclaim) emits the returned `proclamation_posted` event
+        dict through the normal pipeline (actor_type 'god'); the proclamation lands
+        in `world.proclamations` immediately and becomes the active decree."""
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        entry = {
+            "id": f"proc-{self.tick}-{len(self.proclamations)}",
+            "tick": self.tick,
+            "text": text,
+            "replies": [],          # threaded agent answers (return path — next slice)
+        }
+        self.proclamations.append(entry)
+        del self.proclamations[: -self.PROCLAMATION_CAP]
+        return {
+            "kind": "proclamation_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "turn_id": None,
+            "text": f"📜 GOD proclaims to all: \"{_truncate(entry['text'], 80)}\"",
+            "payload": {"proclamation_id": entry["id"], "text": entry["text"]},
+        }
+
+    def answer_proclamation(self, agent: AgentState, text: str) -> dict:
+        """Reflex tool (the return path): an agent answers the active proclamation.
+        The reply is threaded under the proclamation (appended to its `replies`)
+        and emitted as `proclamation_answered`, so the feed groups the exchange and
+        world_state carries the thread. NO location gate — the god's voice is
+        everywhere, so the answer can come from anywhere. Returns a ready-to-emit
+        event dict (or a parse_failure via _fail_event)."""
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        if not text:
+            return self._fail_event(
+                agent.id, "answer_proclamation", "text required",
+                f"{agent.name} went to answer the god, but said nothing.")
+        active = self.active_proclamation()
+        if active is None:
+            return self._fail_event(
+                agent.id, "answer_proclamation", "no active proclamation",
+                f"{agent.name} looked to the heavens, but no decree hung in the air.")
+        active.setdefault("replies", []).append(
+            {"tick": self.tick, "actor_id": agent.id, "text": text})
+        return {
+            "kind": "proclamation_answered",
+            "actor_id": agent.id,
+            "text": f"↳ {agent.name} answers the god: \"{_truncate(text, 80)}\"",
+            "payload": {
+                "proclamation_id": active.get("id"),
+                "text": text,
+                "in_reply_to": active.get("text"),
+            },
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave A.2 (god console) — targeted interventions (EM-136) + one-shot
+    # whispers (EM-137). The world-wide levers (RANDOM_EVENTS, proclamations)
+    # could never save ONE starving agent; these target a single soul. Free-scale
+    # law: pure state mutation + event (intervene) and context injection
+    # (whisper) — zero LLM calls either way. The api layer exposes the endpoints
+    # and emits the returned event dicts through the normal pipeline.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # Per-kind defaults for god_intervene (the UI's BLESS +25 / GRANT +10).
+    GOD_INTERVENTION_DEFAULTS = {
+        "bless_energy": 25,
+        "grant_credits": 10,
+    }
+
+    def _living_agent_or_raise(self, agent_id: str) -> AgentState:
+        """Resolve a LIVING agent for a targeted god action. ValueError (the api
+        maps it to 422) on unknown or dead targets — resurrection is explicitly
+        out of scope, so the god cannot reach the dead."""
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            raise ValueError(f"Unknown agent: {agent_id!r}")
+        if not agent.alive:
+            raise ValueError(f"{agent.name} is dead — the god cannot reach them")
+        return agent
+
+    def god_intervene(self, kind: str, agent_id: str, amount: Any = None) -> dict:
+        """God-mode targeted intervention (EM-136): bless ONE agent's energy
+        (clamped at 100) or grant them credits. amount defaults per kind
+        (GOD_INTERVENTION_DEFAULTS) and is validated 1..100; unknown kind and
+        unknown/dead agent raise ValueError (api → 422). Returns a ready-to-emit
+        `god_intervention` event dict (actor_type 'god', target_id the agent,
+        payload carries before/after so a clamp is visible)."""
+        if kind not in self.GOD_INTERVENTION_DEFAULTS:
+            raise ValueError(f"Unknown intervention kind: {kind!r}")
+        agent = self._living_agent_or_raise(agent_id)
+        if amount is None:
+            amount = self.GOD_INTERVENTION_DEFAULTS[kind]
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            raise ValueError(f"amount must be an integer, got {amount!r}")
+        if not 1 <= amount <= 100:
+            raise ValueError(f"amount must be 1..100, got {amount}")
+        if kind == "bless_energy":
+            before: Any = round(agent.energy, 2)
+            agent.energy = min(100.0, agent.energy + amount)
+            after: Any = round(agent.energy, 2)
+            text = f"✦ god restores {agent.name} — +{amount} energy"
+        else:  # grant_credits
+            before = agent.credits
+            agent.credits += amount
+            after = agent.credits
+            text = f"✦ god favors {agent.name} — +{amount} credits"
+        return {
+            "kind": "god_intervention",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": agent.id,
+            "turn_id": None,
+            "text": text,
+            "payload": {"kind": kind, "amount": amount,
+                        "before": before, "after": after},
+        }
+
+    def post_whisper_as_god(self, agent_id: str, text: str) -> dict:
+        """God-mode one-shot whisper (EM-137): queue a line that rides ONLY the
+        target agent's NEXT prompt, exactly once (pending_whispers, popped by
+        runtime._assemble_context). Text capped at 280 like the billboard;
+        empty text and unknown/dead agents raise ValueError (api → 422).
+        Returns a ready-to-emit `whisper_posted` event dict — this is a
+        spectator app, nothing is secret, so the feed line carries the content
+        too (the whisper is private to the AGENTS, not the watchers)."""
+        agent = self._living_agent_or_raise(agent_id)
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        if not text:
+            raise ValueError("text required")
+        self.pending_whispers.setdefault(agent.id, []).append(text)
+        return {
+            "kind": "whisper_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": agent.id,
+            "turn_id": None,
+            "text": f"✦ god whispers to {agent.name}: \"{_truncate(text, 80)}\"",
+            "payload": {"agent_id": agent.id, "text": text},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
     # W11b / EM-083 — real blackout: recharge disabled at affected places.
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1463,17 +1759,31 @@ class World:
     def living_animals(self) -> list[Animal]:
         return [a for a in self.animals.values() if a.alive]
 
+    # EM-134 — per-building animal-damage cooldown: a building an animal damaged
+    # within the last N ticks cannot lose health to an animal again (the same
+    # critter re-damaged one booth twice in 6 ticks, straight after a repair).
+    # Keeps the chaos — the FIRST hit always lands — while stopping a new build
+    # from being perma-griefed. Human arson is deliberately unaffected.
+    ANIMAL_DAMAGE_COOLDOWN_TICKS = 6
+
     def animal_damage_building(self, building_id: str, amount: int) -> dict | None:
         """World-side entry point for an animal damaging a building (cat/dog arson
         or a knock_over on a structure). Reuses the SHARED _damage_building path so
         invariant 8 holds identically to human arson (operational->damaged->
         destroyed, health clamped 0..100). Animals do NOT alter agent trust (no
         standing). Returns the structure_state_changed event dict, or None if the
-        building is missing / already destroyed (no-op). actor_id is left None here;
-        AnimalRuntime stamps actor_id/actor_type on the emitted event."""
+        building is missing / already destroyed / on its animal-damage cooldown
+        (no-op — AnimalRuntime renders a harmless in-character line for None).
+        actor_id is left None here; AnimalRuntime stamps actor_id/actor_type on
+        the emitted event."""
         building = self.buildings.get(building_id)
         if building is None or building.status == "destroyed":
             return None
+        # EM-134 — within the cooldown window the critter gets shooed away:
+        # no health loss, no state change, the attempt resolves harmlessly.
+        if self.tick - building.last_animal_damage_tick < self.ANIMAL_DAMAGE_COOLDOWN_TICKS:
+            return None
+        building.last_animal_damage_tick = self.tick
         return self._damage_building(building, amount, None, "animal")
 
     def turns_until_death(self, agent: AgentState) -> int | None:
@@ -1514,6 +1824,13 @@ class World:
             # actor_type, text}, capped 20 newest (oldest → newest). THE seam the
             # frontend's billboard panel/3D board builds against.
             "billboard": [dict(e) for e in self.billboard],
+            # PROTOTYPE (god-channel) — loud-tier proclamations {id,tick,text,replies}.
+            "proclamations": [
+                {**p, "replies": [dict(r) for r in p.get("replies", [])]}
+                for p in self.proclamations
+            ],
+            # PROTOTYPE (god-channel) — the consensus-set town name ("" = unnamed).
+            "town_name": self.town_name,
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1687,4 +2004,17 @@ class World:
             }
             for e in (state.get("billboard") or [])[-cls.BILLBOARD_CAP:]
         ]
+        # PROTOTYPE (god-channel) — restore loud-tier proclamations (round-trips
+        # to_snapshot exactly: same {id, tick, text, replies} shape).
+        world.proclamations = [
+            {
+                "id": str(_block_get(p, "id", f"proc-{_int(_block_get(p, 'tick', 0))}-{i}")),
+                "tick": _int(_block_get(p, "tick", 0)),
+                "text": str(_block_get(p, "text", ""))[: cls.BILLBOARD_TEXT_CAP],
+                "replies": [dict(r) for r in (_block_get(p, "replies", []) or [])],
+            }
+            for i, p in enumerate((state.get("proclamations") or [])[-cls.PROCLAMATION_CAP:])
+        ]
+        # PROTOTYPE (god-channel) — the consensus-set town name.
+        world.town_name = str(state.get("town_name", "") or "")
         return world

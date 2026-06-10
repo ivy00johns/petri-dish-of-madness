@@ -751,6 +751,28 @@ def test_cache_identical_messages_hit_invokes_adapter_once():
     assert router.last_routed_via("count") == "real-model-x"
 
 
+def test_cache_forget_evicts_entry():
+    """forget(profile, messages) drops the exact cached entry so a response
+    that failed to parse/validate is never replayed (run 126: cached=true
+    served the same truncated JSON back into a turn)."""
+    router, ad = _counting_router()
+    msgs = [{"role": "system", "content": "world snapshot ALPHA"}]
+
+    asyncio.run(router.chat("count", msgs, max_tokens=10, temperature=0.0))
+    assert ad.calls == 1
+
+    router.forget("count", msgs)
+
+    # Same request again → the adapter is re-invoked (entry gone), and other
+    # keys are untouched.
+    asyncio.run(router.chat("count", msgs, max_tokens=10, temperature=0.0))
+    assert ad.calls == 2, "forgotten entry must not serve a cache HIT"
+
+    # Forgetting an unknown key / uncacheable profile is a harmless no-op.
+    router.forget("count", [{"role": "system", "content": "never cached"}])
+    router.forget("no-such-profile", msgs)
+
+
 def test_cache_different_messages_invokes_adapter_again():
     router, ad = _counting_router()
     asyncio.run(router.chat("count", [{"role": "system", "content": "ALPHA"}],
@@ -1013,9 +1035,12 @@ def test_api_governance_spawn_creates_admit_rule_and_admits_on_pass(api_client):
     assert "Wren" not in before and "Wren" not in _state_names(api_client), "absent pre-vote"
 
     # Vote it through with the living agents -> the agent is admitted.
+    # Civic actions are gated to the governance place — gather voters there.
+    hall = next(p.id for p in world.places.values() if p.kind == "governance")
     living = [a for a in world.agents.values() if a.alive]
     assert living, "need living agents to pass the admit vote"
     for voter in living:
+        voter.location = hall
         world.action_vote(voter, proposal_id, True)
     assert rule.status == "active", "unanimous YES must pass the admit_agent rule"
     assert any(a.name == "Wren" for a in world.agents.values()), "agent admitted once vote passes"

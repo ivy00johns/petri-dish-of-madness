@@ -69,6 +69,9 @@ ACTION_SCHEMA = {
                 "repair", "arson", "take_offline",
                 # W11b / EM-091 — billboard reflex tools (plaza/townhall only).
                 "post_billboard", "read_billboard",
+                # PROTOTYPE (god-channel) — answer the active proclamation (the
+                # threaded return path; offered only while a decree is live).
+                "answer_proclamation",
             ],
         },
         "args": {"type": "object", "default": {}},
@@ -107,6 +110,10 @@ ACTION_SCHEMA = {
              "building_id": {"type": "string"},
          }}}}},
         {"if": {"properties": {"action": {"const": "post_billboard"}}},
+         "then": {"properties": {"args": {"required": ["text"], "properties": {
+             "text": {"type": "string", "maxLength": 280},
+         }}}}},
+        {"if": {"properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
          }}}}},
@@ -160,6 +167,10 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # turn's response args (zero extra LLM calls).
     "post_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
     "read_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
+    # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
+    # god's voice is omnipresent); offered only when a decree is live (see
+    # _assemble_context), enforced by _validate_world.
+    "answer_proclamation": {"tier": "reflex", "location_gate": None,         "agreement_gate": None},
 }
 
 
@@ -239,14 +250,10 @@ def _strip_code_fences(text: str) -> str:
     return t.strip()
 
 
-def _repair_truncated(frag: str) -> dict | None:
-    """Best-effort parse of a JSON object that was cut off mid-output.
-
-    Free models routed through the proxy often run out of tokens partway
-    through (typically inside a trailing string value). We close any open
-    string, drop a dangling trailing comma/colon, and balance the open
-    braces/brackets, then try to parse. Returns None if still unparseable.
-    """
+def _close_and_balance(frag: str) -> dict | None:
+    """One-shot close of a cut-off JSON fragment: close an open string (dropping
+    a trailing half-escape), strip a dangling comma/colon, balance the open
+    braces/brackets, then try to parse. Returns None if still unparseable."""
     stack: list[str] = []
     in_str = False
     esc = False
@@ -269,6 +276,8 @@ def _repair_truncated(frag: str) -> dict | None:
 
     repaired = frag
     if in_str:
+        if esc:
+            repaired = repaired[:-1]          # cut landed mid-escape: drop the \
         repaired += '"'                       # close a dangling string
     repaired = re.sub(r"[,:]\s*$", "", repaired.rstrip())  # drop trailing , or :
     for opener in reversed(stack):
@@ -277,6 +286,51 @@ def _repair_truncated(frag: str) -> dict | None:
         return json.loads(repaired)
     except json.JSONDecodeError:
         return None
+
+
+def _comma_positions_outside_strings(frag: str) -> list[int]:
+    """Indices of every `,` that is not inside a string — the member boundaries
+    a truncated object can be safely cut back to."""
+    positions: list[int] = []
+    in_str = False
+    esc = False
+    for i, ch in enumerate(frag):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == ",":
+            positions.append(i)
+    return positions
+
+
+def _repair_truncated(frag: str) -> dict | None:
+    """Best-effort parse of a JSON object that was cut off mid-output.
+
+    Free models routed through the proxy cut output partway through — even
+    with finish_reason='stop' (mistral-medium reroute observed live, run 126).
+    First try closing/balancing the fragment in place. If that fails (e.g. the
+    cut landed right after a key, leaving `"memories_used": ` with no value),
+    backtrack member by member: cut the fragment at each comma outside strings,
+    last to first, and re-balance until a prefix parses. Salvaging the prefix
+    keeps the action/args (which lead the object) and costs zero extra LLM
+    calls; a prefix that lost a required arg still fails schema/world
+    validation and falls through to the normal retry.
+    """
+    repaired = _close_and_balance(frag)
+    if repaired is not None:
+        return repaired
+    for pos in reversed(_comma_positions_outside_strings(frag)):
+        repaired = _close_and_balance(frag[:pos])
+        if repaired is not None:
+            return repaired
+    return None
 
 
 def _extract_first_json(text: str) -> dict | None:
@@ -330,6 +384,41 @@ def _extract_first_json(text: str) -> dict | None:
     return _repair_truncated(frag)
 
 
+def _looks_truncated(text: str) -> bool:
+    """True when the response opens a JSON object that never closes — the model
+    intended JSON and was cut off mid-output.
+
+    Deliberately ignores the reported finish_reason: rerouted models lie about
+    it (mistral-medium returns 'stop' on output it truncated at ~500 tokens,
+    run 126), so truncation must be detected structurally. Only meaningful on
+    a response that already failed to parse."""
+    text = _strip_code_fences(text)
+    start = text.find("{")
+    if start == -1:
+        return False
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in text[start:]:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                return False  # a complete (if malformed) object exists
+    return True
+
+
 def _no_json_error(text: str, finish_reason: str | None) -> str:
     """Diagnostic message for a response containing no parseable JSON object.
 
@@ -342,6 +431,33 @@ def _no_json_error(text: str, finish_reason: str | None) -> str:
         f"no valid JSON object (finish_reason={finish_reason!r}) "
         f"in response: {text[:400]!r}"
     )
+
+
+_LENGTH_RETRY_TOKEN_FLOOR = 2048
+
+
+def _retry_max_tokens(
+    max_tokens: int, usage: dict | None, *, truncated: bool = False
+) -> int:
+    """Token budget for the one parse-failure retry.
+
+    The proxy can silently reroute a lane to a reasoning model (nemotron /
+    gpt-oss / cogito observed live) whose chain-of-thought alone exceeds the
+    profile budget, so the completion truncates (finish_reason="length")
+    before any JSON appears — and a retry at the same budget fails the same
+    way, turn after turn, until the agent starves on idle fallbacks. When the
+    first attempt died of length, give the retry room to finish thinking and
+    still emit the object. Same number of calls; only the cap moves.
+
+    `truncated` covers the lanes that lie: mistral-medium reroutes report
+    finish_reason='stop' on output they cut mid-JSON (run 126), so the caller
+    passes the structural verdict from `_looks_truncated` as well.
+    """
+    if truncated or (
+        isinstance(usage, dict) and usage.get("finish_reason") == "length"
+    ):
+        return max(max_tokens * 4, _LENGTH_RETRY_TOKEN_FLOOR)
+    return max_tokens
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -384,6 +500,117 @@ def _sanitize_optional_trace_fields(action_dict: dict) -> None:
         else:
             # Wrong type entirely — drop it rather than fail the turn.
             action_dict.pop("memories_used", None)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Behavioral-arg normalization (EM-140) — meet the models where they are.
+#
+# Live runs showed two failure classes that burned whole turns on world errors
+# the model could never fix from feedback alone:
+#   · move_to with the destination under a different key (destination/to/…) or
+#     a JSON null → "unknown place 'None'" (55× in run 139's DB).
+#   · social/economy actions targeting agents by NAME ('Ada') while the world
+#     keys agents by id ('agent_ada_…') — and the prompt itself lists names, so
+#     names are the only thing the model CAN send (119× across the run).
+# Normalization rewrites args in place BEFORE validation: alias keys collapse
+# onto the canonical key, None-ish strings are dropped, place ids match
+# case-insensitively, and agent names resolve to ids (preferring living,
+# co-located agents; ties broken deterministically by id). Anything that still
+# doesn't resolve falls through to the strict validators unchanged.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_NONEISH_STRINGS = {"", "none", "null", "nil"}
+
+# Alias precedence: the canonical key first, then the synonyms models actually
+# produce. First non-empty value wins.
+_PLACE_ALIAS_KEYS = ("place", "place_id", "destination", "location", "to", "target")
+_TARGET_ALIAS_KEYS = ("target", "target_id", "agent", "agent_id", "who", "name")
+_TARGETED_ACTIONS = frozenset(
+    {"give", "steal", "insult", "attack", "whisper", "set_relationship"}
+)
+
+# Behavioral STRING caps where truncation is harmless (display text — losing a
+# few words beats losing the turn). Mirrors ACTION_SCHEMA's maxLength values;
+# live failure: a 60-char propose_project `function` (cap 40) and a 300+-char
+# billboard post (cap 280) each cost their agent a full turn to a schema error.
+_ARG_STRING_CAPS: dict[str, dict[str, int]] = {
+    "propose_project": {"name": 60, "kind": 30, "function": 40},
+    "post_billboard": {"text": 280},
+    "answer_proclamation": {"text": 280},
+}
+
+
+def _noneish(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, str) and value.strip().lower() in _NONEISH_STRINGS
+    )
+
+
+def _first_real_arg(args: dict, keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if not _noneish(args.get(key)):
+            return args[key]
+    return None
+
+
+def _resolve_agent_target(raw: str, agent: AgentState, world: World) -> str | None:
+    """Resolve a display name to an agent id, or None when nothing matches.
+    Exact ids pass through untouched by the caller, so this only sees misses."""
+    wanted = raw.strip().lower()
+    candidates = [
+        a for a in world.agents.values()
+        if a.id != agent.id and a.name.strip().lower() == wanted
+    ]
+    if not candidates:
+        return None
+    best = (
+        [a for a in candidates if a.alive and a.location == agent.location]
+        or [a for a in candidates if a.alive]
+        or candidates
+    )
+    return min(best, key=lambda a: a.id).id
+
+
+def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
+    """Rewrite behavioral args in place so well-intentioned-but-misshapen
+    responses validate instead of dying. Never raises; never invents a value
+    the model didn't supply."""
+    action = action_dict.get("action")
+    args = action_dict.get("args")
+    if not isinstance(args, dict):
+        action_dict["args"] = args = {}
+
+    if action == "move_to":
+        place = _first_real_arg(args, _PLACE_ALIAS_KEYS)
+        if isinstance(place, str):
+            place = place.strip()
+            if place not in world.places:
+                by_lower = {pid.lower(): pid for pid in world.places}
+                place = by_lower.get(place.lower(), place)
+            args["place"] = place
+        elif _noneish(args.get("place")):
+            # A null/None-string place reads better as MISSING than as the
+            # literal place 'None' in the validator's feedback.
+            args.pop("place", None)
+
+    elif action in _TARGETED_ACTIONS:
+        target = _first_real_arg(args, _TARGET_ALIAS_KEYS)
+        if isinstance(target, str):
+            target = target.strip()
+            if target and target not in world.agents:
+                resolved = _resolve_agent_target(target, agent, world)
+                if resolved is not None:
+                    target = resolved
+            args["target"] = target
+        elif _noneish(args.get("target")):
+            args.pop("target", None)
+
+    caps = _ARG_STRING_CAPS.get(action)
+    if caps:
+        for key, cap in caps.items():
+            val = args.get(key)
+            if isinstance(val, str) and len(val) > cap:
+                args[key] = val[:cap]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -447,6 +674,27 @@ def _emit_world_result(result: Any, base: dict, thought: str = "") -> dict:
             "payload": {"error": "bad_world_result"}}
 
 
+def _validate_target(args: dict, agent: AgentState, world: World, action: str) -> str | None:
+    """Shared target check for agent-on-agent actions. Names have already been
+    resolved to ids by `_normalize_args`, so a miss here is genuinely unknown —
+    the feedback names who IS reachable so the retry can self-correct."""
+    target_id = args.get("target")
+    if not target_id:
+        return f"{action} requires target"
+    target = world.agents.get(target_id)
+    if target is None:
+        here = [
+            a.name for a in world.agents.values()
+            if a.alive and a.id != agent.id and a.location == agent.location
+        ]
+        return f"unknown target '{target_id}'. Agents at your location: {here if here else 'none'}"
+    if not target.alive:
+        return f"target '{target.name}' is dead"
+    if target.location != agent.location:
+        return f"target '{target.name}' is not at your location"
+    return None
+
+
 def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str | None:
     """Returns an error string or None if world-legal."""
     action = action_dict.get("action")
@@ -477,44 +725,31 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return f"recharge costs {cost} credits but you have {agent.credits}"
 
     elif action == "give":
-        target_id = args.get("target")
         amount = args.get("amount", 0)
-        if not target_id:
-            return "give requires target"
-        target = world.agents.get(target_id)
-        if target is None or not target.alive:
-            return f"target '{target_id}' not found or dead"
-        if target.location != agent.location:
-            return f"target '{target_id}' is not at your location"
+        target_error = _validate_target(args, agent, world, "give")
+        if target_error:
+            return target_error
         if agent.credits < amount:
             return f"insufficient credits: have {agent.credits}, need {amount}"
 
     elif action == "steal":
         if world.has_active_rule("ban_stealing"):
             return "ban_stealing rule is active — steal is forbidden"
-        target_id = args.get("target")
-        if not target_id:
-            return "steal requires target"
-        target = world.agents.get(target_id)
-        if target is None or not target.alive:
-            return f"target '{target_id}' not found or dead"
-        if target.location != agent.location:
-            return f"target '{target_id}' is not at your location"
+        target_error = _validate_target(args, agent, world, "steal")
+        if target_error:
+            return target_error
 
     elif action in ("insult", "attack", "whisper", "set_relationship"):
-        target_id = args.get("target")
-        if not target_id:
-            return f"{action} requires target"
-        target = world.agents.get(target_id)
-        if target is None or not target.alive:
-            return f"target '{target_id}' not found or dead"
-        if target.location != agent.location:
-            return f"target '{target_id}' is not at your location"
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
 
     elif action == "move_to":
         place_id = args.get("place")
+        known = list(world.places.keys())
+        if not isinstance(place_id, str) or not place_id.strip():
+            return f"move_to requires args.place — choose one of {known}"
         if place_id not in world.places:
-            known = list(world.places.keys())
             return f"unknown place '{place_id}'. Known: {known}"
 
     elif action == "vote":
@@ -530,9 +765,13 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     elif action == "propose_rule":
         effect = args.get("effect")
         # W9 / EM-073 B3: ban_arson is proposable (mirrors world.action_propose_rule).
-        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus", "ban_arson"}
+        # PROTOTYPE (god-channel): name_town — name the town by consensus vote.
+        valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
+                         "ban_arson", "name_town"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
+        if effect == "name_town" and not str(args.get("name") or "").strip():
+            return "name_town requires a name (args.name = the town's new name)"
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -573,7 +812,10 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                     f"building '{building_id}' is planned but not fully funded "
                     f"({committed}/{required}) — contribute_funds first"
                 )
-        elif status != "under_construction":
+        # Wave A / EM-132: `damaged` passes through — the world redirects the
+        # build_step to a repair (the intent is unambiguous; failing the turn
+        # over the verb choice was a live dead-turn trap, run ~109).
+        elif status not in ("under_construction", "damaged"):
             return f"building '{building_id}' is {status}, not under_construction"
         b_loc = _building_field(building, "location")
         if b_loc != agent.location:
@@ -625,6 +867,14 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if action == "post_billboard" and not str(args.get("text") or "").strip():
             return "post_billboard requires text"
 
+    # ── PROTOTYPE (god-channel) — answer the active proclamation ───────────────
+    elif action == "answer_proclamation":
+        active = getattr(world, "active_proclamation", None)
+        if not (callable(active) and active()):
+            return "there is no active proclamation to answer"
+        if not str(args.get("text") or "").strip():
+            return "answer_proclamation requires text"
+
     return None
 
 
@@ -647,7 +897,12 @@ def _assemble_context(
     W11b additions (all keyword-only, default-off, so existing callers are
     unchanged): `commitments` renders the YOUR ACTIVE COMMITMENTS block (EM-079),
     `overheard` injects pending overheard speech (EM-081), `request_reflection`
-    asks for the optional `reflection` field this turn only (EM-080)."""
+    asks for the optional `reflection` field this turn only (EM-080).
+
+    EM-137 (god console): pops — and thereby consumes — the agent's queued god
+    whispers from `world.pending_whispers` into a one-shot prompt block (the
+    only world mutation this function performs, by design: assembly IS the
+    delivery)."""
     place = world.places.get(agent.location)
     place_name = place.name if place else agent.location
     place_kind = place.kind if place else "unknown"
@@ -696,7 +951,11 @@ def _assemble_context(
         return place_kind == loc
 
     valid_actions: list[str] = []
-    valid_actions.append("idle, forage, recharge, move_to, remember")
+    valid_actions.append("idle, forage, recharge, remember")
+    # EM-140 — move_to's arg was undocumented, so models guessed key names
+    # (destination/to/null) and burned turns on 'unknown place' world errors.
+    valid_actions.append(
+        f"move_to (place) - go to one of: {', '.join(world.places.keys())}")
     valid_actions.append("say (text) - speak to everyone here")
     if co_located:
         target_names = ", ".join(a.name for a in co_located)
@@ -713,7 +972,7 @@ def _assemble_context(
         valid_actions.append("(work requires a work place)")
     # Governance actions are gated to a governance place.
     if _gate_ok("propose_rule"):
-        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson")
+        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town (name_town also needs name=<the town's new name>; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
@@ -748,6 +1007,15 @@ def _assemble_context(
             "(everyone, and the watchers, can read it)")
         valid_actions.append(
             f"read_billboard - read the latest billboard posts ({len(board)} on the board)")
+
+    # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
+    # Offered to EVERY agent (no location gate) whenever a decree is live, so the
+    # god's word can be answered back from anywhere — the two-way half of the loop.
+    _active_proc_offer = getattr(world, "active_proclamation", None)
+    if callable(_active_proc_offer) and _active_proc_offer():
+        valid_actions.append(
+            "answer_proclamation (text) - answer the god's proclamation directly; "
+            "your reply is threaded under it for the watchers to see")
 
     # Recent events summary
     event_lines = []
@@ -854,9 +1122,52 @@ def _assemble_context(
             "JSON object — never a separate reply)."
         )
 
+    # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
+    # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
+    # proclamation is injected here so the god's word reaches every agent each turn
+    # until a new one supersedes it. Zero extra LLM calls — it rides this turn.
+    # (getattr keeps callers safe if the engine seam is ever absent.)
+    proclamation_block = ""
+    _active_proc = getattr(world, "active_proclamation", None)
+    _proc = _active_proc() if callable(_active_proc) else None
+    if _proc and _proc.get("text"):
+        proclamation_block = f"""
+=== 📜 THE GOD HAS PROCLAIMED ===
+  "{_proc['text']}"
+  The god's word reaches every soul in the world. You may heed it, defy it, or
+  carry on — but you have heard it, and so has everyone else.
+"""
+
+    # ── EM-137 (god console) — one-shot god whisper, consumed RIGHT HERE. ─────
+    # Popping the queue IS the delivery: the line rides only THIS prompt and the
+    # next turn carries no trace (the same consume-once pattern as
+    # pending_overheard in run_turn, but the queue lives in world state so the
+    # api seam can fill it). Context injection only — zero extra LLM calls.
+    # (getattr keeps callers safe if the engine seam is ever absent.)
+    whisper_block = ""
+    _pending_whispers = getattr(world, "pending_whispers", None)
+    _whispers = (
+        _pending_whispers.pop(agent.id, [])
+        if isinstance(_pending_whispers, dict) else []
+    )
+    if _whispers:
+        whisper_lines = "\n".join(f'  "{w}"' for w in _whispers)
+        whisper_block = f"""
+=== ✦ A VOICE ONLY YOU CAN HEAR ===
+{whisper_lines}
+  No one else heard this — it was meant for you alone. Make of it what you will.
+"""
+
+    # PROTOTYPE (god-channel) — surface the town's name ONLY once it has one (set by
+    # consensus name_town). When the town is unnamed we say NOTHING: naming must be
+    # emergent — an agent's own choice at the town hall, or a god *suggestion* via the
+    # proclamation channel — never a standing directive pushed into every prompt.
+    _town = (getattr(world, "town_name", "") or "").strip()
+    town_line = f"\nTown: {_town}" if _town else ""
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-Tick: {world.tick}
+Tick: {world.tick}{town_line}
 Personality: {agent.personality}
 
 === YOUR STATUS ===
@@ -867,7 +1178,7 @@ Mood: {agent.mood}
 
 === NEEDS ===
 {needs_text}
-
+{proclamation_block}{whisper_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -1230,27 +1541,41 @@ class AgentRuntime:
         # entry becomes ONE `llm_call` row in the loop, all sharing this turn_id.
         llm_attempts: list[dict] = []
 
-        # First attempt
+        # First attempt — EM-135: a lane whose recent outcome window shows
+        # repeated truncations gets the boosted budget UP FRONT instead of
+        # burning attempt 1 at a cap the lane keeps cutting. Guarded getattr:
+        # duck-typed test routers don't implement first_attempt_max_tokens.
+        attempt_tokens = max_tokens
+        first_budget = getattr(self.router, "first_attempt_max_tokens", None)
+        if callable(first_budget):
+            attempt_tokens = first_budget(profile_name, max_tokens)
         action_dict, parse_error, llm_meta = await self._call_and_parse(
-            profile_name, messages, max_tokens, temperature, agent, attempt=1
+            profile_name, messages, attempt_tokens, temperature, agent, attempt=1
         )
         llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
         if parse_error and action_dict is None:
-            # One retry with error fed back
+            # One retry with error fed back; a truncated first attempt retries
+            # with a boosted token budget — whether the provider admitted it
+            # (finish_reason='length') or lied (mistral 'stop' cuts, run 126).
+            retry_tokens = _retry_max_tokens(
+                max_tokens, llm_meta.get("usage"),
+                truncated=bool(llm_meta.get("truncated_json")),
+            )
             retry_messages = messages + [
                 {"role": "assistant", "content": "(previous response could not be parsed)"},
                 {
                     "role": "user",
                     "content": (
                         f"Your previous response failed validation: {parse_error}\n"
-                        "Reply with ONLY a valid JSON object. If unsure, use: "
-                        '{"action": "idle", "args": {}}'
+                        "Do NOT think out loud or explain — your reply must begin "
+                        "with { and contain ONLY a valid JSON object. If unsure, "
+                        'use: {"action": "idle", "args": {}}'
                     ),
                 },
             ]
             action_dict, parse_error, llm_meta = await self._call_and_parse(
-                profile_name, retry_messages, max_tokens, temperature, agent, attempt=2
+                profile_name, retry_messages, retry_tokens, temperature, agent, attempt=2
             )
             llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
@@ -1262,6 +1587,21 @@ class AgentRuntime:
             payload: dict = {"reason": parse_error or "parse_failure"}
             if routed is not None:
                 payload["routed_via"] = routed
+            # Forensics: the feed text caps the snippet at 400 chars, which hid
+            # HOW these responses were malformed. Keep the final attempt's full
+            # raw text in the payload (bounded) so live failures yield fixtures.
+            raw = llm_meta.get("raw_text")
+            if isinstance(raw, str) and raw:
+                payload["raw_response"] = raw[:8000]
+            # EM-140 forensics: when the JSON parsed but validation rejected it,
+            # keep WHAT was rejected — run 139's 'unknown place None' class was
+            # undiagnosable without the offending args.
+            rejected = llm_meta.get("rejected_action")
+            if isinstance(rejected, dict):
+                payload["rejected_action"] = {
+                    "action": rejected.get("action"),
+                    "args": rejected.get("args"),
+                }
             trace = {
                 "perceived": {**perceived, "perceived_summary": None},
                 "memory": memory,
@@ -1463,22 +1803,65 @@ class AgentRuntime:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
         action_dict = _extract_first_json(text)
+        # EM-135 — report this attempt's parse outcome to the router's lane
+        # health. Truncation is judged structurally on the RAW text even when
+        # extraction SUCCEEDED: a response that parsed only via truncation
+        # repair still means the lane is cutting output — salvage hides it
+        # from the feed, not from health tracking.
+        truncated = _looks_truncated(text)
+        self._note_parse_outcome(
+            profile_name, parsed=action_dict is not None, truncated=truncated
+        )
         if action_dict is None:
             finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
+            # Structural truncation verdict for the retry-budget boost (the
+            # reported finish_reason can be a lying 'stop'), plus the full raw
+            # text for the final parse_failure event's forensics.
+            meta["truncated_json"] = truncated
+            meta["raw_text"] = text
+            self._forget_response(profile_name, messages)
             return None, _no_json_error(text, finish_reason), meta
 
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
         _sanitize_optional_trace_fields(action_dict)
+        # EM-140 — collapse arg aliases (destination→place) and resolve agent
+        # names to ids BEFORE validation, so a well-intentioned response isn't
+        # a dead turn over key spelling the prompt never specified.
+        _normalize_args(action_dict, agent, self.world)
 
         schema_error = _validate_schema(action_dict)
         if schema_error:
+            meta["rejected_action"] = action_dict
+            self._forget_response(profile_name, messages)
             return None, f"schema error: {schema_error}", meta
 
         world_error = _validate_world(action_dict, agent, self.world)
         if world_error:
+            meta["rejected_action"] = action_dict
+            self._forget_response(profile_name, messages)
             return None, f"world error: {world_error}", meta
 
         return action_dict, None, meta
+
+    def _forget_response(self, profile_name: str, messages: list[dict]) -> None:
+        """Evict this request from the router's decision cache after a failed
+        parse/validation. A bad response replayed from cache turns one dead
+        turn into many (cached=true was observed serving the same truncated
+        JSON back into a turn, run 126). Guarded getattr: duck-typed test
+        routers don't implement forget()."""
+        forget = getattr(self.router, "forget", None)
+        if callable(forget):
+            forget(profile_name, messages)
+
+    def _note_parse_outcome(
+        self, profile_name: str, *, parsed: bool, truncated: bool
+    ) -> None:
+        """Report one parse attempt's outcome to the router's lane-health
+        window (EM-135). Guarded getattr: duck-typed test routers don't
+        implement note_parse_outcome()."""
+        note = getattr(self.router, "note_parse_outcome", None)
+        if callable(note):
+            note(profile_name, parsed=parsed, truncated=truncated)
 
     def _apply_action(
         self,
@@ -1658,7 +2041,9 @@ class AgentRuntime:
         elif action == "propose_rule":
             effect = args.get("effect", "")
             text = args.get("text", "")
-            ok, reason, rule = self.world.action_propose_rule(agent, effect, text)
+            # PROTOTYPE (god-channel) — name_town carries the proposed name.
+            name = args.get("name")
+            ok, reason, rule = self.world.action_propose_rule(agent, effect, text, name)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)
@@ -1796,6 +2181,11 @@ class AgentRuntime:
                             f"({len(posts)} recent post{'s' if len(posts) != 1 else ''}).",
                     "payload": {"action": "read_billboard",
                                 "posts": posts, "thought": thought}}
+
+        # ── PROTOTYPE (god-channel) — answer the active proclamation ────────────
+        elif action == "answer_proclamation":
+            result = self.world.answer_proclamation(agent, args.get("text", ""))
+            return _emit_world_result(result, base, thought)
 
         else:
             return {**base, "kind": "agent_action",
