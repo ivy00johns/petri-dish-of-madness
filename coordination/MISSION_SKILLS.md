@@ -74,9 +74,9 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [ ] `ux-review` full-skill subjective pass — deferred from W11a+W11b together: recommend running it on the merged main after the PR, as a fresh-eyes pass over the finished W11 surface.
 
 ## Wave A — live-run correctness batch (source: ledger EM-129–135 + EM-106/108, user GO 2026-06-10, ultracode)
-- [ ] `orchestrator` — contract-first wave on `build/wave-a-live-run-fixes`; contract: `contracts/wave-a.md`.
-- [ ] Workflow (ultracode) — implement fan-out (4 role-agents, disjoint file ownership) + adversarial verify workflow.
-- [ ] QE gate — full backend pytest + web vitest + `npm run build` typecheck at the wave gate; qa-report via verify workflow.
-- [ ] render-level verification — Playwright pass on the 3-D village for EM-130/131 (building subtitles + placement) against a live run.
-- [ ] `git-commit` conventions — per-area commits by orchestrator (agents do not commit).
+- [x] `orchestrator` — contract-first wave on `build/wave-a-live-run-fixes`; contracts: `contracts/wave-a.md` + `contracts/wave-a2-god-console.md` (A.2 god console added mid-wave by user request, EM-136/137/138).
+- [x] Workflow (ultracode) — implement fan-out ×2 (4 + 2 role-agents, disjoint file ownership) + 12-skeptic adversarial verify workflow; one cross-file blocker routed at the gate (EM-132 validator passthrough), 11 fixture relocations via gate-fix agent.
+- [x] QE gate — backend 330/330, web 182/182, build clean, compose valid; `coordination/qa-report.json` gate_decision.proceed=true (12/12 confirmed, 0 refuted, 0 CRITICAL/MAJOR).
+- [x] render-level verification — Playwright on `/`: village + feed render, 0 console errors; GOD CONSOLE groups verified in the live DOM; live API E2E (bless clamps at 100, grant +50, whisper delivered and acted on within 3 ticks). EM-130/131 building visuals covered by 15 unit tests — no buildings existed yet in the young live run (noted, not skipped silently).
+- [x] `git-commit` conventions — 9 per-area commits by orchestrator (agents did not commit).
 - [ ] `ux-review` full-skill subjective pass — not in this wave's scope (logic fixes); still owed on merged main per W11b deferral note.
