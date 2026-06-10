@@ -147,3 +147,50 @@ export function storySoFar(
     narratorCount,
   };
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EM-139 — bounded project readout.
+//
+// A long-lived world accumulates dozens of finished/ruined projects (a day-197
+// run carried ~50 destroyed ones); enumerating every building turned the
+// digest's PROJECTS line into a wall of text that made the feed unscrollable.
+// LIVE projects (planned / under_construction) are listed by name with their
+// progress, capped; everything settled (operational/damaged/offline/abandoned/
+// destroyed) aggregates to status counts. Zero-LLM, pure presentation.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** How many live (planned/building) projects are named before "+N more". */
+export const PROJECTS_LISTED_CAP = 3;
+
+/** Settled statuses in display order; anything novel surfaces after these. */
+const SETTLED_STATUS_ORDER = [
+  'operational', 'damaged', 'offline', 'abandoned', 'destroyed',
+] as const;
+
+export function projectReadout(projects: ProjectEntry[]): string {
+  const live = projects.filter(
+    (p) => p.status === 'planned' || p.status === 'under_construction',
+  );
+  const parts: string[] = live
+    .slice(0, PROJECTS_LISTED_CAP)
+    .map((p) =>
+      `${p.name} ${p.progress}% ${p.status === 'planned' ? 'planned' : 'building'}`,
+    );
+  if (live.length > PROJECTS_LISTED_CAP) {
+    parts.push(`+${live.length - PROJECTS_LISTED_CAP} more in progress`);
+  }
+
+  const counts = new Map<string, number>();
+  for (const p of projects) {
+    if (p.status === 'planned' || p.status === 'under_construction') continue;
+    counts.set(p.status, (counts.get(p.status) ?? 0) + 1);
+  }
+  for (const status of SETTLED_STATUS_ORDER) {
+    const n = counts.get(status);
+    if (n) parts.push(`${n} ${status}`);
+    counts.delete(status);
+  }
+  for (const [status, n] of counts) parts.push(`${n} ${status}`); // future-proof
+
+  return parts.join(' · ');
+}
