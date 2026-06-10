@@ -30,6 +30,24 @@ def _truncate(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _humanize_project_name(raw: str) -> str:
+    """EM-129 — derive a display name from a model-authored project name.
+    Models often emit snake_case identifiers ("prepare_beds", "village_fair"):
+    underscores/hyphens become spaces, whitespace collapses, and an
+    all-lowercase identifier-ish result is Title Cased ("Prepare Beds").
+    Already-styled names ("Bram's Market Stall") pass through untouched.
+    Returns "" when nothing displayable survives (empty / punctuation-only /
+    single character) so the caller can fall back. Capped at 60 (the existing
+    Building.name cap)."""
+    text = re.sub(r"[_\-]+", " ", str(raw or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 2 or not re.search(r"[a-z0-9]", text, re.IGNORECASE):
+        return ""
+    if re.fullmatch(r"[a-z0-9 ]+", text):
+        text = text.title()
+    return text[:60]
+
+
 @dataclass
 class RelationshipState:
     type: str = "neutral"  # ally|rival|neutral|friend|enemy
@@ -186,6 +204,11 @@ class Building:
     # commemorates (its name fuzzy-matched an active/proposed rule's text).
     # At most ONE commemorative monument per rule. None for ordinary buildings.
     commemorates: str | None = None
+    # EM-134 — last tick an ANIMAL successfully damaged this building. Internal
+    # cooldown bookkeeping only: NOT serialized in to_dict() (non-contract
+    # field), so snapshots and events are unchanged. The sentinel sits far in
+    # the past so the FIRST animal hit always lands (keep the chaos).
+    last_animal_damage_tick: int = -(10 ** 9)
 
     @property
     def condition_label(self) -> str:
@@ -689,9 +712,31 @@ class World:
     # Governance
     # ──────────────────────────────────────────────────────────────────────────
 
+    # EM-108 — civic actions are location-gated at RESOLUTION time, mirroring
+    # the billboard gate (billboard_here): the prompt already hides
+    # propose_rule/vote away from governance places, but a prompt-ignoring
+    # model must not legislate from anywhere.
+    GOVERNANCE_GATE_MESSAGE = "civic actions happen at the town hall — move there first"
+
+    def governance_here(self, place_id: str) -> bool:
+        """EM-108 — true when civic actions (propose_rule / vote) are reachable
+        from this place: its kind is "governance" (the procgen invariant makes
+        the first governance place id "townhall", but the gate is on kind,
+        never the hardcoded id). Worlds with NO governance place at all
+        (legacy / hand-rolled layouts) are exempt — civic life cannot require
+        a town hall that does not exist."""
+        p = self.places.get(place_id)
+        if p is not None and p.kind == "governance":
+            return True
+        return not any(pl.kind == "governance" for pl in self.places.values())
+
     def action_propose_rule(
         self, agent: AgentState, effect: str, text: str, name: str | None = None
     ) -> tuple[bool, str, RuleState | None]:
+        # EM-108 — only AgentState actors are location-bound; god paths
+        # (enqueue_admit_agent / post_*_as_god) never come through here.
+        if not self.governance_here(agent.location):
+            return False, self.GOVERNANCE_GATE_MESSAGE, None
         # W9 / EM-073 B3: ban_arson included so the arson ban is reachable via
         # governance (enforcement already gates arson in the runtime validator).
         # PROTOTYPE (god-channel): name_town — naming the town by consensus vote.
@@ -734,6 +779,9 @@ class World:
         self, agent: AgentState, rule_id: str, choice: bool
     ) -> tuple[bool, str, str | None]:
         """Returns (success, reason, new_status_if_changed)."""
+        # EM-108 — same resolution-time location gate as action_propose_rule.
+        if not self.governance_here(agent.location):
+            return False, self.GOVERNANCE_GATE_MESSAGE, None
         rule = self.rules.get(rule_id)
         if rule is None:
             return False, f"unknown rule {rule_id!r}", None
@@ -966,7 +1014,18 @@ class World:
             funds_required = max(0, int(funds_required))
         except (TypeError, ValueError):
             funds_required = 0
-        rule = self._commemorated_rule(name)
+        # EM-129 — Building.name stores a humanized DISPLAY name (snake_case →
+        # "Title Case"); junk names fall back to "<Agent>'s <Kind>" (kind
+        # humanized the same way; junk kind → "Project"). The raw model arg is
+        # preserved in the project_proposed payload as raw_name (additive).
+        # `kind` itself stays a raw key — the frontend maps it (EM-130).
+        raw_name = str(name)[:60]
+        display_name = _humanize_project_name(name)
+        if not display_name:
+            display_name = (
+                f"{agent.name}'s {_humanize_project_name(kind) or 'Project'}"[:60]
+            )
+        rule = self._commemorated_rule(display_name)
         if rule is not None:
             already = any(
                 b.commemorates == rule.id and b.status != "destroyed"
@@ -975,12 +1034,12 @@ class World:
             if already:
                 return self._fail_event(
                     agent.id, "propose_project", "commemorative_duplicate",
-                    f"{agent.name}'s proposal {str(name)[:60]!r} honors the law "
+                    f"{agent.name}'s proposal {display_name!r} honors the law "
                     f"\"{_truncate(rule.text)}\" — but a monument to that rule "
                     f"already stands. One monument per law; propose something new.")
         building = Building(
             id=f"bld_{str(uuid.uuid4())[:8]}",
-            name=str(name)[:60],
+            name=display_name,
             kind=str(kind)[:30],
             location=agent.location,
             owner_id="public",
@@ -1005,6 +1064,7 @@ class World:
             "payload": {
                 "building_id": building.id,
                 "name": building.name,
+                "raw_name": raw_name,
                 "kind": building.kind,
                 "location": building.location,
                 "funds_required": funds_required,
@@ -1038,28 +1098,45 @@ class World:
             return self._fail_event(
                 agent.id, "contribute_funds", "amount must be positive",
                 f"{agent.name} tried to contribute a non-positive amount.")
-        if agent.credits < amount:
+        # EM-133 — clamp the contribution at the remaining funding gap so
+        # funds_committed can never overshoot funds_required (the 12/5 booth).
+        # Only the clamped amount leaves the agent; a zero gap fails softly
+        # with guidance (costing nothing) instead of swallowing credits.
+        gap = max(0, building.funds_required - building.funds_committed)
+        if gap == 0:
+            return self._fail_event(
+                agent.id, "contribute_funds", "already fully funded",
+                f"{building.name} is already fully funded — it needs build_step now.")
+        applied = min(amount, gap)
+        if agent.credits < applied:
             return self._fail_event(
                 agent.id, "contribute_funds",
-                f"insufficient credits: have {agent.credits}, need {amount}",
-                f"{agent.name} cannot afford to contribute {amount} credits.")
+                f"insufficient credits: have {agent.credits}, need {applied}",
+                f"{agent.name} cannot afford to contribute {applied} credits.")
 
-        agent.credits -= amount
-        building.funds_committed += amount
+        agent.credits -= applied
+        building.funds_committed += applied
         if agent.id not in building.contributors:
             building.contributors.append(agent.id)
         building.updated_tick = self.tick
 
+        clamp_note = (
+            f" (offered {amount}; clamped at the remaining gap)"
+            if applied < amount else ""
+        )
         economy_evt = {
             "kind": "economy",
             "actor_id": agent.id,
             "target_id": building.id,
-            "text": f"{agent.name} contributes {amount} credits to {building.name}.",
+            "text": f"{agent.name} contributes {applied} credits to "
+                    f"{building.name}{clamp_note}.",
             "payload": {
                 "action": "contribute_funds",
                 "building_id": building.id,
-                "amount": amount,
-                "credits_delta": -amount,
+                "amount": applied,
+                "amount_requested": amount,
+                "amount_applied": applied,
+                "credits_delta": -applied,
                 "funds_committed": building.funds_committed,
                 "funds_required": building.funds_required,
             },
@@ -1106,6 +1183,19 @@ class World:
             return self._fail_event(
                 agent.id, "build_step", f"cannot build a {building.status} structure",
                 f"{agent.name} cannot build {building.name} ({building.status}).")
+        # EM-132 — a build_step aimed at a DAMAGED building is unambiguous
+        # intent to fix it: redirect to the existing repair path (no wasted
+        # turn, no duplicated repair logic) and make the switch legible in the
+        # feed. Other invalid statuses keep failing above/below as before.
+        if building.status == "damaged":
+            result = self.action_repair(agent, building_id)
+            for evt in result.get("_multi", []):
+                if evt.get("kind") == "economy":
+                    evt["text"] = (
+                        f"{agent.name} went to build {building.name}, found it "
+                        f"damaged, and switched to repairing it instead.")
+                    evt["payload"]["redirected_from"] = "build_step"
+            return result
 
         events: list[dict] = []
         # A first build_step on a fully-funded planned building begins construction.
@@ -1575,17 +1665,31 @@ class World:
     def living_animals(self) -> list[Animal]:
         return [a for a in self.animals.values() if a.alive]
 
+    # EM-134 — per-building animal-damage cooldown: a building an animal damaged
+    # within the last N ticks cannot lose health to an animal again (the same
+    # critter re-damaged one booth twice in 6 ticks, straight after a repair).
+    # Keeps the chaos — the FIRST hit always lands — while stopping a new build
+    # from being perma-griefed. Human arson is deliberately unaffected.
+    ANIMAL_DAMAGE_COOLDOWN_TICKS = 6
+
     def animal_damage_building(self, building_id: str, amount: int) -> dict | None:
         """World-side entry point for an animal damaging a building (cat/dog arson
         or a knock_over on a structure). Reuses the SHARED _damage_building path so
         invariant 8 holds identically to human arson (operational->damaged->
         destroyed, health clamped 0..100). Animals do NOT alter agent trust (no
         standing). Returns the structure_state_changed event dict, or None if the
-        building is missing / already destroyed (no-op). actor_id is left None here;
-        AnimalRuntime stamps actor_id/actor_type on the emitted event."""
+        building is missing / already destroyed / on its animal-damage cooldown
+        (no-op — AnimalRuntime renders a harmless in-character line for None).
+        actor_id is left None here; AnimalRuntime stamps actor_id/actor_type on
+        the emitted event."""
         building = self.buildings.get(building_id)
         if building is None or building.status == "destroyed":
             return None
+        # EM-134 — within the cooldown window the critter gets shooed away:
+        # no health loss, no state change, the attempt resolves harmlessly.
+        if self.tick - building.last_animal_damage_tick < self.ANIMAL_DAMAGE_COOLDOWN_TICKS:
+            return None
+        building.last_animal_damage_tick = self.tick
         return self._damage_building(building, amount, None, "animal")
 
     def turns_until_death(self, agent: AgentState) -> int | None:

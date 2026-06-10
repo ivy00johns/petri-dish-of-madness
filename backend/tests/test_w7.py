@@ -1035,9 +1035,12 @@ def test_api_governance_spawn_creates_admit_rule_and_admits_on_pass(api_client):
     assert "Wren" not in before and "Wren" not in _state_names(api_client), "absent pre-vote"
 
     # Vote it through with the living agents -> the agent is admitted.
+    # Civic actions are gated to the governance place — gather voters there.
+    hall = next(p.id for p in world.places.values() if p.kind == "governance")
     living = [a for a in world.agents.values() if a.alive]
     assert living, "need living agents to pass the admit vote"
     for voter in living:
+        voter.location = hall
         world.action_vote(voter, proposal_id, True)
     assert rule.status == "active", "unanimous YES must pass the admit_agent rule"
     assert any(a.name == "Wren" for a in world.agents.values()), "agent admitted once vote passes"

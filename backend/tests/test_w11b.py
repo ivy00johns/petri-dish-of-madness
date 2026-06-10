@@ -864,6 +864,9 @@ def _textured_world(params: WorldParams) -> World:
     bob.zero_energy_turns = 2
     ada.relationships["agent_bob"] = RelationshipState("ally", 40, 3)
 
+    # Civic actions are gated to the governance place — propose from the town
+    # hall, then return to the textured home locations.
+    ada.location = bob.location = "townhall"
     ok, _, rule = world.action_propose_rule(
         ada, "ubi", "Everyone deserves a basic income")
     assert ok and rule
@@ -874,6 +877,7 @@ def _textured_world(params: WorldParams) -> World:
         bob, "ubi", "Everyone deserves a basic income")
     assert ok and renewal and renewal.renewal_of == rule.id
     renewal.status = "renewed"
+    ada.location, bob.location = "plaza", "shack"
 
     world.buildings["bld_x"] = Building(
         id="bld_x", name="Basic Income Monument", kind="monument",

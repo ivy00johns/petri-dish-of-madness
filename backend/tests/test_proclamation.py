@@ -169,6 +169,9 @@ def test_replies_round_trip_through_snapshot():
 
 def _pass_rule(world, effect, text, name=None):
     """Propose `effect` (as Ada) and pass it with Ada + Bo voting yes."""
+    # Civic actions are gated to the governance place — gather at the town hall.
+    world.agents["ada"].location = "townhall"
+    world.agents["bo"].location = "townhall"
     ok, reason, rule = world.action_propose_rule(
         world.agents["ada"], effect, text, name=name)
     assert ok, reason

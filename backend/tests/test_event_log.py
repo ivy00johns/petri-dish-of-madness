@@ -255,6 +255,8 @@ async def test_turn_chain_domain_events_inherit_turn_id():
          "args": {"effect": "ban_stealing", "text": "no theft"}},
         {"action": "idle", "args": {}},  # placeholder; replaced by dynamic vote
     ])
+    # Civic actions are gated to the governance place — stand at the town hall.
+    next(iter(world.agents.values())).location = "townhall"
     run_id = loop._run_id
 
     # Turn 1: propose. Turn 2: MockProvider auto-votes YES on the open proposal.
@@ -609,6 +611,8 @@ async def test_get_rule_history_reflects_proposed_to_passed():
          "args": {"effect": "ubi", "text": "everyone gets a basic income"}},
         {"action": "idle", "args": {}},  # replaced by the dynamic YES vote
     ])
+    # Civic actions are gated to the governance place — stand at the town hall.
+    next(iter(world.agents.values())).location = "townhall"
     run_id = loop._run_id
     await _run_ticks(loop, world, 2)
 
