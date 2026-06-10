@@ -154,6 +154,56 @@ describe('storySoFar — drama heuristic (newest-first precedence)', () => {
     }
   });
 
+  // ── EM-144 — STARVATION is a claim about CURRENT state, corroborated live ──
+
+  it('skips a stale starvation headline once the agent recharged above threshold', () => {
+    const history = newestFirst([
+      ev({ kind: 'conflict', tick: 50, text: 'Ada glares at Bo' }),
+      ev({
+        kind: 'agent_starving', tick: 105, actor_id: 'bram',
+        text: '⚠ Bram is starving — energy 22/100 (below 25)',
+        payload: { energy: 22, threshold: 25 },
+      }),
+    ]);
+    // Bram recharged to 92 — the latched event must NOT headline; the scan
+    // falls through to the next drama candidate.
+    const w = world({ agents: [agent({ id: 'bram', energy: 92 })] });
+    const d = storySoFar(history, w);
+    expect(d.drama?.label).toBe('CONFLICT');
+    expect(d.drama?.tick).toBe(50);
+  });
+
+  it('keeps the starvation headline while the agent is still below threshold', () => {
+    const history = newestFirst([
+      ev({
+        kind: 'agent_starving', tick: 105, actor_id: 'bram',
+        text: '⚠ Bram is starving', payload: { energy: 22, threshold: 25 },
+      }),
+    ]);
+    const w = world({ agents: [agent({ id: 'bram', energy: 12 })] });
+    expect(storySoFar(history, w).drama?.label).toBe('STARVATION');
+  });
+
+  it('skips starvation for dead or absent agents (death is its own drama)', () => {
+    const history = newestFirst([
+      ev({
+        kind: 'agent_starving', tick: 80, actor_id: 'gone',
+        payload: { energy: 5, threshold: 25 },
+      }),
+    ]);
+    const deadWorld = world({ agents: [agent({ id: 'gone', energy: 0, alive: false })] });
+    expect(storySoFar(history, deadWorld).drama).toBeNull();
+    const absentWorld = world({ agents: [] });
+    expect(storySoFar(history, absentWorld).drama).toBeNull();
+  });
+
+  it('lets a starvation event stand when there is no world to corroborate against', () => {
+    const history = newestFirst([
+      ev({ kind: 'agent_starving', tick: 80, actor_id: 'bram', text: '⚠' }),
+    ]);
+    expect(storySoFar(history, null).drama?.label).toBe('STARVATION');
+  });
+
   it('reports no drama on a calm history', () => {
     const history = newestFirst([
       ev({ kind: 'agent_speech', tick: 1 }),

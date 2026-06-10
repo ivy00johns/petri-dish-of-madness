@@ -71,6 +71,34 @@ const DRAMA_LABELS: Record<string, string> = {
   rule_vote: 'RULE VOTE',
 };
 
+/** world.starving_warn_threshold default (EM-070) — payload.threshold wins. */
+const STARVING_THRESHOLD_DEFAULT = 25;
+
+/**
+ * EM-144 — a STARVATION headline is a claim about CURRENT state, unlike the
+ * momentary dramas (a conflict happened; a death happened). Corroborate it
+ * against the live world before headlining: an agent who recharged back above
+ * the threshold (or died — death is its own drama) makes the event stale, and
+ * the scan moves on to the next drama candidate. With no world projection yet
+ * (mock boot, pre-first-broadcast) there is nothing to corroborate against,
+ * so the event stands.
+ */
+function isStaleStarvation(
+  e: WorldEvent,
+  world: WorldState | null,
+): boolean {
+  // No world projection yet, or no actor on the event — nothing to
+  // corroborate against, so the event stands.
+  if (e.kind !== 'agent_starving' || world === null || !e.actor_id) return false;
+  const agent = world.agents?.find((a) => a.id === e.actor_id);
+  if (!agent || !agent.alive) return true;
+  const threshold =
+    typeof e.payload?.threshold === 'number'
+      ? e.payload.threshold
+      : STARVING_THRESHOLD_DEFAULT;
+  return agent.energy >= threshold;
+}
+
 /**
  * Compute the digest. `history` is the standard NEWEST-FIRST rolling window
  * (useSimulation.history); `world` is the latest world_state (or null before
@@ -100,7 +128,7 @@ export function storySoFar(
     }
     if (!drama) {
       const label = DRAMA_LABELS[e.kind];
-      if (label) {
+      if (label && !isStaleStarvation(e, world)) {
         drama = { label, text: e.text ?? `[${e.kind}]`, tick: e.tick };
       }
     }
