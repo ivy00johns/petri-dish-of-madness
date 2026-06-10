@@ -202,11 +202,31 @@ def test_multiple_pending_whispers_deliver_together_once():
     assert "First whisper." not in sp2 and "Second whisper." not in sp2
 
 
-def test_pending_whispers_stay_out_of_the_snapshot_surface():
+def test_pending_whispers_survive_the_snapshot_round_trip():
+    # EM-145 inverts the original "ephemeral by design" call: dev hot-reloads
+    # kept eating queued whispers before delivery, which made the god console
+    # look broken. Undelivered whispers now ride the snapshot (additive key);
+    # delivered ones still leave no trace.
     world = _world()
-    world.post_whisper_as_god("ada", "ephemeral")
-    # Ephemeral by design: not serialized, so a restore drops undelivered ones.
-    assert "pending_whispers" not in world.to_snapshot()
+    world.post_whisper_as_god("ada", "survive the restart")
+
+    snap = world.to_snapshot()
+    assert snap["pending_whispers"] == {"ada": ["survive the restart"]}
+
+    restored = World.from_snapshot(snap, params=_params())
+    assert restored.pending_whispers == {"ada": ["survive the restart"]}
+    # Delivery still consumes: after riding the next prompt, nothing persists.
+    assert "survive the restart" in _system_prompt(restored, restored.agents["ada"])
+    assert restored.to_snapshot()["pending_whispers"] == {}
+
+
+def test_restore_drops_whispers_for_agents_that_no_longer_exist():
+    world = _world()
+    world.post_whisper_as_god("ada", "for ada")
+    snap = world.to_snapshot()
+    snap["pending_whispers"]["ghost"] = ["for nobody"]
+    restored = World.from_snapshot(snap, params=_params())
+    assert restored.pending_whispers == {"ada": ["for ada"]}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -450,9 +450,10 @@ class World:
         self.town_name: str = ""
         # EM-137 (god console) — one-shot god whispers awaiting delivery, keyed
         # by agent id. post_whisper_as_god queues lines here; the runtime pops
-        # the target's queue into its NEXT prompt (_assemble_context) exactly
-        # once. Deliberately NOT serialized in to_snapshot(): a whisper is
-        # ephemeral by design, so a restore simply drops undelivered ones.
+        # the target's queue into its NEXT prompt exactly once. EM-145: queued
+        # (undelivered) whispers ARE serialized in to_snapshot() — dev
+        # hot-reloads kept eating them before delivery, which made the god
+        # console look broken. Delivered whispers still leave no trace.
         self.pending_whispers: dict[str, list[str]] = {}
 
         self.tick: int = 0
@@ -1867,6 +1868,13 @@ class World:
             ],
             # PROTOTYPE (god-channel) — the consensus-set town name ("" = unnamed).
             "town_name": self.town_name,
+            # EM-145 — queued-but-undelivered god whispers, so a restart/restore
+            # no longer eats them (additive key; consumers may ignore).
+            "pending_whispers": {
+                aid: list(lines)
+                for aid, lines in self.pending_whispers.items()
+                if lines
+            },
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -2053,4 +2061,10 @@ class World:
         ]
         # PROTOTYPE (god-channel) — the consensus-set town name.
         world.town_name = str(state.get("town_name", "") or "")
+        # EM-145 — restore queued god whispers (only for agents that exist).
+        world.pending_whispers = {
+            str(aid): [str(t) for t in (lines or []) if str(t).strip()]
+            for aid, lines in (state.get("pending_whispers") or {}).items()
+            if str(aid) in world.agents and lines
+        }
         return world
