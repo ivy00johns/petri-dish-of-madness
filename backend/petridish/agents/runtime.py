@@ -891,6 +891,8 @@ def _assemble_context(
     commitments: list[dict] | None = None,
     overheard: list[dict] | None = None,
     request_reflection: bool = False,
+    god_whispers: list[str] | None = None,
+    board_notes: list[dict] | None = None,
 ) -> list[dict]:
     """Build the OpenAI-style messages list for this agent's turn.
 
@@ -899,10 +901,14 @@ def _assemble_context(
     `overheard` injects pending overheard speech (EM-081), `request_reflection`
     asks for the optional `reflection` field this turn only (EM-080).
 
-    EM-137 (god console): pops — and thereby consumes — the agent's queued god
-    whispers from `world.pending_whispers` into a one-shot prompt block (the
-    only world mutation this function performs, by design: assembly IS the
-    delivery)."""
+    EM-137 (god console): when `god_whispers` is None (legacy callers), pops —
+    and thereby consumes — the agent's queued god whispers from
+    `world.pending_whispers` into a one-shot prompt block (the only world
+    mutation this function performs, by design: assembly IS the delivery).
+    EM-145: `run_turn` instead pops the queue itself and passes `god_whispers`
+    explicitly, so delivery can also emit a legible `god_voice_heard` feed
+    event. `board_notes` (EM-145) injects unseen god billboard posts at the
+    agent's location — billboard entry dicts, rendered read-only here."""
     place = world.places.get(agent.location)
     place_name = place.name if place else agent.location
     place_kind = place.kind if place else "unknown"
@@ -1143,19 +1149,39 @@ def _assemble_context(
     # next turn carries no trace (the same consume-once pattern as
     # pending_overheard in run_turn, but the queue lives in world state so the
     # api seam can fill it). Context injection only — zero extra LLM calls.
+    # EM-145: run_turn pops the queue itself and passes god_whispers in (so it
+    # can emit the delivery event); the pop here is the legacy direct-call path.
     # (getattr keeps callers safe if the engine seam is ever absent.)
+    if god_whispers is None:
+        _pending_whispers = getattr(world, "pending_whispers", None)
+        god_whispers = (
+            _pending_whispers.pop(agent.id, [])
+            if isinstance(_pending_whispers, dict) else []
+        )
     whisper_block = ""
-    _pending_whispers = getattr(world, "pending_whispers", None)
-    _whispers = (
-        _pending_whispers.pop(agent.id, [])
-        if isinstance(_pending_whispers, dict) else []
-    )
-    if _whispers:
-        whisper_lines = "\n".join(f'  "{w}"' for w in _whispers)
+    if god_whispers:
+        whisper_lines = "\n".join(f'  "{w}"' for w in god_whispers)
         whisper_block = f"""
 === ✦ A VOICE ONLY YOU CAN HEAR ===
 {whisper_lines}
-  No one else heard this — it was meant for you alone. Make of it what you will.
+  No one else heard this — it was meant for you alone. It will not repeat.
+  If it asks something of you, answer it aloud or act on it THIS turn.
+"""
+
+    # ── EM-145 — unseen god notes on the billboard at THIS place. ─────────────
+    # The board is opt-in by design (read_billboard), but a god post an agent is
+    # standing next to should not be invisible: run_turn hands the unseen god
+    # entries here once per agent (consume-once via its _board_seen high-water).
+    board_block = ""
+    if board_notes:
+        note_lines = "\n".join(
+            f'  ✦ the god wrote: "{n.get("text", "")}"' for n in board_notes
+        )
+        board_block = f"""
+=== 📌 NEW ON THE NOTICE BOARD ({place_name}) ===
+{note_lines}
+  The god has written on the public board here. If it answers or concerns you,
+  react — aloud or in action — THIS turn.
 """
 
     # PROTOTYPE (god-channel) — surface the town's name ONLY once it has one (set by
@@ -1178,7 +1204,7 @@ Mood: {agent.mood}
 
 === NEEDS ===
 {needs_text}
-{proclamation_block}{whisper_block}
+{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -1289,6 +1315,11 @@ class AgentRuntime:
         # W11b / EM-081 — pending overheard lines awaiting an agent's NEXT turn:
         # [{speaker_id, speaker, text, tick, overheard:true}], capped at 2.
         self._overheard: dict[str, list[dict]] = {}
+        # EM-145 — per-agent high-water tick of god billboard posts already
+        # noticed (so a god post is delivered into a prompt at most once per
+        # agent). In-memory by design: after a restart the worst case is one
+        # repeat notice, which is harmless.
+        self._board_seen: dict[str, int] = {}
 
     def reset_state(self) -> None:
         """Clear ALL per-run cognition state (memories, commitments, importance
@@ -1297,6 +1328,7 @@ class AgentRuntime:
         self._commitments.clear()
         self._importance.clear()
         self._overheard.clear()
+        self._board_seen.clear()
 
     # ── W11b config accessors (defensive: the loader is owned elsewhere) ──────
 
@@ -1500,6 +1532,31 @@ class AgentRuntime:
             })
             del buf[:-_OVERHEARD_PENDING_CAP]
 
+    def _unseen_god_board_notes(self, agent: AgentState) -> list[dict]:
+        """EM-145 — god billboard posts at this agent's location they have not
+        yet been shown (consume-once: collecting them advances the agent's
+        seen high-water tick). Newest 3 only; [] when the agent is away from
+        the board or nothing new. Guarded getattr: duck-typed test worlds
+        without a billboard stay fully functional."""
+        world = self.world
+        here_fn = getattr(world, "billboard_here", None)
+        board = getattr(world, "billboard", None)
+        if not callable(here_fn) or not isinstance(board, list):
+            return []
+        if not here_fn(agent.location):
+            return []
+        seen = self._board_seen.get(agent.id, -1)
+        notes = [
+            e for e in board
+            if isinstance(e, dict)
+            and e.get("actor_type") == "god"
+            and int(e.get("tick", 0) or 0) > seen
+        ]
+        if not notes:
+            return []
+        self._board_seen[agent.id] = max(int(e.get("tick", 0) or 0) for e in notes)
+        return notes[-3:]
+
     async def run_turn(self, agent: AgentState) -> dict:
         """
         Execute one agent turn. Returns an event dict describing what happened.
@@ -1521,12 +1578,45 @@ class AgentRuntime:
         request_reflection = (
             self._importance.get(agent.id, 0.0) >= self._importance_threshold()
         )
+
+        # EM-145 — god-voice delivery happens HERE (not silently inside the
+        # prompt builder) so it can also surface as a feed event: pop the
+        # queued whispers and collect unseen god billboard posts at this place.
+        # Riding the prompt IS the delivery — both are emitted as
+        # `god_voice_heard` below even if the turn later fails to parse.
+        _pw = getattr(self.world, "pending_whispers", None)
+        god_whispers = _pw.pop(agent.id, []) if isinstance(_pw, dict) else []
+        board_notes = self._unseen_god_board_notes(agent)
+
         messages = _assemble_context(
             agent, self.world, recent_events, self.world.params,
             commitments=self._commitments.get(agent.id, []),
             overheard=pending_overheard,
             request_reflection=request_reflection,
+            god_whispers=god_whispers,
+            board_notes=board_notes,
         )
+
+        # The legible half of EM-145: watchers see the god's voice land.
+        delivery_events: list[dict] = []
+        if god_whispers:
+            delivery_events.append({
+                "kind": "god_voice_heard",
+                "actor_id": agent.id,
+                "profile": profile_name,
+                "profile_color": profile_color,
+                "text": f"✦ {agent.name} hears the whisper",
+                "payload": {"channel": "whisper", "count": len(god_whispers)},
+            })
+        if board_notes:
+            delivery_events.append({
+                "kind": "god_voice_heard",
+                "actor_id": agent.id,
+                "profile": profile_name,
+                "profile_color": profile_color,
+                "text": f"📌 {agent.name} reads the god's note on the board",
+                "payload": {"channel": "billboard", "count": len(board_notes)},
+            })
 
         # Decision-trace perception/memory derived from the SAME context (EM-066).
         perceived, memory = _perceived_context(
@@ -1627,8 +1717,11 @@ class AgentRuntime:
             lapsed = self._advance_commitments(
                 agent, "idle", False, None, profile_name, profile_color
             )
-            if lapsed:
-                return {"_multi": [fail_evt] + lapsed, "_trace": trace}
+            # EM-145 — the god's voice rode the prompt even though the turn
+            # failed: the delivery still happened, so it stays legible.
+            tail = lapsed + delivery_events
+            if tail:
+                return {"_multi": [fail_evt] + tail, "_trace": trace}
             return {**fail_evt, "_trace": trace}
 
         # Update mood if provided
@@ -1713,6 +1806,9 @@ class AgentRuntime:
             self._distribute_overheard(
                 agent, chosen_action, action_dict.get("args") or {}
             )
+
+        # EM-145 — god-voice delivery events (built before the LLM call).
+        extra_events.extend(delivery_events)
 
         if extra_events:
             if "_multi" in result_event:

@@ -59,6 +59,10 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   // commitments. commitment_lapsed defaults to ⌛ (expired); the FeedEntry
   // overrides it with the 👻 phantom treatment when reason:"phantom".
   billboard_posted:  '📌',
+  // EM-145 — god-voice delivery receipts ("✦ Bram hears the whisper" /
+  // "📌 Ada reads the god's note"). Uncategorized ON PURPOSE, like
+  // whisper_posted: the god's feedback channel is never filterable away.
+  god_voice_heard:   '✦',
   reflection:        '✎',
   commitment_made:   '⚑',
   commitment_lapsed: '⌛',
@@ -191,7 +195,11 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
   const extinct = event.kind === 'world_extinct';
   // W11b (EM-091): a billboard post by the watchers reads in GOD INK — the
   // violet register the god panel already owns — never an agent color.
-  const godPost = event.kind === 'billboard_posted' && event.actor_type === 'god';
+  // EM-145: delivery receipts (god_voice_heard) share the ink — the whole
+  // god↔agent channel reads as one color in the feed.
+  const godPost =
+    (event.kind === 'billboard_posted' && event.actor_type === 'god') ||
+    event.kind === 'god_voice_heard';
   // W11b (EM-080): diary reflections take the muted-italic diary idiom.
   const reflection = event.kind === 'reflection';
   // W11b (EM-079): a phantom-lapsed commitment — claimed in speech, never

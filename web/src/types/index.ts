@@ -214,6 +214,10 @@ export type EventKind =
   | 'commitment_lapsed'
   | 'usage_alert'
   | 'run_forked'
+  // EM-145 — god-voice delivery made legible: emitted when a god whisper or a
+  // god billboard post is consumed into an agent's prompt. payload
+  // {channel:"whisper"|"billboard", count}; actor = the hearing agent.
+  | 'god_voice_heard'
   // W11a (EM-094, event-log.md v1.2.0 note 1) — the optional LLM narrator's
   // periodic recap: actor_type:"system", actor_id:"narrator", text = the 2–3
   // sentence recap, payload {from_tick, to_tick, profile, routed_via?}. Only
