@@ -174,6 +174,10 @@ class BuildingParams:
       arson_damage       — health removed per `arson`.
       forage_bonus       — extra forage_reward at an operational garden/farm's place.
       work_bonus_pct     — extra work_reward % at an operational workshop's place.
+      auto_build_per_round — EM-115: progress % the village work crew adds to every
+                          under_construction building each round (zero LLM calls),
+                          so funded projects always finish. 0 disables auto-build
+                          and restores the pre-EM-115 stall->abandon behavior.
     """
     enabled: bool = True
     build_step: int = 20
@@ -181,6 +185,7 @@ class BuildingParams:
     arson_damage: int = 50
     forage_bonus: int = 1
     work_bonus_pct: int = 50
+    auto_build_per_round: int = 10
 
 
 @dataclass

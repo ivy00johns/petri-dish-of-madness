@@ -422,8 +422,13 @@ def test_abandon_planned_building_after_idle_window():
 
 
 def test_abandon_under_construction_building_after_idle_window():
-    """An under_construction building that stalls also rots to abandoned."""
+    """An under_construction building that stalls also rots to abandoned.
+
+    Pins the stall-rot path with auto-build disabled — with EM-115's
+    auto_build_per_round active, funded projects always finish instead.
+    """
     world, agents = _world()
+    world.params.buildings.auto_build_per_round = 0
     bid = _propose(world, agents[0], "Clock", "clocktower", 10)
     world.action_contribute_funds(agents[0], bid, 10)  # -> under_construction
     bld = world.buildings[bid]
