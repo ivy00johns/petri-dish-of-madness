@@ -6,12 +6,15 @@
  *   under_construction → scaffolding + a structure RISING with progress (a
  *                        clock tower / garden visibly grows from 0→100); a
  *                        floating progress ring tracks `progress`.
- *   operational        → a DISTINCT procedural mesh per kind (EM-122):
- *                        garden/farm/workshop/library/clocktower/house/stall/
- *                        monument/well/generic — chosen via
- *                        `operationalVariant(kind)`, tinted by the kind palette
- *                        and SOOTED proportionally to lost health
- *                        (`healthTint`), with a cheerful bob/sway.
+ *   operational        → a real GLB from the EM-148 registry where one exists
+ *                        (EM-150), keyed by `operationalVariant(kind)` and
+ *                        mounted in <Suspense> whose fallback is the EM-122
+ *                        procedural variant — while the GLB streams (or if the
+ *                        registry says null: garden/library), the procedural
+ *                        building stands; the scene never shows a hole.
+ *                        Either path is tinted by the kind palette, SOOTED
+ *                        proportionally to lost health (`healthTint` — passed
+ *                        as <Model health>), and bobs/sways cheerfully.
  *   damaged            → scorched, tilted, smoking.
  *   offline            → finished but dimmed/dark (no glow, shutters).
  *   abandoned          → a half-built ruin frozen at its last progress — the
@@ -38,11 +41,18 @@ import type { Building } from '../../types';
 import {
   buildingStyle,
   healthTint,
-  operationalVariant,
   type BuildingStyle,
   type VariantKey,
 } from './worldSpace';
 import { toonGradientMap, toonMaterial } from './toon';
+import { Model } from './assets/Model';
+import { ModelBoundary } from './ModelBoundary';
+import type { ModelSpec } from './assets/models';
+import {
+  modelRotationY,
+  resolveStructureModel,
+  structureModelTint,
+} from './structureModel';
 import { MiniMarker } from './Building';
 import { useProximity, PLACE_LABEL_DIST } from './useProximity';
 
@@ -919,23 +929,42 @@ const VARIANT_COMPONENTS: Record<VariantKey, ComponentType<VariantProps>> = {
 
 function OperationalStructure({
   style,
-  kind,
+  variant,
+  spec,
   offline,
   health,
 }: {
   style: BuildingStyle;
-  kind: string;
+  /** EM-122 silhouette — the render when spec is null AND the Suspense fallback. */
+  variant: VariantKey;
+  /** EM-150: the registry GLB for this variant, or null = stay procedural. */
+  spec: ModelSpec | null;
   offline: boolean;
   health: number;
 }) {
-  const Variant = VARIANT_COMPONENTS[operationalVariant(kind)];
-  return (
+  const Variant = VARIANT_COMPONENTS[variant];
+  const procedural = (
     <Variant
       style={style}
       body={healthTint(style.body, health)}
       roof={healthTint(style.roof, health)}
       offline={offline}
     />
+  );
+  if (!spec) return procedural;
+  return (
+    // Fallback invariant (contract rule 7): while the GLB streams — or if it
+    // FAILS to load — the EM-122 procedural variant stands in (ModelBoundary
+    // is Suspense + an error boundary; a bare Suspense doesn't catch loader
+    // rejections and would unmount the canvas).
+    <ModelBoundary fallback={procedural}>
+      <Model
+        spec={spec}
+        health={health}
+        tint={structureModelTint(offline)}
+        rotation-y={modelRotationY(variant)}
+      />
+    </ModelBoundary>
   );
 }
 
@@ -1037,9 +1066,23 @@ const OPERATIONAL_LABEL_Y: Record<VariantKey, number> = {
   garden: 2.6,
 };
 
+/**
+ * EM-150: label clearance overrides for variants whose GLB stands TALLER than
+ * the procedural silhouette (measured scaled AABB heights: windmill 3.35,
+ * Kenney stall 2.85 — both poke through their old label heights). Variants
+ * absent here keep OPERATIONAL_LABEL_Y, which already clears both meshes.
+ */
+const GLB_LABEL_Y: Partial<Record<VariantKey, number>> = {
+  farm: 4.4,
+  stall: 3.9,
+};
+
 export function Structure({ building, x, z, focusedId, onPick }: StructureProps) {
   const style = useMemo(() => buildingStyle(building.kind), [building.kind]);
-  const variant = useMemo(() => operationalVariant(building.kind), [building.kind]);
+  const { variant, spec } = useMemo(
+    () => resolveStructureModel(building.kind),
+    [building.kind],
+  );
   const bobRef = useRef<THREE.Group>(null);
   const [hovered, setHovered] = useState(false);
   useCursor(hovered && Boolean(onPick));
@@ -1075,7 +1118,7 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
   // Label height tuned per status (and per variant) so it clears the geometry.
   const labelY =
     building.status === 'operational' || building.status === 'offline'
-      ? OPERATIONAL_LABEL_Y[variant]
+      ? (spec ? GLB_LABEL_Y[variant] : undefined) ?? OPERATIONAL_LABEL_Y[variant]
       : building.status === 'under_construction'
         ? 0.6 + grow * 3.4 + 1.4
         : building.status === 'destroyed' || building.status === 'planned'
@@ -1107,7 +1150,8 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
         {(building.status === 'operational' || building.status === 'offline') && (
           <OperationalStructure
             style={style}
-            kind={building.kind}
+            variant={variant}
+            spec={spec}
             offline={building.status === 'offline'}
             health={building.health}
           />

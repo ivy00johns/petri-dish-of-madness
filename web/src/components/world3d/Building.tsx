@@ -8,8 +8,13 @@
  * a minimal accent marker keeps the place locatable without burying villager
  * chips. EM-095: clicking the building zooms the orbit target to it.
  *
- * All geometry is procedural (drei <RoundedBox>, cones, cylinders) — no
- * external assets. Warm WebGL colors (not bound by the CSS token system).
+ * EM-150: place anchors with a PLACE_MODELS registry entry (work/governance/
+ * home) render the real GLB inside <Suspense> whose fallback is the procedural
+ * structure below — while the GLB streams (or for null entries: social/wild),
+ * the procedural anchor stands; the scene never shows a hole (Wave C rule 7).
+ *
+ * All fallback geometry is procedural (drei <RoundedBox>, cones, cylinders).
+ * Warm WebGL colors (not bound by the CSS token system).
  *
  * EM-111: lit surfaces use the shared cached warm-toon materials (toon.ts) for
  * the banded golden-hour cel look; meshBasicMaterial labels/markers stay as-is.
@@ -21,6 +26,9 @@ import type { ThreeEvent } from '@react-three/fiber';
 import type { Place } from '../../types';
 import { PLACE_STYLES, placeToWorld } from './worldSpace';
 import { toonMaterial } from './toon';
+import { Model } from './assets/Model';
+import { ModelBoundary } from './ModelBoundary';
+import { placeModelRotationY, resolvePlaceModel } from './structureModel';
 import { useProximity, PLACE_LABEL_DIST } from './useProximity';
 
 interface BuildingProps {
@@ -283,9 +291,22 @@ export function Building({ place, focusedId, onPick }: BuildingProps) {
   const near = useProximity(useCallback(() => ({ x, z }), [x, z]), PLACE_LABEL_DIST);
   const showFull = near || hovered || focusedId === place.id;
 
-  // label height tuned per structure footprint
+  // EM-150: the place-anchor GLB, or null = stay procedural (social/wild).
+  const spec = resolvePlaceModel(place.kind);
+
+  // label height tuned per structure footprint (GLB anchors measure shorter
+  // than the procedural town hall but TALLER than the market/cottage: the
+  // lumbermill tops out at ~3.4, home_b at ~2.9 — lift their labels clear).
   const labelY =
-    place.kind === 'governance' ? 6.2 : place.kind === 'social' ? 2.6 : 3.4;
+    place.kind === 'governance'
+      ? 6.2
+      : place.kind === 'social'
+        ? 2.6
+        : spec
+          ? place.kind === 'work'
+            ? 4.5
+            : 3.9
+          : 3.4;
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
     if (!onPick) return;
@@ -293,13 +314,10 @@ export function Building({ place, focusedId, onPick }: BuildingProps) {
     onPick(place.id);
   };
 
-  return (
-    <group
-      position={[x, 0, z]}
-      onClick={handleClick}
-      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
-      onPointerOut={() => setHovered(false)}
-    >
+  // The procedural anchor: the render when spec is null AND the Suspense
+  // fallback while a GLB streams (Wave C fallback invariant — never a hole).
+  const procedural = (
+    <>
       {place.kind === 'social' && <PlazaStructure accent={style.accent} />}
       {place.kind === 'work' && (
         <MarketStructure body={style.body} accent={style.accent} />
@@ -311,6 +329,25 @@ export function Building({ place, focusedId, onPick }: BuildingProps) {
         <CottageStructure body={style.body} accent={style.accent} />
       )}
       {place.kind === 'wild' && <CommonsStructure />}
+    </>
+  );
+
+  return (
+    <group
+      position={[x, 0, z]}
+      onClick={handleClick}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+      onPointerOut={() => setHovered(false)}
+    >
+      {spec ? (
+        // ModelBoundary = Suspense + error boundary: the procedural anchor
+        // stands while the GLB streams AND if it fails to load.
+        <ModelBoundary fallback={procedural}>
+          <Model spec={spec} rotation-y={placeModelRotationY(place.kind)} />
+        </ModelBoundary>
+      ) : (
+        procedural
+      )}
 
       {showFull ? (
         <NameLabel text={place.name} y={labelY} color="#fff3e0" />
