@@ -22,10 +22,20 @@ interface StorySoFarProps {
 }
 
 const NARRATOR_KEY = 'em.story.narrator';
+// EM-146 — collapsed-state preference (persisted like the narrator toggle).
+const COLLAPSED_KEY = 'em.story.collapsed';
 
 function loadNarratorPref(): boolean {
   try {
     return localStorage.getItem(NARRATOR_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function loadCollapsedPref(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSED_KEY) === '1';
   } catch {
     return false;
   }
@@ -47,10 +57,17 @@ function DigestLine({ label, children }: { label: string; children: React.ReactN
 
 export function StorySoFar({ world, history }: StorySoFarProps) {
   const [narratorOn, setNarratorOn] = useState(loadNarratorPref);
+  // EM-146 — the digest must never push the feed (the centerpiece) out of
+  // view: the body is height-capped + scrollable, and collapsible entirely.
+  const [collapsed, setCollapsed] = useState(loadCollapsedPref);
 
   useEffect(() => {
     try { localStorage.setItem(NARRATOR_KEY, narratorOn ? '1' : '0'); } catch { /* ignore */ }
   }, [narratorOn]);
+
+  useEffect(() => {
+    try { localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
+  }, [collapsed]);
 
   const digest = useMemo(() => storySoFar(history, world), [history, world]);
 
@@ -69,8 +86,21 @@ export function StorySoFar({ world, history }: StorySoFarProps) {
       aria-label="Story so far"
     >
       <div className="lab-header flex items-center justify-between gap-2">
-        {/* EM-082 a11y: a real heading for the digest section. */}
-        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">STORY SO FAR</h2>
+        {/* EM-082 a11y: a real heading for the digest section. EM-146: the
+            heading doubles as the collapse toggle (aria-expanded). */}
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          aria-expanded={!collapsed}
+          aria-controls="story-so-far-body"
+          title={collapsed ? 'Expand the story-so-far digest' : 'Collapse the digest — the feed keeps its space'}
+          className="flex items-center gap-1.5 bg-transparent border-0 p-0 cursor-pointer text-lab-text hover:text-lab-acid transition-colors duration-100"
+        >
+          <span aria-hidden="true" className="font-mono text-[10px] text-lab-muted">
+            {collapsed ? '▸' : '▾'}
+          </span>
+          <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">STORY SO FAR</h2>
+        </button>
         <button
           type="button"
           onClick={() => setNarratorOn((v) => !v)}
@@ -89,7 +119,11 @@ export function StorySoFar({ world, history }: StorySoFarProps) {
         </button>
       </div>
 
-      <div className="px-3 py-2 space-y-1.5">
+      {/* EM-146 — height-capped + scrollable body, hidden entirely when
+          collapsed: long DRAMA/BILLBOARD content scrolls INSIDE the digest
+          instead of shoving the feed below the fold. */}
+      {!collapsed && (
+      <div id="story-so-far-body" className="px-3 py-2 space-y-1.5 max-h-48 overflow-y-auto">
         {/* Narrator recap — prominent when enabled; labeled off-state when the
             server has never emitted one (world.narrator.enabled is false). */}
         {narratorOn && (
@@ -171,6 +205,7 @@ export function StorySoFar({ world, history }: StorySoFarProps) {
           )}
         </DigestLine>
       </div>
+      )}
     </section>
   );
 }
