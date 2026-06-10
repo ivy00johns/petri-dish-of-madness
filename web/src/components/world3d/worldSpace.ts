@@ -169,6 +169,112 @@ export function buildingStyle(kind: string): BuildingStyle {
 }
 
 /**
+ * EM-122: the small set of DISTINCT procedural operational meshes. Every
+ * emergent building kind renders as exactly one of these silhouettes
+ * (Structure.tsx owns the geometry; this module owns the kind → variant
+ * mapping so it stays pure and testable).
+ */
+export type VariantKey =
+  | 'garden'
+  | 'farm'
+  | 'workshop'
+  | 'library'
+  | 'clocktower'
+  | 'house'
+  | 'stall'
+  | 'monument'
+  | 'well'
+  | 'generic';
+
+/** Exact BUILDING_STYLES keys map straight to their obvious variant. */
+const EXACT_VARIANTS: Record<string, VariantKey> = {
+  clocktower: 'clocktower',
+  garden: 'garden',
+  workshop: 'workshop',
+  farm: 'farm',
+  library: 'library',
+  house: 'house',
+  monument: 'monument',
+  building: 'generic',
+};
+
+/**
+ * EM-122: keyword → variant mapping for emergent kinds, tried in order with
+ * case-insensitive SUBSTRING match (same approach as KIND_KEYWORD_STYLES).
+ * Order is load-bearing, mirroring EM-130's substring traps:
+ *   - library's `archive` must beat monument's `arch`;
+ *   - workshop's `workshop` must beat stall's `shop` (`shop` ⊂ "workshop");
+ *   - clocktower's `light`/`tower` must beat house's `house` ("lighthouse",
+ *     "watchtower").
+ */
+const VARIANT_KEYWORDS: ReadonlyArray<readonly [readonly string[], VariantKey]> = [
+  [['garden', 'orchard', 'grove', 'herb', 'bed'], 'garden'],
+  [['farm', 'field', 'grain', 'crop'], 'farm'],
+  [['workshop', 'forge', 'smith', 'tool', 'craft'], 'workshop'],
+  [['library', 'school', 'archive', 'book'], 'library'],
+  [['clock', 'tower', 'watch', 'light'], 'clocktower'],
+  [['stall', 'market', 'shop', 'booth', 'stand', 'bazaar'], 'stall'],
+  [['well', 'fountain', 'water'], 'well'],
+  [['house', 'home', 'cottage', 'inn', 'shelter', 'cabin'], 'house'],
+  [['monument', 'statue', 'memorial', 'arch', 'shrine', 'obelisk'], 'monument'],
+];
+
+/**
+ * EM-122: resolve which procedural operational mesh a building kind gets.
+ * Exact palette keys map directly; emergent kinds are keyword-matched; the
+ * rest fall back to the neutral `generic` silhouette.
+ */
+export function operationalVariant(kind: string): VariantKey {
+  const exact = EXACT_VARIANTS[kind];
+  if (exact) return exact;
+  const lower = kind.toLowerCase();
+  for (const [keywords, variant] of VARIANT_KEYWORDS) {
+    if (keywords.some((k) => lower.includes(k))) return variant;
+  }
+  return 'generic';
+}
+
+/** EM-122: the charcoal/soot tone damaged-but-operational bodies lerp toward. */
+export const SOOT_HEX = '#2f2a26';
+
+/**
+ * Cap on the soot mix at health 0 — a dying building reads scorched, not
+ * pure charcoal (the `damaged` status renderer owns the full burn look).
+ */
+const MAX_SOOT_MIX = 0.78;
+
+/** Parse #rgb or #rrggbb into [r, g, b] (0..255), or null if malformed. */
+function parseHex(hex: string): [number, number, number] | null {
+  const m3 = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(hex);
+  if (m3) return [m3[1], m3[2], m3[3]].map((c) => parseInt(c + c, 16)) as [number, number, number];
+  const m6 = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (m6) return [m6[1], m6[2], m6[3]].map((c) => parseInt(c, 16)) as [number, number, number];
+  return null;
+}
+
+/**
+ * EM-122: health-aware body tint for OPERATIONAL buildings. Pure: lerps `hex`
+ * toward {@link SOOT_HEX} proportionally to missing health, so a half-burned
+ * workshop LOOKS half-burned before it ever flips to `damaged`.
+ *
+ *   - health is clamped to [0, 100]; health >= 100 returns the input UNCHANGED;
+ *   - darkening is monotonic in lost health, capped at MAX_SOOT_MIX;
+ *   - output is always a valid lowercase #rrggbb hex;
+ *   - malformed input (or a non-finite health) is returned untouched.
+ */
+export function healthTint(hex: string, health: number): string {
+  if (!Number.isFinite(health)) return hex;
+  const h = Math.max(0, Math.min(100, health));
+  if (h >= 100) return hex;
+  const rgb = parseHex(hex);
+  if (!rgb) return hex;
+  const soot = parseHex(SOOT_HEX)!;
+  const t = ((100 - h) / 100) * MAX_SOOT_MIX;
+  const mixed = rgb.map((c, i) => Math.round(c + (soot[i] - c) * t));
+  return `#${mixed.map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/**
  * Material palette for a W8 Animal, keyed by `species`. Warm low-poly tints —
  * like BUILDING_STYLES these are WebGL material colors (THREE.Color), explicitly
  * OUTSIDE the CSS design-token system (the GPU scene owns its warm palette;
