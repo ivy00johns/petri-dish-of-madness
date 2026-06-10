@@ -72,3 +72,11 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] `git-commit` conventions — all commits.
 - [x] `git-pr` — PR to main carrying W9–W11 (see closeout).
 - [ ] `ux-review` full-skill subjective pass — deferred from W11a+W11b together: recommend running it on the merged main after the PR, as a fresh-eyes pass over the finished W11 surface.
+
+## Wave A — live-run correctness batch (source: ledger EM-129–135 + EM-106/108, user GO 2026-06-10, ultracode)
+- [ ] `orchestrator` — contract-first wave on `build/wave-a-live-run-fixes`; contract: `contracts/wave-a.md`.
+- [ ] Workflow (ultracode) — implement fan-out (4 role-agents, disjoint file ownership) + adversarial verify workflow.
+- [ ] QE gate — full backend pytest + web vitest + `npm run build` typecheck at the wave gate; qa-report via verify workflow.
+- [ ] render-level verification — Playwright pass on the 3-D village for EM-130/131 (building subtitles + placement) against a live run.
+- [ ] `git-commit` conventions — per-area commits by orchestrator (agents do not commit).
+- [ ] `ux-review` full-skill subjective pass — not in this wave's scope (logic fixes); still owed on merged main per W11b deferral note.
