@@ -80,3 +80,13 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] render-level verification — Playwright on `/`: village + feed render, 0 console errors; GOD CONSOLE groups verified in the live DOM; live API E2E (bless clamps at 100, grant +50, whisper delivered and acted on within 3 ticks). EM-130/131 building visuals covered by 15 unit tests — no buildings existed yet in the young live run (noted, not skipped silently).
 - [x] `git-commit` conventions — 9 per-area commits by orchestrator (agents did not commit).
 - [ ] `ux-review` full-skill subjective pass — not in this wave's scope (logic fixes); still owed on merged main per W11b deferral note.
+
+## Wave B — "the city comes alive" (source: ledger EM-111/115/118/122 + 3D-WORLD-ART-DIRECTION.md Direction 1, user GO 2026-06-10)
+- [ ] `orchestrator` — contract-first wave on `build/wave-b-city-comes-alive`; contract `contracts/wave-b.md`.
+- [ ] seed imagery — concept frames already exist (`docs/ui-redesign/3d-concepts/dir1-warm-toon-golden-hour.png` is the art target); `nano-banana` not re-invoked.
+- [ ] `frontend-design` + `ui-ux-pro-max` — to be invoked by the frontend art agents (B2/B3/B4 dispatch requirement).
+- [ ] QE gate — `coordination/qa-report.json` after wave 2.
+- [ ] render-level verification — orchestrator Playwright pass on `/` (golden-hour look, foliage, per-kind buildings, console clean, fps sanity).
+- [ ] design-token check — diff-scoped; WebGL canvas hexes exempt per established convention (worldSpace.ts palette idiom).
+- [ ] `ux-review` — subjective pass on the new 3-D look at wave close.
+- [ ] `git-commit` conventions — orchestrator commits at gates.
