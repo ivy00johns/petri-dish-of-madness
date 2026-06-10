@@ -220,3 +220,29 @@ def test_normalize_non_dict_args_replaced():
     action = {"action": "idle", "args": "garbage"}
     _normalize_args(action, actor, world)
     assert action["args"] == {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Behavioral string caps — truncate, never dead-turn (live: Cleo lost a turn to
+# a 60-char propose_project `function`; Bram to a 300+-char billboard post)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def test_overlong_project_function_truncated_turn_resolves():
+    by_kind, world, agent = await _run_first_turn(
+        [{"action": "propose_project", "args": {
+            "name": "Welcome Kits",
+            "kind": "collective",
+            "funds_required": 10,
+            "function": "Improve shared spaces and provide welcome kits for newcomers",
+        }}]
+    )
+    assert by_kind["action_resolved"]["payload"]["outcome"] == "ok"
+    assert "parse_failure" not in by_kind
+
+
+def test_normalize_caps_billboard_text():
+    world = _bare_world()
+    actor = world.agents["agent_bram_1"]
+    action = {"action": "post_billboard", "args": {"text": "F" * 320}}
+    _normalize_args(action, actor, world)
+    assert len(action["args"]["text"]) == 280

@@ -529,6 +529,16 @@ _TARGETED_ACTIONS = frozenset(
     {"give", "steal", "insult", "attack", "whisper", "set_relationship"}
 )
 
+# Behavioral STRING caps where truncation is harmless (display text — losing a
+# few words beats losing the turn). Mirrors ACTION_SCHEMA's maxLength values;
+# live failure: a 60-char propose_project `function` (cap 40) and a 300+-char
+# billboard post (cap 280) each cost their agent a full turn to a schema error.
+_ARG_STRING_CAPS: dict[str, dict[str, int]] = {
+    "propose_project": {"name": 60, "kind": 30, "function": 40},
+    "post_billboard": {"text": 280},
+    "answer_proclamation": {"text": 280},
+}
+
 
 def _noneish(value: Any) -> bool:
     return value is None or (
@@ -594,6 +604,13 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
             args["target"] = target
         elif _noneish(args.get("target")):
             args.pop("target", None)
+
+    caps = _ARG_STRING_CAPS.get(action)
+    if caps:
+        for key, cap in caps.items():
+            val = args.get(key)
+            if isinstance(val, str) and len(val) > cap:
+                args[key] = val[:cap]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
