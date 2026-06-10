@@ -1,0 +1,388 @@
+/**
+ * models.test.ts — EM-148 asset-layer gate. NO canvas/WebGL anywhere:
+ *
+ *   • registry shape — every VariantKey / PlaceKind / character key present,
+ *     specs well-formed, urls under /models/;
+ *   • the vendored files EXIST on disk and are real GLBs — we parse each
+ *     GLB's JSON chunk (plain node fs + DataView, no loader) and re-measure
+ *     its bounding box, so the registry scales are PROVEN to respect the
+ *     village footprints (buildings ≲3 units in the 4.2-spacing slot rings,
+ *     villager ~1.1 tall, critters ≲0.8) — change a model file and this test
+ *     tells you if it stops fitting;
+ *   • declared animation clips actually exist in the GLBs;
+ *   • ASSET_LICENSES.md records every vendored file;
+ *   • toonify helpers — conversion / caching / tint-cloning unit-tested on a
+ *     stub Object3D tree with stub materials.
+ */
+
+import { describe, expect, it } from 'vitest';
+// The app tsconfig ships no @types/node (and EM-148 adds no deps), so the
+// node builtins this fs-backed test needs are imported under @ts-ignore —
+// vitest executes in node, where they are real.
+// @ts-ignore -- node builtin without @types/node
+import { existsSync, readFileSync } from 'node:fs';
+// @ts-ignore -- node builtin without @types/node
+import { resolve } from 'node:path';
+import * as THREE from 'three';
+import type { VariantKey } from '../worldSpace';
+import type { PlaceKind } from '../../../types';
+import {
+  CHARACTER_MODELS,
+  MODEL_REGISTRY,
+  PLACE_MODELS,
+  allModelSpecs,
+  type ModelSpec,
+} from './models';
+import { effectiveTint } from './Model';
+import {
+  applyTintToScene,
+  createToonifyCaches,
+  isTintClone,
+  toToonMaterial,
+  toonifyScene,
+} from './toonify';
+
+// vitest's cwd is web/ (the vitest.config.ts root); no @types/node, so the
+// one global we need is declared minimally here.
+declare const process: { cwd(): string };
+const PUBLIC_DIR = resolve(process.cwd(), 'public');
+const REPO_ROOT = resolve(process.cwd(), '..');
+
+const ALL_VARIANTS: VariantKey[] = [
+  'garden', 'farm', 'workshop', 'library', 'clocktower',
+  'house', 'stall', 'monument', 'well', 'generic',
+];
+const ALL_PLACE_KINDS: PlaceKind[] = ['work', 'home', 'social', 'governance', 'wild'];
+
+function diskPath(spec: ModelSpec): string {
+  return resolve(PUBLIC_DIR, spec.url.replace(/^\//, ''));
+}
+
+// ── Minimal GLB reader (JSON chunk only — no GL, no loaders) ─────────────────
+
+interface GlbJson {
+  nodes?: Array<{
+    mesh?: number;
+    children?: number[];
+    matrix?: number[];
+    translation?: number[];
+    rotation?: number[];
+    scale?: number[];
+    name?: string;
+  }>;
+  meshes?: Array<{ primitives: Array<{ attributes: { POSITION?: number } }> }>;
+  accessors?: Array<{ min?: number[]; max?: number[] }>;
+  scenes?: Array<{ nodes?: number[] }>;
+  scene?: number;
+  animations?: Array<{ name?: string }>;
+}
+
+function readGlbJson(path: string): GlbJson {
+  const buf = readFileSync(path);
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  expect(view.getUint32(0, true)).toBe(0x46546c67); // 'glTF' magic
+  const jsonLen = view.getUint32(12, true);
+  expect(view.getUint32(16, true)).toBe(0x4e4f534a); // 'JSON' chunk type
+  return JSON.parse(buf.subarray(20, 20 + jsonLen).toString('utf8'));
+}
+
+/** World-space AABB from accessor min/max run through the node hierarchy. */
+function glbBounds(g: GlbJson): { size: THREE.Vector3; min: THREE.Vector3 } {
+  const box = new THREE.Box3();
+  const nodes = g.nodes ?? [];
+  const visit = (ni: number, parent: THREE.Matrix4) => {
+    const n = nodes[ni];
+    const local = new THREE.Matrix4();
+    if (n.matrix) local.fromArray(n.matrix);
+    else
+      local.compose(
+        new THREE.Vector3(...((n.translation ?? [0, 0, 0]) as [number, number, number])),
+        new THREE.Quaternion(...((n.rotation ?? [0, 0, 0, 1]) as [number, number, number, number])),
+        new THREE.Vector3(...((n.scale ?? [1, 1, 1]) as [number, number, number])),
+      );
+    const world = new THREE.Matrix4().multiplyMatrices(parent, local);
+    if (n.mesh !== undefined) {
+      for (const prim of g.meshes![n.mesh].primitives) {
+        const acc = prim.attributes.POSITION !== undefined
+          ? g.accessors![prim.attributes.POSITION]
+          : undefined;
+        if (acc?.min && acc?.max) {
+          const sub = new THREE.Box3(
+            new THREE.Vector3(...(acc.min as [number, number, number])),
+            new THREE.Vector3(...(acc.max as [number, number, number])),
+          ).applyMatrix4(world);
+          box.union(sub);
+        }
+      }
+    }
+    for (const c of n.children ?? []) visit(c, world);
+  };
+  const scene = (g.scenes ?? [])[g.scene ?? 0] ?? {};
+  for (const ni of scene.nodes ?? []) visit(ni, new THREE.Matrix4());
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  return { size, min: box.min };
+}
+
+// ── Registry shape ───────────────────────────────────────────────────────────
+
+describe('MODEL_REGISTRY', () => {
+  it('has an entry (model or explicit null) for every VariantKey', () => {
+    expect(Object.keys(MODEL_REGISTRY).sort()).toEqual([...ALL_VARIANTS].sort());
+  });
+
+  it('keeps garden and library procedural (recorded nulls)', () => {
+    expect(MODEL_REGISTRY.garden).toBeNull();
+    expect(MODEL_REGISTRY.library).toBeNull();
+  });
+});
+
+describe('PLACE_MODELS', () => {
+  it('has an entry for every PlaceKind', () => {
+    expect(Object.keys(PLACE_MODELS).sort()).toEqual([...ALL_PLACE_KINDS].sort());
+  });
+});
+
+describe('CHARACTER_MODELS', () => {
+  it('has villager, cat and dog entries with idle+walk clips', () => {
+    for (const key of ['villager', 'cat', 'dog'] as const) {
+      const spec = CHARACTER_MODELS[key];
+      expect(spec, key).not.toBeNull();
+      expect(spec!.clips?.idle, `${key} idle clip`).toBeTruthy();
+      expect(spec!.clips?.walk, `${key} walk clip`).toBeTruthy();
+    }
+  });
+});
+
+describe('every non-null ModelSpec', () => {
+  const specs = allModelSpecs();
+
+  it('exists (the registries are not all-null)', () => {
+    expect(specs.length).toBeGreaterThan(0);
+  });
+
+  it.each(specs.map((s) => [s.url, s] as const))(
+    '%s is well-formed and exists on disk',
+    (_url, spec) => {
+      expect(spec.url.startsWith('/models/')).toBe(true);
+      expect(Number.isFinite(spec.scale)).toBe(true);
+      expect(spec.scale).toBeGreaterThan(0);
+      expect(Number.isFinite(spec.yOffset)).toBe(true);
+      expect(existsSync(diskPath(spec)), `missing file: ${diskPath(spec)}`).toBe(true);
+    },
+  );
+
+  it('total vendored payload stays within the 15 MB budget', () => {
+    const total = specs.reduce(
+      (sum, s) => sum + readFileSync(diskPath(s)).byteLength,
+      0,
+    );
+    expect(total).toBeLessThanOrEqual(15 * 1024 * 1024);
+  });
+});
+
+// ── Footprint discipline (measured from the real GLBs) ──────────────────────
+
+describe('scaled footprints', () => {
+  it.each(
+    (Object.entries(MODEL_REGISTRY) as Array<[VariantKey, ModelSpec | null]>)
+      .filter((e): e is [VariantKey, ModelSpec] => e[1] !== null),
+  )('building %s reads at ≲3 world units in the 4.2-spacing rings', (_k, spec) => {
+    const { size } = glbBounds(readGlbJson(diskPath(spec)));
+    const xz = Math.max(size.x, size.z) * spec.scale;
+    expect(xz).toBeGreaterThan(1.2); // not a speck
+    expect(xz).toBeLessThanOrEqual(3.2);
+    expect(size.y * spec.scale).toBeLessThanOrEqual(4.2);
+  });
+
+  it.each(
+    (Object.entries(PLACE_MODELS) as Array<[PlaceKind, ModelSpec | null]>)
+      .filter((e): e is [PlaceKind, ModelSpec] => e[1] !== null),
+  )('place anchor %s stays within the anchor footprint', (_k, spec) => {
+    const { size } = glbBounds(readGlbJson(diskPath(spec)));
+    expect(Math.max(size.x, size.z) * spec.scale).toBeLessThanOrEqual(3.2);
+    expect(size.y * spec.scale).toBeLessThanOrEqual(5.5);
+  });
+
+  it('villager scales to roughly the 1.1-unit capsule', () => {
+    const spec = CHARACTER_MODELS.villager!;
+    const { size } = glbBounds(readGlbJson(diskPath(spec)));
+    const h = size.y * spec.scale;
+    expect(h).toBeGreaterThanOrEqual(0.9);
+    expect(h).toBeLessThanOrEqual(1.4);
+  });
+
+  it.each([['cat'], ['dog']] as const)('critter %s stays small', (key) => {
+    const spec = CHARACTER_MODELS[key]!;
+    const { size } = glbBounds(readGlbJson(diskPath(spec)));
+    expect(size.y * spec.scale).toBeLessThanOrEqual(0.8);
+  });
+
+  it('models sit on the ground (no floating/buried bases)', () => {
+    for (const spec of allModelSpecs()) {
+      const { min } = glbBounds(readGlbJson(diskPath(spec)));
+      expect(Math.abs(min.y * spec.scale + spec.yOffset), spec.url).toBeLessThan(0.15);
+    }
+  });
+});
+
+// ── Declared clips exist in the GLBs ─────────────────────────────────────────
+
+describe('animation clips', () => {
+  it.each([['villager'], ['cat'], ['dog']] as const)(
+    '%s GLB contains the declared idle/walk clips',
+    (key) => {
+      const spec = CHARACTER_MODELS[key]!;
+      const names = (readGlbJson(diskPath(spec)).animations ?? []).map((a) => a.name);
+      expect(names).toContain(spec.clips!.idle);
+      expect(names).toContain(spec.clips!.walk);
+    },
+  );
+
+  it('static building models carry no animations', () => {
+    for (const spec of Object.values(MODEL_REGISTRY)) {
+      if (!spec) continue;
+      expect(readGlbJson(diskPath(spec)).animations ?? []).toHaveLength(0);
+    }
+  });
+});
+
+// ── License hygiene ──────────────────────────────────────────────────────────
+
+describe('ASSET_LICENSES.md', () => {
+  const doc = readFileSync(resolve(REPO_ROOT, 'ASSET_LICENSES.md'), 'utf8');
+
+  it('records every vendored model file', () => {
+    for (const spec of allModelSpecs()) {
+      expect(doc, `ASSET_LICENSES.md is missing ${spec.url}`).toContain(
+        `web/public${spec.url}`,
+      );
+    }
+  });
+
+  it('declares CC0 for the vendored kits', () => {
+    for (const kit of ['kaykit-medieval-hexagon', 'kaykit-adventurers', 'kenney-fantasy-town', 'quaternius']) {
+      expect(doc).toContain(kit);
+    }
+    expect(doc).toContain('creativecommons.org/publicdomain/zero/1.0');
+  });
+});
+
+// ── toonify (stub Object3D tree, stub materials — no GL) ─────────────────────
+
+type StubMesh = THREE.Mesh<THREE.BufferGeometry, THREE.Material>;
+
+function stubTree() {
+  const root = new THREE.Group();
+  const map = new THREE.Texture();
+  const shared = new THREE.MeshStandardMaterial({ color: '#e07a5f', map });
+  const meshA: StubMesh = new THREE.Mesh(new THREE.BufferGeometry(), shared);
+  const meshB: StubMesh = new THREE.Mesh(new THREE.BufferGeometry(), shared);
+  const solo = new THREE.MeshStandardMaterial({ color: '#5fa05f', transparent: true, opacity: 0.5 });
+  const meshC: StubMesh = new THREE.Mesh(new THREE.BufferGeometry(), solo);
+  root.add(meshA, meshB, meshC);
+  return { root, map, shared, solo, meshA, meshB, meshC };
+}
+
+describe('toonifyScene', () => {
+  it('converts every material to MeshToonMaterial preserving color + map', () => {
+    const { root, map, meshA, meshC } = stubTree();
+    const rewritten = toonifyScene(root, createToonifyCaches());
+    expect(rewritten).toBe(3);
+    const matA = meshA.material as THREE.MeshToonMaterial;
+    expect(matA).toBeInstanceOf(THREE.MeshToonMaterial);
+    expect(matA.map).toBe(map);
+    expect(matA.color.getHexString()).toBe('e07a5f');
+    expect(matA.gradientMap).not.toBeNull();
+    const matC = meshC.material as THREE.MeshToonMaterial;
+    expect(matC.transparent).toBe(true);
+    expect(matC.opacity).toBe(0.5);
+  });
+
+  it('shared source materials convert to the IDENTICAL toon instance', () => {
+    const { root, meshA, meshB, meshC } = stubTree();
+    toonifyScene(root, createToonifyCaches());
+    expect(meshA.material).toBe(meshB.material);
+    expect(meshA.material).not.toBe(meshC.material);
+  });
+
+  it('is cached per scene root — the second call is a no-op', () => {
+    const { root, meshA } = stubTree();
+    const caches = createToonifyCaches();
+    toonifyScene(root, caches);
+    const converted = meshA.material;
+    expect(toonifyScene(root, caches)).toBe(0);
+    expect(meshA.material).toBe(converted);
+  });
+
+  it('flips shadow flags on', () => {
+    const { root, meshA, meshB, meshC } = stubTree();
+    toonifyScene(root, createToonifyCaches());
+    for (const m of [meshA, meshB, meshC]) {
+      expect(m.castShadow).toBe(true);
+      expect(m.receiveShadow).toBe(true);
+    }
+  });
+
+  it('toToonMaterial passes through materials that are already toon', () => {
+    const toon = new THREE.MeshToonMaterial();
+    expect(toToonMaterial(toon)).toBe(toon);
+  });
+});
+
+describe('applyTintToScene', () => {
+  function converted() {
+    const t = stubTree();
+    toonifyScene(t.root, createToonifyCaches());
+    return t;
+  }
+
+  it('clones materials before tinting (shared toon materials untouched)', () => {
+    const { root, meshA, meshB } = converted();
+    const sharedToon = meshA.material as THREE.MeshToonMaterial;
+    applyTintToScene(root, '#808080');
+    expect(meshA.material).not.toBe(sharedToon);
+    expect(isTintClone(meshA.material as THREE.Material)).toBe(true);
+    expect(isTintClone(sharedToon)).toBe(false);
+    // the shared material kept its original color
+    expect(sharedToon.color.getHexString()).toBe('e07a5f');
+    // both meshes got tinted clones
+    expect(isTintClone(meshB.material as THREE.Material)).toBe(true);
+  });
+
+  it('multiplies the base color (white tint = unchanged)', () => {
+    const { root, meshA } = converted();
+    applyTintToScene(root, '#ffffff');
+    const m = meshA.material as THREE.MeshToonMaterial;
+    expect(m.color.getHexString()).toBe('e07a5f');
+  });
+
+  it('re-tinting recomputes from the recorded base — tints never compound', () => {
+    const { root, meshA } = converted();
+    applyTintToScene(root, '#808080');
+    const afterFirst = (meshA.material as THREE.MeshToonMaterial).color.getHex();
+    const cloneRef = meshA.material;
+    applyTintToScene(root, '#808080');
+    expect(meshA.material).toBe(cloneRef); // no clone stacking
+    expect((meshA.material as THREE.MeshToonMaterial).color.getHex()).toBe(afterFirst);
+    applyTintToScene(root, '#ffffff');
+    expect((meshA.material as THREE.MeshToonMaterial).color.getHexString()).toBe('e07a5f');
+  });
+});
+
+describe('effectiveTint', () => {
+  it('returns null when nothing would change', () => {
+    expect(effectiveTint(undefined, undefined)).toBeNull();
+    expect(effectiveTint('#ffffff', undefined)).toBeNull();
+    expect(effectiveTint(undefined, 100)).toBeNull();
+  });
+
+  it('passes the tint through and soots it by health', () => {
+    expect(effectiveTint('#e07a5f', undefined)).toBe('#e07a5f');
+    const sooted = effectiveTint(undefined, 0);
+    expect(sooted).not.toBeNull();
+    // healthTint('#ffffff', 0) — heavily darkened toward soot
+    expect(sooted).toMatch(/^#[0-9a-f]{6}$/);
+    expect(sooted!).not.toBe('#ffffff');
+  });
+});
