@@ -94,7 +94,9 @@ export function latestRoutedVia(
  * scene mixes its own warm palette; design-token-guard governs DOM/CSS only).
  *
  * `body`/`roof`/`accent` finish the operational structure; `tag` is the floating
- * label suffix. Unknown kinds fall back to MONUMENT (a neutral cultural stub).
+ * label suffix. Unknown kinds are keyword-mapped onto an existing palette where
+ * possible (EM-130), otherwise they take the neutral BUILDING style — and their
+ * tag is always the humanized raw kind, never a borrowed style name.
  */
 export interface BuildingStyle {
   body: string;
@@ -111,11 +113,59 @@ export const BUILDING_STYLES: Record<string, BuildingStyle> = {
   library:    { body: '#e6dcc8', roof: '#9c6b4a', accent: '#caa472', tag: 'Library' },
   house:      { body: '#f2cc8f', roof: '#e07a5f', accent: '#ffe0a3', tag: 'House' },
   monument:   { body: '#dcd2c0', roof: '#bfa98a', accent: '#fff3e0', tag: 'Monument' },
+  // EM-130: the NEUTRAL fallback — a generic structure, deliberately distinct
+  // from monument (cream walls + timber roof, reusing tints already in this
+  // palette: clocktower body, workshop accent, clocktower accent).
+  building:   { body: '#efe3c4', roof: '#c98b3a', accent: '#ffd27f', tag: 'Building' },
 };
 
-/** Resolve a Building style by kind, defaulting to the monument tint. */
+/**
+ * EM-130: keyword → palette mapping for emergent (agent-invented) kinds, tried
+ * in order with case-insensitive SUBSTRING match on the raw kind. Order is
+ * load-bearing: garden's `bed` must beat house's `den` (both ⊂ "garden…"), and
+ * library's `archive` must beat monument's `arch`.
+ */
+const KIND_KEYWORD_STYLES: ReadonlyArray<readonly [readonly string[], string]> = [
+  [['garden', 'orchard', 'grove', 'bed'], 'garden'],
+  [['farm'], 'farm'],
+  [['library', 'school', 'archive'], 'library'],
+  [['market', 'stall', 'shop', 'booth', 'bazaar'], 'workshop'],
+  [['hall', 'civic', 'center', 'centre', 'fair', 'pavilion'], 'clocktower'],
+  [['house', 'home', 'inn', 'shelter', 'den'], 'house'],
+  [['monument', 'statue', 'arch'], 'monument'],
+];
+
+/**
+ * EM-130: humanize a raw building kind for display — snake/kebab case becomes
+ * Title Case words ("prepare_beds" → "Prepare Beds"). Junk (empty or only
+ * separators) falls back to "Building".
+ */
+export function humanizeKind(kind: string): string {
+  const words = kind.replace(/[_-]+/g, ' ').trim().replace(/\s+/g, ' ');
+  if (!words) return 'Building';
+  return words
+    .split(' ')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+/**
+ * Resolve a Building style by kind (EM-130). Exact keys keep their curated
+ * tag; emergent kinds borrow a palette via keyword match (or take the neutral
+ * `building` style) but ALWAYS carry the humanized raw kind as their tag, so a
+ * market stall is never labeled "Monument".
+ */
 export function buildingStyle(kind: string): BuildingStyle {
-  return BUILDING_STYLES[kind] ?? BUILDING_STYLES.monument;
+  const exact = BUILDING_STYLES[kind];
+  if (exact) return exact;
+  const lower = kind.toLowerCase();
+  const tag = humanizeKind(kind);
+  for (const [keywords, styleKey] of KIND_KEYWORD_STYLES) {
+    if (keywords.some((k) => lower.includes(k))) {
+      return { ...BUILDING_STYLES[styleKey], tag };
+    }
+  }
+  return { ...BUILDING_STYLES.building, tag };
 }
 
 /**
@@ -154,10 +204,52 @@ export function animalStyle(species: string): AnimalStyle {
  */
 export const ANIMAL_CHAOS_MAGENTA = '#d957d9';
 
+/** EM-131: minimum spacing between building slot centers (largest structure
+ * footprint is ~3.6 world units, so 4.2 leaves breathing room for labels). */
+export const SLOT_SPACING = 4.2;
+
+/** EM-131: radius of the first slot ring — clears the place's own structure
+ * (matches the legacy `buildingSpot` satellite distance). */
+export const SLOT_BASE_RADIUS = 5.5;
+
+/**
+ * EM-131: deterministic slot layout for ALL buildings sharing one place.
+ * Ids are sorted, then placed on concentric rings around the place anchor:
+ * each ring holds as many slots as keep SLOT_SPACING along its circumference,
+ * and the radius grows ring by ring. Pure function of (center, id list) —
+ * no randomness, no clock — so the same world yields the same layout every
+ * frame, reload, and input ordering. No slot ever sits on the anchor itself.
+ */
+export function slotLayout(
+  center: WorldPoint,
+  buildingIds: readonly string[],
+): Map<string, WorldPoint> {
+  const sorted = [...buildingIds].sort();
+  const out = new Map<string, WorldPoint>();
+  let placed = 0;
+  for (let ring = 0; placed < sorted.length; ring++) {
+    const radius = SLOT_BASE_RADIUS + ring * SLOT_SPACING;
+    const capacity = Math.max(1, Math.floor((2 * Math.PI * radius) / SLOT_SPACING));
+    const inRing = Math.min(capacity, sorted.length - placed);
+    for (let s = 0; s < inRing; s++) {
+      // spread the ring's occupants evenly; stagger alternate rings by half a
+      // slot so buildings don't line up into radial spokes.
+      const angle = ((s + (ring % 2) * 0.5) / inRing) * Math.PI * 2 - Math.PI / 2;
+      out.set(sorted[placed + s], {
+        x: center.x + Math.cos(angle) * radius,
+        z: center.z + Math.sin(angle) * radius,
+      });
+    }
+    placed += inRing;
+  }
+  return out;
+}
+
 /**
  * A satellite world position for a structure that sits NEAR (not on top of) a
- * place's structure. Buildings ring the place center on a stable angle derived
- * from the building id, so two structures at the same place don't overlap.
+ * place's structure, on a stable angle derived from the id. Buildings now use
+ * `slotLayout` (EM-131); this remains for single satellites like the notice
+ * board.
  */
 export function buildingSpot(
   center: WorldPoint,
