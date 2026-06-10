@@ -166,6 +166,50 @@ frontend unit tests targeting selectors/scrubber/dashboard).
 
 ---
 
+## Wave 12–14 — v3: Village → Civilization (planned)
+
+Filed 2026-06-09 via `plan-intake` from `docs/research/deep-research-v3.md`. Tactical detail
++ IDs live in `docs/REMAINING-WORK.md` (EM-109–128). Six headline features — multi-city,
+parallel model-family worlds, city growth, deeper relationships, lightweight children, and a
+cozy-art overhaul — shipped **breadth-first**, each EM-### an independently demo-able PR.
+
+**Prerequisites already satisfied.** Unlike v2/v2.1, v3 opens with a clean foundation: every
+hard dep shipped in W11a/W11b — fork/resume (EM-101), persona library (EM-092), procgen +
+housing (EM-098), reflection (EM-080), run browser + cross-run AWI (EM-086), camera nav
+(EM-095), and the governance-texture batch (EM-079/087/100/103). No prerequisite wave to clear.
+
+**Build order (user 2026-06-09):** depth-first on the **first city** — grow it, change it,
+make it *be more things* (EM-115 city-growth slice, EM-122 buildings-per-place-kind, EM-123
+neighborhoods/zoning, riding shipped EM-098 procgen/housing) — **before founding a second
+settlement** (EM-109/110 multi-city). This deliberately inverts the report's "multi-city is the
+keystone" recommendation in favor of deepening what's already on screen.
+
+**Wave 12 — "There is more than one place" (breadth slice).** Items: **EM-109** (multi-city
+data model + 2nd settlement on the 2D map), **EM-110** (reflex travel + migration), **EM-111**
+(art win #1: HDRI + toon + soft shadows), **EM-112** (parallel-worlds runner, `model_family`,
+sequential tournament), **EM-113** (relationship type/strength schema + colored edges),
+**EM-114** (lightweight children: partner→reflex spawn, population cap), **EM-115** (city-growth
+slice: project→building).
+
+**Wave 13 — depth pass 1.** Items: **EM-116** (inter-city trade caravans), **EM-117**
+(diplomacy via governance), **EM-118** (instanced foliage, art phase 2), **EM-119**
+(Model-Family Arena comparison UI), **EM-120** (factions + feuds + reputation), **EM-121**
+(multi-city camera: zoom-to-city / follow-agent).
+
+**Wave 14 — depth pass 2.** Items: **EM-122** (buildings-per-place-kind, art phase 3),
+**EM-123** (neighborhoods + zoning + megaprojects), **EM-124** (character mesh swap, art phase
+4), **EM-125** (reflection → relationship upgrades + migration), **EM-126** (generational depth:
+aging + inheritance + lineage tree), **EM-127** (day/night + seasons + particles, art phase 5),
+**EM-128** (population/culture AWI metrics per model family).
+
+**Free-scale is the binding constraint (sharper than ever here):** more cities × agents ×
+children = more calls, and billing is subscription-only with no overage. Mitigations are
+designed in — reflex-first travel/trade/children/caravans, per-city context scoping, a hard
+population cap, cheaper/slower models for secondary entities, and **sequential** (never
+concurrent) parallel-world runs gated by per-provider RPD/TPD tracking.
+
+---
+
 ## Closure log
 
 What shipped and when. Append on each wave/milestone close.
@@ -189,3 +233,4 @@ What shipped and when. Append on each wave/milestone close.
 | 2026-06-09 | W9 ✅ | EM-069–074 shipped on `build/w9-make-v2-true` (contracts bumped: event-log v1.1.0, api 1.2.0, frontend-inspector v1.1.0). QA gate caught + fixed W9-QA-1 (replay fold key); 172 tests / 0 fail / 1 xfail (pins W10 EM-076). Live verification GREEN: fresh-load scrub correct between snapshots, starvation countdown → death, extinction auto-pause + summary, routing-degraded banner field-verified. All W9 exit criteria met (`BUILD_RESULTS_W9.md`) |
 | 2026-06-09 | W11a ✅ | UI batch shipped on `build/w11a-ui-batch` (contracts: api 1.3.0, event-log v1.2.0, frontend-inspector v1.2.0). EM-086 run browser/archive/cross-run AWI, EM-093 frozen-snapshot scroll, EM-094 digest+narrator, EM-095 camera nav, EM-096 chat-first layout, EM-097, EM-099 critters roster + in-wave user items EM-102/104/105. QA proceed=true (206 backend + 106 frontend); live verification GREEN (0.00px scroll drift measured, 27-run browser with exactly 1 ACTIVE, archive mode + comparison, console 0 errors). W11b (sim texture) next (`BUILD_RESULTS_W11A.md`) |
 | 2026-06-09 | W11b ✅ | Sim-texture batch shipped on `build/w11a-ui-batch` (contracts: api 1.4.0, event-log v1.3.0, frontend-inspector v1.3.0). EM-079/080/081 same-call cognition (commitments+👻 phantoms, reflections, overhearing — prompt-capture tests assert zero extra LLM calls), EM-087+103 law RENEWAL + commemorative-monument guard, EM-091 billboard + god replies, EM-092 personas, EM-098 procgen+housing, EM-100 readable rule names, EM-101 fork/resume (honest snapshot grain), EM-082/083 + in-wave EM-107 layout-stable banners. QA proceed=true (252 backend + 150 frontend); live verification GREEN (god post on the board, fork 26@78→run 101 ↩ chip, banner dismiss 0.0px shift). **W9–W11 complete** (`BUILD_RESULTS_W11B.md`) |
+| 2026-06-09 | v3 intake | `docs/research/deep-research-v3.md` → **EM-109–128** filed via `plan-intake`, opening **W12–W14** (v3 Village→Civilization). Report's EM-105–124 renumbered to EM-109–128 (EM-105–108 taken by W11a/W11b in the interim); EM-121/124 rescoped to multi-city/mesh deltas (their deps shipped W11a); multi-city + multi-world promoted out of `FUTURE.md`. All hard prereqs already shipped — v3 is unblocked. Build order per user: deepen the first city before founding a second |
