@@ -199,7 +199,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-144 | P2 | W12 | frontend | user 2026-06-10 | Stale starvation banner: "[STARVATION] ⚠ Bram is starving — energy 22/100 (below 25)" stayed up after Bram recharged back above the threshold (seen T105) — the warning should derive from live agent energy (clear when energy ≥ threshold, or re-derive per world_state), not latch on the last starvation event | open | — |
 
-_Next free ID: EM-145._
+| EM-145 | P1 | W12 | backend | user 2026-06-10 | God voice tools show no agent uptake: user posted billboard replies and god whispers multiple times and nothing indicated agents "heard" or "read" them (goal: get agents to name the town — still impossible). Wave-A E2E showed an API whisper acted on within 3 ticks, so suspect the UI→API path, whisper loss on hot-reload (`pending_whispers` is in-memory), or prompt injection too weak for live models. Fix end-to-end + make delivery LEGIBLE: feed event when a whisper/billboard reply is consumed into a prompt ("✦ {name} hears the whisper"), and verify with prompt capture | open | — |
+
+_Next free ID: EM-146._
 
 ## Notes
 
