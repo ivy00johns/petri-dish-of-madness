@@ -210,13 +210,17 @@ def test_a_new_name_supersedes_the_old_one_not_a_renewal():
     assert world.town_name == "Lastditch"
 
 
-def test_town_name_surfaces_in_prompt_and_round_trips():
+def test_town_name_is_emergent_not_pushed_and_round_trips():
     world = _world()
-    # Unnamed → the prompt nudges toward name_town, and Cy (at the town hall) is
-    # actually offered the propose_rule line carrying name_town.
-    assert "this town has no name yet" in _system_prompt(world, world.agents["ada"])
-    assert "name_town" in _system_prompt(world, world.agents["cy"])
+    # Unnamed → NO town line and NO naming directive pushed at Ada (at the plaza).
+    # Naming stays emergent: the name_town affordance is only DISCOVERABLE in the
+    # propose_rule menu at the town hall (Cy), never forced into every prompt.
+    ada_sp = _system_prompt(world, world.agents["ada"])
+    assert "Town:" not in ada_sp
+    assert "name_town" not in ada_sp
+    assert "name_town" in _system_prompt(world, world.agents["cy"])  # town-hall menu only
 
+    # Once named, the name rides every prompt's header (world awareness).
     _pass_rule(world, "name_town", "Hopewell.", name="Hopewell")
     assert "Town: Hopewell" in _system_prompt(world, world.agents["bo"])
 

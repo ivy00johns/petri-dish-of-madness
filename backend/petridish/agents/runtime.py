@@ -1007,18 +1007,16 @@ def _assemble_context(
   carry on — but you have heard it, and so has everyone else.
 """
 
-    # PROTOTYPE (god-channel) — the town's name (consensus-set via name_town), or a
-    # nudge that it has none yet so agents know the affordance exists.
+    # PROTOTYPE (god-channel) — surface the town's name ONLY once it has one (set by
+    # consensus name_town). When the town is unnamed we say NOTHING: naming must be
+    # emergent — an agent's own choice at the town hall, or a god *suggestion* via the
+    # proclamation channel — never a standing directive pushed into every prompt.
     _town = (getattr(world, "town_name", "") or "").strip()
-    town_line = (
-        f"Town: {_town}" if _town
-        else "Town: (this town has no name yet — name it with propose_rule effect=name_town)"
-    )
+    town_line = f"\nTown: {_town}" if _town else ""
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-Tick: {world.tick}
-{town_line}
+Tick: {world.tick}{town_line}
 Personality: {agent.personality}
 
 === YOUR STATUS ===
