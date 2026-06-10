@@ -330,6 +330,13 @@ export function socialGraph(
     };
   });
 
+  // Edges may only connect graph NODES. Conflict/economy events can carry a
+  // BUILDING as target_id (arson, project funding) — feeding those into the
+  // force layout threw "node not found: bld_…" and killed the whole panel on
+  // building-heavy archived runs (run 189: 43 conflicts + 57 economy events
+  // targeting buildings).
+  const nodeIds = new Set(nodes.map((n) => n.id));
+
   const edges = new Map<string, EdgeAccum>();
   const bump = (a: string, b: string, type: string, trustDelta: number) => {
     const key = edgeKey(a, b);
@@ -344,6 +351,7 @@ export function socialGraph(
     const a = e.actor_id;
     const b = e.target_id;
     if (!a || !b) continue;
+    if (!nodeIds.has(a) || !nodeIds.has(b) || a === b) continue;
     if (REL_KINDS.has(e.kind)) {
       const type = str(payload(e)['type']) ?? inferRelType(e.text);
       const trust = num(payload(e)['trust_delta']) ?? (type === 'rival' || type === 'enemy' ? -20 : 20);
@@ -359,6 +367,7 @@ export function socialGraph(
   // empty before any relationship event has fired) — only forward edges.
   for (const a of agents) {
     for (const [otherId, rel] of Object.entries(a.relationships ?? {})) {
+      if (!nodeIds.has(otherId) || otherId === a.id) continue;
       if (rel.interactions === 0 && rel.trust === 0 && rel.type === 'neutral') continue;
       const key = edgeKey(a.id, otherId);
       if (!edges.has(key)) {
