@@ -202,6 +202,15 @@ slice: project→building).
 aging + inheritance + lineage tree), **EM-127** (day/night + seasons + particles, art phase 5),
 **EM-128** (population/culture AWI metrics per model family).
 
+**Wave C — "a town, not a diorama" (filed 2026-06-10, P1).** Design spec:
+`docs/superpowers/specs/2026-06-10-wave-c-real-city-design.md`. The city-track build that
+follows Wave B's lighting/instancing foundation: **EM-147** (district town config — ~15
+places + additive `district` field, precursor to EM-123), **EM-148** (GLB asset layer:
+registry + instanced loader + toon-converted CC0 kits), **EM-149** (townLayout lane network —
+kills the hub-and-spoke pinwheel), **EM-150** (buildings GLB swap via `operationalVariant`),
+plus **EM-124 bumped to P1** as Wave C's character swap (C5). Starts after Wave B
+(`build/wave-b-city-comes-alive`) merges; handcraft the hero town first, generator later.
+
 **Free-scale is the binding constraint (sharper than ever here):** more cities × agents ×
 children = more calls, and billing is subscription-only with no overage. Mitigations are
 designed in — reflex-first travel/trade/children/caravans, per-city context scoping, a hard
@@ -234,3 +243,4 @@ What shipped and when. Append on each wave/milestone close.
 | 2026-06-09 | W11a ✅ | UI batch shipped on `build/w11a-ui-batch` (contracts: api 1.3.0, event-log v1.2.0, frontend-inspector v1.2.0). EM-086 run browser/archive/cross-run AWI, EM-093 frozen-snapshot scroll, EM-094 digest+narrator, EM-095 camera nav, EM-096 chat-first layout, EM-097, EM-099 critters roster + in-wave user items EM-102/104/105. QA proceed=true (206 backend + 106 frontend); live verification GREEN (0.00px scroll drift measured, 27-run browser with exactly 1 ACTIVE, archive mode + comparison, console 0 errors). W11b (sim texture) next (`BUILD_RESULTS_W11A.md`) |
 | 2026-06-09 | W11b ✅ | Sim-texture batch shipped on `build/w11a-ui-batch` (contracts: api 1.4.0, event-log v1.3.0, frontend-inspector v1.3.0). EM-079/080/081 same-call cognition (commitments+👻 phantoms, reflections, overhearing — prompt-capture tests assert zero extra LLM calls), EM-087+103 law RENEWAL + commemorative-monument guard, EM-091 billboard + god replies, EM-092 personas, EM-098 procgen+housing, EM-100 readable rule names, EM-101 fork/resume (honest snapshot grain), EM-082/083 + in-wave EM-107 layout-stable banners. QA proceed=true (252 backend + 150 frontend); live verification GREEN (god post on the board, fork 26@78→run 101 ↩ chip, banner dismiss 0.0px shift). **W9–W11 complete** (`BUILD_RESULTS_W11B.md`) |
 | 2026-06-09 | v3 intake | `docs/research/deep-research-v3.md` → **EM-109–128** filed via `plan-intake`, opening **W12–W14** (v3 Village→Civilization). Report's EM-105–124 renumbered to EM-109–128 (EM-105–108 taken by W11a/W11b in the interim); EM-121/124 rescoped to multi-city/mesh deltas (their deps shipped W11a); multi-city + multi-world promoted out of `FUTURE.md`. All hard prereqs already shipped — v3 is unblocked. Build order per user: deepen the first city before founding a second |
+| 2026-06-10 | Wave C intake | `docs/superpowers/specs/2026-06-10-wave-c-real-city-design.md` → **EM-147–150** filed via `plan-intake` (all P1/W14: district town config, GLB asset layer, lane network, buildings GLB swap); **EM-124 bumped P2→P1** and rescoped as Wave C's character swap (C5, deps EM-148); **EM-123** gains dep EM-147. Spec preamble's stale art-doc EM refs (EM-119/121 → ledger EM-122/124) corrected at intake. Gate: Wave C starts after Wave B merges |

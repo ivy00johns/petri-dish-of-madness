@@ -4,12 +4,15 @@
  * The plane receives shadows. Paths are thin, low-lying rounded strips drawn
  * from the plaza (social) hub out to each other place so the village reads as
  * "connected".
+ *
+ * EM-111: terrain/paths use the shared GOLDEN_HOUR palette via the cached
+ * warm-toon material factory (toon.ts) — banded cel shading, warm shadows.
  */
 
 import { useMemo } from 'react';
-import * as THREE from 'three';
 import type { Place } from '../../types';
 import { SIZE, placeToWorld } from './worldSpace';
+import { GOLDEN_HOUR, toonMaterial } from './toon';
 
 interface GroundProps {
   places: Place[];
@@ -40,9 +43,9 @@ function Path({
       position={[midX, 0.02, midZ]}
       rotation={[-Math.PI / 2, 0, angle]}
       receiveShadow
+      material={toonMaterial(GOLDEN_HOUR.path)}
     >
       <planeGeometry args={[length, 1.4]} />
-      <meshStandardMaterial color="#c9a66b" roughness={1} />
     </mesh>
   );
 }
@@ -61,20 +64,24 @@ export function Ground({ places }: GroundProps) {
 
   return (
     <group>
-      {/* Grassy ground plane */}
+      {/* Grassy ground plane (camera never dips below the horizon — the
+          orbit polar clamp keeps us topside, so front-face only is fine). */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
         position={[0, 0, 0]}
         receiveShadow
+        material={toonMaterial(GOLDEN_HOUR.terrain)}
       >
         <planeGeometry args={[SIZE * 1.6, SIZE * 1.6, 1, 1]} />
-        <meshStandardMaterial color="#8ec07c" roughness={1} side={THREE.DoubleSide} />
       </mesh>
 
       {/* A slightly darker grass "field" border ring for depth */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]}>
+      <mesh
+        rotation={[-Math.PI / 2, 0, 0]}
+        position={[0, -0.01, 0]}
+        material={toonMaterial(GOLDEN_HOUR.terrainEdge)}
+      >
         <circleGeometry args={[SIZE * 1.1, 48]} />
-        <meshStandardMaterial color="#7cb069" roughness={1} />
       </mesh>
 
       {/* Dirt paths */}

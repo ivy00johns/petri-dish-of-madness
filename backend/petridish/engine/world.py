@@ -1239,15 +1239,29 @@ class World:
         events.append(built_evt)
 
         if building.progress >= 100:
-            building.progress = 100
-            building.status = "operational"
-            building.health = 100
-            building.updated_tick = self.tick
-            events.append(self._structure_state_changed_event(
-                building, "under_construction", "operational", "completed", agent.id))
-            events.append({
+            events.extend(self._complete_construction(building, "completed", agent.id))
+        return {"_multi": events}
+
+    def _complete_construction(
+        self, building: Building, reason: str, actor_id: str | None
+    ) -> list[dict]:
+        """Shared completion path (EM-115): flip an under_construction building to
+        operational (progress clamped to 100, health restored) and return the
+        structure_state_changed + building_operational events. Used by BOTH the
+        agent `build_step` action and the per-round auto-build reflex in
+        advance_buildings(), so the event kinds/payload keys stay identical and
+        function activation (forage/work buffs via operational_building_at) works
+        regardless of which path finished the job."""
+        building.progress = 100
+        building.status = "operational"
+        building.health = 100
+        building.updated_tick = self.tick
+        return [
+            self._structure_state_changed_event(
+                building, "under_construction", "operational", reason, actor_id),
+            {
                 "kind": "building_operational",
-                "actor_id": agent.id,
+                "actor_id": actor_id,
                 "target_id": building.id,
                 "text": f"{building.name} is now operational"
                         + (f" ({building.function})" if building.function else "") + ".",
@@ -1257,8 +1271,8 @@ class World:
                     "function": building.function,
                     "location": building.location,
                 },
-            })
-        return {"_multi": events}
+            },
+        ]
 
     def action_repair(self, agent: AgentState, building_id: str) -> dict:
         """Restore health to 100; damaged/offline -> operational."""
@@ -1371,24 +1385,46 @@ class World:
     # ──────────────────────────────────────────────────────────────────────────
 
     def advance_buildings(self) -> list[dict]:
-        """Advance building lifecycle once per round. Any non-operational building
-        that has had no fund/build activity for buildings.abandon_after_ticks (and
-        is not already in a terminal state) becomes abandoned. Returns the list of
-        structure_state_changed events to emit. This makes the 'clock tower that
-        never got built' real."""
-        window = int(self._bld_param("abandon_after_ticks", 40))
-        if window <= 0:
-            return []
+        """Advance building lifecycle once per round. Returns the events to emit
+        (the loop flushes them as standalone system events).
+
+        EM-115 — deterministic city growth: every under_construction building
+        gains buildings.auto_build_per_round progress (the village work crew —
+        a zero-LLM reflex) and refreshes last_progress_tick, so a FUNDED project
+        always finishes even if no agent ever picks build_step (intended
+        semantics change: funded projects can no longer rot to abandoned while
+        auto-build is on; set auto_build_per_round=0 to restore the old stall
+        behavior). Interim progress is SILENT — events fire only on completion
+        (via the shared _complete_construction helper, same payloads as the
+        agent build_step path).
+
+        Abandonment (W7 / EM-061) still applies to planned/unfunded + damaged
+        stalls: no fund/build activity for buildings.abandon_after_ticks ->
+        abandoned. This keeps the 'clock tower that never got funded' real."""
         events: list[dict] = []
-        # Skip statuses that represent a *completed* structure (operational/offline)
-        # or a terminal one (abandoned/destroyed). Only planned/under_construction/
-        # damaged structures can rot from lack of follow-through. An owner-offlined
-        # building was built — it isn't "abandoned for no follow-through".
+        auto = int(self._bld_param("auto_build_per_round", 10))
+        window = int(self._bld_param("abandon_after_ticks", 40))
+        # Statuses that never rot: completed structures (operational/offline) and
+        # terminal ones (abandoned/destroyed). An owner-offlined building was
+        # built — it isn't "abandoned for no follow-through".
         skip = {"operational", "offline", "abandoned", "destroyed"}
         for building in self.buildings.values():
             if building.status in skip:
                 continue
-            if self.tick - building.last_progress_tick > window:
+            # Auto-build reflex: funded (under_construction) projects always
+            # creep forward; completion reuses the build_step completion path.
+            if building.status == "under_construction" and auto > 0:
+                building.progress = min(100, building.progress + auto)
+                building.last_progress_tick = self.tick
+                building.updated_tick = self.tick
+                if building.progress >= 100:
+                    events.extend(self._complete_construction(
+                        building, "raised by the village work crew", None))
+                continue
+            # Stall rot: planned/unfunded (and damaged, and stalled
+            # under_construction when auto-build is disabled) projects abandon
+            # after the idle window.
+            if window > 0 and self.tick - building.last_progress_tick > window:
                 frm = building.status
                 building.status = "abandoned"
                 building.updated_tick = self.tick

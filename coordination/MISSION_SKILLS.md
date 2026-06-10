@@ -80,3 +80,13 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] render-level verification — Playwright on `/`: village + feed render, 0 console errors; GOD CONSOLE groups verified in the live DOM; live API E2E (bless clamps at 100, grant +50, whisper delivered and acted on within 3 ticks). EM-130/131 building visuals covered by 15 unit tests — no buildings existed yet in the young live run (noted, not skipped silently).
 - [x] `git-commit` conventions — 9 per-area commits by orchestrator (agents did not commit).
 - [ ] `ux-review` full-skill subjective pass — not in this wave's scope (logic fixes); still owed on merged main per W11b deferral note.
+
+## Wave B — "the city comes alive" (source: ledger EM-111/115/118/122 + 3D-WORLD-ART-DIRECTION.md Direction 1, user GO 2026-06-10)
+- [x] `orchestrator` — contract-first wave on `build/wave-b-city-comes-alive`; contract `contracts/wave-b.md`; 2 implement waves (B1∥B2, B3∥B4) + QE.
+- [x] seed imagery — concept frames pre-existed (`docs/ui-redesign/3d-concepts/dir1-warm-toon-golden-hour.png` was the art target); `nano-banana` not re-invoked; CC0 Venice Sunset HDRI vendored (`ASSET_LICENSES.md`).
+- [x] `frontend-design` + `ui-ux-pro-max` — invoked by B2/B3/B4 per dispatch requirement.
+- [x] QE gate — `coordination/qa-report.json` proceed=true (backend 352, web 236 after prototype-guard gate fix; 5 adversarial probes green; 6 MINOR issues, 1 fixed at gate, rest recorded).
+- [x] render-level verification — orchestrator Playwright passes after each wave: golden-hour look + live auto-build (gate 1), treeline/lamps/props + per-kind stall (gate 2), console 0 errors both times; user live-reviewed mid-wave (bench-on-path feedback folded into B3 as a test-enforced rule). Screenshots `docs/build-evidence/wave-b-gate{1,2}-*.jpeg`.
+- [x] design-token check — diff is world3d canvas + backend only (zero CSS/token files touched); WebGL hexes exempt per established convention and centralized in worldSpace.ts/toon.ts.
+- [x] `ux-review` — scoped subjective pass by orchestrator at both gates (look reads golden-hour; long shadows + banding verified; user co-reviewed live). Full-skill repo-wide pass still owed on merged main per the W11b deferral note.
+- [x] `git-commit` conventions — per-item commits at gates by orchestrator.

@@ -25,12 +25,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Sky } from '@react-three/drei';
+import { Environment, OrbitControls, Sky, SoftShadows } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
 import type { WorldState, WorldEvent, FocusTarget } from '../../types';
 import { Ground } from './Ground';
 import { Scenery } from './Scenery';
+import { Foliage } from './Foliage';
+import { TownProps } from './Props';
 import { Building } from './Building';
 import { Structure } from './Structure';
 import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
@@ -38,6 +40,7 @@ import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
 import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, SIZE } from './worldSpace';
+import { GOLDEN_HOUR } from './toon';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // How recent an animal's last chaotic event must be (in seq distance from the
@@ -474,7 +477,10 @@ export function CozyWorld({
         gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
         camera={{ position: [24, 22, 24], fov: 42, near: 0.1, far: 400 }}
       >
-        <color attach="background" args={['#f3e2c7']} />
+        <color attach="background" args={[GOLDEN_HOUR.background]} />
+        {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
+            feathered golden-hour shadows instead of hard stencils. */}
+        <SoftShadows size={24} samples={10} focus={0.5} />
         <Scene
           world={world}
           bubblesByAgent={bubblesByAgent}
@@ -572,22 +578,30 @@ function Scene({
 
   return (
     <>
+      {/* EM-111 golden hour (art Direction 1): the sun sits LOW — the Sky
+          shader paints the warm horizon gradient, the vendored sunset HDRI
+          (Poly Haven, CC0 — see ASSET_LICENSES.md) supplies soft warm image-
+          based lighting for any PBR materials, and a low-angle warm key light
+          drives the toon ramp's banding. */}
       <Sky
         distance={450000}
-        sunPosition={[8, 6, 4]}
-        inclination={0.48}
-        azimuth={0.25}
-        turbidity={6}
-        rayleigh={1.2}
-        mieCoefficient={0.01}
-        mieDirectionalG={0.85}
+        sunPosition={[10, 2.4, 6]}
+        turbidity={7.5}
+        rayleigh={2.2}
+        mieCoefficient={0.014}
+        mieDirectionalG={0.88}
       />
-      <hemisphereLight args={['#fff3df', '#7aa05f', 0.7]} />
-      <ambientLight intensity={0.25} color="#ffe9cc" />
+      <Environment files="/hdri/venice_sunset_1k.hdr" />
+      <hemisphereLight
+        args={[GOLDEN_HOUR.hemiSky, GOLDEN_HOUR.hemiGround, 0.55]}
+      />
+      {/* Faint warm ambient only — the directional must dominate so the toon
+          bands read; it also keeps shadows warm, never black. */}
+      <ambientLight intensity={0.15} color={GOLDEN_HOUR.ambient} />
       <directionalLight
-        position={[14, 18, 8]}
-        intensity={1.5}
-        color="#ffd9a0"
+        position={[18, 9, 8]}
+        intensity={2.2}
+        color={GOLDEN_HOUR.sun}
         castShadow
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
@@ -599,10 +613,13 @@ function Scene({
         shadow-camera-bottom={-32}
         shadow-bias={-0.0004}
       />
-      <fog attach="fog" args={['#f3e2c7', 45, 95]} />
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 45, 95]} />
 
       <Ground places={places} />
       <Scenery places={places} />
+      {/* EM-118: instanced treeline (LOD) + lived-in town props. */}
+      <Foliage places={places} />
+      <TownProps places={places} />
 
       {places.map((p) => (
         <Building
