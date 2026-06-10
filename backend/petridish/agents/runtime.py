@@ -778,7 +778,12 @@ def _assemble_context(
     W11b additions (all keyword-only, default-off, so existing callers are
     unchanged): `commitments` renders the YOUR ACTIVE COMMITMENTS block (EM-079),
     `overheard` injects pending overheard speech (EM-081), `request_reflection`
-    asks for the optional `reflection` field this turn only (EM-080)."""
+    asks for the optional `reflection` field this turn only (EM-080).
+
+    EM-137 (god console): pops — and thereby consumes — the agent's queued god
+    whispers from `world.pending_whispers` into a one-shot prompt block (the
+    only world mutation this function performs, by design: assembly IS the
+    delivery)."""
     place = world.places.get(agent.location)
     place_name = place.name if place else agent.location
     place_kind = place.kind if place else "unknown"
@@ -1010,6 +1015,26 @@ def _assemble_context(
   carry on — but you have heard it, and so has everyone else.
 """
 
+    # ── EM-137 (god console) — one-shot god whisper, consumed RIGHT HERE. ─────
+    # Popping the queue IS the delivery: the line rides only THIS prompt and the
+    # next turn carries no trace (the same consume-once pattern as
+    # pending_overheard in run_turn, but the queue lives in world state so the
+    # api seam can fill it). Context injection only — zero extra LLM calls.
+    # (getattr keeps callers safe if the engine seam is ever absent.)
+    whisper_block = ""
+    _pending_whispers = getattr(world, "pending_whispers", None)
+    _whispers = (
+        _pending_whispers.pop(agent.id, [])
+        if isinstance(_pending_whispers, dict) else []
+    )
+    if _whispers:
+        whisper_lines = "\n".join(f'  "{w}"' for w in _whispers)
+        whisper_block = f"""
+=== ✦ A VOICE ONLY YOU CAN HEAR ===
+{whisper_lines}
+  No one else heard this — it was meant for you alone. Make of it what you will.
+"""
+
     # PROTOTYPE (god-channel) — surface the town's name ONLY once it has one (set by
     # consensus name_town). When the town is unnamed we say NOTHING: naming must be
     # emergent — an agent's own choice at the town hall, or a god *suggestion* via the
@@ -1030,7 +1055,7 @@ Mood: {agent.mood}
 
 === NEEDS ===
 {needs_text}
-{proclamation_block}
+{proclamation_block}{whisper_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}
 

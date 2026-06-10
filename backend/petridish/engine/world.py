@@ -448,6 +448,12 @@ class World:
         # vote passes (_on_rule_activated). Empty = unnamed. Serialized in
         # to_snapshot() so the frontend/header can show it.
         self.town_name: str = ""
+        # EM-137 (god console) — one-shot god whispers awaiting delivery, keyed
+        # by agent id. post_whisper_as_god queues lines here; the runtime pops
+        # the target's queue into its NEXT prompt (_assemble_context) exactly
+        # once. Deliberately NOT serialized in to_snapshot(): a whisper is
+        # ephemeral by design, so a restore simply drops undelivered ones.
+        self.pending_whispers: dict[str, list[str]] = {}
 
         self.tick: int = 0
         self.day: int = 0
@@ -1528,6 +1534,94 @@ class World:
                 "text": text,
                 "in_reply_to": active.get("text"),
             },
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave A.2 (god console) — targeted interventions (EM-136) + one-shot
+    # whispers (EM-137). The world-wide levers (RANDOM_EVENTS, proclamations)
+    # could never save ONE starving agent; these target a single soul. Free-scale
+    # law: pure state mutation + event (intervene) and context injection
+    # (whisper) — zero LLM calls either way. The api layer exposes the endpoints
+    # and emits the returned event dicts through the normal pipeline.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # Per-kind defaults for god_intervene (the UI's BLESS +25 / GRANT +10).
+    GOD_INTERVENTION_DEFAULTS = {
+        "bless_energy": 25,
+        "grant_credits": 10,
+    }
+
+    def _living_agent_or_raise(self, agent_id: str) -> AgentState:
+        """Resolve a LIVING agent for a targeted god action. ValueError (the api
+        maps it to 422) on unknown or dead targets — resurrection is explicitly
+        out of scope, so the god cannot reach the dead."""
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            raise ValueError(f"Unknown agent: {agent_id!r}")
+        if not agent.alive:
+            raise ValueError(f"{agent.name} is dead — the god cannot reach them")
+        return agent
+
+    def god_intervene(self, kind: str, agent_id: str, amount: Any = None) -> dict:
+        """God-mode targeted intervention (EM-136): bless ONE agent's energy
+        (clamped at 100) or grant them credits. amount defaults per kind
+        (GOD_INTERVENTION_DEFAULTS) and is validated 1..100; unknown kind and
+        unknown/dead agent raise ValueError (api → 422). Returns a ready-to-emit
+        `god_intervention` event dict (actor_type 'god', target_id the agent,
+        payload carries before/after so a clamp is visible)."""
+        if kind not in self.GOD_INTERVENTION_DEFAULTS:
+            raise ValueError(f"Unknown intervention kind: {kind!r}")
+        agent = self._living_agent_or_raise(agent_id)
+        if amount is None:
+            amount = self.GOD_INTERVENTION_DEFAULTS[kind]
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            raise ValueError(f"amount must be an integer, got {amount!r}")
+        if not 1 <= amount <= 100:
+            raise ValueError(f"amount must be 1..100, got {amount}")
+        if kind == "bless_energy":
+            before: Any = round(agent.energy, 2)
+            agent.energy = min(100.0, agent.energy + amount)
+            after: Any = round(agent.energy, 2)
+            text = f"✦ god restores {agent.name} — +{amount} energy"
+        else:  # grant_credits
+            before = agent.credits
+            agent.credits += amount
+            after = agent.credits
+            text = f"✦ god favors {agent.name} — +{amount} credits"
+        return {
+            "kind": "god_intervention",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": agent.id,
+            "turn_id": None,
+            "text": text,
+            "payload": {"kind": kind, "amount": amount,
+                        "before": before, "after": after},
+        }
+
+    def post_whisper_as_god(self, agent_id: str, text: str) -> dict:
+        """God-mode one-shot whisper (EM-137): queue a line that rides ONLY the
+        target agent's NEXT prompt, exactly once (pending_whispers, popped by
+        runtime._assemble_context). Text capped at 280 like the billboard;
+        empty text and unknown/dead agents raise ValueError (api → 422).
+        Returns a ready-to-emit `whisper_posted` event dict — this is a
+        spectator app, nothing is secret, so the feed line carries the content
+        too (the whisper is private to the AGENTS, not the watchers)."""
+        agent = self._living_agent_or_raise(agent_id)
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        if not text:
+            raise ValueError("text required")
+        self.pending_whispers.setdefault(agent.id, []).append(text)
+        return {
+            "kind": "whisper_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": agent.id,
+            "turn_id": None,
+            "text": f"✦ god whispers to {agent.name}: \"{_truncate(text, 80)}\"",
+            "payload": {"agent_id": agent.id, "text": text},
         }
 
     # ──────────────────────────────────────────────────────────────────────────

@@ -715,6 +715,85 @@ async def post_proclamation(body: ProclaimBody):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Wave A.2 — god console: targeted interventions (EM-136) + one-shot whispers
+# (EM-137). The world-wide levers above (inject/billboard/proclaim) can't save
+# ONE starving agent; these target a single soul. Free-scale law: pure state
+# mutation + event / context injection — zero LLM calls.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class InterveneBody(BaseModel):
+    kind: str
+    agent_id: str
+    # ge/le make FastAPI 422 an out-of-range amount before the handler runs;
+    # None falls through to the engine seam's per-kind default (25 / 10).
+    amount: int | None = Field(default=None, ge=1, le=100)
+
+
+@app.post("/api/god/intervene")
+async def god_intervene(body: InterveneBody):
+    """God targets ONE agent with a deterministic intervention (EM-136):
+    `bless_energy` (clamped at 100) or `grant_credits`. Calls the engine seam
+    `world.god_intervene(kind, agent_id, amount)` and emits `god_intervention`
+    (actor_type 'god', target_id the agent; payload carries before/after).
+    503 not initialized; 422 unknown kind, unknown/dead agent, or amount
+    outside 1..100 (the seam's ValueError)."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    intervene_fn = getattr(_world, "god_intervene", None)
+    if intervene_fn is None:
+        raise HTTPException(
+            503, "engine intervention support (world.god_intervene) not available yet"
+        )
+    try:
+        evt = intervene_fn(body.kind, body.agent_id, body.amount)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if isinstance(evt, dict) and evt.get("kind") == "god_intervention":
+        e = dict(evt)
+        e.setdefault("actor_type", "god")
+        _loop._emit_event(e)
+    _loop._broadcast_world_state()
+    return {"status": "ok"}
+
+
+class GodWhisperBody(BaseModel):
+    agent_id: str
+    text: str = Field(min_length=1, max_length=280)
+
+
+@app.post("/api/god/whisper")
+async def god_whisper(body: GodWhisperBody):
+    """God whispers to ONE agent (EM-137): the line rides only that agent's
+    NEXT prompt, exactly once (queued on `world.pending_whispers`, consumed in
+    runtime._assemble_context). Calls the engine seam
+    `world.post_whisper_as_god(agent_id, text)` and emits `whisper_posted`
+    (actor_type 'god', target_id the agent) — a spectator app, so the content
+    rides the payload/feed; the whisper is private to the AGENTS, not the
+    watchers. 503 not initialized; 422 empty/too-long text or unknown/dead
+    agent."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "text must be non-empty")
+    whisper_fn = getattr(_world, "post_whisper_as_god", None)
+    if whisper_fn is None:
+        raise HTTPException(
+            503, "engine whisper support (world.post_whisper_as_god) not available yet"
+        )
+    try:
+        evt = whisper_fn(body.agent_id, text)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if isinstance(evt, dict) and evt.get("kind") == "whisper_posted":
+        e = dict(evt)
+        e.setdefault("actor_type", "god")
+        _loop._emit_event(e)
+    _loop._broadcast_world_state()
+    return {"status": "ok"}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # W6 read-only event-log endpoints (api.openapi.yaml v1.1.0 / event-log.md §7).
 # These surface the repository §7 query methods over the active run
 # (_loop._run_id). With no active run/repo they return empty arrays / empty
