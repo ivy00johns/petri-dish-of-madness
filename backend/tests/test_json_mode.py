@@ -190,3 +190,74 @@ def test_no_json_error_widens_snippet_past_200():
 
     msg = _no_json_error("y" * 500, "stop")
     assert msg.count("y") > 200  # old cap was text[:200]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# (E) Length-truncated first attempt retries with a BOOSTED token budget. The
+#     proxy reroutes lanes to reasoning models (nemotron/gpt-oss/cogito seen
+#     live) whose chain-of-thought eats the whole 512-token budget before any
+#     JSON appears; retrying at the same budget failed identically every turn
+#     and starved agents to death on idle fallbacks.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_retry_max_tokens_boosts_on_length():
+    from petridish.agents.runtime import _retry_max_tokens
+
+    assert _retry_max_tokens(512, {"finish_reason": "length"}) == 2048
+    assert _retry_max_tokens(1024, {"finish_reason": "length"}) == 4096
+
+
+def test_retry_max_tokens_unchanged_otherwise():
+    from petridish.agents.runtime import _retry_max_tokens
+
+    assert _retry_max_tokens(512, {"finish_reason": "stop"}) == 512
+    assert _retry_max_tokens(512, None) == 512
+    assert _retry_max_tokens(512, {}) == 512
+
+
+class _ReasoningRerouteRouter:
+    """Duck-typed Router: attempt 1 returns truncated chain-of-thought with
+    finish_reason=length; attempt 2 returns a valid action. Records the
+    max_tokens of every call."""
+
+    def __init__(self):
+        self.calls: list[int] = []
+        self._usage: dict | None = None
+
+    def profile_name_for(self, agent_id, agent_profile):
+        return agent_profile
+
+    def get_profile(self, name):
+        return None  # runtime falls back to max_tokens=512
+
+    async def chat(self, profile_name, messages, *, max_tokens, temperature):
+        self.calls.append(max_tokens)
+        if len(self.calls) == 1:
+            self._usage = {"input_tokens": 900, "output_tokens": 512,
+                           "latency_ms": 1.0, "finish_reason": "length",
+                           "cached": False}
+            return "We need to output a valid JSON object with action first,"
+        self._usage = {"input_tokens": 950, "output_tokens": 20,
+                       "latency_ms": 1.0, "finish_reason": "stop",
+                       "cached": False}
+        return _VALID_ACTION_JSON
+
+    def last_usage(self, profile_name):
+        return self._usage
+
+    def last_routed_via(self, profile_name):
+        return "nvidia/nemotron-3-nano-30b-a3b"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_retries_length_truncation_with_boosted_budget():
+    from petridish.agents.runtime import AgentRuntime
+
+    agent, world = _world_with_agent()
+    router = _ReasoningRerouteRouter()
+    runtime = AgentRuntime(world, router)
+
+    event = await runtime.run_turn(agent)
+
+    assert router.calls == [512, 2048]
+    assert event["kind"] != "parse_failure"

@@ -211,7 +211,10 @@ def _role_card(animal: Animal) -> dict[str, Any]:
 # wrap JSON in fences / prose / truncate it).
 # ──────────────────────────────────────────────────────────────────────────────
 
-from ..agents.runtime import _extract_first_json  # noqa: E402  (intentional reuse)
+from ..agents.runtime import (  # noqa: E402  (intentional reuse)
+    _extract_first_json,
+    _retry_max_tokens,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -427,7 +430,10 @@ class AnimalRuntime:
         if action_dict is not None:
             return action_dict, meta
 
-        # ONE retry with the error fed back.
+        # ONE retry with the error fed back; a length-truncated first attempt
+        # (reasoning-model reroute) retries with a boosted token budget,
+        # mirroring the agent runtime.
+        retry_tokens = _retry_max_tokens(max_tokens, meta.get("usage"))
         retry_messages = messages + [
             {"role": "assistant", "content": "(previous response could not be parsed)"},
             {"role": "user", "content": (
@@ -436,7 +442,7 @@ class AnimalRuntime:
             )},
         ]
         action_dict_2, meta_2 = await self._call_and_parse(
-            profile_name, retry_messages, max_tokens, temperature, attempt=2
+            profile_name, retry_messages, retry_tokens, temperature, attempt=2
         )
         # Surface the LAST attempt's routing/usage in the single llm_call event.
         return action_dict_2, meta_2

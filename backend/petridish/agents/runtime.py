@@ -344,6 +344,25 @@ def _no_json_error(text: str, finish_reason: str | None) -> str:
     )
 
 
+_LENGTH_RETRY_TOKEN_FLOOR = 2048
+
+
+def _retry_max_tokens(max_tokens: int, usage: dict | None) -> int:
+    """Token budget for the one parse-failure retry.
+
+    The proxy can silently reroute a lane to a reasoning model (nemotron /
+    gpt-oss / cogito observed live) whose chain-of-thought alone exceeds the
+    profile budget, so the completion truncates (finish_reason="length")
+    before any JSON appears — and a retry at the same budget fails the same
+    way, turn after turn, until the agent starves on idle fallbacks. When the
+    first attempt died of length, give the retry room to finish thinking and
+    still emit the object. Same number of calls; only the cap moves.
+    """
+    if isinstance(usage, dict) and usage.get("finish_reason") == "length":
+        return max(max_tokens * 4, _LENGTH_RETRY_TOKEN_FLOOR)
+    return max_tokens
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Schema + world validation
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1237,20 +1256,23 @@ class AgentRuntime:
         llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
         if parse_error and action_dict is None:
-            # One retry with error fed back
+            # One retry with error fed back; a length-truncated first attempt
+            # (reasoning-model reroute) retries with a boosted token budget.
+            retry_tokens = _retry_max_tokens(max_tokens, llm_meta.get("usage"))
             retry_messages = messages + [
                 {"role": "assistant", "content": "(previous response could not be parsed)"},
                 {
                     "role": "user",
                     "content": (
                         f"Your previous response failed validation: {parse_error}\n"
-                        "Reply with ONLY a valid JSON object. If unsure, use: "
-                        '{"action": "idle", "args": {}}'
+                        "Do NOT think out loud or explain — your reply must begin "
+                        "with { and contain ONLY a valid JSON object. If unsure, "
+                        'use: {"action": "idle", "args": {}}'
                     ),
                 },
             ]
             action_dict, parse_error, llm_meta = await self._call_and_parse(
-                profile_name, retry_messages, max_tokens, temperature, agent, attempt=2
+                profile_name, retry_messages, retry_tokens, temperature, agent, attempt=2
             )
             llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
