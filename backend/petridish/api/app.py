@@ -678,6 +678,43 @@ async def post_billboard(body: BillboardBody):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# PROTOTYPE — god proclamation (the LOUD tier of the god↔town channel).
+# POST /api/billboard pins an opt-in note; POST /api/proclaim is heard by all:
+# the active proclamation is injected into every agent's next prompt.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ProclaimBody(BaseModel):
+    text: str = Field(min_length=1, max_length=280)
+
+
+@app.post("/api/proclaim", status_code=201)
+async def post_proclamation(body: ProclaimBody):
+    """God issues a LOUD proclamation heard by the whole world. Unlike a billboard
+    note (opt-in, read at the plaza), the active proclamation rides every agent's
+    next prompt — so the god's word is guaranteed to reach them (this is the fix
+    for 'I asked them to name the town and nobody heard'). Calls the engine seam
+    `world.post_proclamation_as_god(text)` and emits `proclamation_posted`
+    (actor_type 'god'). 503 not initialized; 422 empty/too-long."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "text must be non-empty")
+    post_fn = getattr(_world, "post_proclamation_as_god", None)
+    if post_fn is None:
+        raise HTTPException(
+            503, "engine proclamation support (world.post_proclamation_as_god) not available yet"
+        )
+    evt = post_fn(text)
+    if isinstance(evt, dict) and evt.get("kind") == "proclamation_posted":
+        e = dict(evt)
+        e.setdefault("actor_type", "god")
+        _loop._emit_event(e)
+    _loop._broadcast_world_state()
+    return {"status": "ok"}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # W6 read-only event-log endpoints (api.openapi.yaml v1.1.0 / event-log.md §7).
 # These surface the repository §7 query methods over the active run
 # (_loop._run_id). With no active run/repo they return empty arrays / empty

@@ -414,6 +414,12 @@ class World:
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
         self.billboard: list[dict] = []
+        # PROTOTYPE (god-channel) — loud-tier god proclamations, distinct from the
+        # opt-in billboard. While a proclamation is active it rides EVERY agent's
+        # prompt (runtime._assemble_context), so the god's word is guaranteed to
+        # reach the whole world. Each entry: {id, tick, text, replies:[]}; the
+        # NEWEST entry is the active decree. Serialized in to_snapshot().
+        self.proclamations: list[dict] = []
 
         self.tick: int = 0
         self.day: int = 0
@@ -1329,6 +1335,44 @@ class World:
         }
 
     # ──────────────────────────────────────────────────────────────────────────
+    # PROTOTYPE — god proclamations (the LOUD tier of the god↔town channel).
+    # A billboard note is opt-in: an agent must stand at the plaza and choose
+    # read_billboard. A proclamation is the opposite — the active one is injected
+    # into every agent's prompt each turn (see runtime._assemble_context), so the
+    # god's word reaches the whole world with zero extra LLM calls.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    PROCLAMATION_CAP = 20            # newest proclamations kept
+
+    def active_proclamation(self) -> dict | None:
+        """The current decree — the newest proclamation, or None. This is the one
+        that rides every agent's prompt until the god issues another."""
+        return self.proclamations[-1] if self.proclamations else None
+
+    def post_proclamation_as_god(self, text: str) -> dict:
+        """God-mode LOUD post: a proclamation heard by the whole world. The api
+        layer (POST /api/proclaim) emits the returned `proclamation_posted` event
+        dict through the normal pipeline (actor_type 'god'); the proclamation lands
+        in `world.proclamations` immediately and becomes the active decree."""
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        entry = {
+            "id": f"proc-{self.tick}-{len(self.proclamations)}",
+            "tick": self.tick,
+            "text": text,
+            "replies": [],          # threaded agent answers (return path — next slice)
+        }
+        self.proclamations.append(entry)
+        del self.proclamations[: -self.PROCLAMATION_CAP]
+        return {
+            "kind": "proclamation_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "turn_id": None,
+            "text": f"📜 GOD proclaims to all: \"{_truncate(entry['text'], 80)}\"",
+            "payload": {"proclamation_id": entry["id"], "text": entry["text"]},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
     # W11b / EM-083 — real blackout: recharge disabled at affected places.
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1514,6 +1558,11 @@ class World:
             # actor_type, text}, capped 20 newest (oldest → newest). THE seam the
             # frontend's billboard panel/3D board builds against.
             "billboard": [dict(e) for e in self.billboard],
+            # PROTOTYPE (god-channel) — loud-tier proclamations {id,tick,text,replies}.
+            "proclamations": [
+                {**p, "replies": [dict(r) for r in p.get("replies", [])]}
+                for p in self.proclamations
+            ],
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1686,5 +1735,16 @@ class World:
                 "text": str(_block_get(e, "text", ""))[: cls.BILLBOARD_TEXT_CAP],
             }
             for e in (state.get("billboard") or [])[-cls.BILLBOARD_CAP:]
+        ]
+        # PROTOTYPE (god-channel) — restore loud-tier proclamations (round-trips
+        # to_snapshot exactly: same {id, tick, text, replies} shape).
+        world.proclamations = [
+            {
+                "id": str(_block_get(p, "id", f"proc-{_int(_block_get(p, 'tick', 0))}-{i}")),
+                "tick": _int(_block_get(p, "tick", 0)),
+                "text": str(_block_get(p, "text", ""))[: cls.BILLBOARD_TEXT_CAP],
+                "replies": [dict(r) for r in (_block_get(p, "replies", []) or [])],
+            }
+            for i, p in enumerate((state.get("proclamations") or [])[-cls.PROCLAMATION_CAP:])
         ]
         return world

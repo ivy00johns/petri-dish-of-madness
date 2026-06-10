@@ -873,6 +873,22 @@ def _assemble_context(
             "JSON object — never a separate reply)."
         )
 
+    # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
+    # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
+    # proclamation is injected here so the god's word reaches every agent each turn
+    # until a new one supersedes it. Zero extra LLM calls — it rides this turn.
+    # (getattr keeps callers safe if the engine seam is ever absent.)
+    proclamation_block = ""
+    _active_proc = getattr(world, "active_proclamation", None)
+    _proc = _active_proc() if callable(_active_proc) else None
+    if _proc and _proc.get("text"):
+        proclamation_block = f"""
+=== 📜 THE GOD HAS PROCLAIMED ===
+  "{_proc['text']}"
+  The god's word reaches every soul in the world. You may heed it, defy it, or
+  carry on — but you have heard it, and so has everyone else.
+"""
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
 Tick: {world.tick}
@@ -886,7 +902,7 @@ Mood: {agent.mood}
 
 === NEEDS ===
 {needs_text}
-
+{proclamation_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}
 
