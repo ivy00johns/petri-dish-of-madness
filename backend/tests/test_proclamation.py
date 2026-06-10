@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from petridish.engine.world import World, AgentState, PlaceState
 from petridish.config.loader import WorldParams
-from petridish.agents.runtime import _assemble_context
+from petridish.agents.runtime import _assemble_context, _validate_world
 
 
 def _params() -> WorldParams:
@@ -91,3 +91,69 @@ def test_proclamations_round_trip_through_snapshot():
     restored = World.from_snapshot(snap, params=_params())
     assert restored.to_snapshot()["proclamations"] == snap["proclamations"]
     assert restored.active_proclamation()["text"] == "Build a castle on the hill."
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Return path — answer_proclamation (the threaded two-way half of the channel).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_answer_threads_under_the_active_proclamation():
+    world = _world()
+    world.post_proclamation_as_god("Name this town.")
+    bo = world.agents["bo"]  # at the market — no location gate on answering
+
+    evt = world.answer_proclamation(bo, "Call it Hopewell.")
+
+    assert evt["kind"] == "proclamation_answered"
+    assert evt["actor_id"] == "bo"
+    assert evt["payload"]["text"] == "Call it Hopewell."
+    assert evt["payload"]["in_reply_to"] == "Name this town."
+    # The reply is threaded under the proclamation itself (world_state seam).
+    replies = world.active_proclamation()["replies"]
+    assert replies == [{"tick": world.tick, "actor_id": "bo", "text": "Call it Hopewell."}]
+
+
+def test_answer_with_no_active_proclamation_is_a_parse_failure():
+    world = _world()
+    evt = world.answer_proclamation(world.agents["ada"], "Hello?")
+    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] != "proclamation_answered"
+
+
+def test_answer_action_is_offered_only_while_a_decree_is_live():
+    world = _world()
+    ada = world.agents["ada"]
+    assert "answer_proclamation" not in _system_prompt(world, ada)
+
+    world.post_proclamation_as_god("Speak to me.")
+    # Offered to BOTH agents regardless of where they stand (no location gate).
+    assert "answer_proclamation" in _system_prompt(world, world.agents["ada"])
+    assert "answer_proclamation" in _system_prompt(world, world.agents["bo"])
+
+
+def test_validator_gates_answer_on_an_active_proclamation():
+    world = _world()
+    ada = world.agents["ada"]
+    act = {"action": "answer_proclamation", "args": {"text": "Hopewell."}}
+
+    # No decree → rejected.
+    assert _validate_world(act, ada, world) is not None
+    # Decree live + text → allowed.
+    world.post_proclamation_as_god("Name the town.")
+    assert _validate_world(act, ada, world) is None
+    # Decree live but empty text → rejected.
+    assert _validate_world(
+        {"action": "answer_proclamation", "args": {"text": "  "}}, ada, world) is not None
+
+
+def test_replies_round_trip_through_snapshot():
+    world = _world()
+    world.post_proclamation_as_god("Name the town.")
+    world.answer_proclamation(world.agents["ada"], "Hopewell.")
+    world.answer_proclamation(world.agents["bo"], "No, Lastditch.")
+
+    snap = world.to_snapshot()
+    restored = World.from_snapshot(snap, params=_params())
+    assert restored.to_snapshot()["proclamations"] == snap["proclamations"]
+    assert [r["text"] for r in restored.active_proclamation()["replies"]] == \
+        ["Hopewell.", "No, Lastditch."]

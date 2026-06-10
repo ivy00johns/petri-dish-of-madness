@@ -1372,6 +1372,36 @@ class World:
             "payload": {"proclamation_id": entry["id"], "text": entry["text"]},
         }
 
+    def answer_proclamation(self, agent: AgentState, text: str) -> dict:
+        """Reflex tool (the return path): an agent answers the active proclamation.
+        The reply is threaded under the proclamation (appended to its `replies`)
+        and emitted as `proclamation_answered`, so the feed groups the exchange and
+        world_state carries the thread. NO location gate — the god's voice is
+        everywhere, so the answer can come from anywhere. Returns a ready-to-emit
+        event dict (or a parse_failure via _fail_event)."""
+        text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
+        if not text:
+            return self._fail_event(
+                agent.id, "answer_proclamation", "text required",
+                f"{agent.name} went to answer the god, but said nothing.")
+        active = self.active_proclamation()
+        if active is None:
+            return self._fail_event(
+                agent.id, "answer_proclamation", "no active proclamation",
+                f"{agent.name} looked to the heavens, but no decree hung in the air.")
+        active.setdefault("replies", []).append(
+            {"tick": self.tick, "actor_id": agent.id, "text": text})
+        return {
+            "kind": "proclamation_answered",
+            "actor_id": agent.id,
+            "text": f"↳ {agent.name} answers the god: \"{_truncate(text, 80)}\"",
+            "payload": {
+                "proclamation_id": active.get("id"),
+                "text": text,
+                "in_reply_to": active.get("text"),
+            },
+        }
+
     # ──────────────────────────────────────────────────────────────────────────
     # W11b / EM-083 — real blackout: recharge disabled at affected places.
     # ──────────────────────────────────────────────────────────────────────────

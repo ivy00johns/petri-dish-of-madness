@@ -1,6 +1,10 @@
-# Prototype — God-channel proclamation injection (2026-06-09)
+# Prototype — God-channel: proclaim + answer (2026-06-09)
 
-**Branch:** `build/w11a-ui-batch` · **Status:** working, all backend tests green (259 passed)
+**Branch:** `fix/reasoning-model-token-exhaustion` · **Status:** working, all backend tests green (264 passed)
+
+> Two slices landed: (1) the loud **proclamation injection** (god → every agent),
+> committed as `31265e5`; (2) the threaded **return path** (`answer_proclamation`,
+> agent → god). This doc covers both.
 
 ## Why
 
@@ -15,19 +19,18 @@ god's word is guaranteed to reach the whole world. It reuses the EM-081 overhear
 pattern — **zero extra LLM calls**, the injection rides the turn each agent was
 already taking (free-scale / subscription-only safe).
 
-This is the first slice of the approved design
-(`The God Channel + Town Editing`). The agent **return path** (threaded
-`answer_proclamation`) and the **move/demolish** verbs are the next slices, not in
-this prototype.
+These are the first two slices of the approved design
+(`The God Channel + Town Editing`). The **move/demolish** verbs and a `name_town`
+affordance are the next slices, not in this prototype.
 
 ## What changed
 
 | File | Change |
 |---|---|
-| `backend/petridish/engine/world.py` | New `world.proclamations` state; `active_proclamation()` (newest = active decree); `post_proclamation_as_god(text)` → ready-to-emit `proclamation_posted` event. Serialized in `to_snapshot()` and restored in `from_snapshot()` (exact round-trip). |
-| `backend/petridish/agents/runtime.py` | `_assemble_context` injects a `📜 THE GOD HAS PROCLAIMED` block (the active proclamation) into the system prompt, placed just under `=== NEEDS ===`. Reads `world.active_proclamation()` directly — no new param, `getattr`-guarded. |
-| `backend/petridish/api/app.py` | New `POST /api/proclaim {text}` (god surface), mirroring the existing `/api/billboard` handler: calls the engine seam, emits `proclamation_posted`, broadcasts world state. 503 not-initialized / 422 empty-or-too-long. |
-| `backend/tests/test_proclamation.py` | New — 4 unit tests (see below). |
+| `backend/petridish/engine/world.py` | New `world.proclamations` state; `active_proclamation()` (newest = active decree); `post_proclamation_as_god(text)` → `proclamation_posted` event; **`answer_proclamation(agent, text)`** → threads the reply into the active proclamation's `replies` and returns a `proclamation_answered` event (parse_failure if no decree / empty text). Serialized in `to_snapshot()` and restored in `from_snapshot()` (exact round-trip, replies included). |
+| `backend/petridish/agents/runtime.py` | `_assemble_context` injects a `📜 THE GOD HAS PROCLAIMED` block under `=== NEEDS ===`, and **offers `answer_proclamation` in VALID ACTIONS whenever a decree is live** (no location gate). `answer_proclamation` added to the action enum + arg schema (`text` required) + `TOOL_REGISTRY` (reflex) + `_validate_world` (requires an active decree + text) + the dispatch chain. |
+| `backend/petridish/api/app.py` | New `POST /api/proclaim {text}` (god surface), mirroring `/api/billboard`: calls the engine seam, emits `proclamation_posted`, broadcasts world state. 503 not-initialized / 422 empty-or-too-long. |
+| `backend/tests/test_proclamation.py` | New — 9 unit tests (see below). |
 
 ## How it works
 
@@ -50,6 +53,13 @@ this prototype.
 
    It stays in every prompt until the god issues another proclamation (newest wins).
    Tone is **suggestion, not command** (the approved design) — agents can defy it.
+4. While a decree is live, every agent is also offered `answer_proclamation (text)`
+   in VALID ACTIONS (no location gate — the god's voice is everywhere). Choosing it
+   calls `world.answer_proclamation`, which **threads** the reply into the active
+   proclamation's `replies` and emits `proclamation_answered` (`↳ <name> answers the
+   god: "…"`). So you get a legible exchange — the decree and its answers grouped —
+   in both the feed and `world_state.proclamations`. Still zero extra LLM calls: the
+   answer rides the agent's own turn.
 
 ## Try it
 
@@ -77,16 +87,26 @@ Every agent's next turn will carry the proclamation. Watch the feed for the
 - `test_proclamations_round_trip_through_snapshot` — `to_snapshot → from_snapshot →
   to_snapshot` preserves proclamations exactly (fork/snapshot safe).
 
-Full suite: **259 passed**.
+Return path:
+
+- `test_answer_threads_under_the_active_proclamation` — Bo (at the market) answers;
+  the reply threads into `replies` and the event carries `in_reply_to`.
+- `test_answer_with_no_active_proclamation_is_a_parse_failure` — answering into the
+  void fails cleanly.
+- `test_answer_action_is_offered_only_while_a_decree_is_live` — the action appears in
+  both agents' prompts only after a proclamation, regardless of location.
+- `test_validator_gates_answer_on_an_active_proclamation` — `_validate_world` requires
+  a live decree + non-empty text.
+- `test_replies_round_trip_through_snapshot` — threaded replies survive snapshot/fork.
+
+Full suite: **264 passed**.
 
 ## Honest gaps (deferred, by design)
 
-- **Return path not built.** Agents can't yet *answer* a proclamation in a threaded
-  way (`replies:[]` is reserved but unused). They will react in their normal
-  thought/speech/actions, but there's no `answer_proclamation` action yet.
-- **No `name_town` affordance.** Even though the request now reaches them, there is
-  still no verb to actually set a town name — so "name the town" will surface
-  reactions, not a committed name, until that affordance lands.
+- **No `name_town` affordance.** The request now reaches them *and* they can answer —
+  but there's still no verb to actually *set* a town name, so "name the town" yields
+  an answered exchange (suggestions threaded under the decree), not a committed name,
+  until that affordance lands. Likely the next slice.
 - **No UI.** The data flows to `world_state.proclamations` and the feed gets a
   `proclamation_posted` event, but there's no god-panel "PROCLAIM" button and the
   frontend event registry doesn't know the new kind yet (generic fallback render).
