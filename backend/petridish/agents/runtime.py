@@ -14,6 +14,7 @@ Per-turn flow:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -210,6 +211,39 @@ _DEFAULT_MAX_ACTIVE_COMMITMENTS = 5
 _DEFAULT_IMPORTANCE_THRESHOLD = 10.0
 _OVERHEARD_PENDING_CAP = 2         # an agent holds at most 2 pending overheard lines
 _OVERHEARD_LISTENERS_CAP = 2       # at most 2 co-located listeners per spoken line
+
+# Wave D2 / EM-159+160 — background-tier cadence defaults (config
+# `world.cadence`, read via _world_block_get; the loader's CadenceParams
+# mirrors these exactly so an absent block behaves identically).
+_DEFAULT_SPONTANEITY_CHANCE = 0.15
+_DEFAULT_REFLEX_STREAK_LIMIT = 8
+
+# Wave D2 / EM-159 — energy "bands" for the salience trigger: crossing a
+# 25-point band boundary since the agent's last LLM turn is salient (covers
+# both "I drifted toward starving" and "someone blessed/attacked me").
+_ENERGY_BAND_SIZE = 25.0
+
+
+def _seed_int(*parts: Any) -> int:
+    """Deterministic, wall-clock-free seed from the given parts — a stable
+    sha256 of the joined parts (the animals' AnimalRuntime idiom, duplicated
+    here so agents/ never imports animals/). Used for the EM-160 spontaneity
+    wildcard and the reflex routine's rotation, so background cadence is
+    reproducible across runs + replay (never the `random` module — no global
+    RNG state to corrupt a replay)."""
+    raw = "|".join(str(p) for p in parts)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return int(digest, 16)
+
+
+def _energy_band(energy: float) -> int:
+    """The EM-159 energy band index for an energy value (0..4 with the default
+    25-point bands; 100 sits in its own top band edge-inclusive)."""
+    try:
+        e = max(0.0, min(100.0, float(energy)))
+    except (TypeError, ValueError):
+        e = 0.0
+    return int(e // _ENERGY_BAND_SIZE)
 
 
 def _world_block_get(params: Any, block: str, key: str, default: Any) -> Any:
@@ -1321,6 +1355,20 @@ class AgentRuntime:
         # agent). In-memory by design: after a restart the worst case is one
         # repeat notice, which is harmless.
         self._board_seen: dict[str, int] = {}
+        # Wave D2 / EM-159 — per-agent salience baselines, recorded at each
+        # LLM-consulting turn (_note_llm_turn) and compared when a BACKGROUND
+        # agent's turn comes due. In-memory by design (like _memory /
+        # _importance): after a restart every background agent's first due
+        # turn is salient ("first_turn"), which errs toward liveliness.
+        #   _seen_colocated      — co-located agent+animal ids at last LLM turn
+        #   _energy_band_seen    — energy band index at last LLM turn
+        #   _witnessed_since_llm — agents that witnessed an importance>0 event
+        #                          since their last LLM turn
+        #   _last_llm_tick       — tick of the agent's last LLM-consulting turn
+        self._seen_colocated: dict[str, frozenset[str]] = {}
+        self._energy_band_seen: dict[str, int] = {}
+        self._witnessed_since_llm: set[str] = set()
+        self._last_llm_tick: dict[str, int] = {}
 
     def reset_state(self) -> None:
         """Clear ALL per-run cognition state (memories, commitments, importance
@@ -1330,6 +1378,11 @@ class AgentRuntime:
         self._importance.clear()
         self._overheard.clear()
         self._board_seen.clear()
+        # Wave D2 / EM-159 — salience baselines are per-run state too.
+        self._seen_colocated.clear()
+        self._energy_band_seen.clear()
+        self._witnessed_since_llm.clear()
+        self._last_llm_tick.clear()
 
     # ── W11b config accessors (defensive: the loader is owned elsewhere) ──────
 
@@ -1356,6 +1409,25 @@ class AgentRuntime:
                 _DEFAULT_IMPORTANCE_THRESHOLD))
         except (TypeError, ValueError):
             return _DEFAULT_IMPORTANCE_THRESHOLD
+
+    # ── Wave D2 / EM-159+160 config accessors (world.cadence, defensive) ──────
+
+    def _spontaneity_chance(self) -> float:
+        try:
+            chance = float(_world_block_get(
+                self.world.params, "cadence", "spontaneity_chance",
+                _DEFAULT_SPONTANEITY_CHANCE))
+        except (TypeError, ValueError):
+            chance = _DEFAULT_SPONTANEITY_CHANCE
+        return max(0.0, min(1.0, chance))
+
+    def _reflex_streak_limit(self) -> int:
+        try:
+            return max(1, int(_world_block_get(
+                self.world.params, "cadence", "reflex_streak_limit",
+                _DEFAULT_REFLEX_STREAK_LIMIT)))
+        except (TypeError, ValueError):
+            return _DEFAULT_REFLEX_STREAK_LIMIT
 
     @staticmethod
     def _event_importance(event: dict) -> float:
@@ -1404,6 +1476,10 @@ class AgentRuntime:
                     self._importance[agent.id] = (
                         self._importance.get(agent.id, 0.0) + importance
                     )
+                    # Wave D2 / EM-159 — witnessing an importance>0 event makes
+                    # a background agent's next due turn salient (cleared on
+                    # its next LLM-consulting turn).
+                    self._witnessed_since_llm.add(agent.id)
 
     def push_location_event(self, location: str, event: dict) -> None:
         """Push event to all agents at a location."""
@@ -1558,6 +1634,229 @@ class AgentRuntime:
         self._board_seen[agent.id] = max(int(e.get("tick", 0) or 0) for e in notes)
         return notes[-3:]
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor
+    #
+    # EM-159 applies to the BACKGROUND tier ONLY (protagonists and supporting
+    # always run full LLM turns when due). A due background turn consults the
+    # LLM iff something salient happened since the agent's last LLM turn;
+    # otherwise it resolves the deterministic seeded reflex routine — ZERO
+    # router calls. EM-160 (inseparable, per the v4-review verdict) keeps
+    # background agents from flattening into NPCs-on-rails: a seeded wildcard
+    # and a reflex-streak floor both force full LLM turns.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _colocated_ids(self, agent: AgentState) -> frozenset[str]:
+        """Ids of OTHER living agents + living animals at the agent's place."""
+        world = self.world
+        ids = {
+            a.id for a in world.living_agents()
+            if a.location == agent.location and a.id != agent.id
+        }
+        animals_fn = getattr(world, "living_animals", None)
+        if callable(animals_fn):
+            ids.update(
+                an.id for an in animals_fn() if an.location == agent.location
+            )
+        return frozenset(ids)
+
+    def _has_unseen_board_note(self, agent: AgentState) -> bool:
+        """Non-consuming peek at _unseen_god_board_notes: is there a god board
+        note at this place the agent has not yet been shown? (The consuming
+        delivery still happens only inside the LLM turn path.)"""
+        world = self.world
+        here_fn = getattr(world, "billboard_here", None)
+        board = getattr(world, "billboard", None)
+        if not callable(here_fn) or not isinstance(board, list):
+            return False
+        if not here_fn(agent.location):
+            return False
+        seen = self._board_seen.get(agent.id, -1)
+        return any(
+            isinstance(e, dict)
+            and e.get("actor_type") == "god"
+            and int(e.get("tick", 0) or 0) > seen
+            for e in board
+        )
+
+    def _background_salience(self, agent: AgentState) -> tuple[bool, list[str]]:
+        """The EM-159 salience check for a due BACKGROUND turn. Returns
+        (salient, triggers) where triggers names every condition that fired:
+
+          first_turn           — no baseline yet (first due turn of a run /
+                                 after restore): always think once.
+          new_colocated        — an agent/animal arrived at this place since
+                                 the last LLM turn.
+          witnessed_importance — witnessed an importance>0 event (the EM-080
+                                 accumulator's weights) since the last LLM turn.
+          energy_band          — energy crossed a 25-point band boundary.
+          pending_whisper      — a god whisper is queued for this agent.
+          proclamation         — a god proclamation landed since the last LLM
+                                 turn (it rides every prompt; answering needs
+                                 a real turn).
+          board_note           — an unseen god billboard note at this place.
+          uncast_vote          — an open (proposed) rule this agent hasn't
+                                 voted on yet.
+        """
+        world = self.world
+        triggers: list[str] = []
+
+        baseline = self._seen_colocated.get(agent.id)
+        if baseline is None:
+            triggers.append("first_turn")
+        elif self._colocated_ids(agent) - baseline:
+            triggers.append("new_colocated")
+
+        if agent.id in self._witnessed_since_llm:
+            triggers.append("witnessed_importance")
+
+        band_seen = self._energy_band_seen.get(agent.id)
+        if band_seen is not None and band_seen != _energy_band(agent.energy):
+            triggers.append("energy_band")
+
+        pending = getattr(world, "pending_whispers", None)
+        if isinstance(pending, dict) and pending.get(agent.id):
+            triggers.append("pending_whisper")
+
+        proc_fn = getattr(world, "active_proclamation", None)
+        if callable(proc_fn):
+            proc = proc_fn()
+            if isinstance(proc, dict) and (
+                int(proc.get("tick", 0) or 0)
+                >= self._last_llm_tick.get(agent.id, -1)
+            ):
+                triggers.append("proclamation")
+
+        if self._has_unseen_board_note(agent):
+            triggers.append("board_note")
+
+        for rule in getattr(world, "rules", {}).values():
+            if (
+                getattr(rule, "status", "") == "proposed"
+                and agent.id not in getattr(rule, "votes", {})
+            ):
+                triggers.append("uncast_vote")
+                break
+
+        return bool(triggers), triggers
+
+    def _spontaneity_roll(self, agent: AgentState) -> bool:
+        """EM-160 wildcard: seeded P(full LLM turn) on a non-salient due turn.
+        Deterministic from world state (agent id + tick hash — the animals'
+        roll-for-activity idiom); never the `random` module, so replay holds."""
+        chance = self._spontaneity_chance()
+        if chance <= 0.0:
+            return False
+        bucket = _seed_int("spontaneity", agent.id, self.world.tick) % 1_000_000
+        return (bucket / 1_000_000) < chance
+
+    def _note_llm_turn(self, agent: AgentState) -> None:
+        """Record post-turn salience baselines after an LLM-consulting turn
+        (any tier — protagonists keep fresh baselines too, so a later demotion
+        starts clean) and reset the EM-160 reflex streak."""
+        agent.reflex_streak = 0
+        self._witnessed_since_llm.discard(agent.id)
+        self._seen_colocated[agent.id] = self._colocated_ids(agent)
+        self._energy_band_seen[agent.id] = _energy_band(agent.energy)
+        self._last_llm_tick[agent.id] = self.world.tick
+
+    def _reflex_pick(self, agent: AgentState) -> dict:
+        """The deterministic reflex routine for a non-salient background turn
+        (EM-159, the animals' seeded-picker pattern — ZERO router calls):
+
+          starving  ⇒ recharge   (when it would actually succeed: credits
+                                  cover the effective cost, no blackout,
+                                  energy below full)
+          at work   ⇒ work
+          otherwise ⇒ seeded forage / move-home rotation (move only when a
+                       home-kind place exists and the agent isn't already
+                       home; no homes ⇒ forage)
+
+        Preflight checks mirror the world's action gates so a reflex turn
+        resolves cleanly instead of burning the turn on a rejection."""
+        world = self.world
+        try:
+            threshold = float(getattr(world.params, "starving_warn_threshold", 25.0))
+        except (TypeError, ValueError):
+            threshold = 25.0
+
+        if agent.energy < threshold and agent.energy < 100:
+            cost = int(getattr(world.params, "recharge_cost", 2))
+            if world.has_active_rule("recharge_subsidy"):
+                cost = max(1, cost // 2)
+            blacked_out = getattr(world, "place_blacked_out", lambda _p: False)
+            if agent.credits >= cost and not blacked_out(agent.location):
+                return {"action": "recharge", "args": {}}
+
+        place = world.places.get(agent.location)
+        if place is not None and place.kind == "work":
+            return {"action": "work", "args": {}}
+
+        seed = _seed_int("cadence-reflex", agent.id, world.tick)
+        homes = sorted(p.id for p in world.places.values() if p.kind == "home")
+        at_home = place is not None and place.kind == "home"
+        if homes and not at_home and seed % 2 == 1:
+            return {"action": "move_to", "args": {"place": homes[seed % len(homes)]}}
+        return {"action": "forage", "args": {}}
+
+    def _reflex_turn(
+        self, agent: AgentState, profile_name: str, profile_color: str
+    ) -> dict:
+        """Resolve a non-salient background due turn deterministically — ZERO
+        router calls. Emits normal event kinds through the same _apply_action
+        path as LLM turns, each marked `payload.reflex: true` (+ the current
+        reflex_streak) so the feed/inspector can surface it (EM-166). The
+        trace chain keeps its shape but carries NO llm_call span (the loop
+        skips it for reflex traces — an empty span row would pollute the
+        usage-cap accounting and the free-scale proof)."""
+        agent.reflex_streak = int(getattr(agent, "reflex_streak", 0)) + 1
+        action_dict = self._reflex_pick(agent)
+        result_event = self._apply_action(
+            agent, action_dict, profile_name, profile_color
+        )
+        events = result_event["_multi"] if "_multi" in result_event else [result_event]
+        for evt in events:
+            payload = evt.setdefault("payload", {})
+            payload["reflex"] = True
+            payload["reflex_streak"] = agent.reflex_streak
+        outcome = "failed" if events[0].get("kind") == "parse_failure" else "ok"
+
+        # EM-079 — commitments still advance on reflex turns: a successful
+        # non-talk reflex action resets the staleness clock exactly as if the
+        # LLM had chosen it; a failed one ages every commitment.
+        lapsed = self._advance_commitments(
+            agent, action_dict["action"], outcome == "ok", None,
+            profile_name, profile_color,
+        )
+        if lapsed:
+            if "_multi" in result_event:
+                result_event["_multi"].extend(lapsed)
+            else:
+                result_event = {"_multi": [result_event] + lapsed}
+
+        recent_events = self._memory.get(agent.id, [])
+        perceived, memory = _perceived_context(
+            agent, self.world, recent_events, self.world.params
+        )
+        result_event["_trace"] = {
+            "perceived": {**perceived, "perceived_summary": None},
+            "memory": memory,
+            "llm_attempts": [],   # ZERO calls — and the loop emits zero spans
+            "reflex": True,
+            "reasoning": {
+                "reasoning": None,
+                "perceived_summary": None,
+                "memories_used": None,
+            },
+            "action_chosen": {
+                "chosen_tool": action_dict["action"],
+                "args": action_dict.get("args") or {},
+                "tier": "reflex",
+            },
+            "resolved": {"outcome": outcome, "state_deltas": {}},
+        }
+        return result_event
+
     async def run_turn(self, agent: AgentState) -> dict:
         """
         Execute one agent turn. Returns an event dict describing what happened.
@@ -1570,6 +1869,31 @@ class AgentRuntime:
         temperature = profile.temperature if profile else 0.8
 
         recent_events = self._memory.get(agent.id, [])
+
+        # ── Wave D2 / EM-159+160 — background-tier gate, BEFORE any context is
+        # consumed (overheard lines / whispers / board notes stay queued for
+        # the next LLM turn). Background ONLY: protagonists and supporting
+        # always take full LLM turns when due. A non-salient due turn resolves
+        # the deterministic reflex routine with ZERO router calls — unless the
+        # EM-160 floor (streak limit) or wildcard (seeded spontaneity) forces
+        # a full LLM "reassess" turn anyway.
+        cadence_meta: dict | None = None
+        if getattr(agent, "cadence_tier", "protagonist") == "background":
+            salient, triggers = self._background_salience(agent)
+            if salient:
+                cadence_meta = {
+                    "cadence_reason": "salient",
+                    "salience_triggers": triggers,
+                }
+            elif (
+                int(getattr(agent, "reflex_streak", 0))
+                >= self._reflex_streak_limit()
+            ):
+                cadence_meta = {"cadence_reason": "reassess"}
+            elif self._spontaneity_roll(agent):
+                cadence_meta = {"cadence_reason": "wildcard"}
+            else:
+                return self._reflex_turn(agent, profile_name, profile_color)
 
         # W11b — pending overheard lines are consumed by THIS turn (EM-081), the
         # commitments block rides the prompt when non-empty (EM-079), and the
@@ -1679,7 +2003,12 @@ class AgentRuntime:
         if action_dict is None:
             # Second failure or ProviderError: idle + log. Still return a trace so
             # the dead-air turn remains inspectable (resolved.outcome == "failed").
+            # Wave D2 / EM-159+160 — the router WAS consulted: reset the reflex
+            # streak and re-baseline salience even though the turn failed.
+            self._note_llm_turn(agent)
             payload: dict = {"reason": parse_error or "parse_failure"}
+            if cadence_meta:
+                payload.update(cadence_meta)
             if routed is not None:
                 payload["routed_via"] = routed
             # Forensics: the feed text caps the snippet at 400 chars, which hid
@@ -1749,6 +2078,19 @@ class AgentRuntime:
                 evt.setdefault("payload", {})["routed_via"] = routed
         else:
             result_event.setdefault("payload", {})["routed_via"] = routed
+
+        # Wave D2 / EM-159+160 — WHY a background agent got this full LLM turn
+        # (salient + the exact triggers / wildcard / reassess), additive on the
+        # domain event payload(s) for the feed/inspector. The LLM was consulted:
+        # reset the reflex streak and re-baseline salience on the POST-action
+        # state (the agent may have moved / recharged this turn).
+        if cadence_meta:
+            if "_multi" in result_event:
+                for evt in result_event["_multi"]:
+                    evt.setdefault("payload", {}).update(cadence_meta)
+            else:
+                result_event.setdefault("payload", {}).update(cadence_meta)
+        self._note_llm_turn(agent)
 
         # Assemble the decision-trace chain for loop._execute_turn to emit. The
         # `resolved` outcome reads the applied event(s): a parse_failure kind from

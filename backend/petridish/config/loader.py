@@ -67,6 +67,12 @@ world:
   # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
   # config/world.yaml. 0/absent disables the guard entirely.
   turn_llm_budget_seconds: 12
+  # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
+  # MUST stay in sync with config/world.yaml. Agent entries may also carry an
+  # optional `cadence_tier: protagonist|supporting|background` (EM-158).
+  cadence:
+    spontaneity_chance: 0.15
+    reflex_streak_limit: 8
   # W15 / EM-155 — deterministic seed for the generated 3D city ring.
   # MUST stay in sync with config/world.yaml.
   city_seed: 1337
@@ -168,6 +174,10 @@ class AgentConfig:
     personality: str
     profile: str
     location: str
+    # Wave D2 / EM-158 — optional scheduler cadence tier for the seed agent
+    # (protagonist | supporting | background). ADDITIVE: default protagonist,
+    # so pre-D2 configs parse and behave identically.
+    cadence_tier: str = "protagonist"
 
 
 @dataclass
@@ -330,6 +340,27 @@ class ProcgenParams:
 
 
 @dataclass
+class CadenceParams:
+    """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
+    floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
+    like these defaults; the runtime reads it via the defensive _world_block_get
+    accessor with IDENTICAL defaults. EM-159 (salience gating) never ships
+    without EM-160 (this floor) — background agents must never flatten into
+    NPCs-on-rails.
+
+      spontaneity_chance  — seeded probability (0..1) that a due-but-NON-salient
+                            background turn takes a full LLM turn anyway (the
+                            wildcard half of the floor). Seeded from world
+                            state (agent id + tick hash) — deterministic,
+                            replay-safe. 0 disables the wildcard.
+      reflex_streak_limit — consecutive reflex-only due turns before a forced
+                            LLM "reassess" turn (the floor-timer half).
+    """
+    spontaneity_chance: float = 0.15
+    reflex_streak_limit: int = 8
+
+
+@dataclass
 class AnimalSeed:
     """W8 / EM-064 — a seed critter from the top-level `animals:` list. Spawned at
     world init when `world.animals.enabled`. `personality` is optional flavour fed
@@ -407,6 +438,10 @@ class WorldParams:
     commitments: CommitmentParams = field(default_factory=CommitmentParams)
     reflection: ReflectionParams = field(default_factory=ReflectionParams)
     procgen: ProcgenParams = field(default_factory=ProcgenParams)
+    # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity
+    # floor. Additive with engine-matching defaults, so a world.yaml without
+    # the `cadence` block behaves exactly as the shipped defaults.
+    cadence: CadenceParams = field(default_factory=CadenceParams)
 
 
 @dataclass
@@ -661,6 +696,40 @@ def _parse_procgen(raw: dict | None) -> ProcgenParams:
     )
 
 
+def _parse_cadence(raw: dict | None) -> CadenceParams:
+    """Parse the optional `world.cadence` block (Wave D2 / EM-159+160).
+    Absent/empty/malformed -> engine-matching defaults. spontaneity_chance is
+    clamped to 0..1; reflex_streak_limit to >= 1 (a 0/negative floor timer
+    would mean perpetual forced reassessment)."""
+    if not isinstance(raw, dict):
+        return CadenceParams()
+    d = CadenceParams()
+    try:
+        chance = float(raw.get("spontaneity_chance", d.spontaneity_chance))
+    except (TypeError, ValueError):
+        chance = d.spontaneity_chance
+    try:
+        limit = max(1, int(raw.get("reflex_streak_limit", d.reflex_streak_limit)))
+    except (TypeError, ValueError):
+        limit = d.reflex_streak_limit
+    return CadenceParams(
+        spontaneity_chance=max(0.0, min(1.0, chance)),
+        reflex_streak_limit=limit,
+    )
+
+
+# Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
+# kept literal here so the loader stays engine-import-free).
+_VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
+
+
+def _norm_cadence_tier(value: Any) -> str:
+    """Normalize an agent entry's optional cadence_tier; anything unknown or
+    absent falls back to protagonist (the zero-behavior-change default)."""
+    tier = str(value or "").strip().lower()
+    return tier if tier in _VALID_CADENCE_TIERS else "protagonist"
+
+
 def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
     """Parse the top-level `animals:` seed list (the cat & dog). Absent -> [].
     Each entry needs species + name; location defaults to the first place."""
@@ -721,6 +790,7 @@ def _parse_world(
         commitments=_parse_commitments(w.get("commitments")),
         reflection=_parse_reflection(w.get("reflection")),
         procgen=_parse_procgen(w.get("procgen")),
+        cadence=_parse_cadence(w.get("cadence")),
     )
 
     places = [
@@ -743,6 +813,8 @@ def _parse_world(
             personality=a.get("personality", ""),
             profile=a["profile"],
             location=a.get("location", places[0].id if places else "plaza"),
+            # Wave D2 / EM-158 — optional per-agent tier; absent → protagonist.
+            cadence_tier=_norm_cadence_tier(a.get("cadence_tier")),
         )
         for a in raw.get("agents", [])
     ]
@@ -804,6 +876,7 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
                 personality=a.personality,
                 profile="mock",
                 location=a.location,
+                cadence_tier=a.cadence_tier,  # Wave D2 / EM-158 — preserved
             )
             for a in agents
         ]

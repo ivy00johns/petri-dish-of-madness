@@ -67,6 +67,16 @@ class AgentState:
     mood: str = "neutral"
     alive: bool = True
     zero_energy_turns: int = 0
+    # Wave D2 / EM-158 — scheduler cadence tier: protagonist (acts every round) |
+    # supporting (every 3rd round) | background (every 10th round, salience-
+    # gated per EM-159). ADDITIVE with default protagonist, so pre-D2 configs
+    # and snapshots behave byte-identically until a tier is assigned.
+    cadence_tier: str = "protagonist"
+    # Wave D2 / EM-160 — consecutive due turns this agent resolved via the
+    # zero-LLM reflex routine; reset to 0 on every LLM-consulting turn. Carried
+    # in snapshots so the spontaneity floor survives restore; surfaced in
+    # world_state agents for the EM-166 panel.
+    reflex_streak: int = 0
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -83,6 +93,9 @@ class AgentState:
             "mood": self.mood,
             "alive": self.alive,
             "zero_energy_turns": self.zero_energy_turns,
+            # Wave D2 / EM-166 — additive observability keys; consumers may ignore.
+            "cadence_tier": self.cadence_tier,
+            "reflex_streak": self.reflex_streak,
             "beliefs_count": len(self.beliefs),
             "relationships": {
                 aid: {"type": r.type, "trust": r.trust, "interactions": r.interactions}
@@ -515,34 +528,83 @@ class World:
     # Scheduler
     # ──────────────────────────────────────────────────────────────────────────
 
+    # Wave D2 / EM-158 — cadence tiers: how often each tier comes due, in
+    # rounds. Protagonists act every round (the pre-D2 behavior — and the
+    # DEFAULT tier, so an untiered cast schedules exactly as before);
+    # supporting every 3rd round; background every 10th. The due-set rotation
+    # within a round stays sorted-id.
+    CADENCE_TIERS = ("protagonist", "supporting", "background")
+    TIER_CADENCE_ROUNDS: dict[str, int] = {
+        "protagonist": 1, "supporting": 3, "background": 10,
+    }
+
     def living_agents(self) -> list[AgentState]:
         return [a for a in self.agents.values() if a.alive]
 
+    def _tier_due(self, agent: AgentState, round_no: int) -> bool:
+        """True when `agent`'s cadence tier comes due in round `round_no`
+        (EM-158). Unknown tiers behave as protagonist (due every round)."""
+        every = self.TIER_CADENCE_ROUNDS.get(
+            getattr(agent, "cadence_tier", "protagonist"), 1)
+        return every <= 1 or round_no % every == 0
+
+    def _due_ids(self, round_no: int) -> list[str]:
+        """The sorted-id due set for round `round_no` (EM-158)."""
+        return sorted(a.id for a in self.living_agents()
+                      if self._tier_due(a, round_no))
+
     def _rebuild_turn_order(self) -> None:
-        """Rebuild turn order preserving relative position of existing agents."""
+        """Prune dead agents from the current round's rotation and append any
+        newly spawned agents whose tier is due THIS round. Wave D2 / EM-158:
+        `_turn_order` holds the current round's DUE set (rebuilt sorted-id at
+        each round start by _start_new_round) — with the default all-
+        protagonist cast that is the same full sorted-id rotation as before."""
         alive_ids = {a.id for a in self.living_agents()}
         self._turn_order = [aid for aid in self._turn_order if aid in alive_ids]
-        # Add any newly spawned agents at the end
+        # Add any newly spawned agents due this round at the end.
         for aid in sorted(self.agents.keys()):
-            if aid not in self._turn_order and aid in alive_ids:
+            if (
+                aid not in self._turn_order
+                and aid in alive_ids
+                and self._tier_due(self.agents[aid], self.round)
+            ):
                 self._turn_order.append(aid)
+
+    def _start_new_round(self) -> None:
+        """Advance to the next round with a NON-EMPTY due set (EM-158) and
+        install its sorted-id rotation. Rounds where no tier is due (possible
+        only in a world with zero protagonists) are skipped; each skipped
+        round still applies its per-round effects (UBI), so round economics
+        stay consistent. Bounded by the slowest tier cadence, so this always
+        terminates. Round counting derives from world state (`self.round`,
+        serialized in snapshots) — never wall time."""
+        due: list[str] = []
+        for _ in range(max(self.TIER_CADENCE_ROUNDS.values())):
+            self._apply_round_start()
+            due = self._due_ids(self.round)
+            if due:
+                break
+        self._turn_order = due
+        self._turn_index = 0
 
     def next_agent(self) -> AgentState | None:
         """Return the next agent whose turn it is, advancing the pointer.
         Returns None if no living agents.
         Detects round boundaries and applies per-round effects."""
-        self._rebuild_turn_order()
-        if not self._turn_order:
+        if not self.living_agents():
             return None
+        self._rebuild_turn_order()
 
         # Detect if we're starting a new round
         if self._turn_index >= len(self._turn_order):
-            self._turn_index = 0
             self._round_start = True
 
         if self._round_start:
-            self._apply_round_start()
+            self._start_new_round()
             self._round_start = False
+
+        if not self._turn_order:  # pragma: no cover - defensive
+            return None
 
         agent = self.agents.get(self._turn_order[self._turn_index])
         self._turn_index += 1
@@ -875,6 +937,9 @@ class World:
             personality=str(spec.get("personality", "")),
             profile=str(spec.get("profile", "mock")),
             location=str(location),
+            # Wave D2 / EM-158 — optional tier on the admit_agent spec
+            # (additive; absent pre-D2 proposals spawn protagonists).
+            cadence_tier=str(spec.get("cadence_tier", "protagonist")),
         )
         rule.applied = True
         self.pending_spawn_events.append({
@@ -908,6 +973,7 @@ class World:
         profile: str,
         location: str,
         text: str | None = None,
+        cadence_tier: str = "protagonist",
     ) -> RuleState:
         """Create an `admit_agent` governance proposal (EM-062 governance spawn).
         The pending agent spec rides on rule.payload; the agent enters only if the
@@ -924,6 +990,11 @@ class World:
                 "personality": personality,
                 "profile": profile,
                 "location": location,
+                # Wave D2 / EM-158 — additive; protagonist when unspecified.
+                "cadence_tier": (
+                    cadence_tier if cadence_tier in self.CADENCE_TIERS
+                    else "protagonist"
+                ),
             },
         )
         self.rules[rule.id] = rule
@@ -1760,7 +1831,14 @@ class World:
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
 
-    def spawn_agent(self, name: str, personality: str, profile: str, location: str) -> AgentState:
+    def spawn_agent(
+        self,
+        name: str,
+        personality: str,
+        profile: str,
+        location: str,
+        cadence_tier: str = "protagonist",
+    ) -> AgentState:
         agent_id = f"agent_{name.lower()}_{str(uuid.uuid4())[:6]}"
         agent = AgentState(
             id=agent_id,
@@ -1770,9 +1848,17 @@ class World:
             location=location,
             energy=self.params.starting_energy,
             credits=self.params.starting_credits,
+            # Wave D2 / EM-158 — optional tier; unknown values fall back to
+            # protagonist (the zero-behavior-change default).
+            cadence_tier=(
+                cadence_tier if cadence_tier in self.CADENCE_TIERS else "protagonist"
+            ),
         )
         self.agents[agent_id] = agent
-        self._turn_order.append(agent_id)
+        # Join the current round's rotation only when the tier is due this
+        # round (EM-158); otherwise the agent waits for its next due round.
+        if self._tier_due(agent, self.round):
+            self._turn_order.append(agent_id)
         return agent
 
     def kill_agent(self, agent_id: str) -> None:
@@ -1971,6 +2057,14 @@ class World:
                 mood=str(d.get("mood", "neutral")),
                 alive=bool(d.get("alive", True)),
                 zero_energy_turns=_int(d.get("zero_energy_turns")),
+                # Wave D2 / EM-158+160 — additive keys; pre-D2 snapshots lack
+                # them and restore the protagonist / zero-streak defaults.
+                cadence_tier=(
+                    str(d.get("cadence_tier"))
+                    if d.get("cadence_tier") in cls.CADENCE_TIERS
+                    else "protagonist"
+                ),
+                reflex_streak=max(0, _int(d.get("reflex_streak"))),
             )
             a.relationships = {
                 str(aid): RelationshipState(

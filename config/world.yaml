@@ -27,6 +27,25 @@ world:
   # to disable the guard entirely — exactly the pre-EM-170 behavior.
   turn_llm_budget_seconds: 12
 
+  # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
+  # `cadence_tier` (set per agent entry below, via the spawn body, or
+  # POST /api/agents/{id}/tier): protagonists act every round, supporting every
+  # 3rd round, background every 10th. A BACKGROUND agent's due turn consults
+  # the LLM only when something salient happened since its last LLM turn (new
+  # co-located agent/animal, witnessed important event, energy band crossing,
+  # pending whisper/proclamation/board note, an uncast open vote) — otherwise
+  # it resolves a deterministic zero-LLM reflex routine (starving⇒recharge,
+  # at-work⇒work, else forage/move-home), marked payload.reflex in the feed.
+  # The EM-160 spontaneity floor keeps background agents from flattening into
+  # NPCs-on-rails: each non-salient due turn has a seeded spontaneity_chance
+  # of a full LLM turn anyway, and reflex_streak_limit consecutive reflex
+  # turns force an LLM "reassess" turn. Both rolls are seeded from world state
+  # (agent id + tick) — deterministic and replay-safe. Engine defaults match
+  # these values when the block is absent.
+  cadence:
+    spontaneity_chance: 0.15   # wildcard P(full LLM turn) on a non-salient due turn
+    reflex_streak_limit: 8     # consecutive reflex turns before a forced reassess
+
   # W15 / EM-155 — deterministic seed for the generated 3D city ring. The city
   # renders as a pure function f(snapshot, city_seed); the engine persists the
   # seed in every snapshot so live, replay, and fork all draw the SAME city.
@@ -192,6 +211,9 @@ places:
 agents:                          # seed agents; profile must match a profiles[].name
   # All three start together in the plaza so they meet, greet, and converse from
   # the first round (chatter is the whole point), then wander off to work/govern.
+  # Wave D2 / EM-158: each entry may carry an optional
+  # `cadence_tier: protagonist|supporting|background` (absent = protagonist —
+  # the named cast stays protagonist; the 25-agent roster lands in B4/EM-165).
   - { name: Ada,  personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash, location: plaza }
   - { name: Bram, personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: qwen-next, location: plaza }
   - { name: Cleo, personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: deepseek-pro, location: plaza }

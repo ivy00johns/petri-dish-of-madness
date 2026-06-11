@@ -55,6 +55,8 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             location=a.location,
             energy=cfg.world.starting_energy,
             credits=cfg.world.starting_credits,
+            # Wave D2 / EM-158 — optional per-agent tier from world.yaml.
+            cadence_tier=getattr(a, "cadence_tier", "protagonist"),
         )
         for a in cfg.agents
     ]
