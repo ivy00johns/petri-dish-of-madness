@@ -29,6 +29,11 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 > prereq already shipped in W11a/W11b (fork/resume EM-101, persona library EM-092,
 > procgen+housing EM-098, reflection EM-080, run browser EM-086), so v3 is unblocked. Build
 > order per user: **deepen the first city before founding a second.**
+> **v4 (EW-grade city + 25-agent scaling) filed 2026-06-10** via `plan-intake` from
+> `docs/research/deep-research-v4.md` + its review feedback — **EM-152–169**, opening
+> **W15–W17** (Wave D: D1 city vocabulary+generator · D2 population scaling · D3 life).
+> Direction lock: the art target is Emergence World's dense zoned city, not Stardew-cozy;
+> the Wave C medieval core persists as a historic district (EM-156).
 
 ## Format & conventions
 
@@ -168,11 +173,11 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-120 | P2 | W13 | backend | research-v3 | Factions + feuds + reputation: `factions`/`faction_membership` tables, reputation = derived per-agent aggregate; faction hulls on the graph + reputation column in the agent strip. Extends EM-113 | open | — |
 | EM-121 | P2 | W13 | frontend | research-v3 | Multi-city camera (rescoped): zoom-to-city / follow-agent-across-cities + reset-view for the multi-settlement view. Base orbit/pan/zoom-to-place (EM-095 ✅) + label declutter (EM-102 ✅) already shipped W11a — this is the multi-city delta only | open | — |
 | EM-122 | P2 | W14 | frontend | research-v3 | Art phase 3: buildings-per-place-kind mesh swap (KayKit Hexagon / Kenney Fantasy Town) wired to the building-state model + procgen layout; distinct building types per zone. Deps EM-098 ✅, EM-115 | done | wave-B 2026-06-10 |
-| EM-123 | P2 | W14 | backend | research-v3 | City-growth depth: `neighborhoods` table + `places.neighborhood_id`/`zone_kind`(residential/market/civic/industrial/farm)/`tier`; zoned districts grow as megaprojects complete. Deps EM-115 ✅, EM-147 | open | — |
+| EM-123 | P2 | W14 | backend | research-v3 | City-growth depth: `neighborhoods` table + `places.neighborhood_id`/`zone_kind`(residential/market/civic/industrial/farm)/`tier`; zoned districts grow as megaprojects complete. Deps EM-115 ✅, EM-147 ✅; feeds the W15 CityGenerator (EM-153) — growth output becomes generator input | open | — |
 | EM-124 | P1 | W14 | frontend | research-v3 + wave-c spec C5 | Art phase 4 (rescoped → Wave C C5): 3D character mesh swap — rigged CC0 GLB villagers + critters (KayKit Adventurers / Quaternius Universal Animated) via drei `useAnimations` (idle + walk wired to the existing `animMap` lerp), per-agent identity tint (cloned materials — `<Clone>` shares them by default), DOM overlays (name label, model chip, chat bubble) intact. Pets-in-sidebar (EM-099 ✅) already shipped W11a. Deps EM-148 | done | wave-C 2026-06-10 |
 | EM-125 | P2 | W14 | backend | research-v3 | Reflection-driven society: importance-threshold reflection (**consumes** EM-080 ✅) occasionally upgrades a relationship type (cheap, throttled LLM touch) and triggers reflection-driven migration. Deps EM-080 ✅, EM-113 | open | — |
 | EM-126 | P3 | W14 | backend | research-v3 | Generational depth: life stages/aging (child→adult→elder cadence + tool unlocks), inheritance of credits/relationships/grudges on death, lineage tree in the inspector. Deps EM-114 | open | — |
-| EM-127 | P3 | W14 | frontend | research-v3 | Art phase 5: day/night + seasons + particles (chimney smoke, fireflies) + sparing `<Bloom>`/`<Vignette>` + filmic tone mapping (`antialias:false`, post handles AA). Deps EM-111 | open | — |
+| EM-127 | P3 | W17 | frontend | research-v3 | Art phase 5 (re-waved W14→W17 at v4 intake — rides Wave D3 "life"): day/night + seasons + particles (chimney smoke, fireflies) + sparing `<Bloom>`/`<Vignette>` + filmic tone mapping (`antialias:false`, post handles AA). Deps EM-111 ✅ | open | — |
 | EM-128 | P3 | W14 | frontend | research-v3 | Population-dynamics + culture-drift AWI metrics compared across model families (population/laws/culture charts per family). Deps EM-112, EM-126 | open | — |
 
 | EM-129 | P2 | W12 | backend | user 2026-06-09 | Humanize agent-built building names: raw snake_case args render verbatim in 3D labels + feed ("prepare_beds", "village_fair") — `action_propose_project` should derive a display name (underscores→spaces, title case) while keeping the raw string in payload; trim/reject empty or identifier-only names | done | wave-A 2026-06-10 |
@@ -213,7 +218,26 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-151 | P1 | W12 | frontend | user 2026-06-10 | Inspector archive view breaks on the longest runs: loading run #189 (tick 4097, day 204, **40,842 events**) renders a solid-white left panel and an empty right panel — nothing interactive except BACK TO LIVE (screenshot evidence; header/status bar still render, so a child component is dying or collapsing under the 40k-event projection). EM-141 fixed the d3 "node not found" crash on this same run — this is a NEW failure past that point. Needs: an error boundary around the inspector panels (a dead panel must say so, not blank the annex) + windowing/decimation of the archive projection (selectors currently fold the full history) | open | — |
 
-_Next free ID: EM-152._
+| EM-152 | P0 | W15 | frontend | research-v4 §2 | City asset vocabulary: vendor Kenney City Kit family (Roads/Commercial/Suburban/Industrial) + Car Kit + Furniture Kit + KayKit City Builder Bits (~360+ pieces, ~13 MB, CC0, headless URLs verified at research time); gltfjsx `--instanceall`/`--transform` atlas+dedupe pipeline; toon-ramp conversion per atlas; every file recorded in `ASSET_LICENSES.md` | open | — |
+| EM-153 | P0 | W15 | frontend | research-v4 §3 | Deterministic CityGenerator: pure seeded module (snapshot+seed → grid roads w/ lane markings → blocks → 4–8 lots → zoned kit-assembly → prop/vehicle scatter), zero `Math.random()`, vitest-tested like `townLayout.ts`; sim Buildings get hero placement on their lot. Consumes EM-147 districts; EM-123 growth becomes its input later | open | — |
+| EM-154 | P0 | W15 | frontend | research-v4 §4 | Instanced city render path: raw `InstancedMesh` per kit-piece type for static sets, per-block chunked culling, tight shadow frustum + bias, drei `<Detailed>` LOD; budget ~10–20 draw calls for the whole city, 60fps on integrated GPU. Deps EM-152, EM-153 | open | — |
+| EM-155 | P0 | W15 | persistence | v4-review §5 | City snapshot contract (replay/fork fidelity): city seed + full generator input captured in event-log snapshots; "city is deterministic from snapshot+seed" added as an EM-101/EM-075 invariant with a vitest test — `generate(snapshot, seed)` byte-identical across live/replay/fork. **Must-fix-before-W16** | open | — |
+| EM-156 | P1 | W15 | frontend | v4-review §3 | Old-town migration strategy (resolves v4's open question → old town): Wave C medieval core persists as a seeded "historic district"; Kenney city lands as NEW districts beside known-good geometry — smaller per-PR blast radius, palette-clash contained at district boundaries, "town grows into a city" story | open | — |
+| EM-157 | P2 | W15 | frontend | v4-review §6 | Scope the raw-instancing swap to static deterministic sets only; interactive entities (clickable sim Buildings → inspector) keep per-instance-ergonomic rendering — no blanket replacement of drei instancing | open | — |
+| EM-158 | P0 | W16 | backend | research-v4 §5.1 | Turn-cadence tiers: `cadence_tier` on AgentState (protagonist every round / supporting ⅓ / background 1⁄10) + tier-aware `next_agent()`; pattern generalized from the shipped animal cadence (`act_every_n_ticks` + reflex fallback) | open | — |
+| EM-159 | P0 | W16 | backend | research-v4 §5.2 | Salience-gated reflex turns: LLM called only when something changed near the agent (`_importance` accumulator, co-location delta, energy threshold crossing, active whisper/proclamation); else deterministic needs routine, zero calls. Never for protagonists. **Deps EM-160 — must not ship without the spontaneity floor** | open | — |
+| EM-160 | P0 | W16 | backend | v4-review §1 | Spontaneity floor (anti-dead-town): low per-tick wildcard LLM-turn chance for non-salient background agents + a salience-floor timer (reflex-only for N ticks ⇒ one forced "reassess" LLM turn). Gates the free-scale win against a sim-quality regression — the failure shows worst on camera | open | — |
+| EM-161 | P1 | W16 | backend | research-v4 §5.3 | Prompt diet: relationships capped to top-8 by abs(trust), `open_projects` + `move_to` place list scoped to district, decision-trace instruction block dropped for background tiers (output ~400→~150 tok), `memory_window` 12→8 for background. Correctness requirement for the 8K-context Cerebras lane at 25 agents | open | — |
+| EM-162 | P1 | W16 | providers | research-v4 §5.4 | Cache-key normalization: bucket energy to 10s + floor tick for background-tier prompts so the router's sha1 decision cache serves quiet rounds (35% → target 50–60% hit); keep `forget()` semantics intact | open | — |
+| EM-163 | P1 | W16 | backend | v4-review §2 | Tier-gate world-mutating tools: `propose_project`/`build_step`/governance proposals restricted to protagonist+supporting tiers; background keeps talk/move/economy reflex tools. Phantom-commitment containment (pairs EM-079 scope note) | open | — |
+| EM-164 | P1 | W16 | qe | v4-review §4 | Verify the two load-bearing budget assumptions on a real run before trusting the v4 scaling table: (a) realized cache-hit rate after EM-162 (don't budget at 60% unproven), (b) Ollama sustained turns/h measured WHILE the R3F city renders on the same machine (CPU/GPU contention). W16 go/no-go; measurement can start during W15 | open | — |
+| EM-165 | P1 | W16 | config | research-v4 §5 | 25-agent world: persona-library casting for 25 agents, protagonist-slot selection (user-pinned + salience-rotating), tier assignment in `world.yaml`; population cap honored. Deps EM-158 | open | — |
+| EM-166 | P2 | W16 | backend | v4-review obs. | Salience + tier observability: per-agent salience/`cadence_tier` surfaced in event log + inspector ("who's been reflex-only too long, which tier phantom-commits") so EM-160/163 are tunable from data, not vibes | open | — |
+| EM-167 | P1 | W17 | providers | research-v4 §5.5 | Ollama overflow lane: enable the scaffolded profile (profiles.yaml), route background/supporting tiers there as off-critical-path background tasks (animal-task pattern) — ~40% of background calls off FreeLLMAPI. Deps EM-158, EM-164 | open | — |
+| EM-168 | P1 | W17 | providers | research-v4 §5.6 | Cap-pressure governor: wire the three existing observers (UsageAlertTracker 70% alerts, default-off `usage_caps` throttle, EM-135 lane health) into the tier scheduler — a lane's alert demotes that lane's agents one cadence tier instead of merely slowing ticks. Enforces the v3 population-cap rule. Deps EM-158 | open | — |
+| EM-169 | P2 | W17 | frontend | research-v4 §7 | Ambient vehicles: Car Kit traffic on the generated road network (deterministic paths, instanced), parked cars from the prop scatter. Deps EM-152, EM-153 | open | — |
+
+_Next free ID: EM-170._
 
 ## Notes
 
@@ -272,3 +296,14 @@ _Next free ID: EM-152._
   EM-098) — *before* founding a second settlement (EM-109/110 multi-city), inverting the report's
   "multi-city is the keystone" recommendation. Multi-city + multi-world were promoted out of
   `docs/FUTURE.md` per its convention.
+- **EM-152–169 (v4 EW-grade city + scaling)** entered 2026-06-10 via `plan-intake` from
+  `docs/research/deep-research-v4.md` **plus its review feedback** (seven guardrail items the
+  review authored as EM-125–131 — all **renumbered**: those IDs were taken by v3/Wave-A
+  entries). They open **W15–W17** (Wave D: D1 city vocabulary+generator → D2 population
+  scaling → D3 life; the doc's D-labels map to these waves). Direction lock: the art target
+  is **Emergence World's dense zoned city**, not Stardew-cozy. Key gates: **EM-155** (city
+  snapshot contract) and **EM-164** (budget-assumption verification) are must-pass before
+  W16; **EM-159 must not ship without EM-160** (spontaneity floor) or background agents
+  flatten into NPCs-on-rails. EM-156 resolves the full-pivot question → old-town historic
+  district. Existing entries re-pointed instead of duplicated: **EM-127** re-waved W14→W17
+  (day/night rides D3), **EM-123** feeds the EM-153 generator.

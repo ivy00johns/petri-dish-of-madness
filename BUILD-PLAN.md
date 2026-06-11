@@ -211,6 +211,21 @@ kills the hub-and-spoke pinwheel), **EM-150** (buildings GLB swap via `operation
 plus **EM-124 bumped to P1** as Wave C's character swap (C5). Starts after Wave B
 (`build/wave-b-city-comes-alive`) merges; handcraft the hero town first, generator later.
 
+**Wave D — "the EW-grade city" (filed 2026-06-10, W15–W17).** Research:
+`docs/research/deep-research-v4.md`. Direction lock: the art target is Emergence World's
+dense zoned city — done better — not Stardew-cozy. **W15 / D1** (frontend-only): **EM-152**
+(Kenney city-kit vocabulary, ~360 pieces CC0), **EM-153** (deterministic CityGenerator:
+snapshot+seed → roads/blocks/lots/zoned kit-assembly), **EM-154** (raw-instanced render
+path, ~10–20 draw calls), **EM-155** (city snapshot contract — replay/fork fidelity,
+must-pass before W16), **EM-156** (old-town historic district — Wave C core persists),
+**EM-157** (instancing scoped to static sets). **W16 / D2** (backend scaling to 25 agents):
+**EM-158** cadence tiers, **EM-159+160** salience gating WITH the spontaneity floor
+(inseparable), **EM-161** prompt diet, **EM-162** cache-key normalization, **EM-163**
+tier-gated mutating tools, **EM-164** budget-assumption verification (go/no-go), **EM-165**
+25-agent casting, **EM-166** observability. **W17 / D3**: **EM-167** Ollama overflow,
+**EM-168** cap-pressure governor, **EM-169** ambient vehicles, plus existing **EM-127**
+(day/night, re-waved) and **EM-123** growth feeding the generator.
+
 **Free-scale is the binding constraint (sharper than ever here):** more cities × agents ×
 children = more calls, and billing is subscription-only with no overage. Mitigations are
 designed in — reflex-first travel/trade/children/caravans, per-city context scoping, a hard
@@ -244,3 +259,4 @@ What shipped and when. Append on each wave/milestone close.
 | 2026-06-09 | W11b ✅ | Sim-texture batch shipped on `build/w11a-ui-batch` (contracts: api 1.4.0, event-log v1.3.0, frontend-inspector v1.3.0). EM-079/080/081 same-call cognition (commitments+👻 phantoms, reflections, overhearing — prompt-capture tests assert zero extra LLM calls), EM-087+103 law RENEWAL + commemorative-monument guard, EM-091 billboard + god replies, EM-092 personas, EM-098 procgen+housing, EM-100 readable rule names, EM-101 fork/resume (honest snapshot grain), EM-082/083 + in-wave EM-107 layout-stable banners. QA proceed=true (252 backend + 150 frontend); live verification GREEN (god post on the board, fork 26@78→run 101 ↩ chip, banner dismiss 0.0px shift). **W9–W11 complete** (`BUILD_RESULTS_W11B.md`) |
 | 2026-06-09 | v3 intake | `docs/research/deep-research-v3.md` → **EM-109–128** filed via `plan-intake`, opening **W12–W14** (v3 Village→Civilization). Report's EM-105–124 renumbered to EM-109–128 (EM-105–108 taken by W11a/W11b in the interim); EM-121/124 rescoped to multi-city/mesh deltas (their deps shipped W11a); multi-city + multi-world promoted out of `FUTURE.md`. All hard prereqs already shipped — v3 is unblocked. Build order per user: deepen the first city before founding a second |
 | 2026-06-10 | Wave C intake | `docs/superpowers/specs/2026-06-10-wave-c-real-city-design.md` → **EM-147–150** filed via `plan-intake` (all P1/W14: district town config, GLB asset layer, lane network, buildings GLB swap); **EM-124 bumped P2→P1** and rescoped as Wave C's character swap (C5, deps EM-148); **EM-123** gains dep EM-147. Spec preamble's stale art-doc EM refs (EM-119/121 → ledger EM-122/124) corrected at intake. Gate: Wave C starts after Wave B merges |
+| 2026-06-10 | v4 intake | `docs/research/deep-research-v4.md` + review feedback → **EM-152–169** filed via `plan-intake`, opening **W15–W17** (Wave D: EW-grade city + 25-agent scaling). Review's EM-125–131 renumbered (IDs taken); EM-127 re-waved W14→W17; EM-123 feeds the CityGenerator. Direction lock: EW dense zoned city, not Stardew; old-town historic district (EM-156). Hard gates: EM-155 + EM-164 before W16; EM-159 inseparable from EM-160 |
