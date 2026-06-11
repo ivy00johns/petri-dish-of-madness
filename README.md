@@ -11,7 +11,7 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 ## What's inside
 
 - **Per-agent hot-swappable models** — every villager runs a different LLM (Gemini-Flash, Qwen, DeepSeek, Groq-Llama, local Ollama, …), color-coded and reassignable live from the UI. The UI shows the model that *actually* answered each turn.
-- **A cozy 3D village + 2D map** — villagers walk between buildings with floating chat bubbles (Stardew × Animal-Crossing); toggle to a lighter top-down map for analysis.
+- **A cozy 3D town + 2D map** — a 15-place **district town** (market, civic, residential, farm) laced with a real **street network**, rendered with hand-vendored **CC0 game art** (KayKit · Kenney · Quaternius, all catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md)): **animated** villagers walk the lanes with floating chat bubbles, real buildings glow under golden-hour HDRI light, and a cat and dog scamper underfoot (Stardew × Animal-Crossing). Toggle to a lighter top-down map for analysis.
 - **Economy & governance** — agents work, forage, trade, steal, and propose & vote on town-hall rules that change the world's physics. Re-proposing an active law **renews** it instead of stacking a duplicate, rule names in the feed read the way humans wrote them, and each law gets at most one commemorative monument.
 - **Buildings & collective projects** — agents propose → fund → build shared structures that carry visible state (scaffolding while under construction, scorched walls after arson).
 - **Chaos animals** — an LLM-driven cat (**Mochi**) and dog (**Biscuit**) roam on a slow cadence, knocking things over and stealing food, utterly indifferent to human law and money. Their mischief streams to a dedicated Animal Chaos Feed.
@@ -27,18 +27,19 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 
 ## Screenshots
 
-*(Screenshots predate the W11a chat-first layout — panel positions have since moved, but the village itself looks the same.)*
+**The Town (3D)** — real CC0 buildings and **animated** villagers (Ada · Bram · Cleo) on a
+district street network, chatting live under golden-hour light. Each requests a different model
+through FreeLLMAPI; the feed streams every action and the chips above it filter by category.
 
-**The Village (3D)** — three villagers (Ada · Bram · Cleo), each requesting a different model
-through FreeLLMAPI, chatting live in the plaza. The feed streams every action; the chips above
-it filter by category.
-
-![PetriDishOfMadness — the cozy 3D village with three models chatting live](docs/screenshots/village-3d.png)
+![PetriDishOfMadness — the Wave C real-model town, live](docs/build-evidence/wave-c-gate2-town-live.jpeg)
 
 **World Map (2D)** — the same world, top-down and far lighter on the GPU. Toggle between the two
 from the panel header. Agents are tinted by model, clustered by location, and pulse when they speak.
 
 ![PetriDishOfMadness — the 2D world map](docs/screenshots/world-map-2d.png)
+
+> *The earlier procedural-capsule render (pre-Wave-C village, pre-W11a panel layout) is kept at
+> `docs/screenshots/village-3d.png` for a before/after.*
 
 ---
 
@@ -153,9 +154,10 @@ The default world is **3 cozy villagers** (Ada, Bram, Cleo) who start together i
 plaza and chat, trade, forage, fund community projects, and pass town-hall rules — while a
 cat and dog cause chaos underfoot. Each requests a different model;
 all are routed through a local [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)
-OpenAI-compatible proxy. The center view is a **cozy 3D village** (Stardew × Animal-Crossing
-vibe) — villagers walk between buildings with floating chat bubbles. A toggle in the panel
-header switches back to the legacy 2D map.
+OpenAI-compatible proxy. The center view is a **cozy 3D town** built from real CC0 game art
+(Stardew × Animal-Crossing vibe) — animated villagers walk the district streets between real
+buildings with floating chat bubbles. A toggle in the panel header switches back to the
+legacy 2D map.
 
 > **The fun twist:** FreeLLMAPI is a *best-available router* — it often serves your request
 > from a different provider than you asked for. The UI shows the model that **actually
@@ -420,6 +422,10 @@ petri-dish-of-madness/
 │   │   └── api/          # FastAPI routes + WebSocket broadcaster
 │   └── pyproject.toml
 ├── web/                  # React + Vite + TypeScript + Tailwind frontend
+│   ├── public/
+│   │   ├── models/       # vendored CC0 GLBs (KayKit · Kenney · Quaternius) — see ASSET_LICENSES.md
+│   │   └── hdri/         # CC0 golden-hour environment map
+│   ├── src/components/world3d/  # the cozy 3D town (R3F): assets/ GLB loader, toon shading, town layout
 │   └── src/inspector/    # the /inspector annex (replay, traces, graphs, dashboards)
 ├── config/
 │   ├── profiles.yaml     # Model profiles (edit to add/swap models)
