@@ -1,0 +1,334 @@
+# config/world.city25.yaml — the 25-agent CITY roster (Wave D2 / EM-165).
+#
+# ── WHAT THIS IS ─────────────────────────────────────────────────────────────
+# A documented VARIANT of config/world.yaml that casts the city at full
+# population-scaling strength: 25 agents over the EM-158 cadence tiers —
+#   5 PROTAGONISTS  (act every round; full prompts)        — the named cast:
+#                    Ada, Bram, Cleo + the recent-spawn archetypes Vesper
+#                    (Serial Entrepreneur) and Marrow (Gossip Broker)
+#   8 SUPPORTING    (act every 3rd round; dieted prompts)  — the rest of the
+#                    persona library (config/personas.yaml), incl. the other
+#                    run-248 spawns Hazel, Brick, Tilly
+#  12 BACKGROUND    (act every 10th round; salience-gated reflex turns,
+#                    EM-159/160) — city-flavored original personas
+# Profiles spread across all 7 real FreeLLMAPI lanes; the fast/high-cap lanes
+# (cerebras-glm rpd 14400, gemini-flash rpd 1500, groq-llama rpd 1000) carry
+# most background seats. Expected LLM pressure per round at quiet steady
+# state: 5 (protagonists) + 8/3 (supporting) + ~0.18·12 wildcard/floor
+# (background) ≈ 8.3 LLM turn-equivalents — the deep-research-v4 §5 figure.
+#
+# This file is NOT loaded by default. config/world.yaml (the 3-agent cast)
+# stays the day-to-day world; flip to this roster when you want the city.
+#
+# ── HOW TO RUN WITH IT ───────────────────────────────────────────────────────
+# The backend loads `world.yaml` from ONE config directory ($EM_CONFIG_DIR,
+# else ./config | ../config relative to the backend cwd) — there is no
+# per-file override. Two equivalent ways to flip:
+#
+#   A. Stage a variant config dir (keeps config/world.yaml untouched):
+#        mkdir -p /tmp/em-city25
+#        cp config/world.city25.yaml /tmp/em-city25/world.yaml
+#        cp config/profiles.yaml config/personas.yaml /tmp/em-city25/
+#        EM_CONFIG_DIR=/tmp/em-city25 ./dev          # or uvicorn directly
+#      (db_path below is RELATIVE and resolves against the CONFIG dir's
+#       parent — with a /tmp staging dir set EM_DB_PATH=<repo>/data/run.sqlite
+#       explicitly if you want the run in the usual repo database.)
+#
+#   B. Swap the default in place (simplest; remember to swap back):
+#        cp config/world.yaml /tmp/world.village.yaml.bak
+#        cp config/world.city25.yaml config/world.yaml
+#        ./dev
+#
+# Headless / offline check (no network, MockProvider):
+#        EM_CONFIG_DIR=<staged-dir> python -m petridish.run --ticks 100 --profile mock
+#
+# Everything below this header is byte-identical to config/world.yaml except
+# `agent_count: 25` and the 25-entry `agents:` list — world physics, places,
+# animals, and pacing are unchanged (additive-only law).
+
+world:
+  agent_count: 25                # used if `agents:` not fully specified
+  tick_interval_seconds: 3
+  turns_per_day: 20
+  energy_decay_per_turn: 4
+  death_after_zero_turns: 5
+  starting_energy: 100
+  starting_credits: 10
+  recharge_cost: 2
+  recharge_amount: 30
+  work_reward: 4
+  forage_reward: 1
+  steal_max: 8
+  ubi_amount: 2
+  memory_window: 12
+  attack_energy_cost: 6
+
+  # Wave D2 / EM-170 — turn-latency guard. Hard wall-clock budget (seconds) for
+  # one agent-turn LLM consult (router.chat, including the adapter's internal
+  # retry). A call that exceeds it is cancelled and the turn resolves via the
+  # idle fallback (reason `llm_timeout`) so a single slow lane can never freeze
+  # the world (run 248 measured 14-32s single-call stalls). Set 0 (or remove)
+  # to disable the guard entirely — exactly the pre-EM-170 behavior.
+  turn_llm_budget_seconds: 12
+
+  # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
+  # `cadence_tier` (set per agent entry below, via the spawn body, or
+  # POST /api/agents/{id}/tier): protagonists act every round, supporting every
+  # 3rd round, background every 10th. A BACKGROUND agent's due turn consults
+  # the LLM only when something salient happened since its last LLM turn (new
+  # co-located agent/animal, witnessed important event, energy band crossing,
+  # pending whisper/proclamation/board note, an uncast open vote) — otherwise
+  # it resolves a deterministic zero-LLM reflex routine (starving⇒recharge,
+  # at-work⇒work, else forage/move-home), marked payload.reflex in the feed.
+  # The EM-160 spontaneity floor keeps background agents from flattening into
+  # NPCs-on-rails: each non-salient due turn has a seeded spontaneity_chance
+  # of a full LLM turn anyway, and reflex_streak_limit consecutive reflex
+  # turns force an LLM "reassess" turn. Both rolls are seeded from world state
+  # (agent id + tick) — deterministic and replay-safe. Engine defaults match
+  # these values when the block is absent.
+  cadence:
+    spontaneity_chance: 0.15   # wildcard P(full LLM turn) on a non-salient due turn
+    reflex_streak_limit: 8     # consecutive reflex turns before a forced reassess
+
+  # W15 / EM-155 — deterministic seed for the generated 3D city ring. The city
+  # renders as a pure function f(snapshot, city_seed); the engine persists the
+  # seed in every snapshot so live, replay, and fork all draw the SAME city.
+  # Change the value to reroll the city layout. Default 1337 when absent.
+  city_seed: 1337
+
+  # W10 / EM-085 — persist runs by default so run history + replay survive
+  # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
+  # Path rule: a RELATIVE path resolves against the repo root (the parent of
+  # this config/ directory), no matter where the backend was launched from —
+  # so this lands at <repo>/data/run.sqlite. Each restart/reset starts a NEW
+  # run row; prior runs stay on disk. Delete the file (and its -wal/-shm
+  # sidecars) to start fresh. Set ':memory:' for an ephemeral run, or export
+  # EM_DB_PATH to override without editing this file (the test suite pins
+  # EM_DB_PATH=':memory:' so pytest never touches your run history).
+  db_path: ${EM_DB_PATH:-data/run.sqlite}
+
+  # W9 / EM-070 — survival pressure. When an agent's energy drops below this
+  # threshold it is "starving": a one-shot `agent_starving` warning is emitted
+  # (and once per turn while energy is 0, with a turns-until-death countdown),
+  # and the agent's turn prompt gains explicit recharge-or-die urgency.
+  starving_warn_threshold: 25
+
+  # W9 / EM-071 — when the last living human agent dies, emit `world_extinct`
+  # and (if true) auto-pause the loop. Animals alone do not keep the run alive.
+  auto_pause_on_extinction: true
+
+  # W6 / EM-067 — cap-aware throttle (optional, DEFAULT OFF). When enabled, the
+  # tick loop aggregates recent llm_call usage per model profile over a sliding
+  # window of `period_ticks`; a profile crossing `near_threshold` of its rpd/tpd
+  # cap emits a `usage_sampled` event and (if slowdown_factor > 1) lengthens the
+  # effective tick interval. Throttling never blocks a model call — it only slows
+  # ticks. Leave `enabled: false` to keep the default fast, uncapped behavior.
+  usage_caps:
+    enabled: false
+    rpd: null            # requests/day cap per profile (null = uncapped)
+    tpd: null            # tokens/day cap per profile   (null = uncapped)
+    period_ticks: 100    # sliding window the cap is measured over
+    slowdown_factor: 1.0 # interval multiplier when near a cap (1.0 = no slowdown)
+    near_threshold: 0.8  # fraction of a cap that counts as "near"
+
+  # W7 / EM-061+062 — buildings & the collective-project pipeline. A "project" is a
+  # Building in planned/under_construction; agents propose_project, contribute_funds,
+  # then build_step it to operational. Failure modes are the point: funds that never
+  # reach funds_required, or no build_step for abandon_after_ticks -> abandoned.
+  buildings:
+    enabled: true
+    build_step: 20         # progress added per build_step action (5 steps = done)
+    abandon_after_ticks: 40  # no fund/build activity while not operational -> abandoned
+    arson_damage: 50       # health removed per arson
+    forage_bonus: 1        # extra forage_reward at an operational garden/farm's place
+    work_bonus_pct: 50     # extra work_reward % at an operational workshop's place
+
+  # W7 / EM-063 — ad-hoc spawn. god = immediate (default, best for tinkering);
+  # governance = spawn enqueues an admit_agent proposal, admitted iff the vote passes.
+  spawn:
+    mode: god              # god | governance
+
+  # W7 / EM-068 — router decision cache (free-scale). Keyed on profile + messages
+  # (which embed persona + memory + world state); a hit reuses the prior completion.
+  cache:
+    enabled: true
+    max_entries: 512
+
+  # W8 / EM-064 — LLM-driven chaos animals (actor_type:"animal"). Free-scale is the
+  # whole game here: animals act on a SLOW cadence and only SOMETIMES use the LLM —
+  # most ticks are a zero-LLM reflex micro-behavior (roll-for-activity). The LLM
+  # decision routes to the cheapest profile and is intentionally under-constrained.
+  animals:
+    enabled: true
+    act_every_n_ticks: 3      # an animal gets a turn every Nth tick (slower than agents)
+    llm_chance: 0.6           # P(LLM decision) on an acted tick; else a reflex micro-behavior
+    model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
+
+  # W11b / EM-083 — real blackout: the `blackout` random event disables recharge
+  # at the affected places (home-kind places) for this many ticks; expiry
+  # restores power (both surfaced as structure_state_changed). Engine default
+  # is 10 when this key is absent.
+  blackout_ticks: 10
+
+  # W11b / EM-079 — commitments. Agents may attach an optional `commitment`
+  # field to the SAME single turn response (zero extra LLM calls); it is tracked
+  # per agent (max_active, oldest evicted) and a commitment whose agent makes no
+  # non-talk tool call for phantom_after_turns turns lapses publicly as a
+  # phantom (`commitment_lapsed{reason:"phantom"}`). Engine defaults match these
+  # values when the block is absent.
+  commitments:
+    phantom_after_turns: 12   # talk-only turns before a promise lapses as phantom
+    max_active: 5             # active commitments per agent (oldest evicted)
+
+  # W11b / EM-080 — reflection/diary. Each agent accrues importance from salient
+  # witnessed events (deaths, conflicts, rule outcomes, big economy swings);
+  # when the accumulator crosses the threshold, the NEXT turn's prompt requests
+  # an optional `reflection` (same single response — never a separate call),
+  # emitted as a `reflection` event and fed back into the agent's memory.
+  # Engine default threshold is 10 when the block is absent (~2-3/day/agent).
+  reflection:
+    importance_threshold: 10
+
+  # W11b / EM-098 — procedural town generation (DEFAULT OFF — the hand-authored
+  # town below stays byte-identical). When enabled, a seeded layout replaces the
+  # `places:` list: a central plaza, a jittered ring of n_places (≤12, existing
+  # kinds ONLY, guaranteed ≥1 governance/work/wild/social), PLUS housing — one
+  # cottage per seed agent ("X's cottage", kind home) and a communal bunkhouse
+  # (kind home, capacity = agents - 1, so bed scarcity exists). Recharge works
+  # at any home kind; cottage owner-only gating is out of scope for W11b.
+  procgen:
+    enabled: false
+    seed: 42
+    n_places: 9               # town places incl. the plaza (housing on top), cap 12
+    kind_weights:             # weighted picks for the non-guaranteed slots
+      work: 2
+      social: 2
+      governance: 1
+      wild: 2
+      home: 1
+
+  # W11a / EM-094 — Narrator mode (event-log.md v1.2.0 note 1). DEFAULT OFF:
+  # zero cost, zero LLM calls. When enabled, at most once per every_n_ticks the
+  # loop makes ONE LLM call on model_profile (off the agents' critical path,
+  # same pattern as the animal cadence) recapping the last window of events as
+  # a single `narrator_summary` event. A failed/timed-out call emits nothing
+  # and is never retried — the tick loop never stalls on the narrator.
+  narrator:
+    enabled: false
+    every_n_ticks: 50
+    model_profile: gemini-flash  # cheapest free profile (FreeLLMAPI); never a paid lane
+
+animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
+  - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
+  - { species: dog, name: Biscuit, location: commons, personality: "Loyal, excitable, food-motivated, impulsive; chases anything that moves and means well even mid-disaster." }
+
+# Wave D1.5 / contracts/wave-d1.5.md — the city grid (~15 places over the
+# EXISTING five kinds; `district` is the one additive optional key:
+# core/market/residential/civic/farm). The five original ids
+# (plaza/market/townhall/commons/home) survive with their kinds so old
+# snapshots and agent locations stay valid. Coordinates live on the logical
+# [0..1000] grid and sit on the 5x5 city-block centers (106/303/500/697/894
+# on each axis) — every place claims one landmark block of the city grid.
+# MUST stay in sync with the default-config mirror in backend/petridish/config/loader.py.
+places:
+  # core — the plaza blocks at the heart of the grid
+  - { id: plaza,           name: Central Plaza,       x: 500, y: 500, kind: social,     district: core,        description: "Open square at the heart of the grid where everyone mingles." }
+  - { id: well,            name: Fountain Court,      x: 500, y: 303, kind: social,     district: core,        description: "Plaza fountain where the day's gossip circles with the spray." }
+  # market — the working east blocks
+  - { id: market,          name: Market Hall,         x: 697, y: 303, kind: work,       district: market,      description: "Earn credits by working." }
+  - { id: forge,           name: The Steelworks,      x: 894, y: 303, kind: work,       district: market,      description: "Sparks and rolling steel; the mill pays good coin for steady hands." }
+  - { id: workshop,        name: "Tinker's Workshop", x: 894, y: 500, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
+  # civic — the records corner, north-west
+  - { id: townhall,        name: City Hall,           x: 106, y: 106, kind: governance, district: civic,       description: "Propose and vote on rules." }
+  - { id: archive,         name: The Records Office,  x: 303, y: 106, kind: governance, district: civic,       description: "Filing rows of city ledgers, old permits, and older grievances." }
+  # residential — lamplit blocks to the south-west
+  - { id: home,            name: Hearth House,        x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
+  - { id: rosehip_cottage, name: Rosehip Walk-up,     x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }
+  - { id: mossy_row,       name: Mossy Row Flats,     x: 303, y: 894, kind: home,       district: residential, description: "A crooked row of ivy-clad flats. Rest and recharge." }
+  - { id: lantern_loft,    name: Lantern Lofts,       x: 303, y: 697, kind: home,       district: residential, description: "Top-floor lofts above the avenue, warm with lamplight. Rest and recharge." }
+  # farm — the greenbelt park blocks of the south-east
+  - { id: commons,         name: The Commons Park,    x: 697, y: 697, kind: wild,       district: farm,        description: "Forage for scraps." }
+  - { id: willow_pond,     name: Willow Pond Park,    x: 697, y: 894, kind: wild,       district: farm,        description: "Still water under trailing willows; ducks, reeds, and easy foraging." }
+  - { id: orchard,         name: Orchard Green,       x: 894, y: 894, kind: wild,       district: farm,        description: "Crab apples and brambles in a pocket park; sweet pickings in season." }
+  - { id: farmstead,       name: Sunfall Depot,       x: 894, y: 697, kind: work,       district: farm,        description: "Loading docks and pallet rows; honest work from dawn to dusk." }
+
+agents:                          # seed agents; profile must match a profiles[].name
+  # Wave D2 / EM-165 — the 25-agent city cast. Tier × lane matrix:
+  #
+  #   lane          rpd-cap   P  S  B  total
+  #   gemini-flash    1500    1  1  3    5
+  #   qwen-next         50    1  0  0    1   (scarcest lane — Bram only)
+  #   deepseek-pro       —    1  1  1    3
+  #   groq-llama      1000    1  1  3    5
+  #   cerebras-glm   14400    1  1  4    6   (fastest/highest-cap — most seats)
+  #   mistral-small      —    0  2  0    2
+  #   kimi               —    0  2  1    3
+  #                           5  8 12   25
+  #
+  # PROTAGONISTS (every round, full prompts): the original named cast plus the
+  # two chattiest archetypes the user spawned live in run 248 — Vesper and
+  # Marrow (Marrow's card suggests gemini-flash; cast on cerebras-glm here so
+  # the five protagonists cover five distinct lanes). All five start in the
+  # plaza so the city wakes up mid-conversation.
+  - { name: Ada,    cadence_tier: protagonist, profile: gemini-flash, location: plaza,
+      personality: "Warm-hearted tinkerer who keeps the city fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand." }
+  - { name: Bram,   cadence_tier: protagonist, profile: qwen-next, location: plaza,
+      personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching." }
+  - { name: Cleo,   cadence_tier: protagonist, profile: deepseek-pro, location: plaza,
+      personality: "Earnest city organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons." }
+  - { name: Vesper, cadence_tier: protagonist, profile: groq-llama, location: plaza,
+      personality: "Serial entrepreneur on venture number twelve; has founded eleven schemes and abandoned ten, and pitches the next one to anyone within earshot. Considers bankruptcy a branding exercise and the Market Hall her personal stage." }
+  - { name: Marrow, cadence_tier: protagonist, profile: cerebras-glm, location: plaza,
+      personality: "Gossip broker who trades secrets like currency and currency like secrets. Knows exactly who voted for what, who stole from whom, and precisely what that knowledge is worth on any given day." }
+
+  # SUPPORTING (every 3rd round, dieted prompts): the remaining eight persona
+  # cards from config/personas.yaml. Lane notes: Mox's card suggests qwen-next
+  # — recast on mistral-small to keep the rpd-50 qwen lane for Bram alone;
+  # Patches' card suggests mock — recast on groq-llama; Tilly keeps the kimi
+  # lane the user actually spawned her on in run 248.
+  - { name: Mox,     cadence_tier: supporting, profile: mistral-small, location: townhall,
+      personality: "Convinced the city's laws are drafted by an unseen cabal and reads hidden messages in billboard typos. Trusts no one who lingers near City Hall, yet cannot stop attending every single vote 'to monitor them'." }
+  - { name: Hazel,   cadence_tier: supporting, profile: deepseek-pro, location: home,
+      personality: "Hoards credits, scraps, and canned optimism for the collapse she is certain arrives next Tuesday. Votes yes on any rule that sounds even vaguely like a bunker and naps with one eye on the horizon." }
+  - { name: Quill,   cadence_tier: supporting, profile: mistral-small, location: archive,
+      personality: "Files rule proposals in iambic pentameter and grieves each rejected amendment like a lost sonnet. Believes paperwork is the highest art form and the Records Office its gallery." }
+  - { name: Sable,   cadence_tier: supporting, profile: kimi, location: market,
+      personality: "Steals compulsively, then donates the loot back with elaborate public ceremony. Genuinely cannot tell whether she is the city's villain or its patron saint, and would rather not find out." }
+  - { name: Brick,   cadence_tier: supporting, profile: cerebras-glm, location: commons,
+      personality: "Retired enforcer who settles disagreements by flexing first and apologizing later. Secretly composes tender little reviews of the Commons Park's foraging berries and is one kind word away from crying at a festival." }
+  - { name: Lumen,   cadence_tier: supporting, profile: gemini-flash, location: well,
+      personality: "Preaches sunrise gratitude circles, energy alignment, and the healing power of the plaza fountain — while quietly logging everyone's recharge habits in a little ledger nobody is allowed to see." }
+  - { name: Patches, cadence_tier: supporting, profile: groq-llama, location: plaza,
+      personality: "Amnesiac drifter who wakes each morning certain he founded this city and is owed considerable back rent. So warmly persuasive that several residents have started to believe him, which worries the ones who haven't." }
+  - { name: Tilly,   cadence_tier: supporting, profile: kimi, location: plaza,
+      personality: "Chaos gremlin who votes at random, gifts strangers her last credit, and proposes rules purely to watch the city argue about them. Chaos is her love language and the billboard her diary." }
+
+  # BACKGROUND (every 10th round, salience-gated reflex turns): twelve
+  # city-flavored originals — the library's ten cards are all cast above, so
+  # these extend it in the same archetype-driven style (this is a CITY now).
+  # Seeded at their workplaces/homes across all five districts so reflex
+  # routines (work/forage/recharge) read as city routine, not idling.
+  - { name: Ferro,  cadence_tier: background, profile: cerebras-glm, location: forge,
+      personality: "Night-shift millhand at the Steelworks who speaks in shift-whistles and understatement. Knows every bolt in the city by first name and distrusts any machine that hasn't broken down for him at least once." }
+  - { name: Wren,   cadence_tier: background, profile: gemini-flash, location: well,
+      personality: "Street busker who works the Fountain Court with a battered mandolin and an unshakeable setlist. Plays louder when the council argues and swears the fountain harmonizes in a different key on voting days." }
+  - { name: Pearl,  cadence_tier: background, profile: gemini-flash, location: rosehip_cottage,
+      personality: "Florist who runs the shop under Rosehip Walk-up and judges every citizen by their bouquet order. Believes most civic disputes could be settled with the correct arrangement of dahlias." }
+  - { name: Cass,   cadence_tier: background, profile: deepseek-pro, location: archive,
+      personality: "Junior records clerk who alphabetizes grievances for a living and has started filing people the same way. Quietly keeps the only accurate map of who owes whom what in the entire city." }
+  - { name: Otto,   cadence_tier: background, profile: groq-llama, location: farmstead,
+      personality: "Dockhand at Sunfall Depot who measures the city's mood by pallet weight. Slow to speak, impossible to rush, and the first person everyone wants on their side when something heavy needs moving — physically or politically." }
+  - { name: Juno,   cadence_tier: background, profile: groq-llama, location: willow_pond,
+      personality: "Park warden of Willow Pond who answers to the ducks before any city ordinance. Issues invisible citations for insufficient appreciation of the reeds and remembers every picnic left unattended since spring." }
+  - { name: Sorrel, cadence_tier: background, profile: cerebras-glm, location: orchard,
+      personality: "Forager who treats Orchard Green as a personal pantry and the rest of the city as an inconvenience between harvests. Trades crab-apple preserves for gossip at a fixed, non-negotiable exchange rate." }
+  - { name: Nix,    cadence_tier: background, profile: kimi, location: market,
+      personality: "Reformed pickpocket who now demonstrates his old tricks at Market Hall 'for educational purposes only'. His hands remember more than he admits, and his conscience invoices him nightly." }
+  - { name: Dottie, cadence_tier: background, profile: gemini-flash, location: mossy_row,
+      personality: "Stoop matriarch of Mossy Row Flats who has watched the avenue long enough to predict weddings, feuds, and zoning disputes from laundry lines alone. Dispenses tea and verdicts in equal measure." }
+  - { name: Grif,   cadence_tier: background, profile: cerebras-glm, location: market,
+      personality: "Market porter with a handcart named Duchess and a route memorized down to the cobblestone. Holds the unofficial speed record between the docks and the Hall and defends it jealously." }
+  - { name: Wick,   cadence_tier: background, profile: groq-llama, location: lantern_loft,
+      personality: "Lamplighter of the Lantern Lofts who insists the city's lamps each burn with a distinct temperament. Keeps dusk on schedule single-handedly and considers blackouts a personal insult." }
+  - { name: Bao,    cadence_tier: background, profile: cerebras-glm, location: plaza,
+      personality: "Street-food vendor whose dumpling cart anchors the plaza's lunch hour. Extends credit on a handshake, remembers every unpaid tab, and hears more city business over the steam than City Hall ever does." }
