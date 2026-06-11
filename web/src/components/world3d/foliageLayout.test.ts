@@ -1,73 +1,63 @@
 /**
- * foliageLayout tests (EM-118, lane-aware since EM-149) — the contract
- * invariants for the instanced treeline + town props:
- *   • determinism: same places → byte-identical layout across calls
- *   • clearance: no tree within 10 of any place center; wild props ≥ BAND_MAX
- *     from every center; benches on their own place's snug inner ring (below
- *     SLOT_BASE_RADIUS) and ≥ NEIGHBOR_FLOOR from every other center
- *   • lane corridors: pathSegments is townLayout's lane graph (the single
- *     source of truth — Wave C) and every non-lamp item stays PATH_CLEAR off
- *     every lane centerline; lamps LINE the lanes, never sit on one, and obey
- *     the lamp clearance law (≥ NEIGHBOR_FLOOR, never inside a slot band)
- *   • variant distribution sanity: every tree variant present
- *   • counts within the contract bounds (trees 50–80, total instances ≲400)
+ * foliageLayout tests (EM-118, rebuilt for Wave D1.5) — the park-greenery
+ * laws:
+ *   • determinism: same places → byte-identical layout across calls and
+ *     input orderings
+ *   • PARK-ONLY law: every tree and grass tuft sits INSIDE a park landmark
+ *     block (the blocks claimed by farm-district places); a town with no
+ *     parks gets NO greenery
+ *   • light scatter: per-park counts are small and anchor-clear, trees
+ *     self-spaced
+ *   • LOD split is a complete, threshold-faithful partition
+ *   • the wilderness layers are dead: lamps/benches/fences/mushrooms/wild
+ *     scatter always return []
  */
 
 import { describe, it, expect } from 'vitest';
 import type { Place } from '../../types';
 import { placeToWorld } from './worldSpace';
-import { computeTownLayout } from './townLayout';
-import { deriveCoreRadius } from './cityLayout';
+import { snapToBlockCenter, BLOCK_HALF } from './cityLayout';
 import {
   layoutTrees,
+  layoutParkGrass,
   splitByLod,
+  parkBlocks,
+  insidePark,
   layoutLamps,
   layoutBenches,
   layoutFences,
   layoutMushrooms,
   layoutWildScatter,
-  lampSpotValid,
-  wildernessBound,
-  WILDERNESS_EDGE_MARGIN,
-  TREE_COUNT,
   TREE_SPACING,
   TREE_LOD_RADIUS,
-  BAND_MAX,
-  NEAR_RING_MAX,
-  NEIGHBOR_FLOOR,
-  PATH_HALF_WIDTH,
-  PATH_CLEAR,
-  pathSegments,
-  distToNearestPath,
-  MAX_LAMPS,
+  PARK_TREES_PER_BLOCK,
+  PARK_GRASS_PER_BLOCK,
+  PARK_EDGE_INSET,
+  PARK_ANCHOR_CLEAR,
   BUSH_COUNT,
   ROCK_COUNT,
-  MUSHROOM_COUNT,
-  BENCHES_PER_PLAZA,
-  FENCE_SEGMENTS_PER_HOME,
-  type ScatterItem,
 } from './foliageLayout';
 
-/** The Wave C 15-place district town (mirrors config/world.yaml). */
+/** The Wave D1.5 15-place city grid (mirrors config/world.yaml). */
 const PLACES: Place[] = [
   { id: 'plaza', name: 'Central Plaza', x: 500, y: 500, kind: 'social', district: 'core', description: '' },
-  { id: 'well', name: 'The Old Well', x: 510, y: 420, kind: 'social', district: 'core', description: '' },
-  { id: 'market', name: 'Market', x: 750, y: 400, kind: 'work', district: 'market', description: '' },
-  { id: 'forge', name: 'The Ember Forge', x: 840, y: 340, kind: 'work', district: 'market', description: '' },
-  { id: 'workshop', name: "Tinker's Workshop", x: 820, y: 470, kind: 'work', district: 'market', description: '' },
-  { id: 'townhall', name: 'Town Hall', x: 250, y: 350, kind: 'governance', district: 'civic', description: '' },
-  { id: 'archive', name: 'The Records Hall', x: 180, y: 260, kind: 'governance', district: 'civic', description: '' },
-  { id: 'home', name: 'Hearth', x: 300, y: 650, kind: 'home', district: 'residential', description: '' },
-  { id: 'rosehip_cottage', name: 'Rosehip Cottage', x: 210, y: 640, kind: 'home', district: 'residential', description: '' },
-  { id: 'mossy_row', name: 'Mossy Row', x: 250, y: 740, kind: 'home', district: 'residential', description: '' },
-  { id: 'lantern_loft', name: 'Lantern Loft', x: 340, y: 740, kind: 'home', district: 'residential', description: '' },
-  { id: 'commons', name: 'The Commons', x: 500, y: 750, kind: 'wild', district: 'farm', description: '' },
-  { id: 'willow_pond', name: 'Willow Pond', x: 610, y: 690, kind: 'wild', district: 'farm', description: '' },
-  { id: 'orchard', name: 'Bramble Orchard', x: 640, y: 790, kind: 'wild', district: 'farm', description: '' },
-  { id: 'farmstead', name: 'Sunfall Farmstead', x: 730, y: 700, kind: 'work', district: 'farm', description: '' },
+  { id: 'well', name: 'Fountain Court', x: 500, y: 303, kind: 'social', district: 'core', description: '' },
+  { id: 'market', name: 'Market Hall', x: 697, y: 303, kind: 'work', district: 'market', description: '' },
+  { id: 'forge', name: 'The Steelworks', x: 894, y: 303, kind: 'work', district: 'market', description: '' },
+  { id: 'workshop', name: "Tinker's Workshop", x: 894, y: 500, kind: 'work', district: 'market', description: '' },
+  { id: 'townhall', name: 'City Hall', x: 106, y: 106, kind: 'governance', district: 'civic', description: '' },
+  { id: 'archive', name: 'The Records Office', x: 303, y: 106, kind: 'governance', district: 'civic', description: '' },
+  { id: 'home', name: 'Hearth House', x: 106, y: 697, kind: 'home', district: 'residential', description: '' },
+  { id: 'rosehip_cottage', name: 'Rosehip Walk-up', x: 106, y: 894, kind: 'home', district: 'residential', description: '' },
+  { id: 'mossy_row', name: 'Mossy Row Flats', x: 303, y: 894, kind: 'home', district: 'residential', description: '' },
+  { id: 'lantern_loft', name: 'Lantern Lofts', x: 303, y: 697, kind: 'home', district: 'residential', description: '' },
+  { id: 'commons', name: 'The Commons Park', x: 697, y: 697, kind: 'wild', district: 'farm', description: '' },
+  { id: 'willow_pond', name: 'Willow Pond Park', x: 697, y: 894, kind: 'wild', district: 'farm', description: '' },
+  { id: 'orchard', name: 'Orchard Green', x: 894, y: 894, kind: 'wild', district: 'farm', description: '' },
+  { id: 'farmstead', name: 'Sunfall Depot', x: 894, y: 697, kind: 'work', district: 'farm', description: '' },
 ];
 
-/** A pre-Wave-C, districtless town (fallback clustering path). */
+/** A pre-Wave-C, districtless town (wild-kind fallback path). */
 const LEGACY: Place[] = [
   { id: 'plaza', name: 'Plaza', x: 500, y: 500, kind: 'social', description: '' },
   { id: 'market', name: 'Market', x: 760, y: 420, kind: 'work', description: '' },
@@ -76,289 +66,155 @@ const LEGACY: Place[] = [
   { id: 'commons', name: 'Commons', x: 720, y: 760, kind: 'wild', description: '' },
 ];
 
-const CENTERS = PLACES.map(placeToWorld);
+/** A town with NO farm district and NO wild kind: zero parks anywhere. */
+const PARKLESS: Place[] = PLACES.filter((p) => p.district !== 'farm');
 
-function distToCenters(it: { x: number; z: number }): number[] {
-  return CENTERS.map((c) => Math.hypot(c.x - it.x, c.z - it.z));
-}
+const FARM_IDS = ['commons', 'farmstead', 'orchard', 'willow_pond'];
 
-/**
- * Near-prop invariant (benches): the prop sits on SOME place's snug inner
- * ring (below that place's slot band) and keeps ≥ NEIGHBOR_FLOOR from every
- * other place center.
- */
-function nearPropSafe(it: { x: number; z: number }): boolean {
-  const ds = distToCenters(it);
-  const own = Math.min(...ds);
-  if (own < 3.2 || own > NEAR_RING_MAX) return false;
-  return ds.every((d) => d === own || d >= NEIGHBOR_FLOOR);
-}
-
-describe('foliageLayout determinism', () => {
-  it('produces identical tree layouts across two calls', () => {
-    expect(layoutTrees(PLACES)).toEqual(layoutTrees(PLACES));
+describe('park blocks', () => {
+  it('derives one park block per farm-district place, sorted and snapped', () => {
+    const blocks = parkBlocks(PLACES);
+    expect(blocks.map((b) => b.id)).toEqual(FARM_IDS);
+    for (const b of blocks) {
+      const place = PLACES.find((p) => p.id === b.id)!;
+      const w = placeToWorld(place);
+      expect({ x: b.cx, z: b.cz }).toEqual(snapToBlockCenter(w.x, w.z));
+    }
   });
 
-  it('produces identical prop layouts across two calls', () => {
-    expect(layoutLamps(PLACES)).toEqual(layoutLamps(PLACES));
-    expect(layoutBenches(PLACES)).toEqual(layoutBenches(PLACES));
-    expect(layoutFences(PLACES)).toEqual(layoutFences(PLACES));
-    expect(layoutMushrooms(PLACES)).toEqual(layoutMushrooms(PLACES));
-    expect(layoutWildScatter(BUSH_COUNT, 'bush', PLACES)).toEqual(
-      layoutWildScatter(BUSH_COUNT, 'bush', PLACES),
-    );
+  it('falls back to wild-kind places for district-less legacy towns', () => {
+    expect(parkBlocks(LEGACY).map((b) => b.id)).toEqual(['commons']);
+  });
+
+  it('is insensitive to input ordering', () => {
+    const reversed = [...PLACES].reverse();
+    expect(parkBlocks(reversed)).toEqual(parkBlocks(PLACES));
+  });
+
+  it('a parkless town has no park blocks', () => {
+    expect(parkBlocks(PARKLESS)).toEqual([]);
+  });
+});
+
+describe('determinism', () => {
+  it('produces identical tree and grass layouts across two calls', () => {
+    expect(layoutTrees(PLACES)).toEqual(layoutTrees(PLACES));
+    expect(layoutParkGrass(PLACES)).toEqual(layoutParkGrass(PLACES));
   });
 
   it('is insensitive to call order (pure functions, no shared state)', () => {
     const a = layoutTrees(PLACES);
-    layoutLamps(PLACES);
-    layoutWildScatter(ROCK_COUNT, 'rock', PLACES);
+    layoutParkGrass(PLACES);
+    layoutTrees(LEGACY);
     expect(layoutTrees(PLACES)).toEqual(a);
   });
 });
 
-describe('lane corridors come from townLayout (EM-149 single source of truth)', () => {
-  it('pathSegments returns EXACTLY the townLayout lane graph', () => {
-    const lanes = computeTownLayout(PLACES).lanes;
-    const segs = pathSegments(PLACES);
-    expect(segs).toEqual(
-      lanes.map((l) => ({ ax: l.ax, az: l.az, bx: l.bx, bz: l.bz })),
-    );
-    expect(segs.length).toBeGreaterThanOrEqual(PLACES.length - 1);
-  });
-
-  it('also tracks the lanes for districtless legacy towns', () => {
-    const lanes = computeTownLayout(LEGACY).lanes;
-    expect(pathSegments(LEGACY).length).toBe(lanes.length);
-    expect(pathSegments(LEGACY).length).toBeGreaterThanOrEqual(LEGACY.length - 1);
-  });
-});
-
-describe('tree clearance + counts (contract §B3)', () => {
+describe('the park-only law (Wave D1.5)', () => {
+  const blocks = parkBlocks(PLACES);
   const trees = layoutTrees(PLACES);
+  const grass = layoutParkGrass(PLACES);
 
-  it('keeps a substantial treeline within the clamped core meadow', () => {
-    // Wave D1 gate fix: the wilderness clamp shrank the meadow from the open
-    // ±49.5 square to the historic-core disc (r ≈ 41 here) — the same
-    // sampling now yields 42 trees (was 72). The Wave C 50–80 band assumed
-    // the pre-city meadow; the city ring's own tree_city greenery (~28)
-    // carries the outer canopy now, keeping total scene trees equivalent.
-    expect(trees.length).toBeGreaterThanOrEqual(35);
-    expect(trees.length).toBeLessThanOrEqual(TREE_COUNT);
+  it('plants a light scatter in every park block', () => {
+    expect(trees.length).toBe(blocks.length * PARK_TREES_PER_BLOCK);
+    expect(grass.length).toBe(blocks.length * PARK_GRASS_PER_BLOCK);
   });
 
-  it('keeps every tree ≥ 10 units from every place center', () => {
-    for (const t of trees) {
-      for (const d of distToCenters(t)) expect(d).toBeGreaterThanOrEqual(10);
+  it('keeps EVERY tree and tuft inside a park landmark block', () => {
+    for (const item of [...trees, ...grass]) {
+      expect(
+        insidePark(item.x, item.z, blocks),
+        `greenery escaped the parks at (${item.x}, ${item.z})`,
+      ).toBe(true);
+      // …and inset from the sidewalk rim
+      const owner = blocks.find(
+        (b) =>
+          Math.abs(item.x - b.cx) <= BLOCK_HALF && Math.abs(item.z - b.cz) <= BLOCK_HALF,
+      )!;
+      expect(Math.abs(item.x - owner.cx)).toBeLessThanOrEqual(BLOCK_HALF - PARK_EDGE_INSET + 1e-9);
+      expect(Math.abs(item.z - owner.cz)).toBeLessThanOrEqual(BLOCK_HALF - PARK_EDGE_INSET + 1e-9);
     }
   });
 
-  it('keeps trees spaced apart from each other', () => {
-    for (let i = 0; i < trees.length; i++) {
-      for (let j = i + 1; j < trees.length; j++) {
-        expect(
-          Math.hypot(trees[i].x - trees[j].x, trees[i].z - trees[j].z),
-        ).toBeGreaterThanOrEqual(TREE_SPACING);
+  it('keeps trees clear of the park anchor and spaced apart within a park', () => {
+    for (const b of blocks) {
+      const inThis = trees.filter(
+        (t) => Math.abs(t.x - b.cx) <= BLOCK_HALF && Math.abs(t.z - b.cz) <= BLOCK_HALF,
+      );
+      for (const t of inThis) {
+        expect(Math.hypot(t.x - b.cx, t.z - b.cz)).toBeGreaterThanOrEqual(PARK_ANCHOR_CLEAR);
+      }
+      for (let i = 0; i < inThis.length; i++) {
+        for (let j = i + 1; j < inThis.length; j++) {
+          expect(
+            Math.hypot(inThis[i].x - inThis[j].x, inThis[i].z - inThis[j].z),
+          ).toBeGreaterThanOrEqual(TREE_SPACING);
+        }
       }
     }
   });
 
-  it('includes every variant (oak, conifer, blossom)', () => {
+  it('a town without parks gets ZERO greenery', () => {
+    expect(layoutTrees(PARKLESS)).toEqual([]);
+    expect(layoutParkGrass(PARKLESS)).toEqual([]);
+  });
+
+  it('legacy wild-kind places still seed their park', () => {
+    const legacyTrees = layoutTrees(LEGACY);
+    expect(legacyTrees.length).toBeGreaterThan(0);
+    expect(legacyTrees.length).toBeLessThanOrEqual(PARK_TREES_PER_BLOCK);
+    const legacyBlocks = parkBlocks(LEGACY);
+    for (const t of legacyTrees) expect(insidePark(t.x, t.z, legacyBlocks)).toBe(true);
+  });
+});
+
+describe('tree variants + LOD', () => {
+  const trees = layoutTrees(PLACES);
+
+  it('mixes tree variants (no monoculture)', () => {
     const variants = new Set(trees.map((t) => t.variant));
-    expect(variants).toEqual(new Set(['oak', 'conifer', 'blossom']));
+    expect(variants.size).toBeGreaterThanOrEqual(2);
+    for (const v of variants) expect(['oak', 'conifer', 'blossom']).toContain(v);
   });
 
   it('splits into near/far LOD batches deterministically and completely', () => {
     const { near, far } = splitByLod(trees);
     expect(near.length + far.length).toBe(trees.length);
-    expect(near.length).toBeGreaterThan(0);
-    expect(far.length).toBeGreaterThan(0);
     for (const t of near) expect(Math.hypot(t.x, t.z)).toBeLessThanOrEqual(TREE_LOD_RADIUS);
     for (const t of far) expect(Math.hypot(t.x, t.z)).toBeGreaterThan(TREE_LOD_RADIUS);
     expect(splitByLod(trees)).toEqual(splitByLod(trees));
   });
 });
 
-describe('prop clearance (own slot band avoided; neighbors respected)', () => {
-  it('keeps benches on a social place inner ring, below the slot band', () => {
-    const benches = layoutBenches(PLACES);
-    expect(benches.length).toBeGreaterThan(0);
-    const socials = PLACES.filter((p) => p.kind === 'social').map(placeToWorld);
-    for (const b of benches) {
-      expect(nearPropSafe(b)).toBe(true);
-      const nearest = Math.min(
-        ...socials.map((s) => Math.hypot(s.x - b.x, s.z - b.z)),
-      );
-      expect(nearest).toBeLessThanOrEqual(NEAR_RING_MAX);
+describe('the wilderness layers are dead (Wave D1.5)', () => {
+  it('lamps, benches, fences, mushrooms and wild scatter always return []', () => {
+    for (const places of [PLACES, LEGACY, [], [PLACES[0]]]) {
+      expect(layoutLamps(places)).toEqual([]);
+      expect(layoutBenches(places)).toEqual([]);
+      expect(layoutFences(places)).toEqual([]);
+      expect(layoutMushrooms(places)).toEqual([]);
+      expect(layoutWildScatter(BUSH_COUNT, 'bush', places)).toEqual([]);
+      expect(layoutWildScatter(ROCK_COUNT, 'rock', places)).toEqual([]);
+      expect(layoutWildScatter(50, 'anything', places, 99)).toEqual([]);
     }
-  });
-
-  it('keeps fences, bushes, mushrooms and rocks ≥ BAND_MAX from every center', () => {
-    const wildProps: ScatterItem[] = [
-      ...layoutFences(PLACES),
-      ...layoutWildScatter(BUSH_COUNT, 'bush', PLACES),
-      ...layoutWildScatter(ROCK_COUNT, 'rock', PLACES),
-      ...layoutMushrooms(PLACES),
-    ];
-    expect(wildProps.length).toBeGreaterThan(0);
-    for (const p of wildProps) {
-      for (const d of distToCenters(p)) expect(d).toBeGreaterThanOrEqual(BAND_MAX);
-    }
-  });
-
-  it('keeps every non-lamp item out of the lane corridors', () => {
-    const segs = pathSegments(PLACES);
-    expect(segs.length).toBeGreaterThan(0);
-    const nonLamp: ScatterItem[] = [
-      ...layoutTrees(PLACES),
-      ...layoutBenches(PLACES),
-      ...layoutFences(PLACES),
-      ...layoutWildScatter(BUSH_COUNT, 'bush', PLACES),
-      ...layoutWildScatter(ROCK_COUNT, 'rock', PLACES),
-      ...layoutMushrooms(PLACES),
-    ];
-    expect(nonLamp.length).toBeGreaterThan(0);
-    for (const p of nonLamp) {
-      expect(distToNearestPath(p.x, p.z, segs)).toBeGreaterThanOrEqual(PATH_CLEAR);
-    }
-  });
-
-  it('keeps lamps beside the lane strips — lining a lane, never on one', () => {
-    const segs = pathSegments(PLACES);
-    const lamps = layoutLamps(PLACES);
-    expect(lamps.length).toBeGreaterThan(0);
-    expect(lamps.length).toBeLessThanOrEqual(MAX_LAMPS);
-    for (const l of lamps) {
-      const d = distToNearestPath(l.x, l.z, segs);
-      // off the strip proper…
-      expect(d).toBeGreaterThanOrEqual(PATH_HALF_WIDTH);
-      // …but actually LINING a lane, not floating in a field
-      expect(d).toBeLessThanOrEqual(2.5);
-      // and obeying the lamp clearance law (structures + slot bands)
-      expect(lampSpotValid(l.x, l.z, CENTERS)).toBe(true);
-    }
-  });
-
-  it('lines lanes with lamps in legacy (districtless) towns too', () => {
-    const lamps = layoutLamps(LEGACY);
-    const segs = pathSegments(LEGACY);
-    expect(lamps.length).toBeGreaterThan(0);
-    for (const l of lamps) {
-      expect(distToNearestPath(l.x, l.z, segs)).toBeGreaterThanOrEqual(PATH_HALF_WIDTH);
-      expect(distToNearestPath(l.x, l.z, segs)).toBeLessThanOrEqual(2.5);
-    }
-  });
-
-  it('clusters mushrooms near the wild places', () => {
-    const wilds = PLACES.filter((p) => p.kind === 'wild').map(placeToWorld);
-    const mushrooms = layoutMushrooms(PLACES);
-    expect(mushrooms.length).toBeGreaterThan(0);
-    for (const m of mushrooms) {
-      const nearest = Math.min(
-        ...wilds.map((w) => Math.hypot(w.x - m.x, w.z - m.z)),
-      );
-      expect(nearest).toBeLessThanOrEqual(BAND_MAX + 5.1);
-    }
-  });
-});
-
-describe('historic-core bound (Wave D1 gate fix, EM-156)', () => {
-  function centroidOf(places: Place[]): { x: number; z: number } {
-    const pts = places.map(placeToWorld);
-    return {
-      x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
-      z: pts.reduce((s, p) => s + p.z, 0) / pts.length,
-    };
-  }
-
-  it('derives the bound from cityLayout (same radius the city clears, minus margin)', () => {
-    const b = wildernessBound(PLACES);
-    const c = centroidOf(PLACES);
-    expect(b.cx).toBeCloseTo(c.x);
-    expect(b.cz).toBeCloseTo(c.z);
-    expect(b.maxR).toBeCloseTo(deriveCoreRadius(PLACES) - WILDERNESS_EDGE_MARGIN);
-  });
-
-  it('keeps ALL wilderness scatter inside the core disc — never on the city ring', () => {
-    for (const places of [PLACES, LEGACY]) {
-      const b = wildernessBound(places);
-      const items: ScatterItem[] = [
-        ...layoutTrees(places),
-        ...layoutWildScatter(BUSH_COUNT, 'bush', places),
-        ...layoutWildScatter(ROCK_COUNT, 'rock', places),
-        ...layoutMushrooms(places),
-      ];
-      expect(items.length).toBeGreaterThan(0);
-      for (const it of items) {
-        const d = Math.hypot(it.x - b.cx, it.z - b.cz);
-        expect(d).toBeLessThanOrEqual(b.maxR);
-        // and therefore strictly inside what the city generator clears
-        expect(d).toBeLessThan(deriveCoreRadius(places));
-      }
-    }
-  });
-});
-
-describe('instance budget (contract: total NEW instances ≲400)', () => {
-  it('keeps the per-part instance total under 400', () => {
-    const trees = layoutTrees(PLACES);
-    const { near, far } = splitByLod(trees);
-    // parts per object, mirroring Foliage.tsx / Props.tsx exactly:
-    // near tree = trunk + 2 canopy parts; far tree = trunk + 1 canopy
-    const treeInstances = near.length * 3 + far.length * 2;
-    const lampInstances = layoutLamps(PLACES).length * 3; // base+post+head
-    const benchInstances = layoutBenches(PLACES).length * 4; // seat+back+2 legs
-    const fenceInstances = layoutFences(PLACES).length * 3; // post+2 rails
-    const bushInstances = layoutWildScatter(BUSH_COUNT, 'bush', PLACES).length;
-    const rockInstances = layoutWildScatter(ROCK_COUNT, 'rock', PLACES).length;
-    const mushroomInstances = layoutMushrooms(PLACES).length * 2; // stem+cap
-
-    const total =
-      treeInstances +
-      lampInstances +
-      benchInstances +
-      fenceInstances +
-      bushInstances +
-      rockInstances +
-      mushroomInstances;
-    expect(total).toBeLessThanOrEqual(400);
-  });
-
-  it('respects the configured prop count caps', () => {
-    const socials = PLACES.filter((p) => p.kind === 'social').length;
-    const homes = PLACES.filter((p) => p.kind === 'home').length;
-    expect(layoutBenches(PLACES).length).toBeLessThanOrEqual(BENCHES_PER_PLAZA * socials);
-    expect(layoutFences(PLACES).length).toBeLessThanOrEqual(FENCE_SEGMENTS_PER_HOME * homes);
-    expect(layoutMushrooms(PLACES).length).toBeLessThanOrEqual(MUSHROOM_COUNT);
-    expect(layoutLamps(PLACES).length).toBeLessThanOrEqual(MAX_LAMPS);
   });
 });
 
 describe('degenerate worlds', () => {
   it('handles an empty place list without throwing', () => {
-    expect(layoutLamps([])).toEqual([]);
-    expect(layoutBenches([])).toEqual([]);
-    expect(layoutFences([])).toEqual([]);
-    // Wave D1: with no places the core disc collapses to MIN_CORE_RADIUS, so
-    // the (clamped) treeline shrinks to the few samples landing inside it —
-    // was pinned to TREE_COUNT (72) pre-clamp.
-    const trees = layoutTrees([]);
-    expect(trees.length).toBeGreaterThan(0);
-    expect(trees.length).toBeLessThanOrEqual(TREE_COUNT);
-    const b = wildernessBound([]);
-    for (const t of trees) {
-      expect(Math.hypot(t.x - b.cx, t.z - b.cz)).toBeLessThanOrEqual(b.maxR);
-    }
+    expect(layoutTrees([])).toEqual([]);
+    expect(layoutParkGrass([])).toEqual([]);
+    expect(parkBlocks([])).toEqual([]);
   });
 
-  it('handles a single place (no lanes → no lamps)', () => {
-    const solo = [PLACES[0]];
-    expect(pathSegments(solo)).toEqual([]);
-    expect(layoutLamps(solo)).toEqual([]);
+  it('handles a single (non-park) place', () => {
+    expect(layoutTrees([PLACES[0]])).toEqual([]);
+  });
+
+  it('handles a single park place', () => {
+    const solo = [PLACES.find((p) => p.id === 'commons')!];
     const trees = layoutTrees(solo);
-    const c = placeToWorld(solo[0]);
-    for (const t of trees) {
-      expect(Math.hypot(c.x - t.x, c.z - t.z)).toBeGreaterThanOrEqual(10);
-    }
+    expect(trees.length).toBeGreaterThan(0);
+    expect(trees.length).toBeLessThanOrEqual(PARK_TREES_PER_BLOCK);
   });
 });
