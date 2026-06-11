@@ -246,7 +246,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-174 | P1 | W15 | frontend | user 2026-06-11 | Every building has a purpose: generated zone-building fill removed entirely (user rule — buildings are landmarks or agent-built W7 entities, nothing else); all 72 lots platted from day 0 and claimable by real buildings (landmark block first, nearest-block overflow, slot-ring at full city); D1.6 growth budget retired as superseded | done | hotfix 2026-06-11 |
 | EM-175 | P1 | W16 | backend | user 2026-06-11 | agent_count was dead config (parsed, never consumed — world booted exactly the agents: list despite the yaml comment's promise). Now pads from the persona library at supporting tier; Citizen-N fill when the library runs short; never truncates | done | hotfix 2026-06-11 |
 
-_Next free ID: EM-176._
+| EM-176 | P2 | W17 | frontend | user 2026-06-11 | Bring vehicles back when they're playable: parked-car emission disabled at the generator (`CARS_ENABLED=false`, cityLayout) — static cars read as a distraction before they have a purpose. Keys/registry/GLBs/licenses all kept; EM-169's ambient traffic on the road graph is the re-entry point (flip the flag + moving cars together) | open | — |
+
+_Next free ID: EM-177._
 
 ## Notes
 

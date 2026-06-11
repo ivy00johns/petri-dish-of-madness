@@ -289,6 +289,8 @@ function zoneForPlace(p: Place): CityZone {
 }
 
 const CAR_KEYS: readonly CityPieceKey[] = ['car_a', 'car_b', 'car_c'];
+/** EM-176: parked cars off until EM-169 (W17) makes vehicles playable. */
+export const CARS_ENABLED = false;
 
 // ── Seeded hash (the repo idiom, keyed on seed/gridX/gridZ/purpose) ──────────
 
@@ -470,7 +472,11 @@ function emitCurbLife(
     }
 
     // Sparse parked cars: on the adjacent road tile, pulled to this curb.
-    if (h(seed, `car-${s}`, bx, bz) < CAR_SIDE_CHANCE) {
+    // EM-176 — DISABLED until W17: static cars read as a distraction before
+    // EM-169's ambient traffic gives vehicles a purpose. The keys, registry
+    // entries, GLBs, and license rows all stay; flip CARS_ENABLED to bring
+    // them back (EM-169 replaces this with moving traffic on the road graph).
+    if (CARS_ENABLED && h(seed, `car-${s}`, bx, bz) < CAR_SIDE_CHANCE) {
       const roadDist = BLOCK_PITCH / 2; // road centerline off the block center
       const curbPull = TILE * 0.32;
       const lateral = (h(seed, `car-at-${s}`, bx, bz) - 0.5) * (BLOCK_TILES * TILE - TILE);
