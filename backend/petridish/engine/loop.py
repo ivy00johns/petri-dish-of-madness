@@ -1096,7 +1096,7 @@ class TickLoop:
         usage = llm.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         finish_reason = llm.get("finish_reason")
-        return {
+        payload = {
             "gen_ai.request.model": llm.get("gen_ai.request.model", profile_name),
             "gen_ai.response.model": llm.get("gen_ai.response.model"),
             "gen_ai.usage.input_tokens": usage.get("input_tokens"),
@@ -1106,6 +1106,12 @@ class TickLoop:
             "cached": llm.get("cached", False),
             "attempt": llm.get("attempt", 1),
         }
+        # Wave D2 / EM-170 — ADDITIVE: only an attempt cancelled by the
+        # turn-latency guard carries `timed_out: true` (latency_ms is the real
+        # elapsed ms). Normal rows keep the exact §3.4 key set unchanged.
+        if llm.get("timed_out"):
+            payload["timed_out"] = True
+        return payload
 
     def _sim_time(self, tick: int) -> float:
         """Simulation seconds for a tick (event-log.md §2)."""

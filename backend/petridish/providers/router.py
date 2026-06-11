@@ -285,7 +285,12 @@ class Router:
     # ── EM-135 — reroute-aware lane health ─────────────────────────────────────
 
     def note_parse_outcome(
-        self, profile_name: str, *, parsed: bool, truncated: bool
+        self,
+        profile_name: str,
+        *,
+        parsed: bool,
+        truncated: bool,
+        timed_out: bool = False,
     ) -> None:
         """Record one runtime parse outcome for this profile's lane (EM-135).
 
@@ -293,11 +298,23 @@ class Router:
         by truncation REPAIR still reports truncated=True — the lane is still
         cutting output; salvage hides it from the feed, not from health
         tracking. The window is a deque(maxlen=_LANE_WINDOW), so a full window
-        of clean outcomes flushes a bad streak automatically."""
+        of clean outcomes flushes a bad streak automatically.
+
+        EM-170 — `timed_out=True` records a turn-budget timeout as a lane
+        demerit in the SAME window (the mechanism truncation uses), so a lane
+        that keeps stalling is visible to lane_health() consumers and chronic
+        lanes get deprioritized by that logic. Deliberately NOT counted toward
+        the truncation token boost (_lane_boosted): a bigger completion budget
+        makes a slow lane slower, not healthier. The key is additive — only
+        present on entries that actually timed out — so pre-EM-170 window
+        shapes are unchanged."""
         window = self._lane_outcomes.setdefault(
             profile_name, deque(maxlen=_LANE_WINDOW)
         )
-        window.append({"parsed": bool(parsed), "truncated": bool(truncated)})
+        entry = {"parsed": bool(parsed), "truncated": bool(truncated)}
+        if timed_out:
+            entry["timed_out"] = True
+        window.append(entry)
         # routed_via at the time of the outcome — introspection only.
         self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
 
@@ -322,11 +339,14 @@ class Router:
 
     def lane_health(self) -> dict:
         """Introspection snapshot (EM-135): profile -> {window, boosted,
-        last_routed_via}. For a future UI; no API/event consumers this wave."""
+        timeouts, last_routed_via}. For a future UI; no API/event consumers
+        this wave. `timeouts` (EM-170, additive) counts turn-budget timeouts
+        in the current window — chronic stalling lanes surface here."""
         return {
             profile: {
                 "window": [dict(o) for o in window],
                 "boosted": self._lane_boosted(profile),
+                "timeouts": sum(1 for o in window if o.get("timed_out")),
                 "last_routed_via": self._lane_routed_via.get(profile),
             }
             for profile, window in self._lane_outcomes.items()

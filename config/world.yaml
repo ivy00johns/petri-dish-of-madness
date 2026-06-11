@@ -19,6 +19,14 @@ world:
   memory_window: 12
   attack_energy_cost: 6
 
+  # Wave D2 / EM-170 — turn-latency guard. Hard wall-clock budget (seconds) for
+  # one agent-turn LLM consult (router.chat, including the adapter's internal
+  # retry). A call that exceeds it is cancelled and the turn resolves via the
+  # idle fallback (reason `llm_timeout`) so a single slow lane can never freeze
+  # the world (run 248 measured 14-32s single-call stalls). Set 0 (or remove)
+  # to disable the guard entirely — exactly the pre-EM-170 behavior.
+  turn_llm_budget_seconds: 12
+
   # W15 / EM-155 — deterministic seed for the generated 3D city ring. The city
   # renders as a pure function f(snapshot, city_seed); the engine persists the
   # seed in every snapshot so live, replay, and fork all draw the SAME city.

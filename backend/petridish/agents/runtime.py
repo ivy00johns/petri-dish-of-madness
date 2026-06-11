@@ -13,6 +13,7 @@ Per-turn flow:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -1644,7 +1645,11 @@ class AgentRuntime:
         )
         llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
-        if parse_error and action_dict is None:
+        # EM-170 — a TIMED-OUT consult never retries: the budget already burned
+        # the turn's wall-clock allowance, and a retry would risk stalling the
+        # world for a second budget. The turn drops straight to the idle
+        # fallback below with reason llm_timeout; the world moves on.
+        if parse_error and action_dict is None and not llm_meta.get("timed_out"):
             # One retry with error fed back; a truncated first attempt retries
             # with a boosted token budget — whether the provider admitted it
             # (finish_reason='length') or lied (mistral 'stop' cuts, run 126).
@@ -1831,7 +1836,7 @@ class AgentRuntime:
         """
         usage = meta.get("usage")
         usage = usage if isinstance(usage, dict) else None
-        return {
+        span = {
             "gen_ai.request.model": profile_name,
             "gen_ai.response.model": meta.get("routed_via"),
             "usage": usage,
@@ -1840,6 +1845,12 @@ class AgentRuntime:
             "cached": bool(usage.get("cached")) if usage else False,
             "attempt": meta.get("attempt", 1),
         }
+        # EM-170 — ADDITIVE: only attempts cancelled by the turn-latency guard
+        # carry the flag (latency_ms above is the real elapsed wall-clock ms),
+        # so non-timeout llm_call rows keep their exact pre-EM-170 key set.
+        if meta.get("timed_out"):
+            span["timed_out"] = True
+        return span
 
     async def _call_and_parse(
         self,
@@ -1868,12 +1879,41 @@ class AgentRuntime:
             "routed_via": None,
             "usage": None,
         }
+        budget = self._turn_llm_budget()
         started = time.perf_counter()
         try:
-            text = await self.router.chat(
+            # ── Wave D2 / EM-170 — turn-latency guard ──────────────────────────
+            # The FULL consult (router.chat → adapter, including the adapter's
+            # internal timeout+retry chain) runs under one wall-clock budget.
+            # asyncio.wait_for cancels the inner task on timeout and AWAITS the
+            # cancellation itself, so the underlying HTTP task is reaped — never
+            # abandoned to spam "Task exception was never retrieved". A cancelled
+            # call also never reaches the router's cache-store line, so a
+            # timed-out call can NOT poison the decision cache. budget<=0 ⇒
+            # guard disabled ⇒ byte-for-byte today's await.
+            chat_coro = self.router.chat(
                 profile_name, messages,
                 max_tokens=max_tokens, temperature=temperature,
             )
+            if budget > 0:
+                text = await asyncio.wait_for(chat_coro, timeout=budget)
+            else:
+                text = await chat_coro
+        except asyncio.TimeoutError:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            meta["latency_ms"] = elapsed_ms
+            meta["timed_out"] = True
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
+            # EM-135 lane health: a turn-budget timeout is a lane demerit
+            # (same window mechanism truncation uses) so chronic stallers
+            # surface in lane_health(); the world moves on regardless.
+            self._note_timeout_demerit(profile_name)
+            log.warning(
+                "EM-170: %s's LLM call exceeded the %.1fs turn budget "
+                "(%.0f ms, profile=%s) — cancelled, idle fallback",
+                agent.name, budget, elapsed_ms, profile_name,
+            )
+            return None, f"llm_timeout: LLM call exceeded the {budget:g}s turn budget", meta
         except ProviderError as exc:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
             # On error the adapter may still expose the routed model from a prior
@@ -1958,6 +1998,31 @@ class AgentRuntime:
         note = getattr(self.router, "note_parse_outcome", None)
         if callable(note):
             note(profile_name, parsed=parsed, truncated=truncated)
+
+    def _turn_llm_budget(self) -> float:
+        """EM-170 — the per-turn LLM wall-clock budget in seconds, read
+        defensively from world params (`world.turn_llm_budget_seconds`).
+        <= 0 / absent / malformed ⇒ 0.0 ⇒ guard fully disabled."""
+        try:
+            budget = float(getattr(
+                self.world.params, "turn_llm_budget_seconds", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return budget if budget > 0 else 0.0
+
+    def _note_timeout_demerit(self, profile_name: str) -> None:
+        """EM-170 — report a turn-budget timeout into the router's EM-135
+        lane-health window (the same mechanism truncation demerits use).
+        Guarded for duck-typed test routers: missing method is a no-op, and a
+        router predating the `timed_out` kwarg degrades to a plain unparsed
+        demerit rather than breaking the turn."""
+        note = getattr(self.router, "note_parse_outcome", None)
+        if not callable(note):
+            return
+        try:
+            note(profile_name, parsed=False, truncated=False, timed_out=True)
+        except TypeError:
+            note(profile_name, parsed=False, truncated=False)
 
     def _apply_action(
         self,

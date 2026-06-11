@@ -64,6 +64,9 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+  # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
+  # config/world.yaml. 0/absent disables the guard entirely.
+  turn_llm_budget_seconds: 12
   # W15 / EM-155 — deterministic seed for the generated 3D city ring.
   # MUST stay in sync with config/world.yaml.
   city_seed: 1337
@@ -354,6 +357,14 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # Wave D2 / EM-170 — turn-latency guard: hard wall-clock budget (seconds)
+    # for ONE agent-turn LLM consult (router.chat, including the adapter's
+    # internal retry). On timeout the call is cancelled and the turn resolves
+    # via the existing idle-fallback path (reason `llm_timeout`) so a single
+    # slow call can never freeze the world (run 248: 14-32s stalls). The
+    # DATACLASS default is 0.0 = guard fully disabled = exactly today's
+    # behavior (tests build WorldParams directly); the shipped yamls set 12.
+    turn_llm_budget_seconds: float = 0.0
     # W15 / EM-155 — deterministic seed for the generated 3D city ring (config
     # `world.city_seed`). The engine copies it onto World and persists it in
     # to_snapshot()/world_state, so live/replay/fork render the SAME city.
@@ -692,6 +703,8 @@ def _parse_world(
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        # Wave D2 / EM-170 — absent/0 ⇒ guard disabled (today's behavior).
+        turn_llm_budget_seconds=float(w.get("turn_llm_budget_seconds", 0) or 0),
         # W15 / EM-155 — optional deterministic city seed; absent → 1337.
         city_seed=int(w.get("city_seed", 1337)),
         starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
