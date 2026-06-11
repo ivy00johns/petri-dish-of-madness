@@ -93,6 +93,9 @@ const STATUS_TINT: Record<string, string> = {
   destroyed: '#8a8a8a',
 };
 
+/** Max chars for the subtitle readout before it's clamped to one tidy line. */
+const SUB_MAX = 34;
+
 function StructureLabel({
   building,
   style,
@@ -103,7 +106,7 @@ function StructureLabel({
   y: number;
 }) {
   const tint = STATUS_TINT[building.status] ?? '#fff3e0';
-  const sub =
+  const rawSub =
     building.status === 'under_construction'
       ? `${style.tag} · ${building.progress}%`
       : building.status === 'planned'
@@ -118,7 +121,15 @@ function StructureLabel({
                 ? `${style.tag} · offline`
                 : `${style.tag}${building.function ? ` · ${building.function}` : ''}`;
 
-  const w = Math.max(2.6, building.name.length * 0.32);
+  // Models sometimes overflow `function` with a whole sentence (e.g. a
+  // "Commons Fund" whose function reads "A pooled resource managed by community
+  // vote") — clamp the readout to one line so it never sprawls past the plate.
+  const sub = rawSub.length > SUB_MAX ? `${rawSub.slice(0, SUB_MAX - 1).trimEnd()}…` : rawSub;
+
+  // Plate fits the WIDER of the two lines — title (0.46 font) AND subtitle
+  // (0.30 font) — so a long status line no longer spills past a title-sized
+  // backdrop. (Previously sized to the title alone → the overflow you saw.)
+  const w = Math.max(2.6, building.name.length * 0.32, sub.length * 0.21) + 0.4;
   return (
     <Billboard position={[0, y, 0]}>
       <mesh position={[0, 0, -0.02]}>
@@ -133,7 +144,8 @@ function StructureLabel({
         anchorY="middle"
         outlineWidth={0.014}
         outlineColor="#241b14"
-        maxWidth={10}
+        whiteSpace="nowrap"
+        maxWidth={w}
       >
         {building.name}
       </Text>
@@ -145,7 +157,8 @@ function StructureLabel({
         anchorY="middle"
         outlineWidth={0.01}
         outlineColor="#241b14"
-        maxWidth={10}
+        whiteSpace="nowrap"
+        maxWidth={w}
       >
         {sub}
       </Text>
