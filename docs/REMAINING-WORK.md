@@ -242,7 +242,11 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-171 | P2 | W17 | providers | qe wave-D2 | EM-162 cache payoff is 0% in integration (v4 assumed 50-60%): the day-floored tick still misses (a 25-turn round spans >1 in-world day at 20 turns/day), memory lines embed raw ticks (an agent's own last turn makes every prompt unique), reflex move-home churns co-location rosters. Extend the normalization: coarsen/drop the day line, de-tick background memory lines, scope menu target lists — then re-measure. Capacity math survives without it (8.3 calls/round measured) | open | — |
 | EM-172 | P2 | W17 | backend | qe wave-D2 | Mid-round-death scheduler skip (pre-existing since 58a8e7e, surfaced by the 25-agent chaos run): a death mid-round silently skips one due agent's turn that round — cheap `_turn_index` decrement fix in world.py + regression test. Also note: recharge-to-full energy-band flapping inflates background salience (one-line band hysteresis) | open | — |
 
-_Next free ID: EM-173._
+| EM-173 | P1 | W16 | backend | user 2026-06-11 | Survival reflex on llm_timeout: run 321's degraded proxy night (38% of calls at the 12s budget) turned the EM-170 guard into a death sentence — agents idled turn after turn and Ada starved. Wall-clock timeouts now resolve the EM-159 reflex routine (any tier, marked llm_timeout_reflex, timed_out trace kept); gated reflexes fall through to idle; provider_error stays an honest idle | done | hotfix 2026-06-11 |
+| EM-174 | P1 | W15 | frontend | user 2026-06-11 | Every building has a purpose: generated zone-building fill removed entirely (user rule — buildings are landmarks or agent-built W7 entities, nothing else); all 72 lots platted from day 0 and claimable by real buildings (landmark block first, nearest-block overflow, slot-ring at full city); D1.6 growth budget retired as superseded | done | hotfix 2026-06-11 |
+| EM-175 | P1 | W16 | backend | user 2026-06-11 | agent_count was dead config (parsed, never consumed — world booted exactly the agents: list despite the yaml comment's promise). Now pads from the persona library at supporting tier; Citizen-N fill when the library runs short; never truncates | done | hotfix 2026-06-11 |
+
+_Next free ID: EM-176._
 
 ## Notes
 
