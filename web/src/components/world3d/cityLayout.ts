@@ -633,13 +633,16 @@ export function computeCityPlan(world: CityWorld): CityPlan {
  *
  *   1. LANDMARK BLOCK FIRST: a building's index among its place's buildings
  *      (stable sort by id) picks that place's realLots entry.
- *   2. NEAREST-BLOCK OVERFLOW: past REAL_LOTS_PER_LANDMARK, overflow claims
- *      PLATTED lots city-wide — candidate lots are ordered by (distance from
- *      their block's center to the place's landmark anchor — or the raw
- *      place center for ids with no landmark — then plan block order, then
- *      lot index), and each building takes the first unclaimed one. Claims
- *      are GLOBAL across places, resolved in sorted-location order, so the
- *      result is independent of building input order.
+ *   2. NEIGHBORHOOD OVERFLOW (EM-181 spread sooner): past REAL_LOTS_PER_LANDMARK,
+ *      overflow claims PLATTED lots city-wide, ROUND-ROBIN across blocks — lot
+ *      index 0 of every block (nearest block to the place's landmark anchor —
+ *      or the raw place center for ids with no landmark — first, ties → plan
+ *      block order), then lot index 1, and so on. A place that outgrows its
+ *      block fans out one lot per surrounding block instead of packing the
+ *      single nearest block full before spilling. Each building takes the first
+ *      unclaimed candidate; claims are GLOBAL across places, resolved in
+ *      sorted-location order, so the result is independent of building input
+ *      order.
  *   3. SLOT-RING LAST RESORT: the EM-131 slotLayout ring around the anchor /
  *      place center, only when every platted lot in the city is claimed.
  *
@@ -680,15 +683,20 @@ export function assignBuildingLots(
       : undefined;
     const center = anchor ?? placeCenters.get(loc) ?? { x: 0, z: 0 };
 
-    // Nearest-block candidate order: block-center distance to the place
-    // (ties → plan block order), then lot index within the block.
+    // Nearest-block order: block-center distance to the place (ties → plan
+    // block order). The candidate WALK then round-robins across these blocks
+    // by lot index (EM-181 spread sooner): lot 0 of every block nearest-first,
+    // then lot 1, and so on — a place that outgrows its landmark block fans out
+    // one lot per surrounding block instead of packing the nearest block full
+    // before spilling. Deterministic + input-order independent.
     const blockOrder = plan.blockLots
       .map((b, bi) => ({ bi, d: Math.hypot(b.cx - center.x, b.cz - center.z) }))
       .sort((a, b) => a.d - b.d || a.bi - b.bi);
+    const maxLots = plan.blockLots.reduce((m, b) => Math.max(m, b.lots.length), 0);
     const candidates: Array<{ bi: number; li: number }> = [];
-    for (const { bi } of blockOrder) {
-      for (let li = 0; li < plan.blockLots[bi].lots.length; li++) {
-        candidates.push({ bi, li });
+    for (let li = 0; li < maxLots; li++) {
+      for (const { bi } of blockOrder) {
+        if (li < plan.blockLots[bi].lots.length) candidates.push({ bi, li });
       }
     }
 
