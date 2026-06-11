@@ -587,6 +587,18 @@ class World:
         each round start by _start_new_round) — with the default all-
         protagonist cast that is the same full sorted-id rotation as before."""
         alive_ids = {a.id for a in self.living_agents()}
+        # Wave D3 / EM-172 — mid-round-death scheduler skip (pre-existing since
+        # 58a8e7e): pruning a dead agent that sat BEFORE the rotation pointer
+        # shifts every later entry left by one, so the pointer silently jumped
+        # over the next due agent. Decrement the pointer once per pruned
+        # pre-cursor so it keeps naming the same next-due agent. Dead entries
+        # AT/AFTER the pointer need no shift (the pointer's target is
+        # unaffected); the round-boundary check in next_agent() handles the
+        # shrunken-list edge as before.
+        self._turn_index -= sum(
+            1 for aid in self._turn_order[: self._turn_index]
+            if aid not in alive_ids
+        )
         self._turn_order = [aid for aid in self._turn_order if aid in alive_ids]
         # Add any newly spawned agents due this round at the end.
         for aid in sorted(self.agents.keys()):

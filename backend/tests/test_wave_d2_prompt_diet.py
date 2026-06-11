@@ -15,6 +15,8 @@ Contract under test: contracts/wave-d2.md §B3.
   - EM-162 (background only): energy renders bucketed to 10s ("~70") and the
     tick line floors to the day, so quiet rounds assemble byte-identical
     prompts and the router's sha1 decision cache hits. forget() untouched.
+    (Wave D3 / EM-171 supersedes the day-floored tick: background prompts now
+    carry no tick line at all — see test_wave_d3_cache.py.)
   - EM-163: propose_project / build_step / contribute_funds / propose_rule
     gate to protagonist+supporting at RESOLUTION time (the billboard
     location-gate pattern; EM-108 = prompt-only gating is not enforcement);
@@ -422,7 +424,12 @@ def test_background_energy_bucketed_and_tick_floored():
     prompt = _system_prompt(world, world.agents["bg_solo"], events=[])
     assert "Energy: ~70/100" in prompt
     assert "Energy ~70/100 — at 0 you start DYING." in prompt
-    assert "Tick: day 2" in prompt
+    # Wave D3 / EM-171 — STRICTER than the EM-162 day-floored render this
+    # test originally guarded ("Tick: day 2"): the day line still missed the
+    # cache (a 25-turn round spans >1 in-world day, so consecutive background
+    # due turns never share a day), so background prompts now carry NO tick
+    # line at all. See tests/test_wave_d3_cache.py for the full EM-171 suite.
+    assert "Tick:" not in prompt
     assert "Tick: 41" not in prompt
 
 

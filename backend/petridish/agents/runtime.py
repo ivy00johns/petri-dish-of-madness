@@ -210,9 +210,20 @@ TIER_GATED_ACTIONS = frozenset({
 #     _DIET_BACKGROUND_MEMORY_WINDOW.
 #
 # Wave D2 / EM-162 — cache-key normalization (BACKGROUND prompts only): energy
-# renders bucketed to 10s ("~70", floored) and the tick line floors to the day
-# (`Tick: day N`), so quiet rounds assemble byte-identical prompts and the
-# router's sha1 decision cache can hit. Router.forget() semantics untouched.
+# renders bucketed to 10s ("~70", floored) so quiet rounds assemble
+# byte-identical prompts and the router's sha1 decision cache can hit.
+# Router.forget() semantics untouched.
+#
+# Wave D3 / EM-171 — EM-162's payoff measured 0% in integration; the
+# normalization extends (still BACKGROUND only, protagonist/supporting
+# byte-identical to pre-diet):
+#   - the tick line is DROPPED (the day-floored form still missed — a
+#     25-turn round spans >1 in-world day, so consecutive background due
+#     turns never share a day);
+#   - memory lines render de-ticked ("  - <text>", no raw tick stamp);
+#   - co-located rosters and building/project menus render in sorted order
+#     so equivalent situations assemble identical bytes regardless of dict
+#     insertion order.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DIET_RELATIONSHIP_CAP = 8
@@ -268,6 +279,13 @@ _DEFAULT_REFLEX_STREAK_LIMIT = 8
 # both "I drifted toward starving" and "someone blessed/attacked me").
 _ENERGY_BAND_SIZE = 25.0
 
+# Wave D3 / EM-172 — band hysteresis margin: recharge-to-full flapping right
+# at a band edge (99.x ⇄ 100 across the top-band boundary) re-triggered the
+# energy_band salience every drift, inflating background LLM turns. The band
+# only FLIPS once energy leaves the seen band's range by MORE than this
+# margin; movement within the margin of the old band's edges stays quiet.
+_ENERGY_BAND_HYSTERESIS = 5.0
+
 
 def _seed_int(*parts: Any) -> int:
     """Deterministic, wall-clock-free seed from the given parts — a stable
@@ -289,6 +307,26 @@ def _energy_band(energy: float) -> int:
     except (TypeError, ValueError):
         e = 0.0
     return int(e // _ENERGY_BAND_SIZE)
+
+
+def _energy_band_flipped(energy: float, seen_band: int) -> bool:
+    """EM-172 — hysteresis for the EM-159 energy_band salience trigger.
+
+    True only when `energy` has left `seen_band`'s range by MORE than
+    _ENERGY_BAND_HYSTERESIS. An agent recharging to full and drifting back
+    (99.x ⇄ 100, a band edge) used to flip the band — and trigger a salient
+    background LLM turn — on every oscillation; within-margin wobble around
+    the old band's edges is now quiet. A genuine crossing (starving drift,
+    an attack) clears the margin and still fires."""
+    try:
+        e = max(0.0, min(100.0, float(energy)))
+    except (TypeError, ValueError):
+        e = 0.0
+    if _energy_band(e) == seen_band:
+        return False
+    low = seen_band * _ENERGY_BAND_SIZE - _ENERGY_BAND_HYSTERESIS
+    high = (seen_band + 1) * _ENERGY_BAND_SIZE + _ENERGY_BAND_HYSTERESIS
+    return not (low <= e < high)
 
 
 def _world_block_get(params: Any, block: str, key: str, default: Any) -> Any:
@@ -1074,6 +1112,12 @@ def _assemble_context(
         a for a in world.living_agents()
         if a.location == agent.location and a.id != agent.id
     ]
+    # Wave D3 / EM-171 — background rosters render in sorted (name, id) order
+    # so equivalent co-location sets assemble identical bytes regardless of
+    # agent-dict insertion order (spawn/padding order churns it). Background
+    # ONLY: protagonist/supporting keep today's iteration order byte-for-byte.
+    if background:
+        co_located.sort(key=lambda a: (a.name, a.id))
 
     active_rules = [r for r in world.rules.values() if r.status == "active"]
     proposed_rules = [r for r in world.rules.values() if r.status == "proposed"]
@@ -1099,6 +1143,12 @@ def _assemble_context(
             b for b in open_projects
             if _place_visible(_building_field(b, "location"))
         ]
+    # Wave D3 / EM-171 — background building/project menus render in stable
+    # id order so equivalent situations assemble identical bytes regardless
+    # of buildings-dict insertion order (background only — see roster note).
+    if background:
+        here_buildings.sort(key=lambda b: str(_building_field(b, "id")))
+        open_projects.sort(key=lambda b: str(_building_field(b, "id")))
 
     # ── Tool-registry-driven valid_actions (EM-060) ───────────────────────────
     # Filter the per-turn action list by each action's registry gates: place-kind
@@ -1193,10 +1243,18 @@ def _assemble_context(
             "answer_proclamation (text) - answer the god's proclamation directly; "
             "your reply is threaded under it for the watchers to see")
 
-    # Recent events summary (EM-161: background window shrinks 12→8)
+    # Recent events summary (EM-161: background window shrinks 12→8).
+    # Wave D3 / EM-171 — background memory lines render WITHOUT the tick
+    # stamp: an agent's own last-turn memory otherwise embeds a fresh tick
+    # number that makes every background prompt unique and defeats the
+    # router's sha1 decision cache. Protagonist/supporting keep the stamped
+    # form byte-for-byte.
     event_lines = []
     for evt in recent_events[-_effective_memory_window(agent, params):]:
-        event_lines.append(f"  [tick {evt.get('tick', '?')}] {evt.get('text', '')}")
+        if background:
+            event_lines.append(f"  - {evt.get('text', '')}")
+        else:
+            event_lines.append(f"  [tick {evt.get('tick', '?')}] {evt.get('text', '')}")
 
     # Beliefs
     belief_lines = "\n".join(f"  - {b}" for b in agent.beliefs) if agent.beliefs else "  (none)"
@@ -1371,17 +1429,20 @@ def _assemble_context(
     _town = (getattr(world, "town_name", "") or "").strip()
     town_line = f"\nTown: {_town}" if _town else ""
 
-    # ── Wave D2 / EM-162 — cache-key normalization (BACKGROUND only): the tick
-    # line floors to the day and every displayed energy buckets to 10s, so a
-    # quiet background round assembles byte-identical bytes and the router's
-    # sha1 decision cache hits. Protagonists/supporting render exactly as
-    # before (byte-for-byte).
+    # ── Wave D2 / EM-162 + Wave D3 / EM-171 — cache-key normalization
+    # (BACKGROUND only): every displayed energy buckets to 10s, and the tick
+    # line is DROPPED entirely. EM-162's day-floored tick still missed the
+    # cache in integration (0% realized): a 25-turn round spans >1 in-world
+    # day at 20 turns/day, so consecutive background due turns (~10 rounds
+    # apart) NEVER share a day. The town line survives the drop — it changes
+    # once per naming vote, not per tick. Protagonists/supporting render
+    # exactly as before (byte-for-byte).
     if background:
-        tick_display = f"day {world.tick // max(1, getattr(params, 'turns_per_day', 20))}"
+        clock_header = f"Town: {_town}\n" if _town else ""
         status_energy = _energy_display(agent.energy)
         _co_energy = lambda a: _energy_display(a.energy)  # noqa: E731
     else:
-        tick_display = str(world.tick)
+        clock_header = f"Tick: {world.tick}{town_line}\n"
         status_energy = f"{agent.energy:.1f}"
         _co_energy = lambda a: f"{a.energy:.0f}"  # noqa: E731
 
@@ -1427,8 +1488,7 @@ def _assemble_context(
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-Tick: {tick_display}{town_line}
-Personality: {agent.personality}
+{clock_header}Personality: {agent.personality}
 
 === YOUR STATUS ===
 Location: {place_name} (kind={place_kind})
@@ -1889,7 +1949,8 @@ class AgentRuntime:
                                  the last LLM turn.
           witnessed_importance — witnessed an importance>0 event (the EM-080
                                  accumulator's weights) since the last LLM turn.
-          energy_band          — energy crossed a 25-point band boundary.
+          energy_band          — energy crossed a 25-point band boundary by
+                                 more than the EM-172 hysteresis margin.
           pending_whisper      — a god whisper is queued for this agent.
           proclamation         — a god proclamation landed since the last LLM
                                  turn (it rides every prompt; answering needs
@@ -1911,7 +1972,9 @@ class AgentRuntime:
             triggers.append("witnessed_importance")
 
         band_seen = self._energy_band_seen.get(agent.id)
-        if band_seen is not None and band_seen != _energy_band(agent.energy):
+        # EM-172 — hysteresis: the band only flips once energy crosses the
+        # seen band's boundary by a margin (kills recharge-to-full flapping).
+        if band_seen is not None and _energy_band_flipped(agent.energy, band_seen):
             triggers.append("energy_band")
 
         pending = getattr(world, "pending_whispers", None)
