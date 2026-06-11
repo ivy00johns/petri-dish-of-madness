@@ -237,7 +237,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-168 | P1 | W17 | providers | research-v4 §5.6 | Cap-pressure governor: wire the three existing observers (UsageAlertTracker 70% alerts, default-off `usage_caps` throttle, EM-135 lane health) into the tier scheduler — a lane's alert demotes that lane's agents one cadence tier instead of merely slowing ticks. Enforces the v3 population-cap rule. Deps EM-158 | open | — |
 | EM-169 | P2 | W17 | frontend | research-v4 §7 | Ambient vehicles: Car Kit traffic on the generated road network (deterministic paths, instanced), parked cars from the prop scatter. Deps EM-152, EM-153 | open | — |
 
-_Next free ID: EM-170._
+| EM-170 | P1 | W16 | backend | user 2026-06-11 | Turn-latency guard: a single slow LLM call freezes the whole world (sequential loop) — run 248 measured 14-32s calls back-to-back ("no one talking for 30 sec"; speed slider invisible because sleep is the only thing it controls). Cap per-turn LLM wall-time (~10-12s budget, then idle fallback + lane-health demerit via EM-135 tracking) so no call ever stalls the world; pairs with EM-158 tiers + EM-168 governor. Live mitigation applied: slow seats reassigned to gemini-flash/groq-llama (turns 0.5-0.7s after) | open | — |
+
+_Next free ID: EM-171._
 
 ## Notes
 
