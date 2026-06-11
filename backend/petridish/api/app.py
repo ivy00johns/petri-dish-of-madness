@@ -141,7 +141,10 @@ def _emit_usage_alert(alert: dict) -> None:
 
     Persists + broadcasts ONE `usage_alert {provider, metric, pct, limit}` row
     per provider/metric/day-window (the once-per-window de-dupe lives in
-    providers/usage.py). Defensive: alerting must never break a turn."""
+    providers/usage.py). Defensive: alerting must never break a turn.
+
+    Wave D3 / EM-168: the same alert then drives the cap-pressure governor
+    (_apply_cap_governor) — config-gated, world-side, additive."""
     if _loop is None:
         return
     try:
@@ -163,6 +166,43 @@ def _emit_usage_alert(alert: dict) -> None:
         })
     except Exception as exc:  # pragma: no cover - defensive
         log.debug("usage_alert emission failed: %s", exc)
+    _apply_cap_governor(alert)
+
+
+def _usage_alert_window() -> str:
+    """The UsageAlertTracker's CURRENT UTC-day window key ("YYYY-MM-DD"), or ""
+    when unknown (Wave D3 / EM-168). A pure attribute peek — the tracker owns
+    every clock read and rolls the window lazily on real adapter calls; the
+    governor's demote/restore cycle keys off this value, never a new clock."""
+    tracker = getattr(_router, "_usage_alerts", None)
+    return str(getattr(tracker, "_window", "") or "")
+
+
+def _apply_cap_governor(alert: dict) -> None:
+    """Wave D3 / EM-168 — cap-pressure governor, driven off the usage_alert
+    sink: demote every agent assigned to the alerting lane one cadence tier
+    for the rest of the tracker's day window (world.apply_cap_pressure owns
+    the rules: config gate, once-per-lane-alert-day, background floor,
+    rollover-first restoration). Emits the returned `cap_pressure` feed
+    event(s) and broadcasts the tier change. Same global-reading pattern as
+    _emit_usage_alert/_emit_lane_detour so it follows reset/fork; defensive —
+    governing must never break a turn."""
+    if _world is None or _loop is None:
+        return
+    provider = alert.get("provider")
+    if not provider:
+        return
+    try:
+        apply = getattr(_world, "apply_cap_pressure", None)
+        if not callable(apply):
+            return
+        events = apply(str(provider), _usage_alert_window())
+        for evt in events:
+            _loop._emit_event(evt)
+        if events:
+            _loop._broadcast_world_state()
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("cap governor failed for %s: %s", provider, exc)
 
 
 def _emit_lane_detour(payload: dict) -> None:
@@ -227,6 +267,11 @@ async def lifespan(app: FastAPI):
     # log the same way. The sink reads the CURRENT _loop/_world globals, so
     # events keep landing in the right run after reset/fork.
     _router.set_lane_event_sink(_emit_lane_detour)
+    # Wave D3 / EM-168 — give the world a zero-clock-read peek at the usage
+    # tracker's day window so the scheduler can restore cap-governor demotions
+    # at the tracker's rollover. (loop.reset mutates this world in place, so
+    # the probe survives /api/control/reset; the fork endpoint re-wires it.)
+    _world.set_usage_window_probe(_usage_alert_window)
 
     log.info("PetriDishOfMadness backend started (tick_interval=%.2fs)",
              _config.world.tick_interval_seconds)
@@ -442,6 +487,12 @@ async def reassign_tier(agent_id: str, body: TierBody):
         )
     old_tier = getattr(agent, "cadence_tier", "protagonist")
     agent.cadence_tier = body.tier
+    # Wave D3 / EM-168 — a manual tier set WINS over the cap-pressure governor:
+    # clear the demotion marker so the day rollover never "restores" over the
+    # user's explicit choice. (The lane's once-per-alert-day record stands, so
+    # a same-day repeat alert won't re-demote either.)
+    if getattr(agent, "demoted_from", None) is not None:
+        agent.demoted_from = None
     if _loop:
         _loop._emit_event({
             "kind": "cadence_tier_changed",
@@ -1070,6 +1121,12 @@ async def fork_run(body: ForkBody):
             _router.reassign(agent.id, "mock")
             agent.profile = "mock"
     _router.inject_world(new_world)
+    # Wave D3 / EM-168 — re-wire the usage-window probe onto the forked world
+    # so restored cap-governor demotions (carried by the snapshot) still lift
+    # at the tracker's day rollover.
+    set_probe = getattr(new_world, "set_usage_window_probe", None)
+    if callable(set_probe):
+        set_probe(_usage_alert_window)
     clear_cache = getattr(_router, "clear_cache", None)
     if callable(clear_cache):
         clear_cache()  # audit B12: parent-run cached decisions must not serve here

@@ -77,11 +77,18 @@ class AgentState:
     # in snapshots so the spontaneity floor survives restore; surfaced in
     # world_state agents for the EM-166 panel.
     reflex_streak: int = 0
+    # Wave D3 / EM-168 — cap-pressure governor: the cadence tier this agent
+    # held BEFORE the governor demoted it on a usage_alert (None = not
+    # governed). Restored (and cleared) at the alert tracker's UTC-day
+    # rollover; a manual tier set via POST /api/agents/{id}/tier also clears
+    # it (user intent overrides the governor). ADDITIVE: serialized only when
+    # set, so pre-D3 snapshots and world_state agents are byte-identical.
+    demoted_from: str | None = None
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
     def to_dict(self, profile_color: str = "#888888") -> dict:
-        return {
+        d = {
             "id": self.id,
             "name": self.name,
             "personality": self.personality,
@@ -102,6 +109,11 @@ class AgentState:
                 for aid, r in self.relationships.items()
             },
         }
+        # Wave D3 / EM-168 — only while governed, so ungoverned agents (and
+        # every pre-D3 world) keep the exact pre-D3 dict shape.
+        if self.demoted_from is not None:
+            d["demoted_from"] = self.demoted_from
+        return d
 
 
 @dataclass
@@ -487,6 +499,21 @@ class World:
         except (TypeError, ValueError):
             self.city_seed = 1337
 
+        # Wave D3 / EM-168 — cap-pressure governor bookkeeping: lane (profile
+        # name) -> the UsageAlertTracker day-window key ("YYYY-MM-DD") whose
+        # usage_alert already demoted that lane's agents. ONE demotion pass per
+        # lane-alert-day: repeated alerts on the same lane in the same window
+        # (rpd then tpd) never stack, and a manual tier override is never
+        # re-demoted the same day. Entries expire at the tracker's day
+        # rollover (restore_cap_demotions). Serialized in to_snapshot() only
+        # when non-empty, so pre-D3 snapshots are byte-identical.
+        self.cap_demotions: dict[str, str] = {}
+        # Injected by the API layer (set_usage_window_probe): a zero-clock-read
+        # peek at the UsageAlertTracker's CURRENT day-window key. The tracker
+        # already rolls its window lazily on real adapter calls; the scheduler
+        # only compares the attribute — no new clock reads (EM-168 rule).
+        self._usage_window_probe: Any = None
+
         self.tick: int = 0
         self.day: int = 0
         # W7 — round counter, bumped at each round start. The tick loop watches it
@@ -591,6 +618,10 @@ class World:
         """Return the next agent whose turn it is, advancing the pointer.
         Returns None if no living agents.
         Detects round boundaries and applies per-round effects."""
+        # Wave D3 / EM-168 — restore cap-governor demotions once the usage
+        # tracker's day window has rolled (checked BEFORE the due-set math so
+        # a restored tier schedules correctly from this very call).
+        self._check_cap_demotion_rollover()
         if not self.living_agents():
             return None
         self._rebuild_turn_order()
@@ -630,6 +661,162 @@ class World:
 
     def has_active_rule(self, effect: str) -> bool:
         return self._active_rule(effect) is not None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave D3 / EM-168 — cap-pressure governor.
+    #
+    # A usage_alert (UsageAlertTracker ≥70% of a lane's rpd/tpd day cap) demotes
+    # every agent ASSIGNED to that lane ONE cadence tier (protagonist →
+    # supporting → background; background stays), recording the prior tier on
+    # AgentState.demoted_from. At the tracker's UTC-day rollover (the alert
+    # windows already reset daily) demoted agents return to demoted_from. The
+    # world never reads a clock: the API layer feeds the tracker's CURRENT
+    # window key into apply_cap_pressure (alert path) and exposes it through
+    # the injected _usage_window_probe (rollover path) — both are attribute
+    # reads of state the tracker already maintains.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _cap_governor_enabled(self) -> bool:
+        """Config gate `world.cap_governor.enabled` (default ON). Disabled ⇒
+        usage alerts stay alert-only — byte-identical pre-D3 behavior."""
+        return bool(_block_get(
+            getattr(self.params, "cap_governor", None), "enabled", True))
+
+    def set_usage_window_probe(self, probe: Any) -> None:
+        """Register a zero-argument callable returning the UsageAlertTracker's
+        CURRENT day-window key (or None/"" when unknown). Wired by the API
+        layer; it must be a cheap attribute read — the tracker itself owns all
+        clock reads (it rolls its window lazily on real adapter calls)."""
+        self._usage_window_probe = probe
+
+    def apply_cap_pressure(self, lane: str, window: str) -> list[dict]:
+        """One usage_alert landed for `lane` inside day-window `window`: demote
+        every living agent assigned to that lane one cadence tier (background
+        stays), recording demoted_from. Idempotent per lane-alert-day — a
+        second alert on the same lane in the same window (rpd then tpd) is a
+        no-op, including for agents whose demotion was manually overridden.
+        Returns the feed event dicts to emit (at most one demotion event, plus
+        any rollover-restoration event when this alert is the first observation
+        of a NEW window). Disabled governor ⇒ [] and zero state changes."""
+        if not self._cap_governor_enabled():
+            return []
+        lane = str(lane)
+        window = str(window)
+        # Rollover-first ordering: an alert from a NEW day restores yesterday's
+        # demotions before applying today's.
+        events = self.restore_cap_demotions(window)
+        if self.cap_demotions.get(lane) == window:
+            return events  # this lane's alert-day already demoted — never stack
+        demoted: list[dict] = []
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            if not agent.alive or agent.profile != lane:
+                continue
+            if agent.demoted_from is not None:
+                continue  # already governed (another lane / earlier alert)
+            tier = (
+                agent.cadence_tier
+                if agent.cadence_tier in self.CADENCE_TIERS else "protagonist"
+            )
+            idx = self.CADENCE_TIERS.index(tier)
+            if idx >= len(self.CADENCE_TIERS) - 1:
+                continue  # background stays — nothing to restore either
+            agent.demoted_from = tier
+            agent.cadence_tier = self.CADENCE_TIERS[idx + 1]
+            demoted.append({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "from": tier,
+                "to": agent.cadence_tier,
+            })
+        self.cap_demotions[lane] = window
+        if demoted:
+            names = ", ".join(d["name"] for d in demoted)
+            events.append({
+                "kind": "cap_pressure",
+                "actor_id": None,
+                "actor_type": "system",
+                "profile": lane,
+                "text": (
+                    f"🪫 {lane} is nearing its daily cap — "
+                    f"{names} slow to a calmer cadence until tomorrow."
+                ),
+                "payload": {
+                    "phase": "demoted",
+                    "lane": lane,
+                    "window": window,
+                    "agents": [
+                        {"agent_id": d["agent_id"], "from": d["from"], "to": d["to"]}
+                        for d in demoted
+                    ],
+                },
+            })
+        return events
+
+    def restore_cap_demotions(self, window: str) -> list[dict]:
+        """The usage tracker's day window is now `window`: if any recorded
+        demotion belongs to an EARLIER window, the day has rolled — every
+        governed agent returns to its demoted_from tier (which clears) and the
+        per-lane demotion records expire. Returns at most ONE restoration feed
+        event. Same-window calls are no-ops ([])."""
+        window = str(window)
+        if not self.cap_demotions:
+            return []
+        stale = [ln for ln, w in self.cap_demotions.items() if w != window]
+        if not stale:
+            return []
+        for ln in stale:
+            self.cap_demotions.pop(ln, None)
+        restored: list[dict] = []
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            if agent.demoted_from is None:
+                continue
+            target = (
+                agent.demoted_from
+                if agent.demoted_from in self.CADENCE_TIERS else "protagonist"
+            )
+            agent.cadence_tier = target
+            agent.demoted_from = None
+            restored.append({"agent_id": agent.id, "name": agent.name, "to": target})
+        if not restored:
+            return []
+        names = ", ".join(r["name"] for r in restored)
+        return [{
+            "kind": "cap_pressure",
+            "actor_id": None,
+            "actor_type": "system",
+            "profile": None,
+            "text": (
+                f"🔋 A fresh day's quota — {names} "
+                "return to their usual cadence."
+            ),
+            "payload": {
+                "phase": "restored",
+                "window": window,
+                "agents": [
+                    {"agent_id": r["agent_id"], "to": r["to"]} for r in restored
+                ],
+            },
+        }]
+
+    def _check_cap_demotion_rollover(self) -> None:
+        """Scheduler-side rollover hook (EM-168): when demotions are
+        outstanding and the injected probe shows the tracker's window has
+        rolled, restore them and park the feed event in the spawn-events
+        outbox (drained + emitted by the tick loop, like governance spawns).
+        Zero clock reads — the probe is an attribute peek at the tracker."""
+        if not self.cap_demotions or self._usage_window_probe is None:
+            return
+        try:
+            window = self._usage_window_probe()
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not window:
+            return
+        events = self.restore_cap_demotions(str(window))
+        if events:
+            self.pending_spawn_events.extend(events)
 
     # ──────────────────────────────────────────────────────────────────────────
     # W7 / EM-061 — buildings config accessors (safe defaults if config lacks the
@@ -1936,7 +2123,7 @@ class World:
 
     def to_snapshot(self, profile_colors: dict[str, str] | None = None) -> dict:
         pc = profile_colors or {}
-        return {
+        snap = {
             "tick": self.tick,
             "day": self.day,
             "running": self.running,
@@ -1984,6 +2171,13 @@ class World:
                 if lines
             },
         }
+        # Wave D3 / EM-168 — per-lane cap-governor demotion records (lane ->
+        # alert-day window). Serialized only when a demotion is outstanding so
+        # ungoverned snapshots keep the exact pre-D3 key set; the agents list
+        # already carries each governed agent's demoted_from (AgentState.to_dict).
+        if self.cap_demotions:
+            snap["cap_demotions"] = dict(self.cap_demotions)
+        return snap
 
     # ──────────────────────────────────────────────────────────────────────────
     # W11b / EM-101 — snapshot restore (the missing half of to_snapshot).
@@ -2065,6 +2259,13 @@ class World:
                     else "protagonist"
                 ),
                 reflex_streak=max(0, _int(d.get("reflex_streak"))),
+                # Wave D3 / EM-168 — additive: pre-D3 snapshots lack the key
+                # (and unknown tier values restore ungoverned, fail-safe).
+                demoted_from=(
+                    str(d.get("demoted_from"))
+                    if d.get("demoted_from") in cls.CADENCE_TIERS
+                    else None
+                ),
             )
             a.relationships = {
                 str(aid): RelationshipState(
@@ -2184,6 +2385,14 @@ class World:
         ]
         # PROTOTYPE (god-channel) — the consensus-set town name.
         world.town_name = str(state.get("town_name", "") or "")
+        # Wave D3 / EM-168 — restore the cap-governor demotion records (absent
+        # in pre-D3 snapshots ⇒ {}), so a fork/restore still restores tiers at
+        # the next day rollover and never re-demotes the same lane-alert-day.
+        world.cap_demotions = {
+            str(lane): str(win)
+            for lane, win in (state.get("cap_demotions") or {}).items()
+            if lane and win
+        }
         # EM-145 — restore queued god whispers (only for agents that exist).
         world.pending_whispers = {
             str(aid): [str(t) for t in (lines or []) if str(t).strip()]

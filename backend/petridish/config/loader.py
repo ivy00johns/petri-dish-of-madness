@@ -78,6 +78,12 @@ world:
     enabled: true
     sick_threshold: 3
     probe_every: 4
+  # Wave D3 / EM-168 — cap-pressure governor: a lane's usage_alert demotes its
+  # agents one cadence tier until the alert tracker's UTC-day rollover. MUST
+  # stay in sync with config/world.yaml. enabled:false = alerts stay
+  # alert-only (byte-identical pre-D3 behavior).
+  cap_governor:
+    enabled: true
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -373,6 +379,24 @@ class LaneFailoverParams:
 
 
 @dataclass
+class CapGovernorParams:
+    """Wave D3 / EM-168 — cap-pressure governor (config `world.cap_governor`).
+    When a usage_alert fires for a lane (UsageAlertTracker ≥70% of its rpd/tpd
+    day cap), every agent ASSIGNED to that lane is demoted ONE cadence tier
+    (protagonist→supporting→background; background stays) with the prior tier
+    recorded on AgentState.demoted_from; demoted agents are restored at the
+    tracker's UTC-day rollover. The engine reads the block via its defensive
+    _block_get accessor with an IDENTICAL default, so an absent block behaves
+    exactly like these values.
+
+      enabled — master toggle (default ON). `false` ⇒ usage alerts stay
+                alert-only: byte-identical pre-D3 behavior (no demotions, no
+                cap_pressure events, no new snapshot keys).
+    """
+    enabled: bool = True
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -479,6 +503,10 @@ class WorldParams:
     # router-matching defaults (default ON); `enabled: false` restores the
     # byte-identical pre-D3 routing.
     lane_failover: LaneFailoverParams = field(default_factory=LaneFailoverParams)
+    # Wave D3 / EM-168 — cap-pressure governor. Additive with engine-matching
+    # defaults (default ON); `enabled: false` keeps usage alerts alert-only
+    # (byte-identical pre-D3 behavior).
+    cap_governor: CapGovernorParams = field(default_factory=CapGovernorParams)
 
 
 @dataclass
@@ -777,6 +805,15 @@ def _parse_lane_failover(raw: dict | None) -> LaneFailoverParams:
     )
 
 
+def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
+    """Parse the optional `world.cap_governor` block (Wave D3 / EM-168).
+    Absent/empty/malformed -> engine-matching defaults (governor ON)."""
+    if not isinstance(raw, dict):
+        return CapGovernorParams()
+    d = CapGovernorParams()
+    return CapGovernorParams(enabled=bool(raw.get("enabled", d.enabled)))
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -851,6 +888,7 @@ def _parse_world(
         procgen=_parse_procgen(w.get("procgen")),
         cadence=_parse_cadence(w.get("cadence")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
+        cap_governor=_parse_cap_governor(w.get("cap_governor")),
     )
 
     places = [

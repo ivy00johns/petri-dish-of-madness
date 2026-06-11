@@ -51,6 +51,22 @@ world:
     sick_threshold: 3    # timed_out entries in the 6-window that mark a lane sick
     probe_every: 4       # every Nth would-be-detour probes the home lane
 
+  # Wave D3 / EM-168 — cap-pressure governor. When a lane's usage_alert fires
+  # (UsageAlertTracker crossed 70% of its rpd/tpd day cap, profiles.yaml),
+  # every agent ASSIGNED to that lane is demoted ONE cadence tier
+  # (protagonist→supporting→background; background stays) — the prior tier is
+  # recorded as `demoted_from` and the feed gets ONE dim `cap_pressure` event.
+  # Demotion happens at most once per lane per alert-day; at the tracker's
+  # UTC-day rollover (the same daily reset the alert windows already use — no
+  # extra clocks/timers) demoted agents return to `demoted_from` with one
+  # restoration event. A manual POST /api/agents/{id}/tier always wins and
+  # clears the demotion. Composes with lane_failover above: a demoted agent on
+  # a sick lane still detours per-call. Set enabled:false to keep usage alerts
+  # alert-only — byte-identical pre-D3 behavior. MUST stay in sync with the
+  # default-config mirror in backend/petridish/config/loader.py.
+  cap_governor:
+    enabled: true        # default ON
+
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
   # POST /api/agents/{id}/tier): protagonists act every round, supporting every
