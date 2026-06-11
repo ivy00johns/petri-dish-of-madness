@@ -17,6 +17,7 @@ import { useMemo } from 'react';
 import * as THREE from 'three';
 import type { Place } from '../../types';
 import { SIZE, placeToWorld, hashUnit } from './worldSpace';
+import { insideWilderness, wildernessBound } from './foliageLayout';
 import { toonMaterial } from './toon';
 
 interface SceneryProps {
@@ -44,6 +45,9 @@ function scatter(
   spread: number,
 ): Scatter[] {
   const placePts = places.map(placeToWorld);
+  // Wave D1 gate fix (EM-156): grass/flowers stay inside the historic-core
+  // disc — the generated city ring owns the ground beyond it.
+  const bound = wildernessBound(places);
   const out: Scatter[] = [];
   let attempts = 0;
   let i = 0;
@@ -52,6 +56,7 @@ function scatter(
     const seed = `${prefix}-${i++}`;
     const x = (hashUnit(`${seed}-x`) - 0.5) * spread;
     const z = (hashUnit(`${seed}-z`) - 0.5) * spread;
+    if (!insideWilderness(x, z, bound)) continue; // never on the city ring
     // keep clear of place centers
     const tooClose = placePts.some(
       (p) => Math.hypot(p.x - x, p.z - z) < minClear,

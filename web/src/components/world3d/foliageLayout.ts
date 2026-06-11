@@ -33,11 +33,26 @@
  *   • LAMPS are the deliberate exception: they LINE the lanes, placed at
  *     LAMP_PATH_OFFSET (half-width + 0.8) beside the strip near each lane
  *     end, alternating sides per lane — never on the strip proper.
+ *
+ * Historic-core bound (Wave D1 gate fix, EM-156): the generated city ring
+ * (cityLayout) owns everything OUTSIDE deriveCoreRadius of the town centroid —
+ * its road tiles start just past that boundary — so all wilderness scatter
+ * (treeline, bushes, rocks, mushrooms) is clamped INSIDE it via
+ * `wildernessBound`. The radius is DERIVED per snapshot (never hardcoded),
+ * exactly the radius the city generator clears. Ring-bound props
+ * (lamps/benches/fences ≤ FENCE_RING_RADIUS = 11.2 from their place) sit
+ * ≥ ~13 inside the boundary by construction and need no clamp. The city ring
+ * supplies its own greenery (`tree_city`); the wilderness backdrop belongs in
+ * the core meadow.
  */
 
 import type { Place } from '../../types';
 import { SIZE, placeToWorld, hashUnit, type WorldPoint } from './worldSpace';
 import { computeTownLayout, LANE_WIDTHS } from './townLayout';
+// NOTE: cityLayout also imports BAND_MAX from this module — a deliberate,
+// benign cycle: both sides only dereference the import inside function bodies
+// (runtime), never during module evaluation.
+import { deriveCoreRadius, townCenter } from './cityLayout';
 
 // ── Contract constants ───────────────────────────────────────────────────────
 
@@ -45,10 +60,17 @@ import { computeTownLayout, LANE_WIDTHS } from './townLayout';
 export const TREE_PLACE_CLEAR = 10.5;
 /** Minimum tree-to-tree spacing so canopies don't merge into blobs. */
 export const TREE_SPACING = 2.4;
-/** Target treeline size (contract bound: ~50–80; bumped for the SIZE-66 town). */
+/** Target treeline size. Wave C aimed at the 50–80 contract band across the
+ *  open ±49.5 meadow; since the Wave D1 clamp the meadow is the historic-core
+ *  disc only (r ≈ 41 for the default town) and the SAME sampling yields ~42
+ *  trees — the city ring's own `tree_city` greenery (~28) carries the outer
+ *  canopy now, so the in-core treeline deliberately stays a backdrop, not a
+ *  packed forest. TREE_COUNT remains the (rarely reached) upper target. */
 export const TREE_COUNT = 72;
-/** Tree scatter spread (square of side TREE_SPREAD centered on the village) —
- *  scales with SIZE, so the treeline keeps framing the bigger Wave C town. */
+/** Tree scatter SAMPLING spread (square of side TREE_SPREAD centered on the
+ *  village). Since Wave D1 every sample is additionally clamped inside
+ *  `wildernessBound` (the historic-core disc) — the square is just the
+ *  candidate space, the disc is the law. */
 export const TREE_SPREAD = SIZE * 1.5;
 /** Trees within this distance of world origin render at full detail (LOD). */
 export const TREE_LOD_RADIUS = 34;
@@ -100,6 +122,38 @@ export interface ScatterItem {
 
 export interface TreeItem extends ScatterItem {
   variant: TreeVariant;
+}
+
+// ── Historic-core bound (Wave D1 gate fix — see file header) ────────────────
+
+/** Canopy/footprint breathing room kept off the city ring's first road cap. */
+export const WILDERNESS_EDGE_MARGIN = 1.0;
+
+export interface WildernessBound {
+  cx: number;
+  cz: number;
+  /** Max distance from the town centroid wilderness items may stand at. */
+  maxR: number;
+}
+
+/**
+ * The disc wilderness scatter must stay inside: the SAME historic-core radius
+ * the city generator clears (cityLayout.deriveCoreRadius — measured per
+ * snapshot, never hardcoded), centered on the SAME town centroid, minus a
+ * canopy margin. Everything beyond it is the generated city's ground.
+ */
+export function wildernessBound(places: Place[]): WildernessBound {
+  const c = townCenter(places);
+  return {
+    cx: c.x,
+    cz: c.z,
+    maxR: Math.max(0, deriveCoreRadius(places) - WILDERNESS_EDGE_MARGIN),
+  };
+}
+
+/** True if (x,z) lies inside the wilderness disc (never on the city ring). */
+export function insideWilderness(x: number, z: number, b: WildernessBound): boolean {
+  return Math.hypot(x - b.cx, z - b.cz) <= b.maxR;
 }
 
 // ── Shared guards ────────────────────────────────────────────────────────────
@@ -180,6 +234,7 @@ export function distToNearestPath(x: number, z: number, segs: PathSeg[]): number
 export function layoutTrees(places: Place[]): TreeItem[] {
   const centers = places.map(placeToWorld);
   const segs = pathSegments(places);
+  const bound = wildernessBound(places);
   const out: TreeItem[] = [];
   let attempts = 0;
   let i = 0;
@@ -188,6 +243,7 @@ export function layoutTrees(places: Place[]): TreeItem[] {
     const seed = `treeline-${i++}`;
     const x = (hashUnit(`${seed}-x`) - 0.5) * TREE_SPREAD;
     const z = (hashUnit(`${seed}-z`) - 0.5) * TREE_SPREAD;
+    if (!insideWilderness(x, z, bound)) continue; // never on the city ring
     if (!clearOfAll(x, z, centers, TREE_PLACE_CLEAR)) continue;
     if (distToNearestPath(x, z, segs) < PATH_CLEAR) continue;
     if (out.some((t) => Math.hypot(t.x - x, t.z - z) < TREE_SPACING)) continue;
@@ -232,6 +288,7 @@ export function layoutWildScatter(
 ): ScatterItem[] {
   const centers = places.map(placeToWorld);
   const segs = pathSegments(places);
+  const bound = wildernessBound(places);
   const out: ScatterItem[] = [];
   let attempts = 0;
   let i = 0;
@@ -240,6 +297,7 @@ export function layoutWildScatter(
     const seed = `${prefix}-${i++}`;
     const x = (hashUnit(`${seed}-x`) - 0.5) * spread;
     const z = (hashUnit(`${seed}-z`) - 0.5) * spread;
+    if (!insideWilderness(x, z, bound)) continue; // never on the city ring
     if (!clearOfAll(x, z, centers, BAND_MAX)) continue;
     if (distToNearestPath(x, z, segs) < PATH_CLEAR) continue;
     out.push({
@@ -262,6 +320,9 @@ export function layoutMushrooms(places: Place[]): ScatterItem[] {
   if (wilds.length === 0) return layoutWildScatter(MUSHROOM_COUNT, 'mushroom', places);
   const centers = places.map(placeToWorld);
   const segs = pathSegments(places);
+  // An edge wild place's annulus (≤ BAND_MAX + 5 out) can poke past the
+  // core boundary — same clamp as the rest of the wilderness.
+  const bound = wildernessBound(places);
   const out: ScatterItem[] = [];
   let attempts = 0;
   let i = 0;
@@ -273,6 +334,7 @@ export function layoutMushrooms(places: Place[]): ScatterItem[] {
     const angle = hashUnit(`${seed}-a`) * Math.PI * 2;
     const x = home.x + Math.cos(angle) * radius;
     const z = home.z + Math.sin(angle) * radius;
+    if (!insideWilderness(x, z, bound)) continue; // never on the city ring
     if (!clearOfAll(x, z, centers, BAND_MAX)) continue;
     if (distToNearestPath(x, z, segs) < PATH_CLEAR) continue;
     out.push({

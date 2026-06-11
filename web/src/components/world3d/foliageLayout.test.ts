@@ -17,6 +17,7 @@ import { describe, it, expect } from 'vitest';
 import type { Place } from '../../types';
 import { placeToWorld } from './worldSpace';
 import { computeTownLayout } from './townLayout';
+import { deriveCoreRadius } from './cityLayout';
 import {
   layoutTrees,
   splitByLod,
@@ -26,6 +27,8 @@ import {
   layoutMushrooms,
   layoutWildScatter,
   lampSpotValid,
+  wildernessBound,
+  WILDERNESS_EDGE_MARGIN,
   TREE_COUNT,
   TREE_SPACING,
   TREE_LOD_RADIUS,
@@ -134,9 +137,13 @@ describe('lane corridors come from townLayout (EM-149 single source of truth)', 
 describe('tree clearance + counts (contract §B3)', () => {
   const trees = layoutTrees(PLACES);
 
-  it('reaches the contract tree count band (50–80)', () => {
-    expect(trees.length).toBeGreaterThanOrEqual(50);
-    expect(trees.length).toBeLessThanOrEqual(80);
+  it('keeps a substantial treeline within the clamped core meadow', () => {
+    // Wave D1 gate fix: the wilderness clamp shrank the meadow from the open
+    // ±49.5 square to the historic-core disc (r ≈ 41 here) — the same
+    // sampling now yields 42 trees (was 72). The Wave C 50–80 band assumed
+    // the pre-city meadow; the city ring's own tree_city greenery (~28)
+    // carries the outer canopy now, keeping total scene trees equivalent.
+    expect(trees.length).toBeGreaterThanOrEqual(35);
     expect(trees.length).toBeLessThanOrEqual(TREE_COUNT);
   });
 
@@ -255,6 +262,43 @@ describe('prop clearance (own slot band avoided; neighbors respected)', () => {
   });
 });
 
+describe('historic-core bound (Wave D1 gate fix, EM-156)', () => {
+  function centroidOf(places: Place[]): { x: number; z: number } {
+    const pts = places.map(placeToWorld);
+    return {
+      x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
+      z: pts.reduce((s, p) => s + p.z, 0) / pts.length,
+    };
+  }
+
+  it('derives the bound from cityLayout (same radius the city clears, minus margin)', () => {
+    const b = wildernessBound(PLACES);
+    const c = centroidOf(PLACES);
+    expect(b.cx).toBeCloseTo(c.x);
+    expect(b.cz).toBeCloseTo(c.z);
+    expect(b.maxR).toBeCloseTo(deriveCoreRadius(PLACES) - WILDERNESS_EDGE_MARGIN);
+  });
+
+  it('keeps ALL wilderness scatter inside the core disc — never on the city ring', () => {
+    for (const places of [PLACES, LEGACY]) {
+      const b = wildernessBound(places);
+      const items: ScatterItem[] = [
+        ...layoutTrees(places),
+        ...layoutWildScatter(BUSH_COUNT, 'bush', places),
+        ...layoutWildScatter(ROCK_COUNT, 'rock', places),
+        ...layoutMushrooms(places),
+      ];
+      expect(items.length).toBeGreaterThan(0);
+      for (const it of items) {
+        const d = Math.hypot(it.x - b.cx, it.z - b.cz);
+        expect(d).toBeLessThanOrEqual(b.maxR);
+        // and therefore strictly inside what the city generator clears
+        expect(d).toBeLessThan(deriveCoreRadius(places));
+      }
+    }
+  });
+});
+
 describe('instance budget (contract: total NEW instances ≲400)', () => {
   it('keeps the per-part instance total under 400', () => {
     const trees = layoutTrees(PLACES);
@@ -295,8 +339,16 @@ describe('degenerate worlds', () => {
     expect(layoutLamps([])).toEqual([]);
     expect(layoutBenches([])).toEqual([]);
     expect(layoutFences([])).toEqual([]);
-    expect(layoutTrees([]).length).toBe(TREE_COUNT);
-    expect(layoutMushrooms([]).length).toBeGreaterThan(0); // falls back to scatter
+    // Wave D1: with no places the core disc collapses to MIN_CORE_RADIUS, so
+    // the (clamped) treeline shrinks to the few samples landing inside it —
+    // was pinned to TREE_COUNT (72) pre-clamp.
+    const trees = layoutTrees([]);
+    expect(trees.length).toBeGreaterThan(0);
+    expect(trees.length).toBeLessThanOrEqual(TREE_COUNT);
+    const b = wildernessBound([]);
+    for (const t of trees) {
+      expect(Math.hypot(t.x - b.cx, t.z - b.cz)).toBeLessThanOrEqual(b.maxR);
+    }
   });
 
   it('handles a single place (no lanes → no lamps)', () => {
