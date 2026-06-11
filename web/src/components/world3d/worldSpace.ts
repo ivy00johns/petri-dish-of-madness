@@ -340,9 +340,11 @@ export const ANIMAL_CHAOS_MAGENTA = '#d957d9';
  * footprint is ~3.6 world units, so 4.2 leaves breathing room for labels). */
 export const SLOT_SPACING = 4.2;
 
-/** EM-131: radius of the first slot ring — clears the place's own structure
- * (matches the legacy `buildingSpot` satellite distance). */
-export const SLOT_BASE_RADIUS = 5.5;
+/** EM-131: radius of the first slot ring — clears the place's own structure.
+ * Wave D1.6: shrunk 5.5 → 4.6 so OVERFLOW buildings (slotLayout is now the
+ * fallback past a landmark block's realLots, contracts/wave-d1.6.md §2) keep
+ * their centers inside the 5.2u half-block instead of standing on the road. */
+export const SLOT_BASE_RADIUS = 4.6;
 
 /**
  * EM-131: deterministic slot layout for ALL buildings sharing one place.

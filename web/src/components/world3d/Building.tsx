@@ -2,11 +2,13 @@
  * Building — a cute, rounded low-poly structure for one place, distinct per
  * kind, with a floating name label billboarded above it.
  *
- * EM-102 declutter: the full name label only renders while the camera is near
- * (useProximity), the building is hovered, or it's the camera-focus target
- * (EM-095 zoom-to-place reveals the focused building's full label). Otherwise
- * a minimal accent marker keeps the place locatable without burying villager
- * chips. EM-095: clicking the building zooms the orbit target to it.
+ * Wave D1.6 legibility: the 15 places ARE the city's landmarks — the user
+ * navigates by their names — so the landmark label is ALWAYS on, scaled up
+ * with camera distance (so it stays readable at the default ~89u city
+ * framing) and gently distance-faded toward the zoom-out limit. The tight
+ * EM-102 proximity gate remains the law for AGENT-BUILT building labels
+ * (Structure.tsx) and generated fill is never labeled (CityScape).
+ * EM-095: clicking the building zooms the orbit target to it.
  *
  * EM-150: place anchors with a PLACE_MODELS registry entry (work/governance/
  * home) render the real GLB inside <Suspense> whose fallback is the procedural
@@ -20,16 +22,16 @@
  * the banded golden-hour cel look; meshBasicMaterial labels/markers stay as-is.
  */
 
-import { useCallback, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Billboard, RoundedBox, Text, useCursor } from '@react-three/drei';
-import type { ThreeEvent } from '@react-three/fiber';
+import { useFrame, type ThreeEvent } from '@react-three/fiber';
+import type { Group, MeshBasicMaterial } from 'three';
 import type { Place } from '../../types';
 import { PLACE_STYLES, placeToWorld } from './worldSpace';
 import { toonMaterial } from './toon';
 import { Model } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
 import { placeModelRotationY, resolvePlaceModel } from './structureModel';
-import { useProximity, PLACE_LABEL_DIST } from './useProximity';
 
 interface BuildingProps {
   place: Place;
@@ -39,26 +41,98 @@ interface BuildingProps {
   onPick?: (placeId: string) => void;
 }
 
-/** Floating name label above a structure. */
-function NameLabel({ text, y, color }: { text: string; y: number; color: string }) {
+// ── Landmark label tuning (Wave D1.6 — see landmarkLabelTransform) ───────────
+
+/** Camera distance at which the label renders at its natural (1×) scale. */
+export const LANDMARK_LABEL_REF_DIST = 34;
+/** Scale ceiling — at the default ~89u framing the label hits this cap,
+ *  ≈ 15px of text on a typical canvas; bigger would collide with neighbors
+ *  one 13u block over. */
+export const LANDMARK_LABEL_MAX_SCALE = 2.6;
+/** Fade window: full ink through the default framing, thinning toward the
+ *  130u zoom-out limit so a pulled-back city reads calm, never billboard-y. */
+export const LANDMARK_FADE_START = 95;
+export const LANDMARK_FADE_END = 165;
+export const LANDMARK_MIN_OPACITY = 0.45;
+
+/**
+ * Pure scale/fade law for a landmark label at camera distance `d` — kept
+ * separate from the component so the tuning is unit-testable.
+ */
+export function landmarkLabelTransform(d: number): { scale: number; fade: number } {
+  const scale = Math.min(
+    LANDMARK_LABEL_MAX_SCALE,
+    Math.max(1, d / LANDMARK_LABEL_REF_DIST),
+  );
+  const fade = Math.min(
+    1,
+    Math.max(
+      LANDMARK_MIN_OPACITY,
+      1 - (d - LANDMARK_FADE_START) / (LANDMARK_FADE_END - LANDMARK_FADE_START),
+    ),
+  );
+  return { scale, fade };
+}
+
+/**
+ * The always-on landmark name label (Wave D1.6): billboarded above the place,
+ * scaled with camera distance so it stays readable at the default city
+ * framing, distance-faded toward the zoom-out limit. Per-frame work is two
+ * cheap imperative mutations (group scale + material opacity) — no setState.
+ */
+function LandmarkLabel({
+  text,
+  x,
+  y,
+  z,
+  color,
+}: {
+  text: string;
+  /** World position of the label (the parent group sits at (x, 0, z)). */
+  x: number;
+  y: number;
+  z: number;
+  color: string;
+}) {
+  const scaleRef = useRef<Group>(null);
+  const plateRef = useRef<MeshBasicMaterial>(null);
+  // drei's <Text> ref is the troika mesh; fillOpacity is applied per-render
+  // without a glyph re-sync (troika uniform-only property).
+  const textRef = useRef<{ fillOpacity: number } | null>(null);
+
+  useFrame(({ camera }) => {
+    const d = Math.hypot(
+      camera.position.x - x,
+      camera.position.y - y,
+      camera.position.z - z,
+    );
+    const { scale, fade } = landmarkLabelTransform(d);
+    if (scaleRef.current) scaleRef.current.scale.setScalar(scale);
+    if (plateRef.current) plateRef.current.opacity = 0.72 * fade;
+    if (textRef.current) textRef.current.fillOpacity = fade;
+  });
+
   return (
     <Billboard position={[0, y, 0]}>
-      {/* soft backing plate */}
-      <mesh position={[0, 0, -0.02]}>
-        <planeGeometry args={[Math.max(2.4, text.length * 0.34), 0.85]} />
-        <meshBasicMaterial color="#3a2f25" transparent opacity={0.72} />
-      </mesh>
-      <Text
-        fontSize={0.5}
-        color={color}
-        anchorX="center"
-        anchorY="middle"
-        outlineWidth={0.015}
-        outlineColor="#241b14"
-        maxWidth={10}
-      >
-        {text}
-      </Text>
+      <group ref={scaleRef}>
+        {/* soft backing plate */}
+        <mesh position={[0, 0, -0.02]}>
+          <planeGeometry args={[Math.max(2.4, text.length * 0.34), 0.85]} />
+          <meshBasicMaterial ref={plateRef} color="#3a2f25" transparent opacity={0.72} />
+        </mesh>
+        <Text
+          ref={textRef as never}
+          fontSize={0.5}
+          color={color}
+          anchorX="center"
+          anchorY="middle"
+          outlineWidth={0.015}
+          outlineColor="#241b14"
+          maxWidth={10}
+        >
+          {text}
+        </Text>
+      </group>
     </Billboard>
   );
 }
@@ -281,15 +355,11 @@ function CommonsStructure() {
   );
 }
 
-export function Building({ place, focusedId, onPick }: BuildingProps) {
+export function Building({ place, onPick }: BuildingProps) {
   const { x, z } = placeToWorld(place);
   const style = PLACE_STYLES[place.kind];
   const [hovered, setHovered] = useState(false);
   useCursor(hovered && Boolean(onPick));
-
-  // EM-102: full label only when near / hovered / the camera-focus target.
-  const near = useProximity(useCallback(() => ({ x, z }), [x, z]), PLACE_LABEL_DIST);
-  const showFull = near || hovered || focusedId === place.id;
 
   // EM-150: the place-anchor GLB, or null = stay procedural (social/wild).
   const spec = resolvePlaceModel(place.kind);
@@ -297,7 +367,7 @@ export function Building({ place, focusedId, onPick }: BuildingProps) {
   // label height tuned per structure footprint (GLB anchors measure shorter
   // than the procedural town hall but TALLER than the market/cottage: the
   // lumbermill tops out at ~3.4, home_b at ~2.9 — lift their labels clear).
-  const labelY =
+  const baseLabelY =
     place.kind === 'governance'
       ? 6.2
       : place.kind === 'social'
@@ -307,6 +377,13 @@ export function Building({ place, focusedId, onPick }: BuildingProps) {
             ? 4.5
             : 3.9
           : 3.4;
+
+  // Wave D1.6: stagger label heights by block parity so the scaled-up labels
+  // of ADJACENT landmark blocks (13u apart, plates up to ~16u wide at max
+  // scale) never sit on the same horizon line.
+  const blockParity =
+    ((Math.round(x / 13) + Math.round(z / 13)) % 2 + 2) % 2;
+  const labelY = baseLabelY + blockParity * 1.6;
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
     if (!onPick) return;
@@ -349,11 +426,10 @@ export function Building({ place, focusedId, onPick }: BuildingProps) {
         procedural
       )}
 
-      {showFull ? (
-        <NameLabel text={place.name} y={labelY} color="#fff3e0" />
-      ) : (
-        <MiniMarker y={labelY} color={style.accent} />
-      )}
+      {/* Wave D1.6: the landmark name is ALWAYS on — the user navigates by
+          it. Distance-scaled + faded; agent-built Structure labels keep the
+          tight EM-102 gate, generated fill is never labeled. */}
+      <LandmarkLabel text={place.name} x={x} y={labelY} z={z} color="#fff3e0" />
     </group>
   );
 }

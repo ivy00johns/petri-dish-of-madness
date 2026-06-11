@@ -39,11 +39,12 @@ import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, WORLD_REACH } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, WORLD_REACH } from './worldSpace';
 import { GOLDEN_HOUR } from './toon';
 import { preloadHeroModels } from './assets/Model';
 import { allCityModelSpecs } from './assets/cityModels';
-import { CityScape } from './CityScape';
+import { CityScape, useCityPlan } from './CityScape';
+import { assignBuildingLots } from './cityLayout';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // Wave C (EM-148/149): warm the GLB cache for the hero set (place anchors,
@@ -418,27 +419,22 @@ export function CozyWorld({
     return m;
   }, [places]);
 
-  // W7/EM-131: buildings sharing a place are laid out on deterministic slot
-  // rings around the place center (sorted by id; radius grows with count), so
-  // a project rises NEXT TO the existing structure — and next to its sibling
-  // projects — rather than piling onto the place anchor.
+  // Wave D1.6: real W7 buildings claim the REAL street-front lots inside
+  // their place's landmark block (stable id order → lot index; overflow
+  // beyond the block's lots falls back to the EM-131 slot ring around the
+  // landmark anchor). The same content-memoized plan feeds CityScape.
   const buildings = world?.buildings;
+  const { plan: cityPlan } = useCityPlan({
+    places: places ?? [],
+    city_seed: world?.city_seed,
+    buildings,
+    day: world?.day,
+  });
   const buildingSpots = useMemo(() => {
-    const fallback = { x: 0, z: 0 };
     const list = buildings ?? [];
-    const idsByPlace = new Map<string, string[]>();
-    list.forEach((b) => {
-      const ids = idsByPlace.get(b.location) ?? [];
-      ids.push(b.id);
-      idsByPlace.set(b.location, ids);
-    });
-    const spotById = new Map<string, { x: number; z: number }>();
-    for (const [loc, ids] of idsByPlace) {
-      const c = placeCenters.get(loc) ?? fallback;
-      for (const [id, pt] of slotLayout(c, ids)) spotById.set(id, pt);
-    }
-    return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? fallback) }));
-  }, [buildings, placeCenters]);
+    const spotById = assignBuildingLots(cityPlan, list, placeCenters);
+    return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? { x: 0, z: 0 }) }));
+  }, [buildings, cityPlan, placeCenters]);
 
   const buildingSpotById = useMemo(
     () => new Map(buildingSpots.map((s) => [s.building.id, s])),
