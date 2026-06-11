@@ -49,6 +49,8 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   memory:           '◈',
   parse_failure:    '⚠',
   model_reassigned: '⇄',
+  // Wave D2 (EM-158) — per-agent cadence tier reassignment receipt.
+  cadence_tier_changed: '⇄',
   random_event:     '⊕',
   control:          '⏏',
   // Animal chaos layer (W8) — critter glyphs so the cat/dog read at a glance.
@@ -131,7 +133,7 @@ const CATEGORIES: FeedCategory[] = [
   // W11b (EM-079/080): the inner-life channel — diary reflections + spoken
   // commitments (made / kept / 👻 phantom-lapsed).
   { key: 'diary',   label: 'Diary',   icon: '✎', kinds: ['reflection', 'commitment_made', 'commitment_lapsed'] },
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'random_event', 'memory', 'run_forked'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'memory', 'run_forked'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
@@ -208,6 +210,9 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
     event.kind === 'commitment_lapsed' && event.payload?.reason === 'phantom';
   // W11b (EM-083): usage alerts read in the warn register like other alarms.
   const usageAlert = event.kind === 'usage_alert';
+  // Wave D2 (EM-159/166): a background agent's zero-LLM reflex turn — marked
+  // subtly so the free-scale machinery is legible without shouting.
+  const reflexTurn = event.payload?.reflex === true;
   // W11b (EM-087): a renewal of an already-active law (rule_passed carrying
   // payload.renewed) renders RENEWED, distinct from a fresh PASSED.
   const renewed = event.kind === 'rule_passed' && event.payload?.renewed === true;
@@ -320,6 +325,17 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
             title="Renewed — re-proposing an identical active law extends it; it never stacks."
           >
             ↻ renewed
+          </span>
+        )}
+
+        {/* Wave D2 (EM-159/166): zero-LLM background reflex turn — a subtle
+            dim chip, the human-agent sibling of the animals' reflex idiom. */}
+        {reflexTurn && (
+          <span
+            className="ml-1.5 font-mono text-[9px] px-1 py-px border border-lab-border text-lab-dim rounded-sm align-middle whitespace-nowrap uppercase tracking-wider"
+            title="Reflex turn — a background-tier agent resolved this deterministically with zero LLM calls"
+          >
+            ⟳ reflex
           </span>
         )}
 

@@ -5,6 +5,8 @@
  */
 
 import type { Agent, WorldState } from '../../types';
+// Wave D2 (EM-166) — the shared cadence-tier chip (protagonist/supporting/background).
+import { TierChip } from './RosterStrip';
 
 interface AgentPanelsProps {
   world: WorldState | null;
@@ -127,17 +129,20 @@ function AgentCard({ agent, world }: AgentCardProps) {
           )}
         </div>
 
-        {/* Model badge — the key identity signal */}
-        <div
-          className="flex-none font-mono text-[9px] font-semibold px-1.5 py-0.5 border rounded-sm tracking-wider"
-          style={{
-            backgroundColor: color + '22',
-            borderColor: color + '80',
-            color,
-          }}
-          title={agent.profile}
-        >
-          {agent.profile}
+        {/* Model badge — the key identity signal — plus the Wave D2 tier chip. */}
+        <div className="flex-none flex items-center gap-1">
+          <TierChip tier={agent.cadence_tier} reflexStreak={agent.reflex_streak} />
+          <div
+            className="font-mono text-[9px] font-semibold px-1.5 py-0.5 border rounded-sm tracking-wider"
+            style={{
+              backgroundColor: color + '22',
+              borderColor: color + '80',
+              color,
+            }}
+            title={agent.profile}
+          >
+            {agent.profile}
+          </div>
         </div>
       </div>
 
@@ -164,6 +169,23 @@ function AgentCard({ agent, world }: AgentCardProps) {
             </span>
           </div>
         </div>
+
+        {/* Wave D2 (EM-160/166) — visible reflex streak for background agents:
+            how many consecutive due turns ran on the zero-LLM reflex routine
+            (the spontaneity floor forces a reassess before it gets stale). */}
+        {agent.cadence_tier === 'background' &&
+          typeof agent.reflex_streak === 'number' &&
+          agent.reflex_streak > 0 && (
+            <div
+              className="flex items-center gap-1"
+              title="Consecutive zero-LLM reflex turns — salience, the seeded wildcard, or the streak floor will bring the LLM back"
+            >
+              <span className="font-mono text-[9px] text-lab-muted">REFLEX STREAK</span>
+              <span className="font-mono text-[10px] text-lab-dim tabular-nums">
+                ×{agent.reflex_streak}
+              </span>
+            </div>
+          )}
       </div>
 
       {/* Relationships */}

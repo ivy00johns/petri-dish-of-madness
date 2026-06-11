@@ -49,6 +49,42 @@ const REL_COLOR: Record<string, string> = {
   enemy: 'var(--rel-enemy)',
 };
 
+// Wave D2 (EM-158/166) — the cadence tier chip (matches the model-chip idiom,
+// token-only colors). Protagonists read brightest; background reads dimmest.
+const TIER_ABBR: Record<string, string> = {
+  protagonist: 'PRO',
+  supporting: 'SUP',
+  background: 'BG',
+};
+const TIER_CLASS: Record<string, string> = {
+  protagonist: 'text-lab-acid border-lab-acid/50',
+  supporting: 'text-lab-muted border-lab-border-bright',
+  background: 'text-lab-dim border-lab-border',
+};
+const TIER_TITLE: Record<string, string> = {
+  protagonist: 'Protagonist — acts every round, always a full LLM turn',
+  supporting: 'Supporting — acts every 3rd round, always a full LLM turn when due',
+  background:
+    'Background — acts every 10th round; quiet turns resolve a zero-LLM reflex routine ' +
+    '(salience, a seeded wildcard, or the reflex-streak floor brings the LLM back)',
+};
+
+/** Wave D2 (EM-166) — the small cadence-tier chip shown beside the model chip. */
+export function TierChip({ tier, reflexStreak }: { tier?: string | null; reflexStreak?: number | null }) {
+  if (!tier) return null; // pre-D2 backend — no chip, no layout shift
+  const streak = typeof reflexStreak === 'number' && reflexStreak > 0 ? ` · reflex ×${reflexStreak}` : '';
+  return (
+    <span
+      className={`font-mono text-[8px] font-semibold px-1 py-px border rounded-sm tracking-wider whitespace-nowrap shrink-0 ${
+        TIER_CLASS[tier] ?? TIER_CLASS.supporting
+      }`}
+      title={`${TIER_TITLE[tier] ?? `Cadence tier: ${tier}`}${streak}`}
+    >
+      {TIER_ABBR[tier] ?? tier.slice(0, 3).toUpperCase()}
+    </span>
+  );
+}
+
 function EnergyBar({ value, color }: { value: number; color: string }) {
   const pct = Math.max(0, Math.min(100, value));
   const barColor =
@@ -167,16 +203,20 @@ function AgentCard({
               </span>
             )}
           </div>
-          <span
-            className="font-mono text-[8px] font-semibold px-1 py-px border rounded-sm tracking-wider truncate max-w-[5.5rem] shrink-0"
-            style={{
-              backgroundColor: `color-mix(in srgb, ${color} 13%, transparent)`,
-              borderColor: `color-mix(in srgb, ${color} 50%, transparent)`,
-              color,
-            }}
-            title={agent.profile}
-          >
-            {agent.profile}
+          <span className="flex items-center gap-1 shrink-0">
+            {/* Wave D2 (EM-166) — cadence tier chip beside the model chip. */}
+            <TierChip tier={agent.cadence_tier} reflexStreak={agent.reflex_streak} />
+            <span
+              className="font-mono text-[8px] font-semibold px-1 py-px border rounded-sm tracking-wider truncate max-w-[5.5rem] shrink-0"
+              style={{
+                backgroundColor: `color-mix(in srgb, ${color} 13%, transparent)`,
+                borderColor: `color-mix(in srgb, ${color} 50%, transparent)`,
+                color,
+              }}
+              title={agent.profile}
+            >
+              {agent.profile}
+            </span>
           </span>
         </div>
 
