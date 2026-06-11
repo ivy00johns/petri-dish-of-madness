@@ -248,7 +248,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-176 | P2 | W17 | frontend | user 2026-06-11 | Bring vehicles back when they're playable: parked-car emission disabled at the generator (`CARS_ENABLED=false`, cityLayout) — static cars read as a distraction before they have a purpose. Keys/registry/GLBs/licenses all kept; EM-169's ambient traffic on the road graph is the re-entry point (flip the flag + moving cars together) | open | — |
 
-_Next free ID: EM-177._
+| EM-177 | P1 | W17 | providers | user 2026-06-11 | Lane failover with recovery probes: the router KNOWS lane health (EM-135/170 windows) but nothing acts on it — degraded-proxy days (every lane except mistral-small rerouted to a 12s-blowing reasoning model; 4th manual rescue in two sessions) starve agents glued to sick lanes. A lane with ≥3 timeouts in its 6-window detours that agent's calls to the healthiest lane per-call (assignment/identity unchanged), every 4th would-be-detour probes the home lane so recovery is automatic, `lane_detour` feed events on streak edges only, `GET /api/lanes` exposes health. `world.lane_failover {enabled, sick_threshold, probe_every}`; off ⇒ pre-D3 behavior. Contract: `contracts/wave-d3.md` B1 | open | — |
+
+_Next free ID: EM-178._
 
 ## Notes
 
