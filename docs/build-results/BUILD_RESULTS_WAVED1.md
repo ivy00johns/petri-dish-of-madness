@@ -45,6 +45,30 @@ QE's one MAJOR — "~160 unhandled preload promise rejections under blocked /mod
 
 `docs/build-evidence/`: `wave-d1-final-city.jpeg` (post-clamp hero shot, live run day 10), `wave-d1-gate2-city-{default,wide}.jpeg`, `qe-wave-d1-{default-camera,city-zoomed,blocked-models}.jpeg`.
 
+## Wave D1.5 — corrective: "make it THE city" (user verdict on D1: decor, rejected)
+
+D1's ring city was decor around an unchanged medieval core — the user killed the core and
+ordered the sim onto the grid. Contract: `contracts/wave-d1.5.md`. Lean build (2 agents +
+orchestrator gates), commits `f115dd1`/`aaf5825`/`c2d9dce`/`c685144`:
+
+- **The sim IS the city now**: 15 places became landmarks on a 5×5-block lattice (13.0u
+  pitch; ids/kinds/districts unchanged so the engine and every pinned backend test held —
+  377/377 with ZERO test edits); names re-themed (City Hall, Market Hall, The Steelworks,
+  Hearth House, The Commons Park…).
+- **Dense by law**: landmark blocks reserved for their place; every other lot developed
+  (8/8 per block, test-enforced "zero empty road-framed blocks"); parks from the old farm
+  edge + 1 seeded park. 473 instances, extent 33.8 — the city spans the 66u world exactly.
+- **Medieval retired**: kaykit-medieval-hexagon deleted (9 GLBs + license rows; fountain
+  stays for the plaza), lanes/wilderness machinery removed (signatures kept, so consumers
+  didn't churn), anchors swapped to kenney-city GLBs, camera/fog/shadow retuned compact.
+- Gates: backend **377/377**, web **468/468**, tsc + build clean, **61fps**, console 0
+  errors; live-verified at street level: Ada/Cleo/Bram with chips at the Central Plaza
+  fountain, critters + billboard among dense blocks — the EW reference shot. Evidence:
+  `docs/build-evidence/wave-d15-{city,plaza-zoom,street-level}.jpeg`.
+- Known polish (recorded, not blocking): generated-block variety skews dark-commercial in
+  civic zones; agents lerp straight lines between landmarks rather than following streets
+  (road-pathing is a natural W17 item); D1's ring-era evidence shots are historical.
+
 ## Handoff
 
 - Wave D1 complete on `build/wave-d1-ew-city` — **PR to main awaits the user's word.**
