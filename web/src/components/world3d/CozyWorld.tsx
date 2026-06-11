@@ -419,16 +419,16 @@ export function CozyWorld({
     return m;
   }, [places]);
 
-  // Wave D1.6: real W7 buildings claim the REAL street-front lots inside
-  // their place's landmark block (stable id order → lot index; overflow
-  // beyond the block's lots falls back to the EM-131 slot ring around the
-  // landmark anchor). The same content-memoized plan feeds CityScape.
+  // EM-174: real W7 buildings claim REAL lots — street-front lots inside
+  // their place's landmark block first (stable id order → lot index), then
+  // nearest-block overflow onto the city's platted lots; the EM-131 slot
+  // ring only when the whole city is full. The plan itself is a pure
+  // function of (places, city_seed); the same content-memoized plan feeds
+  // CityScape.
   const buildings = world?.buildings;
   const { plan: cityPlan } = useCityPlan({
     places: places ?? [],
     city_seed: world?.city_seed,
-    buildings,
-    day: world?.day,
   });
   const buildingSpots = useMemo(() => {
     const list = buildings ?? [];

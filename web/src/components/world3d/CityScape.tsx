@@ -1,8 +1,11 @@
 /**
  * CityScape — the instanced render path for THE city (EM-154, re-aimed by
- * Wave D1.5): the compact dense EW-style grid the sim lives on — roads,
- * fully-developed zoned blocks, street props and parked cars in Kenney/KayKit
- * set dressing. Pure renderer: ALL layout policy lives in cityLayout.
+ * Wave D1.5 and EM-174): the compact EW-style grid the sim lives on — roads,
+ * platted-lot paving pads, parks, street props and parked cars in Kenney
+ * set dressing. EM-174: the generator emits ZERO decorative buildings —
+ * every building in the world is a landmark anchor (Building.tsx) or a real
+ * W7 Building entity (Structure.tsx). Pure renderer: ALL layout policy
+ * lives in cityLayout.
  *
  * Pipeline: computeCityPlan (deterministic — seed = world.city_seed ?? 1337)
  * × CITY_MODEL_REGISTRY → one raw THREE.InstancedMesh per
@@ -45,7 +48,7 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { Building, Place } from '../../types';
+import type { Place } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
@@ -271,28 +274,19 @@ export function extractInstanceParts(scene: THREE.Object3D): CityPart[] {
 // ── Plan memo (content-keyed — see file header) ──────────────────────────────
 
 /** Everything the plan depends on: seed + each place's position/kind/district
- *  (cityLayout zones generated blocks from the nearest landmark's district)
- *  + the Wave D1.6 growth inputs: the sim DAY and the building-STATUS
- *  multiset — deliberately NOT per-tick fields (tick, progress, health), so
- *  snapshot polling never churns the memo while nothing growth-relevant
- *  changed. */
+ *  (cityLayout zones generated blocks from the nearest landmark's district).
+ *  EM-174/EM-155: the plan is keyed on (places, city_seed) ONLY — buildings
+ *  and day no longer shape it (they only claim lots, assignBuildingLots), so
+ *  snapshot polling never churns the memo while the town stands still. */
 export function citySignature(
   places: readonly Place[] | null | undefined,
   citySeed: number | null | undefined,
-  buildings?: readonly Building[] | null,
-  day?: number | null,
 ): string {
   const head = citySeed ?? 'default';
-  const counts = new Map<string, number>();
-  for (const b of buildings ?? []) counts.set(b.status, (counts.get(b.status) ?? 0) + 1);
-  const statuses = [...counts.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([s, n]) => `${s}:${n}`)
-    .join(',');
   const body = (places ?? [])
     .map((p) => `${p.id}:${p.x}:${p.y}:${p.kind}:${p.district ?? ''}`)
     .join(',');
-  return `${head}|day:${Math.max(0, Math.floor(day ?? 0))}|st:${statuses}|${body}`;
+  return `${head}|${body}`;
 }
 
 /**
@@ -303,11 +297,8 @@ export function citySignature(
 export function useCityPlan(
   world: CityWorld,
 ): { plan: CityPlan; center: { x: number; z: number } } {
-  const { places = [], city_seed: citySeed, buildings, day } = world;
-  const sig = useMemo(
-    () => citySignature(places, citySeed, buildings, day),
-    [places, citySeed, buildings, day],
-  );
+  const { places = [], city_seed: citySeed } = world;
+  const sig = useMemo(() => citySignature(places, citySeed), [places, citySeed]);
   const ref = useRef<{
     sig: string;
     plan: CityPlan;
@@ -316,7 +307,7 @@ export function useCityPlan(
   if (!ref.current || ref.current.sig !== sig) {
     ref.current = {
       sig,
-      plan: computeCityPlan({ places, city_seed: citySeed, buildings, day }),
+      plan: computeCityPlan({ places, city_seed: citySeed }),
       center: GRID_CENTER,
     };
   }
@@ -405,7 +396,7 @@ function CityPiece({
   );
 }
 
-// ── Wave D1.6: empty platted lots (procedural pads — no GLB key) ─────────────
+// ── EM-174: platted lots (procedural pads — no GLB key) ──────────────────────
 
 /** Pad tint — the existing warm paving stone (Structure's step/portico). */
 export const PAD_COLOR = '#cfc4ad';
@@ -417,10 +408,13 @@ const PAD_GEOMETRY = new THREE.BoxGeometry(2.3, 0.05, 2.3).translate(0, 0.025, 0
 const PAD_SPEC: ModelSpec = { url: '', scale: 1, yOffset: 0 };
 
 /**
- * The undeveloped platted lots, instanced like every other piece (chunked,
- * raycast-dead, StaticDrawUsage). Subtle by construction: thin flat geometry
- * in an existing palette tint — reads "young city", never competes with the
- * developed blocks. Purely procedural ⇒ no ModelBoundary needed.
+ * The platted lots, instanced like every other piece (chunked, raycast-dead,
+ * StaticDrawUsage). Subtle by construction: thin flat geometry in an
+ * existing palette tint — reads "platted city", never competes with the
+ * landmarks. A real W7 building that claims a lot renders ON TOP of its pad
+ * (the pad reads as the building's foundation — pads are never removed by
+ * claims, keeping the plan independent of the building list). Purely
+ * procedural ⇒ no ModelBoundary needed.
  */
 function EmptyLotPads({
   instances,
@@ -451,11 +445,11 @@ function EmptyLotPads({
 }
 
 /**
- * THE city (Wave D1.5/D1.6). Mounted by CozyWorld inside the canvas — every
- * road tile, EARNED generated building, platted-lot pad, prop and parked car
- * of the compact grid, as pure non-interactive set dressing (EM-157). Place
- * anchors, agent-built structures, villagers and critters render through
- * their own components on top of this.
+ * THE city (Wave D1.5 + EM-174). Mounted by CozyWorld inside the canvas —
+ * every road tile, platted-lot pad, park tree, prop and parked car of the
+ * compact grid, as pure non-interactive set dressing (EM-157). ZERO
+ * generated buildings: place anchors, agent-built structures, villagers and
+ * critters render through their own components on top of this.
  */
 export function CityScape({ world }: { world: CityWorld }) {
   const { plan, center } = useCityPlan(world);

@@ -133,6 +133,7 @@ describe('renderableEntries (plan → render mapping, rule 10)', () => {
       blocks: [{ cx: 0, cz: 0, zone: 'landmark' }],
       landmarks: { plaza: { x: 0, z: 0 } },
       realLots: { plaza: [{ x: 3.6, z: 1.9, rotY: 0 }] },
+      blockLots: [{ cx: 13, cz: 0, lots: [{ x: 13, z: 3.7, rotY: 0 }] }],
       emptyLots: [{ x: -3.6, z: -1.9, rotY: 0 }],
       extent: 33,
     };
@@ -308,28 +309,11 @@ describe('citySignature (plan memo key)', () => {
     expect(citySignature(moved, null)).not.toBe(citySignature(TOWN, null));
   });
 
-  it('keys on the growth inputs: day + building-status multiset (Wave D1.6)', () => {
-    const b = (id: string, status: string) =>
-      ({ id, status, name: id, kind: 'house', location: 'plaza', owner_id: null,
-        health: 100, condition_label: 'pristine', progress: 100, funds_committed: 0,
-        funds_required: 0, contributors: [], function: '' }) as never;
-    expect(citySignature(TOWN, null, [], 4)).not.toBe(citySignature(TOWN, null, [], 5));
-    expect(citySignature(TOWN, null, [b('a', 'operational')], 4)).not.toBe(
-      citySignature(TOWN, null, [], 4),
-    );
-    expect(citySignature(TOWN, null, [b('a', 'operational')], 4)).not.toBe(
-      citySignature(TOWN, null, [b('a', 'destroyed')], 4),
-    );
-  });
-
-  it('does NOT churn on per-tick fields (id/progress/health/order)', () => {
-    const b = (id: string, status: string, progress: number) =>
-      ({ id, status, name: id, kind: 'house', location: 'plaza', owner_id: null,
-        health: 100, condition_label: 'pristine', progress, funds_committed: 0,
-        funds_required: 0, contributors: [], function: '' }) as never;
-    const sigA = citySignature(TOWN, null, [b('a', 'operational', 10), b('z', 'planned', 0)], 4);
-    const sigB = citySignature(TOWN, null, [b('q', 'planned', 55), b('k', 'operational', 90)], 4);
-    expect(sigA).toBe(sigB); // same status multiset + day ⇒ same plan memo
+  it('is keyed on (places, city_seed) ONLY — buildings/day never churn the memo (EM-174)', () => {
+    // The EM-155 determinism contract: same places + same seed ⇒ the same
+    // memoized plan, no matter what the rest of the snapshot is doing.
+    expect(citySignature.length).toBe(2);
+    expect(citySignature(TOWN, 1337)).toBe(citySignature(TOWN.map((p) => ({ ...p })), 1337));
   });
 });
 
@@ -362,7 +346,7 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
     const straightChunks = container.querySelectorAll('[name^="city-road_straight-"]');
     expect(straightChunks.length).toBe(chunkInstances(PLAN.pieces.road_straight, CENTER).length);
     expect(straightChunks.length).toBeGreaterThan(1);
-    // the young city (day 0 plan) really shows its platted pads
+    // EM-174: the platted city always shows its pads (no generated buildings)
     expect(PLAN.emptyLots.length).toBeGreaterThan(0);
     const padMeshes = container.querySelectorAll('[name^="city-pad-"]');
     expect(padMeshes.length).toBe(padChunks);
