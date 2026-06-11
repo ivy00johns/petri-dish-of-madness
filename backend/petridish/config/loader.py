@@ -49,6 +49,11 @@ profiles:
 
 EMBEDDED_WORLD_YAML = """
 world:
+  # EM-175 — target roster size: pads from the persona library when `agents:`
+  # lists fewer; never truncates (a longer list always wins). Padded extras
+  # join at cadence_tier "supporting"; the hand-listed cast keeps whatever it
+  # declares (default protagonist). Citizen-N extras fill if the library runs
+  # short. MUST stay in sync with config/world.yaml.
   agent_count: 5
   tick_interval_seconds: 0.5
   turns_per_day: 20
@@ -823,6 +828,106 @@ def _parse_world(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# EM-175 — agent_count roster padding
+# ──────────────────────────────────────────────────────────────────────────────
+
+_CITIZEN_PERSONALITY = (
+    "An ordinary citizen of the town; even-keeled and adaptable, works a bit, "
+    "chats a bit, and mostly just gets by."
+)
+
+
+def _pad_agents(
+    agents: list[AgentConfig],
+    agent_count: int,
+    places: list[PlaceConfig],
+    profiles: list[ModelProfile],
+    personas: list[dict],
+) -> list[AgentConfig]:
+    """EM-175 — make `world.agent_count` real: pad, never truncate.
+
+    config/world.yaml has always promised agent_count is "used if `agents:`
+    not fully specified", but the padding was never implemented — the world
+    booted exactly the hand-listed cast. Rules, as shipped:
+
+      - len(agents) >= agent_count  ⇒  the list is returned UNCHANGED. The
+        hand-authored `agents:` list always wins; agent_count never truncates.
+      - Otherwise the roster pads from the persona library
+        (config/personas.yaml, EM-092). Cards whose name collides
+        (case-insensitively) with a listed agent are skipped. Each padded
+        agent takes the card's name + personality, the card's
+        suggested_profile when it names a registered profile (else a
+        round-robin pick across the non-mock profiles), the default place
+        (plaza when it exists, else the first place), and
+        cadence_tier "supporting" — extras at supporting keeps the free-tier
+        turn economics sane, while the hand-listed cast keeps whatever tier
+        it declares (default protagonist).
+      - If the library runs short, numbered citizens (Citizen-N, neutral
+        personality, round-robin across non-mock profiles) fill the rest, so
+        agent_count is ALWAYS honored.
+
+    Called by load_config() BEFORE the mock profile_override remap, so the
+    test suite's forced-mock path applies to padded agents too.
+    """
+    if agent_count <= len(agents):
+        return agents
+
+    place_ids = [p.id for p in places]
+    default_loc = (
+        "plaza" if "plaza" in place_ids
+        else (place_ids[0] if place_ids else "plaza")
+    )
+
+    profile_names = {p.name for p in profiles}
+    # Round-robin lanes for cards without a usable suggestion + Citizen-N fill.
+    rr_lanes = [p.name for p in profiles if p.adapter != "mock"] or ["mock"]
+    rr_cursor = 0
+
+    def _pick_profile(suggested: str = "") -> str:
+        nonlocal rr_cursor
+        if suggested and suggested in profile_names:
+            return suggested
+        lane = rr_lanes[rr_cursor % len(rr_lanes)]
+        rr_cursor += 1
+        return lane
+
+    used_names = {a.name.strip().lower() for a in agents}
+    out = list(agents)
+
+    for card in personas:
+        if len(out) >= agent_count:
+            break
+        name = str(card.get("name") or "").strip()
+        if not name or name.lower() in used_names:
+            continue
+        used_names.add(name.lower())
+        out.append(AgentConfig(
+            name=name,
+            personality=str(card.get("personality") or ""),
+            profile=_pick_profile(str(card.get("suggested_profile") or "")),
+            location=default_loc,
+            cadence_tier="supporting",
+        ))
+
+    n = 1
+    while len(out) < agent_count:
+        name = f"Citizen-{n}"
+        n += 1
+        if name.lower() in used_names:
+            continue
+        used_names.add(name.lower())
+        out.append(AgentConfig(
+            name=name,
+            personality=_CITIZEN_PERSONALITY,
+            profile=_pick_profile(),
+            location=default_loc,
+            cadence_tier="supporting",
+        ))
+
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Public loader
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -867,6 +972,13 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
             name="mock", adapter="mock", model_id="mock",
             color="#2ecc71",
         ))
+
+    # EM-175 — honor world.agent_count: pad the roster from the persona
+    # library (then Citizen-N) when `agents:` lists fewer; never truncate.
+    # Runs BEFORE the mock override below so padded agents are remapped too.
+    agents = _pad_agents(
+        agents, world_params.agent_count, places, profiles, load_personas(),
+    )
 
     # If profile_override == "mock", remap all agents to mock profile
     if profile_override == "mock":

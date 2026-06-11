@@ -3,7 +3,13 @@
 # Seed agents: each must reference a profile name from profiles.yaml.
 
 world:
-  agent_count: 5                 # used if `agents:` not fully specified
+  # EM-175 — target roster size: pads from the persona library
+  # (config/personas.yaml) when `agents:` lists fewer; never truncates (a
+  # longer list always wins). Padded extras join at cadence_tier "supporting"
+  # (the hand-listed cast keeps whatever it declares, default protagonist) so
+  # the free-tier turn economics stay sane; if the library runs short,
+  # numbered Citizen-N extras fill the remainder.
+  agent_count: 5
   tick_interval_seconds: 3
   turns_per_day: 20
   energy_decay_per_turn: 4

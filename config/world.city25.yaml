@@ -47,7 +47,12 @@
 # animals, and pacing are unchanged (additive-only law).
 
 world:
-  agent_count: 25                # used if `agents:` not fully specified
+  # EM-175 — target roster size: pads from the persona library
+  # (config/personas.yaml) when `agents:` lists fewer; never truncates (a
+  # longer list always wins). The 25 listed seats == 25 here, so padding is a
+  # no-op for this variant. Padded extras (elsewhere) join at cadence_tier
+  # "supporting"; Citizen-N extras fill if the library runs short.
+  agent_count: 25
   tick_interval_seconds: 3
   turns_per_day: 20
   energy_decay_per_turn: 4
