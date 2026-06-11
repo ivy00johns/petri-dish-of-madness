@@ -1,5 +1,8 @@
 /**
- * models.ts — THE GLB asset registry for the cozy village (EM-148).
+ * models.ts — THE GLB asset registry for the cozy 3-D CITY (EM-148, re-aimed
+ * by Wave D1.5: the medieval village look is retired; the sim lives on a
+ * compact dense city grid, so place anchors and agent-built structures wear
+ * the same Kenney city kits as the generated blocks).
  *
  * Single source of truth mapping renderer concepts → vendored CC0 models
  * under web/public/models/ (every file recorded in ASSET_LICENSES.md).
@@ -8,11 +11,14 @@
  * non-null model streams in, per the Wave C fallback invariant).
  *
  * Scale discipline (load-bearing): building slot rings space structures
- * 4.2 world units apart and buildings must read at ≲3 units; villagers are
- * ~1.1-unit capsules; critters ~0.5–0.65. Every `scale` below was derived
- * from the GLB's measured bounding box (see models.test.ts, which re-measures
- * the vendored files and enforces these bounds — change a model, the test
- * tells you if it stops fitting).
+ * 4.2 world units apart and buildings must stay ≤3.4 units on the long side
+ * (the Wave D1 city convention); villagers are ~1.1-unit capsules; critters
+ * ~0.5–0.65. Every `scale` below was derived from the GLB's measured bounding
+ * box (see models.test.ts, which re-measures the vendored files and enforces
+ * these bounds — change a model, the test tells you if it stops fitting).
+ * City-kit GLBs are shared with cityModels.ts BY URL (one download, one
+ * toonified scene) but carry their own scale rows here — anchors may read
+ * ~15% larger than ring buildings per the Wave C convention.
  *
  * Consumers (wave 2):
  *   • C4 Structure/Building → MODEL_REGISTRY[operationalVariant(kind)]
@@ -38,9 +44,9 @@ export interface ModelSpec {
   clips?: { idle?: string; walk?: string };
 }
 
-const KAYKIT_MEDIEVAL = '/models/kaykit-medieval-hexagon';
 const KAYKIT_ADVENTURERS = '/models/kaykit-adventurers';
 const KENNEY_FANTASY_TOWN = '/models/kenney-fantasy-town';
+const KENNEY_CITY = '/models/kenney-city';
 const QUATERNIUS = '/models/quaternius';
 
 /**
@@ -48,33 +54,39 @@ const QUATERNIUS = '/models/quaternius';
  * All 10 VariantKeys are present; `null` keeps the procedural silhouette
  * (garden's flower beds and the library have no good CC0 match in the
  * headlessly-acquirable kits — recorded in the EM-148 report).
+ *
+ * Wave D1.5: agent-built structures wear the Kenney city kits (measured
+ * bounds in cityModels.ts): ind_b 1.322 long, ind_a 1.678, res_a 1.300,
+ * com_a 0.940 (1.293 tall), civic_a 2.320 (2.480 tall), com_b 0.970
+ * (1.693 tall), fountain 2.000. All land at 2.3–3.4u long, ≤4.1u tall.
  */
 export const MODEL_REGISTRY: Record<VariantKey, ModelSpec | null> = {
-  // KayKit buildings are authored at hex-tile scale (~0.7–1.4 units wide),
-  // hence the 1.7–2.8× scales to read at ~2–2.9 world units.
   garden: null, // procedural flower beds stay — no CC0 garden kit acquired
-  farm: { url: `${KAYKIT_MEDIEVAL}/building_windmill.glb`, scale: 2.3, yOffset: 0 },
-  workshop: { url: `${KAYKIT_MEDIEVAL}/building_blacksmith.glb`, scale: 2.2, yOffset: 0 },
+  farm: { url: `${KENNEY_CITY}/industrial-h.glb`, scale: 2.4, yOffset: 0 }, // warehouse → 3.17u
+  workshop: { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 }, // factory → 3.36u
   library: null, // no CC0 library model in the acquired kits — stays procedural
-  clocktower: { url: `${KAYKIT_MEDIEVAL}/building_tower.glb`, scale: 1.7, yOffset: 0 },
-  house: { url: `${KAYKIT_MEDIEVAL}/building_home_a.glb`, scale: 2.8, yOffset: 0 },
-  stall: { url: `${KENNEY_FANTASY_TOWN}/stall.glb`, scale: 2.3, yOffset: 0 },
-  monument: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 },
-  well: { url: `${KAYKIT_MEDIEVAL}/building_well.glb`, scale: 2.3, yOffset: 0 },
-  generic: { url: `${KAYKIT_MEDIEVAL}/building_tavern.glb`, scale: 2.1, yOffset: 0 },
+  clocktower: { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 }, // civic landmark → 3.36u, 3.60u tall
+  house: { url: `${KENNEY_CITY}/suburban-a.glb`, scale: 2.3, yOffset: 0 }, // → 2.99u
+  stall: { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // storefront → 2.44u
+  monument: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 }, // → 2.60u
+  well: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 }, // city fountain → 2.60u
+  generic: { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // tall commercial → 2.33u, 4.06u tall
 };
 
 /**
  * Place-anchor models keyed by PlaceKind (the structure that marks a place
  * itself, not the agent-built satellites). Anchors may read slightly larger
- * than ring buildings. `null` = the existing procedural place structure.
+ * than ring buildings (~15%, Wave C convention) but stay ≤3.4u on the long
+ * side. `null` = the existing procedural place structure.
  */
 export const PLACE_MODELS: Record<PlaceKind, ModelSpec | null> = {
-  social: null, // the plaza is an open square — procedural stays
-  work: { url: `${KAYKIT_MEDIEVAL}/building_lumbermill.glb`, scale: 2.0, yOffset: 0 },
-  governance: { url: `${KAYKIT_MEDIEVAL}/building_castle.glb`, scale: 1.25, yOffset: 0 },
-  home: { url: `${KAYKIT_MEDIEVAL}/building_home_b.glb`, scale: 2.3, yOffset: 0 },
-  wild: null, // the commons keeps its procedural wilds
+  // The Kenney fantasy-town fountain reads fine as a city plaza fountain
+  // (2.000 raw → 3.20u at anchor scale, vs 2.60u as a ring building).
+  social: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.6, yOffset: 0 },
+  work: { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 2.0, yOffset: 0 }, // wide storefront → 3.28u
+  governance: { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 }, // grand civic block → 3.36u
+  home: { url: `${KENNEY_CITY}/suburban-b.glb`, scale: 1.8, yOffset: 0 }, // → 3.29u
+  wild: null, // parks are trees — the wild anchor stays procedural
 };
 
 /**

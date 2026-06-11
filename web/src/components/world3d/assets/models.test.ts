@@ -6,11 +6,15 @@
  *   • the vendored files EXIST on disk and are real GLBs — we parse each
  *     GLB's JSON chunk (plain node fs + DataView, no loader) and re-measure
  *     its bounding box, so the registry scales are PROVEN to respect the
- *     village footprints (buildings ≲3 units in the 4.2-spacing slot rings,
- *     villager ~1.1 tall, critters ≲0.8) — change a model file and this test
- *     tells you if it stops fitting;
+ *     city footprints (buildings ≤3.4 units on the long side in the
+ *     4.2-spacing slot rings — the Wave D1 city convention; villager ~1.1
+ *     tall, critters ≲0.8) — change a model file and this test tells you if
+ *     it stops fitting;
  *   • declared animation clips actually exist in the GLBs;
- *   • ASSET_LICENSES.md records every vendored file;
+ *   • license hygiene BOTH directions — ASSET_LICENSES.md records every
+ *     vendored file, every hero-kit row in the doc points at a real registry
+ *     file, no orphan GLBs sit in the hero-kit directories, and the retired
+ *     Wave D1.5 medieval kit is GONE;
  *   • toonify helpers — conversion / caching / tint-cloning unit-tested on a
  *     stub Object3D tree with stub materials.
  */
@@ -20,7 +24,7 @@ import { describe, expect, it } from 'vitest';
 // node builtins this fs-backed test needs are imported under @ts-ignore —
 // vitest executes in node, where they are real.
 // @ts-ignore -- node builtin without @types/node
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 // @ts-ignore -- node builtin without @types/node
 import { resolve } from 'node:path';
 import * as THREE from 'three';
@@ -187,11 +191,11 @@ describe('scaled footprints', () => {
   it.each(
     (Object.entries(MODEL_REGISTRY) as Array<[VariantKey, ModelSpec | null]>)
       .filter((e): e is [VariantKey, ModelSpec] => e[1] !== null),
-  )('building %s reads at ≲3 world units in the 4.2-spacing rings', (_k, spec) => {
+  )('building %s stays ≤3.4 units on the long side (city convention)', (_k, spec) => {
     const { size } = glbBounds(readGlbJson(diskPath(spec)));
     const xz = Math.max(size.x, size.z) * spec.scale;
     expect(xz).toBeGreaterThan(1.2); // not a speck
-    expect(xz).toBeLessThanOrEqual(3.2);
+    expect(xz).toBeLessThanOrEqual(3.4);
     expect(size.y * spec.scale).toBeLessThanOrEqual(4.2);
   });
 
@@ -200,7 +204,7 @@ describe('scaled footprints', () => {
       .filter((e): e is [PlaceKind, ModelSpec] => e[1] !== null),
   )('place anchor %s stays within the anchor footprint', (_k, spec) => {
     const { size } = glbBounds(readGlbJson(diskPath(spec)));
-    expect(Math.max(size.x, size.z) * spec.scale).toBeLessThanOrEqual(3.2);
+    expect(Math.max(size.x, size.z) * spec.scale).toBeLessThanOrEqual(3.4);
     expect(size.y * spec.scale).toBeLessThanOrEqual(5.5);
   });
 
@@ -252,6 +256,10 @@ describe('animation clips', () => {
 describe('ASSET_LICENSES.md', () => {
   const doc = readFileSync(resolve(REPO_ROOT, 'ASSET_LICENSES.md'), 'utf8');
 
+  /** The hero-kit dirs THIS registry owns rows for (kenney-city is shared
+   *  with cityModels.ts, whose test runs the same checks for that dir). */
+  const HERO_DIRS = ['kaykit-adventurers', 'kenney-fantasy-town', 'quaternius'] as const;
+
   it('records every vendored model file', () => {
     for (const spec of allModelSpecs()) {
       expect(doc, `ASSET_LICENSES.md is missing ${spec.url}`).toContain(
@@ -260,8 +268,42 @@ describe('ASSET_LICENSES.md', () => {
     }
   });
 
+  it('every hero-kit row in the doc is a real registry file (no orphan rows)', () => {
+    const registryRepoPaths = new Set(allModelSpecs().map((s) => `web/public${s.url}`));
+    const rows =
+      doc.match(
+        /web\/public\/models\/(?:kaykit-adventurers|kenney-fantasy-town|quaternius|kaykit-medieval-hexagon)\/[\w.-]+\.glb/g,
+      ) ?? [];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const repoPath of new Set<string>(rows)) {
+      expect(registryRepoPaths.has(repoPath), `orphan license row: ${repoPath}`).toBe(true);
+      expect(existsSync(resolve(REPO_ROOT, repoPath)), `row file missing: ${repoPath}`).toBe(true);
+    }
+  });
+
+  it('no orphan GLBs sit in the hero-kit directories', () => {
+    const registryRepoPaths = new Set(allModelSpecs().map((s) => `web/public${s.url}`));
+    for (const dir of HERO_DIRS) {
+      const files: string[] = readdirSync(resolve(PUBLIC_DIR, 'models', dir));
+      for (const f of files) {
+        expect(
+          registryRepoPaths.has(`web/public/models/${dir}/${f}`),
+          `orphan vendored file: web/public/models/${dir}/${f}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('the medieval kit is retired (Wave D1.5): no dir, no license rows', () => {
+    expect(existsSync(resolve(PUBLIC_DIR, 'models', 'kaykit-medieval-hexagon'))).toBe(false);
+    expect(doc).not.toContain('kaykit-medieval-hexagon');
+    // the fantasy-town stall went with it (the fountain stays)
+    expect(doc).not.toContain('kenney-fantasy-town/stall.glb');
+    expect(existsSync(resolve(PUBLIC_DIR, 'models', 'kenney-fantasy-town', 'stall.glb'))).toBe(false);
+  });
+
   it('declares CC0 for the vendored kits', () => {
-    for (const kit of ['kaykit-medieval-hexagon', 'kaykit-adventurers', 'kenney-fantasy-town', 'quaternius']) {
+    for (const kit of ['kaykit-adventurers', 'kenney-fantasy-town', 'kenney-city', 'quaternius']) {
       expect(doc).toContain(kit);
     }
     expect(doc).toContain('creativecommons.org/publicdomain/zero/1.0');

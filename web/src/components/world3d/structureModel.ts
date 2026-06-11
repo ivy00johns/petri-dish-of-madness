@@ -48,7 +48,7 @@ export function resolveStructureModel(kind: string): StructureModelResolution {
 
 /**
  * Resolve a place-anchor GLB by place kind (Building.tsx). Unknown kinds (or
- * registry nulls — social/wild stay procedural by design) return null.
+ * registry nulls — wild stays procedural by design) return null.
  */
 export function resolvePlaceModel(kind: string): ModelSpec | null {
   const spec = Object.prototype.hasOwnProperty.call(PLACE_MODELS, kind)
@@ -78,14 +78,12 @@ export function structureModelTint(offline: boolean): string | undefined {
 
 /**
  * Per-variant Y-rotation (radians) so each GLB's doorway/front reads toward
- * the default camera. Wave-1 registry specs ship rotation unset, so EM-150
- * verified every model's authored facing in-browser (an isolation probe
- * rendered each GLB from the default +X/+Z azimuth at 0/±90/180): the KayKit
- * medieval-hexagon kit and Kenney fantasy-town both author detail faces —
- * windmill fan, forge fire, tower door, lumbermill saw, home_a/_b doors,
- * tavern stairs, castle banners — toward +X/+Z, which IS the default camera
- * side. Every variant therefore keeps rotation 0; this table stays as the
- * tuning point if a later kit swap reads backwards.
+ * the default camera. Registry specs ship rotation unset; the EM-150 probe
+ * methodology (render each GLB from the default +X/+Z azimuth at 0/±90/180)
+ * found the Kenney kits author detail faces — storefront doors, fountain —
+ * toward +Z/+X, which IS the default camera side (same convention the
+ * cityModels.ts pieces rely on). Every variant therefore keeps rotation 0;
+ * this table stays as the tuning point if a later kit swap reads backwards.
  */
 const MODEL_ROTATION_Y: Partial<Record<VariantKey, number>> = {};
 
