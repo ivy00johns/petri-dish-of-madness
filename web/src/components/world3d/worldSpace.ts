@@ -11,12 +11,27 @@
  * breathes — intra-district spacing (≥60 logical) lands at ~4 world units,
  * comfortably past the 4.2 slot-ring pitch, and district centroids (≥250
  * logical) sit ~16.5 apart. The mapping math itself is unchanged.
+ *
+ * Wave D1 (EM-154): SIZE deliberately stays 66 — cityLayout derives the
+ * historic-core radius from placeToWorld, so scaling SIZE rescales the
+ * generated city ring with it; "fit the city" is a BOUNDS problem, not a
+ * mapping problem. WORLD_REACH is that bound: the half-extent the terrain,
+ * pan clamp, and fog must cover now that the city ring (extent ≈ 2× the
+ * ~42-unit core radius, instances out to ~±85) surrounds the town.
  */
 
 import type { Place, PlaceKind, WorldEvent } from '../../types';
 
-/** Edge length of the village ground plane in world units. */
+/** Edge length of the village (historic core) ground square in world units. */
 export const SIZE = 66;
+
+/**
+ * Half-extent of the FULL scene envelope — historic core + the Wave D1
+ * generated city ring + margin (EM-154). Ground plane, pan bounds, fog and
+ * camera distances are tuned against this, NOT against SIZE.
+ * 1.45 × 66 ≈ 95.7 covers the default plan's ~±85 with ~10 units of grass apron.
+ */
+export const WORLD_REACH = SIZE * 1.45;
 
 /** Convert a place's logical (0..1000) x to world X. */
 export function toWorldX(x: number): number {

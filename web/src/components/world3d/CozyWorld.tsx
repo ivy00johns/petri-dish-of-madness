@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Environment, OrbitControls, Sky, SoftShadows } from '@react-three/drei';
+import { Environment, OrbitControls, Sky, SoftShadows, useGLTF } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
 import type { WorldState, WorldEvent, FocusTarget } from '../../types';
@@ -39,15 +39,36 @@ import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, SIZE } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, WORLD_REACH } from './worldSpace';
 import { GOLDEN_HOUR } from './toon';
 import { preloadHeroModels } from './assets/Model';
+import { allCityModelSpecs } from './assets/cityModels';
+import { CityScape } from './CityScape';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // Wave C (EM-148/149): warm the GLB cache for the hero set (place anchors,
 // buildings, villager, cat/dog) ONCE at module scope — the Suspense
 // fallbacks cover the in-flight window.
 preloadHeroModels();
+
+/**
+ * Wave D1 (EM-154): warm the city-kit GLBs the same way. Rejections are
+ * handled — drei's preload routes failures through suspend-react's internal
+ * catch (the error surfaces only at render time, where CityScape's per-piece
+ * ModelBoundary skips the piece), and the try/catch guards any synchronous
+ * loader-construction throw — so a blocked /models/** never spills unhandled
+ * promise noise into the console (rule 10).
+ */
+function preloadCityModels(): void {
+  for (const spec of allCityModelSpecs()) {
+    try {
+      useGLTF.preload(spec.url);
+    } catch {
+      // skip — CityScape's ModelBoundary owns the render-time fallback
+    }
+  }
+}
+preloadCityModels();
 
 // How recent an animal's last chaotic event must be (in seq distance from the
 // newest event) for the critter to still wear its magenta chaos accent. This
@@ -77,11 +98,12 @@ const BUBBLE_LIFETIME_MS = 5200;
 const MAX_BUBBLES_PER_AGENT = 3;
 const SPEECH_TRUNCATE = 120;
 
-// ── EM-095 camera constants (retuned for the SIZE-66 Wave C town, EM-149) ───
-const DEFAULT_CAMERA = new THREE.Vector3(38, 33, 38);
+// ── EM-095 camera constants (Wave D1 / EM-154: retuned so the generated city
+// ring reads from the default framing and the user can pan/zoom out to it) ──
+const DEFAULT_CAMERA = new THREE.Vector3(46, 38, 46);
 const DEFAULT_TARGET = new THREE.Vector3(0, 1.5, 0);
-/** The orbit target stays within this XZ box (pan bounds over the village). */
-const PAN_BOUND = SIZE * 0.75;
+/** The orbit target stays within this XZ box (pan bounds: town + city ring). */
+const PAN_BOUND = WORLD_REACH * 0.9;
 /** Comfortable viewing radius zoom-to-place eases toward. */
 const FOCUS_DOLLY_DIST = 20;
 /** Convergence epsilon for transit/reset motion. */
@@ -264,7 +286,7 @@ function CameraDirector({
       enableDamping
       dampingFactor={0.08}
       minDistance={14}
-      maxDistance={100}
+      maxDistance={160}
       minPolarAngle={0.25}
       maxPolarAngle={Math.PI / 2.3}
       target={[DEFAULT_TARGET.x, DEFAULT_TARGET.y, DEFAULT_TARGET.z]}
@@ -481,7 +503,7 @@ export function CozyWorld({
         shadows
         dpr={[1, 2]}
         gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
-        camera={{ position: [38, 33, 38], fov: 42, near: 0.1, far: 400 }}
+        camera={{ position: [46, 38, 46], fov: 42, near: 0.1, far: 420 }}
       >
         <color attach="background" args={[GOLDEN_HOUR.background]} />
         {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
@@ -604,9 +626,12 @@ function Scene({
       {/* Faint warm ambient only — the directional must dominate so the toon
           bands read; it also keeps shadows warm, never black. */}
       <ambientLight intensity={0.15} color={GOLDEN_HOUR.ambient} />
-      {/* EM-149: shadow frustum + fog distances widened with SIZE 40 → 66 so
-          the whole district town casts shadows and isn't swallowed by haze.
-          Same low golden-hour sun ANGLE, scaled out to cover the town. */}
+      {/* EM-154: shadow frustum nudged out (±52 → ±64) to take in the
+          commercial ring hugging the historic core — deliberately NOT the
+          whole city: the far ring sits outside the shadow frustum so the
+          2048 map keeps its texel density on the core, where the eye lives.
+          Fog pushed out (70/160 → 90/300) so the city ring reads instead of
+          dissolving; same low golden-hour sun ANGLE as Wave C. */}
       <directionalLight
         position={[27, 13.5, 12]}
         intensity={2.2}
@@ -615,20 +640,24 @@ function Scene({
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
         shadow-camera-near={1}
-        shadow-camera-far={130}
-        shadow-camera-left={-52}
-        shadow-camera-right={52}
-        shadow-camera-top={52}
-        shadow-camera-bottom={-52}
+        shadow-camera-far={150}
+        shadow-camera-left={-64}
+        shadow-camera-right={64}
+        shadow-camera-top={64}
+        shadow-camera-bottom={-64}
         shadow-bias={-0.0004}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 70, 160]} />
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 90, 300]} />
 
       <Ground places={places} />
       <Scenery places={places} />
       {/* EM-118: instanced treeline (LOD) + lived-in town props. */}
       <Foliage places={places} />
       <TownProps places={places} />
+
+      {/* Wave D1 (EM-154/156/157): the generated city ring — non-interactive
+          instanced set dressing AROUND the historic core, never inside it. */}
+      <CityScape world={world} />
 
       {places.map((p) => (
         <Building

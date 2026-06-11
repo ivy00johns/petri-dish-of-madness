@@ -18,7 +18,7 @@
 
 import { useMemo } from 'react';
 import type { Place } from '../../types';
-import { SIZE } from './worldSpace';
+import { WORLD_REACH } from './worldSpace';
 import { GOLDEN_HOUR, toonMaterial } from './toon';
 import {
   computeTownLayout,
@@ -65,14 +65,16 @@ export function Ground({ places }: GroundProps) {
   return (
     <group>
       {/* Grassy ground plane (camera never dips below the horizon — the
-          orbit polar clamp keeps us topside, so front-face only is fine). */}
+          orbit polar clamp keeps us topside, so front-face only is fine).
+          Wave D1 (EM-154): sized by WORLD_REACH so the generated city ring
+          (instances out to ~±85) stands on grass, not on the void. */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
         position={[0, 0, 0]}
         receiveShadow
         material={toonMaterial(GOLDEN_HOUR.terrain)}
       >
-        <planeGeometry args={[SIZE * 1.6, SIZE * 1.6, 1, 1]} />
+        <planeGeometry args={[WORLD_REACH * 2, WORLD_REACH * 2, 1, 1]} />
       </mesh>
 
       {/* A slightly darker grass "field" border ring for depth */}
@@ -81,7 +83,7 @@ export function Ground({ places }: GroundProps) {
         position={[0, -0.01, 0]}
         material={toonMaterial(GOLDEN_HOUR.terrainEdge)}
       >
-        <circleGeometry args={[SIZE * 1.1, 48]} />
+        <circleGeometry args={[WORLD_REACH * 1.35, 48]} />
       </mesh>
 
       {/* Per-district ground-zone tints: two stacked translucent discs per
