@@ -112,3 +112,10 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] design-token check — diff is world3d canvas + backend config only; WebGL hex exemption per established convention.
 - [x] `git-commit` conventions — per-item commits at gates by orchestrator (agents did not commit).
 - [ ] `ux-review` full-skill repo-wide pass — STILL OWED (standing deferral; now covers W9–WaveD1).
+
+## Wave D1.5/D1.6 + Wave D2 — corrective city + population scaling (user GO 2026-06-10/11)
+- [x] `orchestrator` — D1.5 ("kill the medieval core", contracts/wave-d1.5.md, 2 agents ∥), D1.6 ("the city is earned", contracts/wave-d1.6.md, 1 agent), D2 (contracts/wave-d2.md, 4 sequential lean batches B1–B4). Per-batch orchestrator gates + commits throughout; agents never committed.
+- [x] QE gate (D2) — `coordination/qa-report.json` wave-D2 proceed=true; EM-164 measured verification incl. a bounded live FreeLLMAPI run (EM-170 capped 32/60 degraded-proxy calls at 12.0s; cadence math 8.30 calls/round at 25 agents; cache assumption falsified → EM-171). Backend 445 / web 501 / build clean.
+- [x] render-level verification — orchestrator Playwright at every D1.5/D1.6 gate (dense city, landmark labels at default framing, street-level agents-at-plaza shot); live-run evidence in docs/build-evidence/wave-d15-*, wave-d16-*, d16-stage-*.
+- [x] `git-commit` conventions — all commits.
+- [ ] `ux-review` full-skill repo-wide pass — STILL OWED (standing deferral; now covers W9–W16).
