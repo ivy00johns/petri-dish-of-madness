@@ -101,3 +101,14 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] design-token check — diff is world3d canvas + backend config only; WebGL hexes exempt per the established convention (centralized in worldSpace.ts/townLayout.ts/toon.ts).
 - [x] `git-commit` conventions — per-item commits at gates by orchestrator (agents did not commit).
 - [ ] `ux-review` full-skill repo-wide pass — STILL OWED on merged main (standing deferral since W11b; now covers W9–WaveC surface).
+
+## Wave D1 — "the EW-grade city" (source: deep-research-v4 + v4-review, ledger EM-152–157, user GO 2026-06-10 "release the ultracode workflow swarm")
+- [x] `plan-intake` — v4 + review feedback filed as EM-152–169 before the build (`649cf84`); review's colliding EM-125–131 renumbered.
+- [x] `orchestrator` — contract-first wave on `build/wave-d1-ew-city`; contract `contracts/wave-d1.md`; ultracode Workflow substrate (implement fan-out wf_1b3838bb, verify wf_d7a16916).
+- [x] asset acquisition — 6 Kenney kits + KayKit City Builder Bits acquired headlessly, CC0 verified pre-vendor, 23 GLBs ~1.45 MB, all in `ASSET_LICENSES.md` with both-directions integrity tests.
+- [x] `frontend-design` / `ui-ux-pro-max` — design direction carried by the frozen v4 research (EW-grade city target) + Wave B/C toon art direction; look verified live at both gates.
+- [x] QE gate — `coordination/qa-report.json` proceed=true (contract 4, coverage 4, security 5, regression 4); 10 probe families, 1 MAJOR adversarially REFUTED (React 18 dev-mode re-dispatch; production-build probe = 0 pageerrors), 4 MINORs recorded. Backend 377 / web 467 / build clean.
+- [x] render-level verification — orchestrator Playwright at gate 2 (60fps measured, console 0 errors, city ring + historic core) + QE independent pass (blocked-models fallback, click-to-focus regression, zoomed fps). Evidence: `docs/build-evidence/wave-d1-*.jpeg`, `qe-wave-d1-*.jpeg`.
+- [x] design-token check — diff is world3d canvas + backend config only; WebGL hex exemption per established convention.
+- [x] `git-commit` conventions — per-item commits at gates by orchestrator (agents did not commit).
+- [ ] `ux-review` full-skill repo-wide pass — STILL OWED (standing deferral; now covers W9–WaveD1).
