@@ -69,31 +69,33 @@ world:
   city_seed: 1337
 
 places:
-  # Wave C / EM-147 — the district town (~15 places over the existing five
-  # kinds). MUST stay in sync with config/world.yaml's places block. The five
-  # original ids (plaza/market/townhall/commons/home) survive with their kinds
-  # so old snapshots and agent locations stay valid; `district` is the one
-  # additive optional key (core/market/residential/civic/farm).
-  # core — the heart of town
-  - { id: plaza,           name: "Central Plaza",     x: 500, y: 500, kind: social,     district: core,        description: "Open square where everyone mingles." }
-  - { id: well,            name: "The Old Well",      x: 510, y: 420, kind: social,     district: core,        description: "Mossy stone well where the day's gossip is drawn up with the water." }
-  # market — the working east end
-  - { id: market,          name: "Market",            x: 750, y: 400, kind: work,       district: market,      description: "Earn credits by working." }
-  - { id: forge,           name: "The Ember Forge",   x: 840, y: 340, kind: work,       district: market,      description: "Sparks and hammer-song; the smith pays good coin for steady hands." }
-  - { id: workshop,        name: "Tinker's Workshop", x: 820, y: 470, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
-  # civic — the quiet north-west
-  - { id: townhall,        name: "Town Hall",         x: 250, y: 350, kind: governance, district: civic,       description: "Propose and vote on rules." }
-  - { id: archive,         name: "The Records Hall",  x: 180, y: 260, kind: governance, district: civic,       description: "Dusty shelves of town ledgers, old maps, and older grievances." }
-  # residential — lamplit lanes to the south-west
-  - { id: home,            name: "Hearth",            x: 300, y: 650, kind: home,       district: residential, description: "Rest and recharge." }
-  - { id: rosehip_cottage, name: "Rosehip Cottage",   x: 210, y: 640, kind: home,       district: residential, description: "A snug cottage wrapped in climbing roses. Rest and recharge." }
-  - { id: mossy_row,       name: "Mossy Row",         x: 250, y: 740, kind: home,       district: residential, description: "A crooked lane of moss-roofed homes. Rest and recharge." }
-  - { id: lantern_loft,    name: "Lantern Loft",      x: 340, y: 740, kind: home,       district: residential, description: "An attic room above the lane, warm with lamplight. Rest and recharge." }
-  # farm — the wild south-east edge
-  - { id: commons,         name: "The Commons",       x: 500, y: 750, kind: wild,       district: farm,        description: "Forage for scraps." }
-  - { id: willow_pond,     name: "Willow Pond",       x: 610, y: 690, kind: wild,       district: farm,        description: "Still water under trailing willows; frogs, reeds, and easy foraging." }
-  - { id: orchard,         name: "Bramble Orchard",   x: 640, y: 790, kind: wild,       district: farm,        description: "Crab apples and brambles at the town's edge; sweet pickings in season." }
-  - { id: farmstead,       name: "Sunfall Farmstead", x: 730, y: 700, kind: work,       district: farm,        description: "Fields and a weathered barn; honest work from dawn to dusk." }
+  # Wave D1.5 / contracts/wave-d1.5.md — the city grid (~15 places over the
+  # existing five kinds). MUST stay in sync with config/world.yaml's places
+  # block. The five original ids (plaza/market/townhall/commons/home) survive
+  # with their kinds so old snapshots and agent locations stay valid;
+  # `district` is the one additive optional key
+  # (core/market/residential/civic/farm). Coordinates sit on the 5x5
+  # city-block centers (106/303/500/697/894 on each axis).
+  # core — the plaza blocks at the heart of the grid
+  - { id: plaza,           name: "Central Plaza",     x: 500, y: 500, kind: social,     district: core,        description: "Open square at the heart of the grid where everyone mingles." }
+  - { id: well,            name: "Fountain Court",    x: 500, y: 303, kind: social,     district: core,        description: "Plaza fountain where the day's gossip circles with the spray." }
+  # market — the working east blocks
+  - { id: market,          name: "Market Hall",       x: 697, y: 303, kind: work,       district: market,      description: "Earn credits by working." }
+  - { id: forge,           name: "The Steelworks",    x: 894, y: 303, kind: work,       district: market,      description: "Sparks and rolling steel; the mill pays good coin for steady hands." }
+  - { id: workshop,        name: "Tinker's Workshop", x: 894, y: 500, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
+  # civic — the records corner, north-west
+  - { id: townhall,        name: "City Hall",         x: 106, y: 106, kind: governance, district: civic,       description: "Propose and vote on rules." }
+  - { id: archive,         name: "The Records Office", x: 303, y: 106, kind: governance, district: civic,      description: "Filing rows of city ledgers, old permits, and older grievances." }
+  # residential — lamplit blocks to the south-west
+  - { id: home,            name: "Hearth House",      x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
+  - { id: rosehip_cottage, name: "Rosehip Walk-up",   x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }
+  - { id: mossy_row,       name: "Mossy Row Flats",   x: 303, y: 894, kind: home,       district: residential, description: "A crooked row of ivy-clad flats. Rest and recharge." }
+  - { id: lantern_loft,    name: "Lantern Lofts",     x: 303, y: 697, kind: home,       district: residential, description: "Top-floor lofts above the avenue, warm with lamplight. Rest and recharge." }
+  # farm — the greenbelt park blocks of the south-east
+  - { id: commons,         name: "The Commons Park",  x: 697, y: 697, kind: wild,       district: farm,        description: "Forage for scraps." }
+  - { id: willow_pond,     name: "Willow Pond Park",  x: 697, y: 894, kind: wild,       district: farm,        description: "Still water under trailing willows; ducks, reeds, and easy foraging." }
+  - { id: orchard,         name: "Orchard Green",     x: 894, y: 894, kind: wild,       district: farm,        description: "Crab apples and brambles in a pocket park; sweet pickings in season." }
+  - { id: farmstead,       name: "Sunfall Depot",     x: 894, y: 697, kind: work,       district: farm,        description: "Loading docks and pallet rows; honest work from dawn to dusk." }
 
 agents:
   - { name: Ada,  personality: "Pragmatic engineer; values fairness, distrusts freeloaders.", profile: mock, location: plaza }
