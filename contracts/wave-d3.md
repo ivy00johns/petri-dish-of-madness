@@ -159,6 +159,60 @@ extend), `backend/petridish/config/loader.py`, `config/world.yaml`,
 
 ---
 
+## B4 — EM-187: resume-on-boot (P1, added v1.1 on user approval 2026-06-11)
+
+**Owner:** backend-agent-B4 (after the wave-D3 QE gate; this batch gets its own
+full-suite gate + targeted QE check).
+**Files owned:** `backend/petridish/engine/loop.py`,
+`backend/petridish/api/app.py`, `backend/petridish/config/loader.py`,
+`backend/petridish/persistence/` (query helpers only),
+`config/world.yaml`, `backend/tests/test_resume_on_boot.py` (new).
+
+### Behavior spec
+
+1. On startup (the lifespan path), when `world.resume_on_boot` is true
+   (default), find the most recent run whose latest snapshot tick is > 0.
+   If found and config-compatible (see 3), rebuild the world from that
+   snapshot via the EM-101 machinery (`World.from_snapshot`, CURRENT config
+   params + snapshot state — REUSE/factor the fork endpoint's logic in
+   api/app.py ~1085–1160 rather than duplicating it) and start a NEW run row
+   with `forked_from=<parent run>` / `forked_at_tick=<snapshot tick>` so the
+   run browser's existing lineage chip applies. No resumable snapshot ⇒
+   fresh run exactly as today.
+2. Feed transparency: one system event on resume — "▶ resumed run <parent>
+   from tick <T>" (kind `run_resumed` or ride an existing system kind if one
+   fits; additive payload {parent_run_id, snapshot_tick}).
+3. Config-compatibility guard: resume only when the parent run's stored
+   `config_json` matches the current config on the WORLD-DEFINING bits —
+   agent roster (ids/names after EM-175 padding), places set, `city_seed`.
+   Tunable params (cadence, budgets, lane_failover, cap_governor, …) adopt
+   the CURRENT config and never block a resume. Mismatch ⇒ fresh run with a
+   logged reason (log.info, no feed noise).
+4. Seed critters: a resumed world must NOT re-spawn seed animals when the
+   snapshot already carries them (no duplicate cat/dog).
+5. `POST /api/control/reset` stays the explicit fresh start (unchanged), and
+   a reset-created run is itself resumable later.
+6. `world.resume_on_boot: false` ⇒ byte-identical pre-D3 boot (prove with a
+   test). Loader param via the EM-155 conventions (dataclass + embedded
+   mirror; this is boot behavior — it does not ride snapshots).
+7. Hot-reload churn guard: runs whose only snapshot is tick 0 are skipped as
+   resume sources (they ARE the fresh state), so reload streaks don't chain
+   empty lineage.
+
+### Acceptance tests (minimum)
+
+- Happy path: world state continuity across a simulated boot (tick, energy,
+  credits, relationships, buildings, animals; no duplicate seed critters).
+- Lineage: new run row carries forked_from/forked_at_tick; run browser list
+  shape unchanged.
+- Tick-0-only runs skipped; no snapshots at all ⇒ fresh.
+- resume_on_boot=false ⇒ fresh boot identical to today.
+- Config-mismatch (changed roster / places / city_seed) ⇒ fresh + logged
+  reason; changed tunable param (e.g. sick_threshold) still resumes and
+  adopts the new value.
+- `run_resumed` event emitted exactly once with the right payload.
+- Reset endpoint behavior unchanged.
+
 ## Gates
 
 After each batch: full backend pytest (all tests, not just new), then
@@ -166,3 +220,5 @@ orchestrator commit. After B3: QE agent writes/updates `coordination/qa-report.j
 (wave-D3) with adversarial verification of B1's failover claims (the
 "green gate ≠ real fix" rule: verify a detour actually calls the substitute
 adapter, not just that a flag flips). Build blocked on the standard QA rules.
+B4 (added post-gate): full-suite gate + orchestrator live boot check
+(restart backend twice, verify the second boot resumes the first's run).
