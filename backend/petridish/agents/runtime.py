@@ -2000,25 +2000,52 @@ class AgentRuntime:
         return {"action": "forage", "args": {}}
 
     def _reflex_turn(
-        self, agent: AgentState, profile_name: str, profile_color: str
-    ) -> dict:
+        self, agent: AgentState, profile_name: str, profile_color: str,
+        *,
+        llm_attempts: list[dict] | None = None,
+        cadence_reason: str | None = None,
+        require_resolution: bool = False,
+    ) -> dict | None:
         """Resolve a non-salient background due turn deterministically — ZERO
         router calls. Emits normal event kinds through the same _apply_action
         path as LLM turns, each marked `payload.reflex: true` (+ the current
         reflex_streak) so the feed/inspector can surface it (EM-166). The
         trace chain keeps its shape but carries NO llm_call span (the loop
         skips it for reflex traces — an empty span row would pollute the
-        usage-cap accounting and the free-scale proof)."""
+        usage-cap accounting and the free-scale proof).
+
+        EM-173 (survival reflex on llm_timeout) reuses this path with three
+        optional hooks, all inert for the EM-159 cadence callers:
+          - `llm_attempts`: the timed-out consult's real attempt spans ride the
+            trace, so the loop still emits the `llm_call` row with
+            timed_out: true (the timeout stays legible).
+          - `cadence_reason`: stamped on every emitted event payload
+            ("llm_timeout_reflex").
+          - `require_resolution`: a reflex action rejected by the world's
+            gates returns None (streak increment undone, no commitment aging,
+            nothing emitted) so the caller can fall through to the existing
+            idle fallback instead of surfacing a gated action as "instinct".
+        """
         agent.reflex_streak = int(getattr(agent, "reflex_streak", 0)) + 1
         action_dict = self._reflex_pick(agent)
         result_event = self._apply_action(
             agent, action_dict, profile_name, profile_color
         )
         events = result_event["_multi"] if "_multi" in result_event else [result_event]
+        if require_resolution and events[0].get("kind") == "parse_failure":
+            # EM-173 — the reflex itself could not resolve: undo and signal
+            # the caller to take the existing idle fallback (never crash).
+            # A gated action made no world-state change, so discarding the
+            # rejection event is safe; the caller's fallback advances
+            # commitments exactly once.
+            agent.reflex_streak -= 1
+            return None
         for evt in events:
             payload = evt.setdefault("payload", {})
             payload["reflex"] = True
             payload["reflex_streak"] = agent.reflex_streak
+            if cadence_reason is not None:
+                payload["cadence_reason"] = cadence_reason
         outcome = "failed" if events[0].get("kind") == "parse_failure" else "ok"
 
         # EM-079 — commitments still advance on reflex turns: a successful
@@ -2041,7 +2068,10 @@ class AgentRuntime:
         result_event["_trace"] = {
             "perceived": {**perceived, "perceived_summary": None},
             "memory": memory,
-            "llm_attempts": [],   # ZERO calls — and the loop emits zero spans
+            # EM-159: ZERO calls and the loop emits zero spans. EM-173: the
+            # timed-out consult's span rides here so its llm_call row (with
+            # timed_out: true) is still emitted.
+            "llm_attempts": llm_attempts if llm_attempts is not None else [],
             "reflex": True,
             "reasoning": {
                 "reasoning": None,
@@ -2199,6 +2229,50 @@ class AgentRuntime:
             llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
         routed = self.router.last_routed_via(profile_name)
+
+        # ── EM-173 — survival reflex on llm_timeout ───────────────────────────
+        # Run 321: a degraded proxy night put 38% of calls into the EM-170 12s
+        # budget; agents burned turn after turn as llm_timeout idles, could not
+        # recharge, and Ada starved. A WALL-CLOCK timeout means the agent never
+        # got to speak — so ANY tier (protagonist included) resolves the EM-159
+        # reflex routine instead of idling. Content failures (provider_error /
+        # parse failures) stay honest idles below — only the timeout earns the
+        # reflex. The timed-out llm_call span (timed_out: true) still rides the
+        # trace, every reflex event is stamped payload.reflex: true +
+        # payload.cadence_reason: "llm_timeout_reflex", and the EM-170 lane
+        # demerit / cache-no-poison behavior is untouched (both happened in
+        # _call_and_parse). Salience baselines / reflex-streak reset are NOT
+        # noted here: the LLM never answered, so a background agent's pending
+        # triggers stay queued and its next due turn consults the LLM again.
+        if action_dict is None and llm_meta.get("timed_out"):
+            reflex_event = self._reflex_turn(
+                agent, profile_name, profile_color,
+                llm_attempts=llm_attempts,
+                cadence_reason="llm_timeout_reflex",
+                require_resolution=True,
+            )
+            if reflex_event is not None:
+                # Feed legibility: the action line itself says the call timed
+                # out and instinct took over.
+                primary = (
+                    reflex_event["_multi"][0] if "_multi" in reflex_event
+                    else reflex_event
+                )
+                primary["text"] += " ⏱ (LLM call timed out — instinct took over)"
+                # EM-145 — the god's voice rode the timed-out prompt: the
+                # delivery still happened, so it stays legible (same as the
+                # idle-fallback path below).
+                if delivery_events:
+                    trace = reflex_event.pop("_trace", None)
+                    if "_multi" in reflex_event:
+                        reflex_event["_multi"].extend(delivery_events)
+                    else:
+                        reflex_event = {"_multi": [reflex_event] + delivery_events}
+                    if trace is not None:
+                        reflex_event["_trace"] = trace
+                return reflex_event
+            # Reflex could not resolve (validation failure) — fall through to
+            # the existing idle fallback below; never crash.
 
         if action_dict is None:
             # Second failure or ProviderError: idle + log. Still return a trace so
