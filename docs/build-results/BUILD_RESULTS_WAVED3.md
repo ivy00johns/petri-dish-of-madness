@@ -25,10 +25,12 @@ nothing acted on it.
 | B2 EM-168 | `3d90859` | Cap-pressure governor: a `usage_alert` (70% of a lane's rpd/tpd day cap) demotes that lane's agents one cadence tier (background floor), once per lane-alert-day; the tracker's own lazy UTC-day rollover restores `demoted_from`. Manual tier sets win and clear the demotion. `cap_pressure` events on edges; snapshot/fork round-trips. `world.cap_governor.enabled=false` inert. Composes with EM-177 (tested). 28 tests. |
 | B3 EM-171/172 | `1ad6e90` | Background cache payoff: tick line dropped, memory lines de-ticked, rosters/menus sorted (background tier ONLY — protagonist fixture guard untouched) ⇒ realized decision-cache hit rate **91.7%** (was 0%), deterministic across 3 runs. EM-172: mid-round death no longer silently skips the next due agent (`_turn_index` decrement, reproduction-proven) + 5-point energy-band hysteresis kills recharge-flap salience wakes. 20 tests. |
 | QE gate | `8909d1b` | Adversarial verification (4 permanent tests): incident-shape proof (all lanes sick but one ⇒ 18/18 real calls on the healthy adapter at its own token budget, exactly 2 probes per home lane, zero mock calls), probe-driven recovery edge exactly once, demotion changes real `next_agent()` scheduling 9→3→9. EM-172 revert experiment in a /tmp copy: exactly the 3 reproduction tests fail pre-fix. |
+| B4 EM-187 | `c34a8a3` | Resume-on-boot (added v1.1 on user approval): startup restores the most recent run's latest >tick-0 snapshot via the EM-101 fork machinery (new run row with `forked_from`/`forked_at_tick`, ≤25-tick loss) — `./dev` restarts and uvicorn hot-reloads keep the live world. One `run_resumed` feed line; world-defining config changes fall back to fresh (logged) while tunables adopt current values; no duplicate seed critters; reset stays the explicit fresh start; `resume_on_boot: false` byte-identical. 16 tests. **Live-verified**: run 408→407→406→397 lineage chain on the user's running backend — the build's own hot-reloads resumed instead of resetting. |
 
 ## Gates
 
-Backend **550/550** (+91 over the wave: 459→550) · QA proceed=true
+Backend **566/566** (+107 over the wave: 459→566; B4 post-QE-gate batch
+gated on the full suite + live boot-lineage verification) · QA proceed=true
 (contract 4, coverage 4, security 5, regression 4, zero CRITICAL/MAJOR).
 Backend-only wave — web untouched (user had live working-tree edits in
 `world3d/`; all frontend items deferred by contract).
