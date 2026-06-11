@@ -132,6 +132,8 @@ describe('renderableEntries (plan → render mapping, rule 10)', () => {
       pieces,
       blocks: [{ cx: 0, cz: 0, zone: 'landmark' }],
       landmarks: { plaza: { x: 0, z: 0 } },
+      realLots: { plaza: [{ x: 3.6, z: 1.9, rotY: 0 }] },
+      emptyLots: [{ x: -3.6, z: -1.9, rotY: 0 }],
       extent: 33,
     };
     const entries = renderableEntries(v2Plan, CITY_MODEL_REGISTRY);
@@ -305,6 +307,30 @@ describe('citySignature (plan memo key)', () => {
     const moved = TOWN.map((p, i) => (i === 0 ? { ...p, x: p.x + 1 } : p));
     expect(citySignature(moved, null)).not.toBe(citySignature(TOWN, null));
   });
+
+  it('keys on the growth inputs: day + building-status multiset (Wave D1.6)', () => {
+    const b = (id: string, status: string) =>
+      ({ id, status, name: id, kind: 'house', location: 'plaza', owner_id: null,
+        health: 100, condition_label: 'pristine', progress: 100, funds_committed: 0,
+        funds_required: 0, contributors: [], function: '' }) as never;
+    expect(citySignature(TOWN, null, [], 4)).not.toBe(citySignature(TOWN, null, [], 5));
+    expect(citySignature(TOWN, null, [b('a', 'operational')], 4)).not.toBe(
+      citySignature(TOWN, null, [], 4),
+    );
+    expect(citySignature(TOWN, null, [b('a', 'operational')], 4)).not.toBe(
+      citySignature(TOWN, null, [b('a', 'destroyed')], 4),
+    );
+  });
+
+  it('does NOT churn on per-tick fields (id/progress/health/order)', () => {
+    const b = (id: string, status: string, progress: number) =>
+      ({ id, status, name: id, kind: 'house', location: 'plaza', owner_id: null,
+        health: 100, condition_label: 'pristine', progress, funds_committed: 0,
+        funds_required: 0, contributors: [], function: '' }) as never;
+    const sigA = citySignature(TOWN, null, [b('a', 'operational', 10), b('z', 'planned', 0)], 4);
+    const sigB = citySignature(TOWN, null, [b('q', 'planned', 55), b('k', 'operational', 90)], 4);
+    expect(sigA).toBe(sigB); // same status multiset + day ⇒ same plan memo
+  });
 });
 
 describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
@@ -321,21 +347,26 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
     }
   }
 
-  it('mounts one instancedMesh per (key × chunk × part), matching the plan', () => {
+  it('mounts one instancedMesh per (key × chunk × part) + the platted-lot pads', () => {
     const { container } = renderCity();
     const meshes = container.querySelectorAll('instancedMesh');
-    // mocked GLBs are single-mesh ⇒ parts = 1, so expected = Σ chunks per key
+    // mocked GLBs are single-mesh ⇒ parts = 1, so expected = Σ chunks per key,
+    // plus the Wave D1.6 procedural pad chunks (the young city's empty lots)
     const entries = renderableEntries(PLAN, CITY_MODEL_REGISTRY);
-    const expected = entries.reduce(
-      (n, e) => n + chunkInstances(e.instances, CENTER).length,
-      0,
-    );
+    const padChunks = chunkInstances(PLAN.emptyLots, CENTER).length;
+    const expected =
+      entries.reduce((n, e) => n + chunkInstances(e.instances, CENTER).length, 0) + padChunks;
     expect(meshes.length).toBe(expected);
     expect(meshes.length).toBeGreaterThan(entries.length - 1); // road_straight chunks
     // the dominant key really did chunk
     const straightChunks = container.querySelectorAll('[name^="city-road_straight-"]');
     expect(straightChunks.length).toBe(chunkInstances(PLAN.pieces.road_straight, CENTER).length);
     expect(straightChunks.length).toBeGreaterThan(1);
+    // the young city (day 0 plan) really shows its platted pads
+    expect(PLAN.emptyLots.length).toBeGreaterThan(0);
+    const padMeshes = container.querySelectorAll('[name^="city-pad-"]');
+    expect(padMeshes.length).toBe(padChunks);
+    expect(padMeshes.length).toBeGreaterThan(0);
   });
 
   it('renders every plan instance exactly once across all chunks', () => {

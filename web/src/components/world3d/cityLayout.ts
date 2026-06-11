@@ -1,10 +1,10 @@
 /**
- * cityLayout — deterministic CityGenerator for Wave D1.5 (EM-153 v2).
+ * cityLayout — deterministic CityGenerator for Wave D1.5/D1.6 (EM-153 v3).
  *
- * The sim lives ON the grid now (contracts/wave-d1.5.md) — Emergence-World
- * style: compact, dense, every block developed. The Wave D1 "ring around the
- * historic core" is gone, and with it the deriveCoreRadius/townCenter
- * machinery — the city IS the world.
+ * The sim lives ON the grid (contracts/wave-d1.5.md) and the city is EARNED
+ * (contracts/wave-d1.6.md) — development is a pure function of the snapshot:
+ * tick 0 is a FOUNDED city, not a finished one, and blocks fill in as the
+ * agents' sim actually produces days and real buildings.
  *
  *   • FROZEN GRID: 5×5 blocks, block pitch BLOCK_PITCH (13.0) world units —
  *     4 developable tiles + 1 road tile per pitch (TILE = 2.6) — centered on
@@ -16,15 +16,33 @@
  *     of block centers; snapping tolerance is asserted < 1.0u in tests).
  *     `CityPlan.landmarks` maps place id → snapped anchor center. Landmark
  *     blocks carry zone 'landmark' and receive NO generated buildings — the
- *     place anchor + its building-slot ring live there. Farm-district
- *     landmark blocks are the city's parks and get a tree fill.
- *   • GENERATED BLOCKS are fully developed by zone — every lot gets a
- *     building (an empty road-framed block is a contract violation) — except
- *     park blocks (trees + benches, no buildings). A generated block takes
- *     the zone of the nearest landmark's district (core→civic flavor,
- *     market→commercial, civic→civic, residential→residential,
- *     farm→park/greenbelt); exactly one seeded park is guaranteed among the
- *     generated blocks.
+ *     place anchor lives there, plus `CityPlan.realLots`: up to
+ *     REAL_LOTS_PER_LANDMARK street-front lots INSIDE the block (never on
+ *     roads) reserved for the sim's actual W7 Building entities. Farm-
+ *     district landmark blocks are the city's parks and get a tree fill.
+ *   • DEVELOPMENT = f(snapshot) (Wave D1.6, EM-123 frontend half):
+ *       – FOUNDING STOCK (frozen falloff): at tick 0, generated blocks carry
+ *         a small seeded founding stock by Manhattan block-distance from the
+ *         plaza/core block — adjacent (d ≤ 1) 2–3 lots, mid ring (d = 2)
+ *         0–1, edge (d ≥ 3) 0.
+ *       – GROWTH BUDGET derives ONLY from snapshot fields:
+ *         growthBudget = GROWTH_PER_BUILDING × |real buildings with status
+ *         operational|damaged|offline| + floor(day / GROWTH_DAY_DIVISOR),
+ *         capped at total lots. No Date, no tick-time accumulation.
+ *       – STABLE FILL ORDER: every lot gets a fixed seeded order key —
+ *         founding lots first, then growth lots weighted toward the core —
+ *         and development takes the first (founding + budget) lots. The
+ *         order never depends on the budget, so a lot once developed stays
+ *         developed at every higher budget (scrubbing a replay never
+ *         teleports buildings between blocks), and growth is monotone.
+ *       – EMPTY PLATTED LOTS surface in `CityPlan.emptyLots` (rendered by
+ *         CityScape as subtle procedural pavement pads — "young city",
+ *         not "broken"; no new GLB keys, the 23-key vocabulary is frozen).
+ *   • PARK BLOCKS (trees + benches, no buildings): farm-district landmarks
+ *     plus exactly one seeded park among the generated blocks. A generated
+ *     block takes the zone of the nearest landmark's district (core→civic
+ *     flavor, market→commercial, civic→civic, residential→residential,
+ *     farm→park/greenbelt).
  *   • SIDEWALK PROPS (lamp/bench/hydrant/bin) sit at block corners along the
  *     road edges; `car_a..c` park sparsely on the curbs of the adjacent road
  *     tiles.
@@ -40,8 +58,8 @@
  * Math.atan2(dx, dz), so +X ⇒ π/2, −Z ⇒ π, −X ⇒ −π/2.
  */
 
-import type { Place } from '../../types';
-import { placeToWorld, hashUnit } from './worldSpace';
+import type { Building, Place } from '../../types';
+import { placeToWorld, hashUnit, slotLayout } from './worldSpace';
 
 // ── Frozen vocabulary (Wave D1 contract — the registry imports this) ────────
 
@@ -96,11 +114,35 @@ export interface CityInstance { x: number; z: number; rotY: number; s?: number }
 
 export interface CityBlock { cx: number; cz: number; zone: CityZone }
 
+/** What computeCityPlan derives the city from (a WorldState slice — Wave
+ *  D1.6 adds `buildings` + `day` for the growth law; all optional so old
+ *  snapshots and tests stay valid). */
+export interface CityWorld {
+  places: Place[];
+  city_seed?: number | null;
+  /** W7 buildings — only their status multiset feeds the growth budget. */
+  buildings?: Building[] | null;
+  /** Sim day — the time half of the growth budget. */
+  day?: number | null;
+}
+
 export interface CityPlan {
   pieces: Record<CityPieceKey, CityInstance[]>;
   blocks: CityBlock[];
   /** Wave D1.5: place id → its landmark block's snapped anchor center. */
   landmarks: Record<string, { x: number; z: number }>;
+  /**
+   * Wave D1.6: place id → up to REAL_LOTS_PER_LANDMARK street-front lots
+   * INSIDE the place's landmark block (never on roads), reserved for the
+   * sim's actual W7 Building entities (assignBuildingLots). Only the place
+   * that CLAIMED the block carries an entry.
+   */
+  realLots: Record<string, CityInstance[]>;
+  /**
+   * Wave D1.6: platted-but-undeveloped lots of the generated blocks —
+   * rendered by CityScape as subtle procedural pavement pads ("young city").
+   */
+  emptyLots: CityInstance[];
   /** Outer half-size of the city (Chebyshev from the world origin). */
   extent: number;
 }
@@ -113,8 +155,39 @@ export const DEFAULT_CITY_SEED = 1337;
 /** Hard cap on total emitted instances (contract budget — holds trivially). */
 export const MAX_CITY_INSTANCES = 3000;
 
-/** Lots per developed block: 2 per side × 4 sides, ALL developed. */
+/** Lots per developable block: 2 per side × 4 sides (developed lots come
+ *  from the founding stock + growth budget; the rest are platted pads). */
 export const LOTS_PER_BLOCK = 8;
+
+// ── Wave D1.6 growth law (development = f(snapshot)) ─────────────────────────
+
+/** Street-front lots reserved for real W7 buildings inside a landmark block. */
+export const REAL_LOTS_PER_LANDMARK = 6;
+
+/** Statuses that count as a "real building" for the growth budget — things
+ *  that EXIST in the world (even hurt/dark), unlike plans/ruins. */
+export const GROWTH_ACTIVE_STATUSES: ReadonlySet<string> = new Set([
+  'operational', 'damaged', 'offline',
+]);
+
+/**
+ * Growth-budget constants — tuned against the archived long runs (run 189,
+ * 203 days / 35 buildings; run 236, 25 days): each real standing building is
+ * worth GROWTH_PER_BUILDING generated lots, and every GROWTH_DAY_DIVISOR sim
+ * days of survival earn one more. On run 189 that scrubs young grid (~13% at
+ * day 5) → filling blocks (~51% at day 50, ~86% at day 100) → dense city
+ * (capped from day ~150); run 236 ends still-sparse (~35% at day 25).
+ */
+export const GROWTH_PER_BUILDING = 2;
+export const GROWTH_DAY_DIVISOR = 3;
+
+/**
+ * The frozen founding-stock falloff (Manhattan block-distance from the
+ * plaza/core block): adjacent (d ≤ 1) 2–3 developed lots, mid ring (d = 2)
+ * 0–1, edge (d ≥ 3) 0.
+ */
+const FOUNDING_ADJACENT_DIST = 1;
+const FOUNDING_MID_DIST = 2;
 
 /** Curb-life densities (per block side). */
 const PROP_SIDE_CHANCE = 0.7;
@@ -254,6 +327,39 @@ function h(seed: number, purpose: string, gridX = 0, gridZ = 0): number {
   return hashUnit(`city:${seed}:${gridX}:${gridZ}:${purpose}`);
 }
 
+// ── Wave D1.6: the growth budget (pure, snapshot-only) ───────────────────────
+
+/**
+ * How many generated lots the sim has EARNED beyond the founding stock.
+ * Derives ONLY from snapshot fields (no Date, no tick-time accumulation):
+ * standing real buildings (operational|damaged|offline) and the sim day.
+ */
+export function growthBudget(
+  buildings: readonly Building[] | null | undefined,
+  day: number | null | undefined,
+): number {
+  let active = 0;
+  for (const b of buildings ?? []) {
+    if (GROWTH_ACTIVE_STATUSES.has(b.status)) active++;
+  }
+  const d = Math.max(0, Math.floor(day ?? 0));
+  return GROWTH_PER_BUILDING * active + Math.floor(d / GROWTH_DAY_DIVISOR);
+}
+
+/**
+ * Founding stock for a generated block (the FROZEN Wave D1.6 falloff):
+ * Manhattan block-distance from the core block ⇒ 2–3 / 0–1 / 0 lots.
+ */
+function foundingCount(seed: number, bx: number, bz: number, dCore: number): number {
+  if (dCore <= FOUNDING_ADJACENT_DIST) {
+    return 2 + (h(seed, 'founding-extra', bx, bz) < 0.5 ? 1 : 0);
+  }
+  if (dCore === FOUNDING_MID_DIST) {
+    return h(seed, 'founding-mid', bx, bz) < 0.5 ? 1 : 0;
+  }
+  return 0;
+}
+
 // ── Emission ─────────────────────────────────────────────────────────────────
 
 function emptyPieces(): Record<CityPieceKey, CityInstance[]> {
@@ -340,18 +446,44 @@ function emitParkBenches(
   }
 }
 
-/** Every lot of a developed block gets a building — zero empty lots. */
-function emitLots(
+/**
+ * One platted lot of a generated block — position/appearance hashes are keyed
+ * ONLY on (seed, block, lot index), so a lot looks identical at every growth
+ * budget (a city scrub adds buildings; it never reshuffles them).
+ */
+interface LotDef {
+  bx: number;
+  bz: number;
+  i: number;
+  x: number;
+  z: number;
+  rotY: number;
+  key: CityPieceKey;
+  s: number;
+  founding: boolean;
+  /** Fixed seeded fill-order key — independent of the budget (stable prefix). */
+  order: number;
+}
+
+/**
+ * The 8 platted lots of a generated block, with their FIXED seeded fill
+ * order: the block's founding lots (frozen falloff count, lowest seeded roll
+ * wins) sort into band [0, 1); growth lots sort into overlapping core-
+ * weighted bands [2 + dCore, 4 + dCore) so the city thickens outward from
+ * the plaza with organic interleave.
+ */
+function blockLots(
   seed: number,
   bx: number,
   bz: number,
   zone: Exclude<CityZone, 'park' | 'landmark'>,
-  pieces: Record<CityPieceKey, CityInstance[]>,
-): void {
+  dCore: number,
+): LotDef[] {
   const wx = bx * BLOCK_PITCH;
   const wz = bz * BLOCK_PITCH;
   const variants = ZONE_BUILDINGS[zone];
   const perSide = LOTS_PER_BLOCK / 4; // 2
+  const lots: LotDef[] = [];
   for (let i = 0; i < LOTS_PER_BLOCK; i++) {
     const side = SIDES[i % 4];
     const slot = Math.floor(i / 4); // 0 | 1
@@ -363,13 +495,63 @@ function emitLots(
       (h(seed, `lot-jitter-${i}`, bx, bz) - 0.5) * 0.5;
     const key =
       variants[Math.floor(h(seed, `lot-key-${i}`, bx, bz) * variants.length) % variants.length];
-    pieces[key].push({
+    lots.push({
+      bx,
+      bz,
+      i,
       x: wx + side.dx * inset + tx * lateral,
       z: wz + side.dz * inset + tz * lateral,
       rotY: dirRot(side.dx, side.dz), // face the street
+      key,
       s: 0.92 + h(seed, `lot-scale-${i}`, bx, bz) * 0.16,
+      founding: false,
+      order: 0,
     });
   }
+
+  // Founding selection: the frozen-falloff count of lots with the lowest
+  // seeded roll. Everything is keyed (seed, block, lot) — budget-independent.
+  const founding = foundingCount(seed, bx, bz, dCore);
+  const byRoll = lots
+    .map((lot) => ({ lot, roll: h(seed, `lot-founding-${lot.i}`, bx, bz) }))
+    .sort((a, b) => a.roll - b.roll || a.lot.i - b.lot.i);
+  for (let k = 0; k < founding && k < byRoll.length; k++) byRoll[k].lot.founding = true;
+
+  for (const lot of lots) {
+    lot.order = lot.founding
+      ? h(seed, `lot-order-${lot.i}`, bx, bz) // band [0, 1): founded first
+      : 2 + dCore + h(seed, `lot-order-${lot.i}`, bx, bz) * 2; // core-weighted
+  }
+  return lots;
+}
+
+/**
+ * The street-front lots a landmark block reserves for the sim's REAL W7
+ * buildings: up to REAL_LOTS_PER_LANDMARK positions inside the block (inset
+ * behind the sidewalk like generated lots — never on roads), cycling sides
+ * N/E/S/W so consecutive buildings spread around the place anchor.
+ */
+function computeRealLots(seed: number, bx: number, bz: number): CityInstance[] {
+  const wx = bx * BLOCK_PITCH;
+  const wz = bz * BLOCK_PITCH;
+  const out: CityInstance[] = [];
+  for (let i = 0; i < REAL_LOTS_PER_LANDMARK; i++) {
+    const side = SIDES[i % 4];
+    const slot = Math.floor(i / 4); // 0 | 1
+    const tx = -side.dz;
+    const tz = side.dx;
+    const inset = BLOCK_HALF - 1.6;
+    // ±1.5 (tighter than generated lots) keeps corner-adjacent lots on
+    // neighboring sides ≥ ~2.5u apart while clearing the anchor (≥ 3.8u).
+    const lateral =
+      (slot === 0 ? -1.5 : 1.5) + (h(seed, `real-lot-${i}`, bx, bz) - 0.5) * 0.3;
+    out.push({
+      x: wx + side.dx * inset + tx * lateral,
+      z: wz + side.dz * inset + tz * lateral,
+      rotY: dirRot(side.dx, side.dz), // face the street
+    });
+  }
+  return out;
 }
 
 /** Sidewalk props at block corners + sparse parked cars on the curbs. */
@@ -424,12 +606,11 @@ function emitCurbLife(
  *
  * seed = world.city_seed ?? 1337. The grid itself is frozen (5×5, pitch 13,
  * origin-centered); the seed drives lot variety, the guaranteed generated
- * park, curb life, and park fills.
+ * park, curb life, and park fills. Wave D1.6: development derives from the
+ * snapshot's `buildings` + `day` (founding stock + growth budget over a
+ * fixed seeded fill order — see the file header).
  */
-export function computeCityPlan(world: {
-  places: Place[];
-  city_seed?: number | null;
-}): CityPlan {
+export function computeCityPlan(world: CityWorld): CityPlan {
   const places = world.places ?? [];
   const seed = world.city_seed ?? DEFAULT_CITY_SEED;
   const pieces = emptyPieces();
@@ -500,14 +681,28 @@ export function computeCityPlan(world: {
     best.zone = 'park';
   }
 
-  // Pass 2 — emit blocks + their contents in deterministic loop order.
+  // The core block (the plaza) anchors the founding falloff + growth
+  // weighting: first core-district place by id, else first social place,
+  // else the world origin. The shipped town's plaza sits at grid (0, 0).
+  const corePlace =
+    sortedPlaces.find((p) => p.district === 'core') ??
+    sortedPlaces.find((p) => p.kind === 'social') ??
+    null;
+  const coreBx = corePlace ? Math.round(landmarks[corePlace.id].x / BLOCK_PITCH) : 0;
+  const coreBz = corePlace ? Math.round(landmarks[corePlace.id].z / BLOCK_PITCH) : 0;
+
+  // Pass 2 — emit blocks + their contents in deterministic loop order, and
+  // collect the generated blocks' platted lots for the development pass.
   const blocks: CityBlock[] = [];
+  const realLots: Record<string, CityInstance[]> = {};
+  const lots: LotDef[] = [];
   for (const b of infos) {
     blocks.push({ cx: b.bx * BLOCK_PITCH, cz: b.bz * BLOCK_PITCH, zone: b.zone });
 
     if (b.zone === 'landmark') {
-      // The place anchor + its slot ring own the interior — no generated
-      // buildings here. Farm-district landmarks are the city's parks.
+      // The place anchor + its real-building lots own the interior — no
+      // generated buildings here. Farm-district landmarks are the parks.
+      if (b.landmark) realLots[b.landmark.id] = computeRealLots(seed, b.bx, b.bz);
       if (b.landmark && (b.landmark.district === 'farm' || (!b.landmark.district && b.landmark.kind === 'wild'))) {
         const trees =
           LANDMARK_PARK_TREES_MIN +
@@ -520,7 +715,8 @@ export function computeCityPlan(world: {
       emitParkTrees(seed, b.bx, b.bz, trees, false, pieces);
       emitParkBenches(seed, b.bx, b.bz, pieces);
     } else {
-      emitLots(seed, b.bx, b.bz, b.zone, pieces);
+      const dCore = Math.abs(b.bx - coreBx) + Math.abs(b.bz - coreBz);
+      lots.push(...blockLots(seed, b.bx, b.bz, b.zone, dCore));
     }
 
     // Curb life dresses every block's road edges (landmark blocks included —
@@ -528,10 +724,76 @@ export function computeCityPlan(world: {
     emitCurbLife(seed, b.bx, b.bz, pieces);
   }
 
+  // Pass 3 — development = f(snapshot): sort the lots by their FIXED seeded
+  // fill order (budget-independent ⇒ stable prefix, monotone growth) and
+  // develop the first (founding stock + growth budget), capped at total lots.
+  lots.sort(
+    (a, b) => a.order - b.order || a.bz - b.bz || a.bx - b.bx || a.i - b.i,
+  );
+  const foundingTotal = lots.reduce((n, lot) => n + (lot.founding ? 1 : 0), 0);
+  const developed = Math.min(
+    lots.length,
+    foundingTotal + growthBudget(world.buildings, world.day),
+  );
+  const emptyLots: CityInstance[] = [];
+  lots.forEach((lot, idx) => {
+    if (idx < developed) {
+      pieces[lot.key].push({ x: lot.x, z: lot.z, rotY: lot.rotY, s: lot.s });
+    } else {
+      emptyLots.push({ x: lot.x, z: lot.z, rotY: lot.rotY });
+    }
+  });
+
   return {
     pieces,
     blocks,
     landmarks,
+    realLots,
+    emptyLots,
     extent: Math.abs(tileCenter(TILE_MIN)) + TILE / 2, // 33.8: outer ring road edge
   };
+}
+
+// ── Wave D1.6: real W7 buildings claim real lots ─────────────────────────────
+
+/**
+ * Deterministic world position for every W7 Building: its index among its
+ * place's buildings (stable sort by id) picks that place's realLots entry;
+ * overflow beyond REAL_LOTS_PER_LANDMARK falls back to the EM-131 slotLayout
+ * ring around the landmark anchor (or the raw place center for ids with no
+ * landmark — procgen/mock worlds). Pure function of (plan, buildings,
+ * centers) — same world ⇒ same spots every frame, reload and input order.
+ */
+export function assignBuildingLots(
+  plan: Pick<CityPlan, 'realLots' | 'landmarks'>,
+  buildings: ReadonlyArray<{ id: string; location: string }>,
+  placeCenters: ReadonlyMap<string, { x: number; z: number }>,
+): Map<string, { x: number; z: number }> {
+  const out = new Map<string, { x: number; z: number }>();
+  const byPlace = new Map<string, string[]>();
+  for (const b of buildings) {
+    const ids = byPlace.get(b.location) ?? [];
+    ids.push(b.id);
+    byPlace.set(b.location, ids);
+  }
+  for (const [loc, raw] of byPlace) {
+    const ids = [...raw].sort();
+    // Locations are data-driven strings — own-property guard the lookups.
+    const lotsForPlace = Object.prototype.hasOwnProperty.call(plan.realLots, loc)
+      ? plan.realLots[loc]
+      : [];
+    const n = Math.min(ids.length, lotsForPlace.length);
+    for (let i = 0; i < n; i++) {
+      out.set(ids[i], { x: lotsForPlace[i].x, z: lotsForPlace[i].z });
+    }
+    const overflow = ids.slice(n);
+    if (overflow.length > 0) {
+      const anchor = Object.prototype.hasOwnProperty.call(plan.landmarks, loc)
+        ? plan.landmarks[loc]
+        : undefined;
+      const center = anchor ?? placeCenters.get(loc) ?? { x: 0, z: 0 };
+      for (const [id, pt] of slotLayout(center, overflow)) out.set(id, pt);
+    }
+  }
+  return out;
 }

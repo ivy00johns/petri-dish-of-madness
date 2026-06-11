@@ -45,18 +45,20 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { Place, WorldState } from '../../types';
+import type { Building, Place } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
   type CityInstance,
   type CityPieceKey,
   type CityPlan,
+  type CityWorld,
 } from './cityLayout';
 import { CITY_MODEL_REGISTRY } from './assets/cityModels';
 import type { ModelSpec } from './assets/models';
 import { useToonGLTF } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
+import { toonMaterial } from './toon';
 
 // ── Chunking (pure, exported for tests) ──────────────────────────────────────
 
@@ -269,16 +271,28 @@ export function extractInstanceParts(scene: THREE.Object3D): CityPart[] {
 // ── Plan memo (content-keyed — see file header) ──────────────────────────────
 
 /** Everything the plan depends on: seed + each place's position/kind/district
- *  (cityLayout zones generated blocks from the nearest landmark's district). */
+ *  (cityLayout zones generated blocks from the nearest landmark's district)
+ *  + the Wave D1.6 growth inputs: the sim DAY and the building-STATUS
+ *  multiset — deliberately NOT per-tick fields (tick, progress, health), so
+ *  snapshot polling never churns the memo while nothing growth-relevant
+ *  changed. */
 export function citySignature(
-  places: readonly Place[],
+  places: readonly Place[] | null | undefined,
   citySeed: number | null | undefined,
+  buildings?: readonly Building[] | null,
+  day?: number | null,
 ): string {
   const head = citySeed ?? 'default';
-  const body = places
+  const counts = new Map<string, number>();
+  for (const b of buildings ?? []) counts.set(b.status, (counts.get(b.status) ?? 0) + 1);
+  const statuses = [...counts.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([s, n]) => `${s}:${n}`)
+    .join(',');
+  const body = (places ?? [])
     .map((p) => `${p.id}:${p.x}:${p.y}:${p.kind}:${p.district ?? ''}`)
     .join(',');
-  return `${head}|${body}`;
+  return `${head}|day:${Math.max(0, Math.floor(day ?? 0))}|st:${statuses}|${body}`;
 }
 
 /**
@@ -287,10 +301,13 @@ export function citySignature(
  * per-tick world-object churn never rebuilds instance buffers.
  */
 export function useCityPlan(
-  places: Place[],
-  citySeed: number | null | undefined,
+  world: CityWorld,
 ): { plan: CityPlan; center: { x: number; z: number } } {
-  const sig = useMemo(() => citySignature(places, citySeed), [places, citySeed]);
+  const { places = [], city_seed: citySeed, buildings, day } = world;
+  const sig = useMemo(
+    () => citySignature(places, citySeed, buildings, day),
+    [places, citySeed, buildings, day],
+  );
   const ref = useRef<{
     sig: string;
     plan: CityPlan;
@@ -299,7 +316,7 @@ export function useCityPlan(
   if (!ref.current || ref.current.sig !== sig) {
     ref.current = {
       sig,
-      plan: computeCityPlan({ places, city_seed: citySeed }),
+      plan: computeCityPlan({ places, city_seed: citySeed, buildings, day }),
       center: GRID_CENTER,
     };
   }
@@ -388,15 +405,60 @@ function CityPiece({
   );
 }
 
+// ── Wave D1.6: empty platted lots (procedural pads — no GLB key) ─────────────
+
+/** Pad tint — the existing warm paving stone (Structure's step/portico). */
+export const PAD_COLOR = '#cfc4ad';
+
+/** Thin paving pad: 2.3×2.3, ground-flush (top face baked to y = 0.05). */
+const PAD_GEOMETRY = new THREE.BoxGeometry(2.3, 0.05, 2.3).translate(0, 0.025, 0);
+
+/** Identity spec for the pad instances (procedural — no GLB, no url). */
+const PAD_SPEC: ModelSpec = { url: '', scale: 1, yOffset: 0 };
+
 /**
- * THE city (Wave D1.5). Mounted by CozyWorld inside the canvas — every road
- * tile, generated building, prop and parked car of the compact grid, as pure
- * non-interactive set dressing (EM-157). Place anchors, agent-built
- * structures, villagers and critters render through their own components on
- * top of this.
+ * The undeveloped platted lots, instanced like every other piece (chunked,
+ * raycast-dead, StaticDrawUsage). Subtle by construction: thin flat geometry
+ * in an existing palette tint — reads "young city", never competes with the
+ * developed blocks. Purely procedural ⇒ no ModelBoundary needed.
  */
-export function CityScape({ world }: { world: Pick<WorldState, 'places' | 'city_seed'> }) {
-  const { plan, center } = useCityPlan(world.places, world.city_seed);
+function EmptyLotPads({
+  instances,
+  center,
+}: {
+  instances: CityInstance[];
+  center: { x: number; z: number };
+}) {
+  const chunks = useMemo(() => chunkInstances(instances, center), [instances, center]);
+  const part = useMemo<CityPart>(
+    () => ({ geometry: PAD_GEOMETRY, material: toonMaterial(PAD_COLOR) }),
+    [],
+  );
+  return (
+    <>
+      {chunks.map((chunk, ci) => (
+        <CityChunkMesh
+          key={`pad:${ci}`}
+          name={`city-pad-${ci}`}
+          part={part}
+          spec={PAD_SPEC}
+          instances={chunk}
+          castShadow={false}
+        />
+      ))}
+    </>
+  );
+}
+
+/**
+ * THE city (Wave D1.5/D1.6). Mounted by CozyWorld inside the canvas — every
+ * road tile, EARNED generated building, platted-lot pad, prop and parked car
+ * of the compact grid, as pure non-interactive set dressing (EM-157). Place
+ * anchors, agent-built structures, villagers and critters render through
+ * their own components on top of this.
+ */
+export function CityScape({ world }: { world: CityWorld }) {
+  const { plan, center } = useCityPlan(world);
   const entries = useMemo(() => renderableEntries(plan, CITY_MODEL_REGISTRY), [plan]);
   return (
     <group name="cityscape">
@@ -407,6 +469,9 @@ export function CityScape({ world }: { world: Pick<WorldState, 'places' | 'city_
           <CityPiece pieceKey={key} spec={spec} instances={instances} center={center} />
         </ModelBoundary>
       ))}
+      {plan.emptyLots.length > 0 && (
+        <EmptyLotPads instances={plan.emptyLots} center={center} />
+      )}
     </group>
   );
 }
