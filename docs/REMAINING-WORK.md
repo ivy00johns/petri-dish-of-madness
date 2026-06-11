@@ -268,7 +268,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-186 | P2 | W18 | backend | qe wave-D3 | Headless `run.py` skips the D3 wiring: it builds `Router(cfg.profiles)` without `world.lane_failover` and never wires the lane-event/usage-alert sinks or the usage-window probe — EM-177 failover and the EM-168 governor only fully work via the API server entry point. Defaults coincide with shipped yaml so default headless behavior is identical; thread the params + sinks through `run.py` (and the pre-existing W7 `world.cache`→Router gap noted in the same finding) | open | — |
 
-_Next free ID: EM-187._
+| EM-187 | P1 | W18 | backend | user 2026-06-11 | Resume-on-boot: every backend start (./dev, uvicorn hot-reload) calls `init_run` → fresh run, killing the live world — 398 runs on disk, ~12 today from build hot-reloads alone; never existed, but backend-heavy waves make the loss constant. On startup, restore the latest snapshot of the most recent non-empty run via the EM-101 fork machinery (`World.from_snapshot` + `start_run(forked_from=…)`, ≤25-tick loss at the snapshot grain), with an honest "resumed run N from tick T" feed line; the reset button stays the explicit fresh-start. `world.resume_on_boot: true` default; config-mismatch (changed agents/places) falls back to fresh with a logged reason. Deps EM-101 ✅ | open | — |
+
+_Next free ID: EM-188._
 
 ## Notes
 
