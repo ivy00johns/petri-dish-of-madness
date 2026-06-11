@@ -19,6 +19,12 @@ export interface Place {
 
 export type RelationshipType = 'ally' | 'rival' | 'neutral' | 'friend' | 'enemy';
 
+// Wave D2 (EM-158): scheduler cadence tier. Protagonists act every round,
+// supporting every 3rd, background every 10th (salience-gated, EM-159, with
+// the EM-160 spontaneity floor). Open union — the feed/chips tolerate
+// unknown future tiers.
+export type CadenceTier = 'protagonist' | 'supporting' | 'background' | (string & {});
+
 export interface Relationship {
   type: RelationshipType;
   trust: number;       // -100..100
@@ -41,6 +47,12 @@ export interface Agent {
   // pre-W9 backend (or mock mode) stays valid; the UI shows a death countdown
   // only when this is a number.
   turns_until_death?: number | null;
+  // Wave D2 (EM-158/166, additive) — the agent's scheduler cadence tier.
+  // Optional so pre-D2 backends/snapshots stay valid; absent ⇒ protagonist.
+  cadence_tier?: CadenceTier | null;
+  // Wave D2 (EM-160/166, additive) — consecutive zero-LLM reflex turns
+  // (background tier only; resets on every LLM turn). Shown in the agent panel.
+  reflex_streak?: number | null;
   beliefs: string[];
   relationships: Record<string, Relationship>;
 }
@@ -171,6 +183,10 @@ export interface WorldState {
   // W11b (EM-091): the notice-board posts, newest capped at 20. Optional so a
   // pre-W11b backend stays valid; the panel/3D board derive from history then.
   billboard?: BillboardPost[];
+  // W15 (EM-155): deterministic seed for the generated city ring — the 3D city
+  // renders as f(snapshot, city_seed). Optional/additive (pre-W15 backends and
+  // snapshots lack it); consumers default with `city_seed ?? 1337`.
+  city_seed?: number | null;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -199,6 +215,12 @@ export type EventKind =
   | 'memory'
   | 'parse_failure'
   | 'model_reassigned'
+  // Wave D2 (EM-158) — POST /api/agents/{id}/tier reassignment receipt;
+  // payload {old_tier, new_tier}. Turn events additionally carry the additive
+  // payload keys cadence_tier (every turn event), reflex: true +
+  // reflex_streak (zero-LLM background reflex turns), and cadence_reason /
+  // salience_triggers (why a background agent got a full LLM turn).
+  | 'cadence_tier_changed'
   | 'random_event'
   | 'control'
   // Animal chaos layer (W8 / EM-064-065). Distinct actor_type:"animal" events;

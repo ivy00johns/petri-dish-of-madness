@@ -94,9 +94,10 @@ describe('resolvePlaceModel', () => {
     },
   );
 
-  it('social and wild stay procedural (recorded nulls)', () => {
-    expect(resolvePlaceModel('social')).toBeNull();
+  it('wild stays procedural (recorded null); social wears the city fountain (D1.5)', () => {
     expect(resolvePlaceModel('wild')).toBeNull();
+    expect(resolvePlaceModel('social')).not.toBeNull();
+    expect(resolvePlaceModel('social')!.url).toContain('fountain');
   });
 
   it.each(EVIL_KINDS.map((k) => [k] as const))(

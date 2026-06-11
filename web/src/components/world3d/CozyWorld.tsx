@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Environment, OrbitControls, Sky, SoftShadows } from '@react-three/drei';
+import { Environment, OrbitControls, Sky, SoftShadows, useGLTF } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
 import type { WorldState, WorldEvent, FocusTarget } from '../../types';
@@ -39,15 +39,40 @@ import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, buildingSpot, slotLayout, latestRoutedVia, SIZE } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, WORLD_REACH } from './worldSpace';
 import { GOLDEN_HOUR } from './toon';
 import { preloadHeroModels } from './assets/Model';
+import { allCityModelSpecs } from './assets/cityModels';
+import { CityScape, useCityPlan } from './CityScape';
+import { assignBuildingLots } from './cityLayout';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // Wave C (EM-148/149): warm the GLB cache for the hero set (place anchors,
 // buildings, villager, cat/dog) ONCE at module scope — the Suspense
 // fallbacks cover the in-flight window.
 preloadHeroModels();
+
+/**
+ * Wave D1 (EM-154): warm the city-kit GLBs the same way. Both preload lists
+ * derive from the live registries (allModelSpecs / allCityModelSpecs), so the
+ * Wave D1.5 asset swap — medieval kit deleted, city kits shared between the
+ * registries — keeps them correct with no hand-kept url list. Rejections are
+ * handled — drei's preload routes failures through suspend-react's internal
+ * catch (the error surfaces only at render time, where CityScape's per-piece
+ * ModelBoundary skips the piece), and the try/catch guards any synchronous
+ * loader-construction throw — so a blocked /models/** never spills unhandled
+ * promise noise into the console (rule 10).
+ */
+function preloadCityModels(): void {
+  for (const spec of allCityModelSpecs()) {
+    try {
+      useGLTF.preload(spec.url);
+    } catch {
+      // skip — CityScape's ModelBoundary owns the render-time fallback
+    }
+  }
+}
+preloadCityModels();
 
 // How recent an animal's last chaotic event must be (in seq distance from the
 // newest event) for the critter to still wear its magenta chaos accent. This
@@ -77,11 +102,13 @@ const BUBBLE_LIFETIME_MS = 5200;
 const MAX_BUBBLES_PER_AGENT = 3;
 const SPEECH_TRUNCATE = 120;
 
-// ── EM-095 camera constants (retuned for the SIZE-66 Wave C town, EM-149) ───
-const DEFAULT_CAMERA = new THREE.Vector3(38, 33, 38);
+// ── EM-095 camera constants (Wave D1.5: retuned for ONE compact dense 66u
+// city — the default framing shows the whole grid, blocks and landmarks
+// legible, matching the EW reference) ──
+const DEFAULT_CAMERA = new THREE.Vector3(54, 46, 54);
 const DEFAULT_TARGET = new THREE.Vector3(0, 1.5, 0);
-/** The orbit target stays within this XZ box (pan bounds over the village). */
-const PAN_BOUND = SIZE * 0.75;
+/** The orbit target stays within this XZ box (pan bounds: city + apron). */
+const PAN_BOUND = WORLD_REACH * 0.9;
 /** Comfortable viewing radius zoom-to-place eases toward. */
 const FOCUS_DOLLY_DIST = 20;
 /** Convergence epsilon for transit/reset motion. */
@@ -264,7 +291,7 @@ function CameraDirector({
       enableDamping
       dampingFactor={0.08}
       minDistance={14}
-      maxDistance={100}
+      maxDistance={130}
       minPolarAngle={0.25}
       maxPolarAngle={Math.PI / 2.3}
       target={[DEFAULT_TARGET.x, DEFAULT_TARGET.y, DEFAULT_TARGET.z]}
@@ -392,27 +419,22 @@ export function CozyWorld({
     return m;
   }, [places]);
 
-  // W7/EM-131: buildings sharing a place are laid out on deterministic slot
-  // rings around the place center (sorted by id; radius grows with count), so
-  // a project rises NEXT TO the existing structure — and next to its sibling
-  // projects — rather than piling onto the place anchor.
+  // EM-174: real W7 buildings claim REAL lots — street-front lots inside
+  // their place's landmark block first (stable id order → lot index), then
+  // nearest-block overflow onto the city's platted lots; the EM-131 slot
+  // ring only when the whole city is full. The plan itself is a pure
+  // function of (places, city_seed); the same content-memoized plan feeds
+  // CityScape.
   const buildings = world?.buildings;
+  const { plan: cityPlan } = useCityPlan({
+    places: places ?? [],
+    city_seed: world?.city_seed,
+  });
   const buildingSpots = useMemo(() => {
-    const fallback = { x: 0, z: 0 };
     const list = buildings ?? [];
-    const idsByPlace = new Map<string, string[]>();
-    list.forEach((b) => {
-      const ids = idsByPlace.get(b.location) ?? [];
-      ids.push(b.id);
-      idsByPlace.set(b.location, ids);
-    });
-    const spotById = new Map<string, { x: number; z: number }>();
-    for (const [loc, ids] of idsByPlace) {
-      const c = placeCenters.get(loc) ?? fallback;
-      for (const [id, pt] of slotLayout(c, ids)) spotById.set(id, pt);
-    }
-    return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? fallback) }));
-  }, [buildings, placeCenters]);
+    const spotById = assignBuildingLots(cityPlan, list, placeCenters);
+    return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? { x: 0, z: 0 }) }));
+  }, [buildings, cityPlan, placeCenters]);
 
   const buildingSpotById = useMemo(
     () => new Map(buildingSpots.map((s) => [s.building.id, s])),
@@ -481,7 +503,7 @@ export function CozyWorld({
         shadows
         dpr={[1, 2]}
         gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
-        camera={{ position: [38, 33, 38], fov: 42, near: 0.1, far: 400 }}
+        camera={{ position: [54, 46, 54], fov: 42, near: 0.1, far: 420 }}
       >
         <color attach="background" args={[GOLDEN_HOUR.background]} />
         {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
@@ -604,9 +626,13 @@ function Scene({
       {/* Faint warm ambient only — the directional must dominate so the toon
           bands read; it also keeps shadows warm, never black. */}
       <ambientLight intensity={0.15} color={GOLDEN_HOUR.ambient} />
-      {/* EM-149: shadow frustum + fog distances widened with SIZE 40 → 66 so
-          the whole district town casts shadows and isn't swallowed by haze.
-          Same low golden-hour sun ANGLE, scaled out to cover the town. */}
+      {/* Wave D1.5: the whole 66u city fits ONE shadow frustum now — ±48
+          covers the grid's ~47u half-diagonal (verified against the light
+          axis), so every block gets shadows AND the 2048 map gains texel
+          density over D1's ±64. Fog pulled back in (90/300 → 75/230): the
+          far half of the compact grid picks up gentle depth haze and nothing
+          ever dissolves inside the 130u zoom range; same low golden-hour sun
+          ANGLE as Wave C. */}
       <directionalLight
         position={[27, 13.5, 12]}
         intensity={2.2}
@@ -615,20 +641,25 @@ function Scene({
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
         shadow-camera-near={1}
-        shadow-camera-far={130}
-        shadow-camera-left={-52}
-        shadow-camera-right={52}
-        shadow-camera-top={52}
-        shadow-camera-bottom={-52}
+        shadow-camera-far={150}
+        shadow-camera-left={-48}
+        shadow-camera-right={48}
+        shadow-camera-top={48}
+        shadow-camera-bottom={-48}
         shadow-bias={-0.0004}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 70, 160]} />
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 75, 230]} />
 
       <Ground places={places} />
       <Scenery places={places} />
       {/* EM-118: instanced treeline (LOD) + lived-in town props. */}
       <Foliage places={places} />
       <TownProps places={places} />
+
+      {/* Wave D1.5: THE city — non-interactive instanced set dressing for
+          the whole compact grid (roads, zoned blocks, props, parked cars);
+          the places' own anchors render via <Building> below. */}
+      <CityScape world={world} />
 
       {places.map((p) => (
         <Building

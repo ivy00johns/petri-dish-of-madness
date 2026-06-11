@@ -1,0 +1,104 @@
+You are Hero, a character in a living world simulation.
+Agent ID: hero
+Tick: 47
+Personality: Bold, curious, tireless.
+
+=== YOUR STATUS ===
+Location: Market Hall (kind=work)
+Energy: 63.7/100
+Credits: 34
+Mood: neutral
+
+=== NEEDS ===
+  Energy 64/100 — at 0 you start DYING. recharge restores energy (costs 2 credits).
+
+=== CO-LOCATED AGENTS ===
+  Supporter (id=sup_01, energy=71, credits=18)
+  Bystander (id=bg_01, energy=78, credits=12)
+  Filler02 (id=filler_02, energy=60, credits=12)
+  Filler17 (id=filler_17, energy=60, credits=27)
+
+=== RECENT EVENTS ===
+  [tick 4] event 4 happened
+  [tick 5] event 5 happened
+  [tick 6] event 6 happened
+  [tick 7] event 7 happened
+  [tick 8] event 8 happened
+  [tick 9] event 9 happened
+  [tick 10] event 10 happened
+  [tick 11] event 11 happened
+  [tick 12] event 12 happened
+  [tick 13] event 13 happened
+  [tick 14] event 14 happened
+  [tick 15] event 15 happened
+
+=== YOUR BELIEFS ===
+  (none)
+
+=== RELATIONSHIPS ===
+  Supporter: ally (trust=-100)
+  Bystander: rival (trust=-87)
+  Filler00: neutral (trust=-74)
+  Filler01: friend (trust=-61)
+  Filler02: enemy (trust=-48)
+  Filler03: ally (trust=-35)
+  Filler04: rival (trust=-22)
+  Filler05: neutral (trust=-9)
+  Filler06: friend (trust=4)
+  Filler07: enemy (trust=17)
+  Filler08: ally (trust=30)
+  Filler09: rival (trust=43)
+  Filler10: neutral (trust=56)
+  Filler11: friend (trust=69)
+  Filler12: enemy (trust=82)
+  Filler13: ally (trust=95)
+  Filler14: rival (trust=-93)
+  Filler15: neutral (trust=-80)
+  Filler16: friend (trust=-67)
+  Filler17: enemy (trust=-54)
+  Filler18: ally (trust=-41)
+  Filler19: rival (trust=-28)
+  Filler20: neutral (trust=-15)
+  Filler21: friend (trust=-2)
+
+=== BUILDINGS HERE ===
+  id=b1 'Spice Stall' kind=workshop status=planned progress=0/100 health=100/100 funds=10/50 owner=public
+  id=b6 'Market Awning' kind=workshop status=under_construction progress=0/100 health=100/100 funds=20/20 owner=public
+
+=== ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
+  id=b1 'Spice Stall' kind=workshop status=planned at=market funds=10/50 progress=0/100
+  id=b2 'Plaza Clocktower' kind=workshop status=under_construction at=plaza funds=60/60 progress=0/100
+  id=b3 'Commons Garden' kind=workshop status=planned at=commons funds=0/40 progress=0/100
+  id=b4 'Hall Annex' kind=workshop status=under_construction at=townhall funds=30/30 progress=0/100
+  id=b5 'Hearth Library' kind=workshop status=planned at=home funds=5/80 progress=0/100
+  id=b6 'Market Awning' kind=workshop status=under_construction at=market funds=20/20 progress=0/100
+
+=== ACTIVE RULES ===
+  [ubi] Daily bread for all
+
+=== VALID ACTIONS ===
+  idle, forage, recharge, remember
+  move_to (place) - go to one of: plaza, well, market, forge, workshop, townhall, archive, home, rosehip_cottage, mossy_row, lantern_loft, commons, willow_pond, orchard, farmstead
+  say (text) - speak to everyone here
+  whisper (target, text) - private to one of: Supporter, Bystander, Filler02, Filler17
+  give (target, amount) - transfer credits to: Supporter, Bystander, Filler02, Filler17
+  insult (target) - insult: Supporter, Bystander, Filler02, Filler17
+  attack (target) - attack: Supporter, Bystander, Filler02, Filler17
+  set_relationship (target, type) - ally|rival|neutral|friend|enemy
+  steal (target) - steal from: Supporter, Bystander, Filler02, Filler17
+  work - earn credits (you are at a work place)
+  propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place
+  contribute_funds (building_id, amount) - fund an active project below to push it toward construction
+  arson (building_id=b1) - burn this building (a crime; witnesses lose trust)
+  build_step (building_id=b6) - add construction progress here
+  arson (building_id=b6) - burn this building (a crime; witnesses lose trust)
+
+⚠ SAYING you will build/fund/work on something does NOT do it — words change nothing. Use propose_project / contribute_funds / build_step (or work / forage / give) to actually act. Your action THIS TURN is the only thing that happens.
+
+RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
+{"action": "<verb>", "args": {...}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}
+
+The "action" field is required and must come first. "args" must match the action.
+ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
+If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.
+If nothing makes sense, use: {"action": "idle", "args": {}}

@@ -3,7 +3,13 @@
 # Seed agents: each must reference a profile name from profiles.yaml.
 
 world:
-  agent_count: 5                 # used if `agents:` not fully specified
+  # EM-175 — target roster size: pads from the persona library
+  # (config/personas.yaml) when `agents:` lists fewer; never truncates (a
+  # longer list always wins). Padded extras join at cadence_tier "supporting"
+  # (the hand-listed cast keeps whatever it declares, default protagonist) so
+  # the free-tier turn economics stay sane; if the library runs short,
+  # numbered Citizen-N extras fill the remainder.
+  agent_count: 5
   tick_interval_seconds: 3
   turns_per_day: 20
   energy_decay_per_turn: 4
@@ -18,6 +24,39 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+
+  # Wave D2 / EM-170 — turn-latency guard. Hard wall-clock budget (seconds) for
+  # one agent-turn LLM consult (router.chat, including the adapter's internal
+  # retry). A call that exceeds it is cancelled and the turn resolves via the
+  # idle fallback (reason `llm_timeout`) so a single slow lane can never freeze
+  # the world (run 248 measured 14-32s single-call stalls). Set 0 (or remove)
+  # to disable the guard entirely — exactly the pre-EM-170 behavior.
+  turn_llm_budget_seconds: 12
+
+  # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
+  # `cadence_tier` (set per agent entry below, via the spawn body, or
+  # POST /api/agents/{id}/tier): protagonists act every round, supporting every
+  # 3rd round, background every 10th. A BACKGROUND agent's due turn consults
+  # the LLM only when something salient happened since its last LLM turn (new
+  # co-located agent/animal, witnessed important event, energy band crossing,
+  # pending whisper/proclamation/board note, an uncast open vote) — otherwise
+  # it resolves a deterministic zero-LLM reflex routine (starving⇒recharge,
+  # at-work⇒work, else forage/move-home), marked payload.reflex in the feed.
+  # The EM-160 spontaneity floor keeps background agents from flattening into
+  # NPCs-on-rails: each non-salient due turn has a seeded spontaneity_chance
+  # of a full LLM turn anyway, and reflex_streak_limit consecutive reflex
+  # turns force an LLM "reassess" turn. Both rolls are seeded from world state
+  # (agent id + tick) — deterministic and replay-safe. Engine defaults match
+  # these values when the block is absent.
+  cadence:
+    spontaneity_chance: 0.15   # wildcard P(full LLM turn) on a non-salient due turn
+    reflex_streak_limit: 8     # consecutive reflex turns before a forced reassess
+
+  # W15 / EM-155 — deterministic seed for the generated 3D city ring. The city
+  # renders as a pure function f(snapshot, city_seed); the engine persists the
+  # seed in every snapshot so live, replay, and fork all draw the SAME city.
+  # Change the value to reroll the city layout. Default 1337 when absent.
+  city_seed: 1337
 
   # W10 / EM-085 — persist runs by default so run history + replay survive
   # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
@@ -145,38 +184,42 @@ animals:                       # seed critters (the cat & dog). Spawned at world
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
   - { species: dog, name: Biscuit, location: commons, personality: "Loyal, excitable, food-motivated, impulsive; chases anything that moves and means well even mid-disaster." }
 
-# Wave C / EM-147 — the district town (~15 places over the EXISTING five kinds;
-# `district` is the one additive optional key: core/market/residential/civic/farm).
-# The five original ids (plaza/market/townhall/commons/home) survive with their
-# kinds so old snapshots and agent locations stay valid. Coordinates live on the
-# logical [0..1000] grid; districts cluster (≥60 units between neighbours within
-# a district, district centroids ≥250 apart) so the town breathes.
+# Wave D1.5 / contracts/wave-d1.5.md — the city grid (~15 places over the
+# EXISTING five kinds; `district` is the one additive optional key:
+# core/market/residential/civic/farm). The five original ids
+# (plaza/market/townhall/commons/home) survive with their kinds so old
+# snapshots and agent locations stay valid. Coordinates live on the logical
+# [0..1000] grid and sit on the 5x5 city-block centers (106/303/500/697/894
+# on each axis) — every place claims one landmark block of the city grid.
 # MUST stay in sync with the default-config mirror in backend/petridish/config/loader.py.
 places:
-  # core — the heart of town
-  - { id: plaza,           name: Central Plaza,       x: 500, y: 500, kind: social,     district: core,        description: "Open square where everyone mingles." }
-  - { id: well,            name: The Old Well,        x: 510, y: 420, kind: social,     district: core,        description: "Mossy stone well where the day's gossip is drawn up with the water." }
-  # market — the working east end
-  - { id: market,          name: Market,              x: 750, y: 400, kind: work,       district: market,      description: "Earn credits by working." }
-  - { id: forge,           name: The Ember Forge,     x: 840, y: 340, kind: work,       district: market,      description: "Sparks and hammer-song; the smith pays good coin for steady hands." }
-  - { id: workshop,        name: "Tinker's Workshop", x: 820, y: 470, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
-  # civic — the quiet north-west
-  - { id: townhall,        name: Town Hall,           x: 250, y: 350, kind: governance, district: civic,       description: "Propose and vote on rules." }
-  - { id: archive,         name: The Records Hall,    x: 180, y: 260, kind: governance, district: civic,       description: "Dusty shelves of town ledgers, old maps, and older grievances." }
-  # residential — lamplit lanes to the south-west
-  - { id: home,            name: Hearth,              x: 300, y: 650, kind: home,       district: residential, description: "Rest and recharge." }
-  - { id: rosehip_cottage, name: Rosehip Cottage,     x: 210, y: 640, kind: home,       district: residential, description: "A snug cottage wrapped in climbing roses. Rest and recharge." }
-  - { id: mossy_row,       name: Mossy Row,           x: 250, y: 740, kind: home,       district: residential, description: "A crooked lane of moss-roofed homes. Rest and recharge." }
-  - { id: lantern_loft,    name: Lantern Loft,        x: 340, y: 740, kind: home,       district: residential, description: "An attic room above the lane, warm with lamplight. Rest and recharge." }
-  # farm — the wild south-east edge
-  - { id: commons,         name: The Commons,         x: 500, y: 750, kind: wild,       district: farm,        description: "Forage for scraps." }
-  - { id: willow_pond,     name: Willow Pond,         x: 610, y: 690, kind: wild,       district: farm,        description: "Still water under trailing willows; frogs, reeds, and easy foraging." }
-  - { id: orchard,         name: Bramble Orchard,     x: 640, y: 790, kind: wild,       district: farm,        description: "Crab apples and brambles at the town's edge; sweet pickings in season." }
-  - { id: farmstead,       name: Sunfall Farmstead,   x: 730, y: 700, kind: work,       district: farm,        description: "Fields and a weathered barn; honest work from dawn to dusk." }
+  # core — the plaza blocks at the heart of the grid
+  - { id: plaza,           name: Central Plaza,       x: 500, y: 500, kind: social,     district: core,        description: "Open square at the heart of the grid where everyone mingles." }
+  - { id: well,            name: Fountain Court,      x: 500, y: 303, kind: social,     district: core,        description: "Plaza fountain where the day's gossip circles with the spray." }
+  # market — the working east blocks
+  - { id: market,          name: Market Hall,         x: 697, y: 303, kind: work,       district: market,      description: "Earn credits by working." }
+  - { id: forge,           name: The Steelworks,      x: 894, y: 303, kind: work,       district: market,      description: "Sparks and rolling steel; the mill pays good coin for steady hands." }
+  - { id: workshop,        name: "Tinker's Workshop", x: 894, y: 500, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
+  # civic — the records corner, north-west
+  - { id: townhall,        name: City Hall,           x: 106, y: 106, kind: governance, district: civic,       description: "Propose and vote on rules." }
+  - { id: archive,         name: The Records Office,  x: 303, y: 106, kind: governance, district: civic,       description: "Filing rows of city ledgers, old permits, and older grievances." }
+  # residential — lamplit blocks to the south-west
+  - { id: home,            name: Hearth House,        x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
+  - { id: rosehip_cottage, name: Rosehip Walk-up,     x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }
+  - { id: mossy_row,       name: Mossy Row Flats,     x: 303, y: 894, kind: home,       district: residential, description: "A crooked row of ivy-clad flats. Rest and recharge." }
+  - { id: lantern_loft,    name: Lantern Lofts,       x: 303, y: 697, kind: home,       district: residential, description: "Top-floor lofts above the avenue, warm with lamplight. Rest and recharge." }
+  # farm — the greenbelt park blocks of the south-east
+  - { id: commons,         name: The Commons Park,    x: 697, y: 697, kind: wild,       district: farm,        description: "Forage for scraps." }
+  - { id: willow_pond,     name: Willow Pond Park,    x: 697, y: 894, kind: wild,       district: farm,        description: "Still water under trailing willows; ducks, reeds, and easy foraging." }
+  - { id: orchard,         name: Orchard Green,       x: 894, y: 894, kind: wild,       district: farm,        description: "Crab apples and brambles in a pocket park; sweet pickings in season." }
+  - { id: farmstead,       name: Sunfall Depot,       x: 894, y: 697, kind: work,       district: farm,        description: "Loading docks and pallet rows; honest work from dawn to dusk." }
 
 agents:                          # seed agents; profile must match a profiles[].name
   # All three start together in the plaza so they meet, greet, and converse from
   # the first round (chatter is the whole point), then wander off to work/govern.
+  # Wave D2 / EM-158: each entry may carry an optional
+  # `cadence_tier: protagonist|supporting|background` (absent = protagonist —
+  # the named cast stays protagonist; the 25-agent roster lands in B4/EM-165).
   - { name: Ada,  personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash, location: plaza }
   - { name: Bram, personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: qwen-next, location: plaza }
   - { name: Cleo, personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: deepseek-pro, location: plaza }

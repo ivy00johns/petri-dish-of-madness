@@ -111,6 +111,8 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
             location=a.location,
             energy=cfg.world.starting_energy,
             credits=cfg.world.starting_credits,
+            # Wave D2 / EM-158 — optional per-agent tier from world.yaml.
+            cadence_tier=getattr(a, "cadence_tier", "protagonist"),
         )
         for a in cfg.agents
     ]
@@ -357,6 +359,43 @@ async def reassign_model(agent_id: str, body: ReassignBody):
     return {"status": "ok", "agent_id": agent_id, "profile": body.profile}
 
 
+# Wave D2 / EM-158 — per-agent cadence tier reassignment (hot-swappable like
+# the model endpoint above). Takes effect at the agent's next round-start
+# scheduling decision; the change is broadcast so the tier chip updates live.
+
+_VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
+
+
+class TierBody(BaseModel):
+    tier: str = Field(max_length=20)
+
+
+@app.post("/api/agents/{agent_id}/tier")
+async def reassign_tier(agent_id: str, body: TierBody):
+    if _world is None:
+        raise HTTPException(503, "Not initialized")
+    agent = _world.agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(404, f"Unknown agent: {agent_id}")
+    if body.tier not in _VALID_CADENCE_TIERS:
+        raise HTTPException(
+            400, f"Unknown tier: {body.tier!r} (protagonist|supporting|background)"
+        )
+    old_tier = getattr(agent, "cadence_tier", "protagonist")
+    agent.cadence_tier = body.tier
+    if _loop:
+        _loop._emit_event({
+            "kind": "cadence_tier_changed",
+            "actor_id": agent_id,
+            "profile": agent.profile,
+            "profile_color": _loop._get_profile_color(agent),
+            "text": f"{agent.name}'s cadence tier set to {body.tier}.",
+            "payload": {"old_tier": old_tier, "new_tier": body.tier},
+        })
+        _loop._broadcast_world_state()
+    return {"status": "ok", "agent_id": agent_id, "cadence_tier": body.tier}
+
+
 # Spawn / kill agents
 
 class SpawnBody(BaseModel):
@@ -378,6 +417,10 @@ class SpawnBody(BaseModel):
     # server prefills name/personality/profile (suggested_profile) from the
     # card; explicit body fields override. Unknown persona -> 400.
     persona: str | None = Field(default=None, max_length=40)
+    # Wave D2 / EM-158 — optional scheduler cadence tier
+    # (protagonist | supporting | background). Absent ⇒ protagonist (the
+    # zero-behavior-change default). Unknown value -> 400.
+    cadence_tier: str | None = Field(default=None, max_length=20)
 
 
 def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str]:
@@ -424,6 +467,14 @@ async def spawn_agent(body: SpawnBody, response: Response):
     name, personality, profile = _resolve_spawn_fields(body)
     if _router.get_profile(profile) is None:
         raise HTTPException(400, f"Unknown profile: {profile}")
+    # Wave D2 / EM-158 — optional cadence tier; absent ⇒ protagonist.
+    cadence_tier = body.cadence_tier or "protagonist"
+    if cadence_tier not in _VALID_CADENCE_TIERS:
+        raise HTTPException(
+            400,
+            f"Unknown cadence_tier: {body.cadence_tier!r} "
+            "(protagonist|supporting|background)",
+        )
 
     mode = _spawn_mode(body)
 
@@ -438,6 +489,7 @@ async def spawn_agent(body: SpawnBody, response: Response):
             personality=personality,
             profile=profile,
             location=body.location,
+            cadence_tier=cadence_tier,  # Wave D2 / EM-158 — additive
         )
         proposal_id = rule.id
         spec = {
@@ -445,6 +497,7 @@ async def spawn_agent(body: SpawnBody, response: Response):
             "profile": profile,
             "personality": personality,
             "location": body.location,
+            "cadence_tier": cadence_tier,
         }
         if _loop:
             _loop._emit_event({
@@ -466,6 +519,7 @@ async def spawn_agent(body: SpawnBody, response: Response):
         personality=personality,
         profile=profile,
         location=body.location,
+        cadence_tier=cadence_tier,  # Wave D2 / EM-158 — additive
     )
     _router.reassign(agent.id, profile)
     if _loop and _repo:

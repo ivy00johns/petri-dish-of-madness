@@ -11,12 +11,26 @@
  * breathes — intra-district spacing (≥60 logical) lands at ~4 world units,
  * comfortably past the 4.2 slot-ring pitch, and district centroids (≥250
  * logical) sit ~16.5 apart. The mapping math itself is unchanged.
+ *
+ * Wave D1.5: SIZE stays 66 and now the city IS the world — a compact 5×5
+ * block grid spanning ~±33 centered on the origin (the decorative D1 ring
+ * and its WORLD_REACH sprawl are gone). WORLD_REACH is the half-extent the
+ * terrain, pan clamp, fog and camera distances are tuned against: city span
+ * + a small grass apron.
  */
 
 import type { Place, PlaceKind, WorldEvent } from '../../types';
 
-/** Edge length of the village ground plane in world units. */
+/** Edge length of the city ground square in world units (city span ≈ 66). */
 export const SIZE = 66;
+
+/**
+ * Half-extent of the FULL scene envelope — the compact city + grass apron
+ * (Wave D1.5). Ground plane, pan bounds, fog and camera distances are tuned
+ * against this, NOT against SIZE. 0.85 × 66 ≈ 56.1 covers the grid's ±33
+ * with ~23 units of grass apron.
+ */
+export const WORLD_REACH = SIZE * 0.85;
 
 /** Convert a place's logical (0..1000) x to world X. */
 export function toWorldX(x: number): number {
@@ -326,9 +340,11 @@ export const ANIMAL_CHAOS_MAGENTA = '#d957d9';
  * footprint is ~3.6 world units, so 4.2 leaves breathing room for labels). */
 export const SLOT_SPACING = 4.2;
 
-/** EM-131: radius of the first slot ring — clears the place's own structure
- * (matches the legacy `buildingSpot` satellite distance). */
-export const SLOT_BASE_RADIUS = 5.5;
+/** EM-131: radius of the first slot ring — clears the place's own structure.
+ * Wave D1.6: shrunk 5.5 → 4.6 so OVERFLOW buildings (slotLayout is now the
+ * fallback past a landmark block's realLots, contracts/wave-d1.6.md §2) keep
+ * their centers inside the 5.2u half-block instead of standing on the road. */
+export const SLOT_BASE_RADIUS = 4.6;
 
 /**
  * EM-131: deterministic slot layout for ALL buildings sharing one place.

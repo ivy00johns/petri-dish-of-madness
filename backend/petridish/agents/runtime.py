@@ -13,6 +13,8 @@ Per-turn flow:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -174,6 +176,51 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Wave D2 / EM-163 — tier-gated world-mutating tools.
+#
+# The world-mutating PROPOSAL-side tools are reserved for the protagonist +
+# supporting cadence tiers. Enforced at RESOLUTION time in _validate_world
+# (the billboard location-gate pattern — EM-108's lesson is that prompt-only
+# gating is not enforcement) AND omitted from the background valid-actions
+# menu in _assemble_context, so menu and resolution always agree. Background
+# agents keep talk / move / economy / billboard — and VOTING: only PROPOSING
+# gates (vote stays for everyone).
+# ──────────────────────────────────────────────────────────────────────────────
+
+TIER_GATED_ACTIONS = frozenset({
+    "propose_project", "build_step", "contribute_funds", "propose_rule",
+})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wave D2 / EM-161 — prompt diet (supporting + background tiers; protagonists
+# keep today's full prompt byte-for-byte):
+#   - relationships capped to the top-_DIET_RELATIONSHIP_CAP by |trust|;
+#   - open_projects + the move_to place menu scoped to the agent's district
+#     horizon. ADJACENCY RULE (the documented simple derivation): a diet agent
+#     sees its OWN district plus the always-visible core district
+#     (_DIET_CORE_DISTRICT); places without a district tag are always visible;
+#     an agent standing at an un-districted (or unknown) place gets the full
+#     map. The diet narrows the MENU, never the rules — _validate_world still
+#     accepts any valid place / any visible project.
+#   - BACKGROUND only: the decision-trace instruction block is dropped (their
+#     completions shrink — the trace fields are optional in ACTION_SCHEMA, so
+#     the parser is unaffected) and the memory window shrinks to
+#     _DIET_BACKGROUND_MEMORY_WINDOW.
+#
+# Wave D2 / EM-162 — cache-key normalization (BACKGROUND prompts only): energy
+# renders bucketed to 10s ("~70", floored) and the tick line floors to the day
+# (`Tick: day N`), so quiet rounds assemble byte-identical prompts and the
+# router's sha1 decision cache can hit. Router.forget() semantics untouched.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_DIET_RELATIONSHIP_CAP = 8
+_DIET_BACKGROUND_MEMORY_WINDOW = 8
+_DIET_CORE_DISTRICT = "core"
+_ENERGY_DISPLAY_BUCKET = 10
+
+
 # W11b / EM-079 — commitment lifecycle action sets.
 #   _TALK_ACTIONS: pure-talk turns; commitments go STALE during these (a phantom
 #   commitment is one claimed in speech and never enacted).
@@ -210,6 +257,39 @@ _DEFAULT_IMPORTANCE_THRESHOLD = 10.0
 _OVERHEARD_PENDING_CAP = 2         # an agent holds at most 2 pending overheard lines
 _OVERHEARD_LISTENERS_CAP = 2       # at most 2 co-located listeners per spoken line
 
+# Wave D2 / EM-159+160 — background-tier cadence defaults (config
+# `world.cadence`, read via _world_block_get; the loader's CadenceParams
+# mirrors these exactly so an absent block behaves identically).
+_DEFAULT_SPONTANEITY_CHANCE = 0.15
+_DEFAULT_REFLEX_STREAK_LIMIT = 8
+
+# Wave D2 / EM-159 — energy "bands" for the salience trigger: crossing a
+# 25-point band boundary since the agent's last LLM turn is salient (covers
+# both "I drifted toward starving" and "someone blessed/attacked me").
+_ENERGY_BAND_SIZE = 25.0
+
+
+def _seed_int(*parts: Any) -> int:
+    """Deterministic, wall-clock-free seed from the given parts — a stable
+    sha256 of the joined parts (the animals' AnimalRuntime idiom, duplicated
+    here so agents/ never imports animals/). Used for the EM-160 spontaneity
+    wildcard and the reflex routine's rotation, so background cadence is
+    reproducible across runs + replay (never the `random` module — no global
+    RNG state to corrupt a replay)."""
+    raw = "|".join(str(p) for p in parts)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return int(digest, 16)
+
+
+def _energy_band(energy: float) -> int:
+    """The EM-159 energy band index for an energy value (0..4 with the default
+    25-point bands; 100 sits in its own top band edge-inclusive)."""
+    try:
+        e = max(0.0, min(100.0, float(energy)))
+    except (TypeError, ValueError):
+        e = 0.0
+    return int(e // _ENERGY_BAND_SIZE)
+
 
 def _world_block_get(params: Any, block: str, key: str, default: Any) -> Any:
     """Read `world.<block>.<key>` defensively: the block may be a dataclass, a
@@ -233,6 +313,47 @@ def _action_tier(action: str) -> str:
     """The registry tier for an action (defaults to 'llm' for unknown actions)."""
     meta = TOOL_REGISTRY.get(action)
     return meta.get("tier", "llm") if meta else "llm"
+
+
+def _cadence_tier(agent: Any) -> str:
+    """The agent's cadence tier, defensively defaulted to protagonist (the
+    pre-D2 behavior) for duck-typed agents or unknown values."""
+    tier = getattr(agent, "cadence_tier", "protagonist") or "protagonist"
+    return tier if tier in ("protagonist", "supporting", "background") else "protagonist"
+
+
+def _effective_memory_window(agent: Any, params: Any) -> int:
+    """EM-161 — the per-turn memory window: config memory_window, shrunk to
+    _DIET_BACKGROUND_MEMORY_WINDOW for the background tier only (min() so a
+    smaller configured window still wins)."""
+    window = params.memory_window
+    if _cadence_tier(agent) == "background":
+        window = min(window, _DIET_BACKGROUND_MEMORY_WINDOW)
+    return window
+
+
+def _energy_display(energy: float) -> str:
+    """EM-162 — the background-tier display form of an energy value: floored
+    to the 10s bucket and prefixed '~' ("~70"), clamped to 0..100, so quiet
+    rounds render identical bytes while energy drifts within a bucket."""
+    try:
+        e = max(0.0, min(100.0, float(energy)))
+    except (TypeError, ValueError):
+        e = 0.0
+    return f"~{int(e // _ENERGY_DISPLAY_BUCKET) * _ENERGY_DISPLAY_BUCKET}"
+
+
+def _diet_visible_districts(world: World, agent: AgentState) -> set[str] | None:
+    """EM-161 — the diet agent's district horizon: its current place's district
+    plus the always-visible core district (the documented adjacency rule).
+    Returns None (= no scoping, full map) when the agent stands at an
+    un-districted or unknown place — the diet must never hide the whole world
+    where district data is absent."""
+    here = world.places.get(agent.location)
+    district = getattr(here, "district", None) if here is not None else None
+    if not district:
+        return None
+    return {district, _DIET_CORE_DISTRICT}
 
 IDLE_ACTION = {"action": "idle", "args": {}}
 
@@ -704,6 +825,18 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     if not agent.alive:
         return "agent is dead"
 
+    # ── Wave D2 / EM-163 — tier gate (RESOLUTION time, the billboard pattern;
+    # EM-108: prompt-only gating is not enforcement). Background agents keep
+    # talk/move/economy/billboard/vote — only PROPOSING gates. The background
+    # valid-actions menu omits these (see _assemble_context), so a rejection
+    # here means the model invented an off-menu action.
+    if action in TIER_GATED_ACTIONS and _cadence_tier(agent) == "background":
+        return (
+            f"{action} is reserved for protagonist and supporting agents "
+            "(tier rule) — background agents keep to talking, moving, working, "
+            "the billboard, and voting"
+        )
+
     if action == "work":
         place = world.places.get(agent.location)
         if place is None or place.kind != "work":
@@ -913,6 +1046,30 @@ def _assemble_context(
     place_name = place.name if place else agent.location
     place_kind = place.kind if place else "unknown"
 
+    # ── Wave D2 / EM-161+162+163 — tier flags. The diet applies to supporting
+    # AND background; protagonists keep today's full prompt byte-for-byte. The
+    # EM-162 normalization + the trace-block/memory cuts + the EM-163 menu
+    # omission are BACKGROUND only.
+    tier = _cadence_tier(agent)
+    diet = tier in ("supporting", "background")
+    background = tier == "background"
+    visible_districts = _diet_visible_districts(world, agent) if diet else None
+
+    def _place_visible(place_id: str) -> bool:
+        """EM-161 — is this place inside the diet agent's district horizon?
+        Always True for protagonists / when scoping is off; un-districted
+        places are always visible."""
+        if visible_districts is None:
+            return True
+        p = world.places.get(place_id)
+        district = getattr(p, "district", None) if p is not None else None
+        return district is None or district in visible_districts
+
+    def _tier_ok(action: str) -> bool:
+        """EM-163 — offer this action on the menu? Mirrors the resolution-time
+        gate in _validate_world exactly (menu and resolution agree)."""
+        return not (background and action in TIER_GATED_ACTIONS)
+
     co_located = [
         a for a in world.living_agents()
         if a.location == agent.location and a.id != agent.id
@@ -934,6 +1091,14 @@ def _assemble_context(
         b for b in _buildings(world).values()
         if _building_field(b, "status") in ("planned", "under_construction")
     ]
+    # EM-161 — diet tiers see only the projects inside their district horizon
+    # (current + core; see _diet_visible_districts). Menu narrowing only:
+    # _validate_world still accepts contributions to ANY open project.
+    if visible_districts is not None:
+        open_projects = [
+            b for b in open_projects
+            if _place_visible(_building_field(b, "location"))
+        ]
 
     # ── Tool-registry-driven valid_actions (EM-060) ───────────────────────────
     # Filter the per-turn action list by each action's registry gates: place-kind
@@ -960,8 +1125,11 @@ def _assemble_context(
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
     # (destination/to/null) and burned turns on 'unknown place' world errors.
+    # EM-161 — diet tiers get the district-horizon menu only (protagonists the
+    # full map); resolution still accepts ANY valid place.
     valid_actions.append(
-        f"move_to (place) - go to one of: {', '.join(world.places.keys())}")
+        "move_to (place) - go to one of: "
+        + ", ".join(pid for pid in world.places.keys() if _place_visible(pid)))
     valid_actions.append("say (text) - speak to everyone here")
     if co_located:
         target_names = ", ".join(a.name for a in co_located)
@@ -976,16 +1144,18 @@ def _assemble_context(
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
         valid_actions.append("(work requires a work place)")
-    # Governance actions are gated to a governance place.
-    if _gate_ok("propose_rule"):
+    # Governance actions are gated to a governance place. EM-163: PROPOSING is
+    # tier-gated off the background menu (_tier_ok); voting stays for everyone.
+    if _gate_ok("propose_rule") and _tier_ok("propose_rule"):
         valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town (name_town also needs name=<the town's new name>; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
 
-    # ── W7 construction actions (offered per gates) ───────────────────────────
-    valid_actions.append("propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place")
-    if open_projects:
+    # ── W7 construction actions (offered per gates; EM-163 tier gate) ──────────
+    if _tier_ok("propose_project"):
+        valid_actions.append("propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place")
+    if open_projects and _tier_ok("contribute_funds"):
         valid_actions.append("contribute_funds (building_id, amount) - fund an active project below to push it toward construction")
     for b in here_buildings:
         bid = _building_field(b, "id")
@@ -996,7 +1166,7 @@ def _assemble_context(
             status == "planned"
             and _building_field(b, "funds_committed", 0) >= _building_field(b, "funds_required", 0)
         )
-        if (status == "under_construction" or funded_planned) and _gate_ok("build_step"):
+        if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step"):
             valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
         if status in ("damaged", "offline") and _gate_ok("repair"):
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
@@ -1023,17 +1193,23 @@ def _assemble_context(
             "answer_proclamation (text) - answer the god's proclamation directly; "
             "your reply is threaded under it for the watchers to see")
 
-    # Recent events summary
+    # Recent events summary (EM-161: background window shrinks 12→8)
     event_lines = []
-    for evt in recent_events[-params.memory_window:]:
+    for evt in recent_events[-_effective_memory_window(agent, params):]:
         event_lines.append(f"  [tick {evt.get('tick', '?')}] {evt.get('text', '')}")
 
     # Beliefs
     belief_lines = "\n".join(f"  - {b}" for b in agent.beliefs) if agent.beliefs else "  (none)"
 
-    # Relationships
+    # Relationships — EM-161: diet tiers keep only the top-8 by |trust| (their
+    # strongest bonds and feuds); protagonists keep the full O(N) block.
+    rel_items = list(agent.relationships.items())
+    if diet and len(rel_items) > _DIET_RELATIONSHIP_CAP:
+        rel_items = sorted(
+            rel_items, key=lambda kv: -abs(getattr(kv[1], "trust", 0) or 0)
+        )[:_DIET_RELATIONSHIP_CAP]
     rel_lines = []
-    for other_id, rel in agent.relationships.items():
+    for other_id, rel in rel_items:
         other = world.agents.get(other_id)
         other_name = other.name if other else other_id
         rel_lines.append(f"  {other_name}: {rel.type} (trust={rel.trust})")
@@ -1074,8 +1250,12 @@ def _assemble_context(
     if world.has_active_rule("recharge_subsidy"):
         recharge_cost = max(1, recharge_cost // 2)
     starve_threshold = getattr(params, "starving_warn_threshold", 25)
+    # EM-162 — background prompts render energy bucketed to 10s ("~70") so
+    # quiet-round prompts stay byte-identical while energy drifts within a
+    # bucket; protagonists/supporting keep the exact figures byte-for-byte.
+    needs_energy = _energy_display(agent.energy) if background else f"{agent.energy:.0f}"
     needs_lines = [
-        f"Energy {agent.energy:.0f}/100 — at 0 you start DYING. "
+        f"Energy {needs_energy}/100 — at 0 you start DYING. "
         f"recharge restores energy (costs {recharge_cost} credits)."
     ]
     if agent.energy <= 0:
@@ -1191,14 +1371,68 @@ def _assemble_context(
     _town = (getattr(world, "town_name", "") or "").strip()
     town_line = f"\nTown: {_town}" if _town else ""
 
+    # ── Wave D2 / EM-162 — cache-key normalization (BACKGROUND only): the tick
+    # line floors to the day and every displayed energy buckets to 10s, so a
+    # quiet background round assembles byte-identical bytes and the router's
+    # sha1 decision cache hits. Protagonists/supporting render exactly as
+    # before (byte-for-byte).
+    if background:
+        tick_display = f"day {world.tick // max(1, getattr(params, 'turns_per_day', 20))}"
+        status_energy = _energy_display(agent.energy)
+        _co_energy = lambda a: _energy_display(a.energy)  # noqa: E731
+    else:
+        tick_display = str(world.tick)
+        status_energy = f"{agent.energy:.1f}"
+        _co_energy = lambda a: f"{a.energy:.0f}"  # noqa: E731
+
+    # ── Wave D2 / EM-161 — the decision-trace instruction block is dropped for
+    # BACKGROUND only (their completions shrink; the trace fields are optional
+    # in ACTION_SCHEMA so the parser is unaffected). The ⚠ words-change-nothing
+    # warning stops naming the EM-163-gated tools for background — the prompt
+    # must never suggest an action resolution would reject. Protagonists and
+    # supporting keep today's text byte-for-byte.
+    if background:
+        action_warning = (
+            "⚠ SAYING you will do something does NOT do it — words change "
+            "nothing. Use real actions (work / forage / give / move_to) to "
+            "actually act. Your action THIS TURN is the only thing that happens."
+        )
+        format_template = (
+            '{"action": "<verb>", "args": {...}, '
+            '"mood": "optional mood update", "thought": "one short sentence"}'
+        )
+        trace_instructions = ""
+    else:
+        action_warning = (
+            "⚠ SAYING you will build/fund/work on something does NOT do it — "
+            "words change nothing. Use propose_project / contribute_funds / "
+            "build_step (or work / forage / give) to actually act. Your action "
+            "THIS TURN is the only thing that happens."
+        )
+        format_template = (
+            '{"action": "<verb>", "args": {...}, "mood": "optional mood update", '
+            '"thought": "one short sentence", "perceived_summary": "one sentence '
+            'on who/what was nearby or overheard", "memories_used": ["the memory '
+            'snippets you leaned on"], "reasoning": "a brief why, kept inside '
+            'this JSON"}'
+        )
+        trace_instructions = (
+            '\nALSO include (in the SAME json object — do NOT make a second '
+            'call): "perceived_summary" (one sentence on what you perceived '
+            'this turn), "memories_used" (the recent-event/memory snippets you '
+            'actually relied on), and "reasoning" (your fuller reasoning, '
+            'distinct from the short "thought"). These three are optional but '
+            "strongly preferred — they are recorded into the decision trace."
+        )
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-Tick: {world.tick}{town_line}
+Tick: {tick_display}{town_line}
 Personality: {agent.personality}
 
 === YOUR STATUS ===
 Location: {place_name} (kind={place_kind})
-Energy: {agent.energy:.1f}/100
+Energy: {status_energy}/100
 Credits: {agent.credits}
 Mood: {agent.mood}
 
@@ -1206,7 +1440,7 @@ Mood: {agent.mood}
 {needs_text}
 {proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
-{chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}
+{chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
 === RECENT EVENTS ===
 {chr(10).join(event_lines) or "  (none)"}
@@ -1229,13 +1463,12 @@ Mood: {agent.mood}
 === VALID ACTIONS ===
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
-⚠ SAYING you will build/fund/work on something does NOT do it — words change nothing. Use propose_project / contribute_funds / build_step (or work / forage / give) to actually act. Your action THIS TURN is the only thing that happens.
+{action_warning}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
-{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}}
+{format_template}
 
-The "action" field is required and must come first. "args" must match the action.
-ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
+The "action" field is required and must come first. "args" must match the action.{trace_instructions}
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
@@ -1272,7 +1505,9 @@ def _perceived_context(
     # over-broad; v1 perception is "where I am", so nearby = current place only.
     nearby_places = [agent.location] if agent.location in world.places else []
 
-    window = params.memory_window
+    # EM-161 — the SAME effective window _assemble_context fed the model
+    # (background shrinks to 8), so the trace stays truthful to the prompt.
+    window = _effective_memory_window(agent, params)
     fed = recent_events[-window:]
     # overheard: seqs of the events the agent witnessed this window (best-effort;
     # the per-agent memory buffer stores text/tick/kind, seq may be absent).
@@ -1320,6 +1555,20 @@ class AgentRuntime:
         # agent). In-memory by design: after a restart the worst case is one
         # repeat notice, which is harmless.
         self._board_seen: dict[str, int] = {}
+        # Wave D2 / EM-159 — per-agent salience baselines, recorded at each
+        # LLM-consulting turn (_note_llm_turn) and compared when a BACKGROUND
+        # agent's turn comes due. In-memory by design (like _memory /
+        # _importance): after a restart every background agent's first due
+        # turn is salient ("first_turn"), which errs toward liveliness.
+        #   _seen_colocated      — co-located agent+animal ids at last LLM turn
+        #   _energy_band_seen    — energy band index at last LLM turn
+        #   _witnessed_since_llm — agents that witnessed an importance>0 event
+        #                          since their last LLM turn
+        #   _last_llm_tick       — tick of the agent's last LLM-consulting turn
+        self._seen_colocated: dict[str, frozenset[str]] = {}
+        self._energy_band_seen: dict[str, int] = {}
+        self._witnessed_since_llm: set[str] = set()
+        self._last_llm_tick: dict[str, int] = {}
 
     def reset_state(self) -> None:
         """Clear ALL per-run cognition state (memories, commitments, importance
@@ -1329,6 +1578,11 @@ class AgentRuntime:
         self._importance.clear()
         self._overheard.clear()
         self._board_seen.clear()
+        # Wave D2 / EM-159 — salience baselines are per-run state too.
+        self._seen_colocated.clear()
+        self._energy_band_seen.clear()
+        self._witnessed_since_llm.clear()
+        self._last_llm_tick.clear()
 
     # ── W11b config accessors (defensive: the loader is owned elsewhere) ──────
 
@@ -1355,6 +1609,25 @@ class AgentRuntime:
                 _DEFAULT_IMPORTANCE_THRESHOLD))
         except (TypeError, ValueError):
             return _DEFAULT_IMPORTANCE_THRESHOLD
+
+    # ── Wave D2 / EM-159+160 config accessors (world.cadence, defensive) ──────
+
+    def _spontaneity_chance(self) -> float:
+        try:
+            chance = float(_world_block_get(
+                self.world.params, "cadence", "spontaneity_chance",
+                _DEFAULT_SPONTANEITY_CHANCE))
+        except (TypeError, ValueError):
+            chance = _DEFAULT_SPONTANEITY_CHANCE
+        return max(0.0, min(1.0, chance))
+
+    def _reflex_streak_limit(self) -> int:
+        try:
+            return max(1, int(_world_block_get(
+                self.world.params, "cadence", "reflex_streak_limit",
+                _DEFAULT_REFLEX_STREAK_LIMIT)))
+        except (TypeError, ValueError):
+            return _DEFAULT_REFLEX_STREAK_LIMIT
 
     @staticmethod
     def _event_importance(event: dict) -> float:
@@ -1403,6 +1676,10 @@ class AgentRuntime:
                     self._importance[agent.id] = (
                         self._importance.get(agent.id, 0.0) + importance
                     )
+                    # Wave D2 / EM-159 — witnessing an importance>0 event makes
+                    # a background agent's next due turn salient (cleared on
+                    # its next LLM-consulting turn).
+                    self._witnessed_since_llm.add(agent.id)
 
     def push_location_event(self, location: str, event: dict) -> None:
         """Push event to all agents at a location."""
@@ -1557,6 +1834,259 @@ class AgentRuntime:
         self._board_seen[agent.id] = max(int(e.get("tick", 0) or 0) for e in notes)
         return notes[-3:]
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor
+    #
+    # EM-159 applies to the BACKGROUND tier ONLY (protagonists and supporting
+    # always run full LLM turns when due). A due background turn consults the
+    # LLM iff something salient happened since the agent's last LLM turn;
+    # otherwise it resolves the deterministic seeded reflex routine — ZERO
+    # router calls. EM-160 (inseparable, per the v4-review verdict) keeps
+    # background agents from flattening into NPCs-on-rails: a seeded wildcard
+    # and a reflex-streak floor both force full LLM turns.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _colocated_ids(self, agent: AgentState) -> frozenset[str]:
+        """Ids of OTHER living agents + living animals at the agent's place."""
+        world = self.world
+        ids = {
+            a.id for a in world.living_agents()
+            if a.location == agent.location and a.id != agent.id
+        }
+        animals_fn = getattr(world, "living_animals", None)
+        if callable(animals_fn):
+            ids.update(
+                an.id for an in animals_fn() if an.location == agent.location
+            )
+        return frozenset(ids)
+
+    def _has_unseen_board_note(self, agent: AgentState) -> bool:
+        """Non-consuming peek at _unseen_god_board_notes: is there a god board
+        note at this place the agent has not yet been shown? (The consuming
+        delivery still happens only inside the LLM turn path.)"""
+        world = self.world
+        here_fn = getattr(world, "billboard_here", None)
+        board = getattr(world, "billboard", None)
+        if not callable(here_fn) or not isinstance(board, list):
+            return False
+        if not here_fn(agent.location):
+            return False
+        seen = self._board_seen.get(agent.id, -1)
+        return any(
+            isinstance(e, dict)
+            and e.get("actor_type") == "god"
+            and int(e.get("tick", 0) or 0) > seen
+            for e in board
+        )
+
+    def _background_salience(self, agent: AgentState) -> tuple[bool, list[str]]:
+        """The EM-159 salience check for a due BACKGROUND turn. Returns
+        (salient, triggers) where triggers names every condition that fired:
+
+          first_turn           — no baseline yet (first due turn of a run /
+                                 after restore): always think once.
+          new_colocated        — an agent/animal arrived at this place since
+                                 the last LLM turn.
+          witnessed_importance — witnessed an importance>0 event (the EM-080
+                                 accumulator's weights) since the last LLM turn.
+          energy_band          — energy crossed a 25-point band boundary.
+          pending_whisper      — a god whisper is queued for this agent.
+          proclamation         — a god proclamation landed since the last LLM
+                                 turn (it rides every prompt; answering needs
+                                 a real turn).
+          board_note           — an unseen god billboard note at this place.
+          uncast_vote          — an open (proposed) rule this agent hasn't
+                                 voted on yet.
+        """
+        world = self.world
+        triggers: list[str] = []
+
+        baseline = self._seen_colocated.get(agent.id)
+        if baseline is None:
+            triggers.append("first_turn")
+        elif self._colocated_ids(agent) - baseline:
+            triggers.append("new_colocated")
+
+        if agent.id in self._witnessed_since_llm:
+            triggers.append("witnessed_importance")
+
+        band_seen = self._energy_band_seen.get(agent.id)
+        if band_seen is not None and band_seen != _energy_band(agent.energy):
+            triggers.append("energy_band")
+
+        pending = getattr(world, "pending_whispers", None)
+        if isinstance(pending, dict) and pending.get(agent.id):
+            triggers.append("pending_whisper")
+
+        proc_fn = getattr(world, "active_proclamation", None)
+        if callable(proc_fn):
+            proc = proc_fn()
+            if isinstance(proc, dict) and (
+                int(proc.get("tick", 0) or 0)
+                >= self._last_llm_tick.get(agent.id, -1)
+            ):
+                triggers.append("proclamation")
+
+        if self._has_unseen_board_note(agent):
+            triggers.append("board_note")
+
+        for rule in getattr(world, "rules", {}).values():
+            if (
+                getattr(rule, "status", "") == "proposed"
+                and agent.id not in getattr(rule, "votes", {})
+            ):
+                triggers.append("uncast_vote")
+                break
+
+        return bool(triggers), triggers
+
+    def _spontaneity_roll(self, agent: AgentState) -> bool:
+        """EM-160 wildcard: seeded P(full LLM turn) on a non-salient due turn.
+        Deterministic from world state (agent id + tick hash — the animals'
+        roll-for-activity idiom); never the `random` module, so replay holds."""
+        chance = self._spontaneity_chance()
+        if chance <= 0.0:
+            return False
+        bucket = _seed_int("spontaneity", agent.id, self.world.tick) % 1_000_000
+        return (bucket / 1_000_000) < chance
+
+    def _note_llm_turn(self, agent: AgentState) -> None:
+        """Record post-turn salience baselines after an LLM-consulting turn
+        (any tier — protagonists keep fresh baselines too, so a later demotion
+        starts clean) and reset the EM-160 reflex streak."""
+        agent.reflex_streak = 0
+        self._witnessed_since_llm.discard(agent.id)
+        self._seen_colocated[agent.id] = self._colocated_ids(agent)
+        self._energy_band_seen[agent.id] = _energy_band(agent.energy)
+        self._last_llm_tick[agent.id] = self.world.tick
+
+    def _reflex_pick(self, agent: AgentState) -> dict:
+        """The deterministic reflex routine for a non-salient background turn
+        (EM-159, the animals' seeded-picker pattern — ZERO router calls):
+
+          starving  ⇒ recharge   (when it would actually succeed: credits
+                                  cover the effective cost, no blackout,
+                                  energy below full)
+          at work   ⇒ work
+          otherwise ⇒ seeded forage / move-home rotation (move only when a
+                       home-kind place exists and the agent isn't already
+                       home; no homes ⇒ forage)
+
+        Preflight checks mirror the world's action gates so a reflex turn
+        resolves cleanly instead of burning the turn on a rejection."""
+        world = self.world
+        try:
+            threshold = float(getattr(world.params, "starving_warn_threshold", 25.0))
+        except (TypeError, ValueError):
+            threshold = 25.0
+
+        if agent.energy < threshold and agent.energy < 100:
+            cost = int(getattr(world.params, "recharge_cost", 2))
+            if world.has_active_rule("recharge_subsidy"):
+                cost = max(1, cost // 2)
+            blacked_out = getattr(world, "place_blacked_out", lambda _p: False)
+            if agent.credits >= cost and not blacked_out(agent.location):
+                return {"action": "recharge", "args": {}}
+
+        place = world.places.get(agent.location)
+        if place is not None and place.kind == "work":
+            return {"action": "work", "args": {}}
+
+        seed = _seed_int("cadence-reflex", agent.id, world.tick)
+        homes = sorted(p.id for p in world.places.values() if p.kind == "home")
+        at_home = place is not None and place.kind == "home"
+        if homes and not at_home and seed % 2 == 1:
+            return {"action": "move_to", "args": {"place": homes[seed % len(homes)]}}
+        return {"action": "forage", "args": {}}
+
+    def _reflex_turn(
+        self, agent: AgentState, profile_name: str, profile_color: str,
+        *,
+        llm_attempts: list[dict] | None = None,
+        cadence_reason: str | None = None,
+        require_resolution: bool = False,
+    ) -> dict | None:
+        """Resolve a non-salient background due turn deterministically — ZERO
+        router calls. Emits normal event kinds through the same _apply_action
+        path as LLM turns, each marked `payload.reflex: true` (+ the current
+        reflex_streak) so the feed/inspector can surface it (EM-166). The
+        trace chain keeps its shape but carries NO llm_call span (the loop
+        skips it for reflex traces — an empty span row would pollute the
+        usage-cap accounting and the free-scale proof).
+
+        EM-173 (survival reflex on llm_timeout) reuses this path with three
+        optional hooks, all inert for the EM-159 cadence callers:
+          - `llm_attempts`: the timed-out consult's real attempt spans ride the
+            trace, so the loop still emits the `llm_call` row with
+            timed_out: true (the timeout stays legible).
+          - `cadence_reason`: stamped on every emitted event payload
+            ("llm_timeout_reflex").
+          - `require_resolution`: a reflex action rejected by the world's
+            gates returns None (streak increment undone, no commitment aging,
+            nothing emitted) so the caller can fall through to the existing
+            idle fallback instead of surfacing a gated action as "instinct".
+        """
+        agent.reflex_streak = int(getattr(agent, "reflex_streak", 0)) + 1
+        action_dict = self._reflex_pick(agent)
+        result_event = self._apply_action(
+            agent, action_dict, profile_name, profile_color
+        )
+        events = result_event["_multi"] if "_multi" in result_event else [result_event]
+        if require_resolution and events[0].get("kind") == "parse_failure":
+            # EM-173 — the reflex itself could not resolve: undo and signal
+            # the caller to take the existing idle fallback (never crash).
+            # A gated action made no world-state change, so discarding the
+            # rejection event is safe; the caller's fallback advances
+            # commitments exactly once.
+            agent.reflex_streak -= 1
+            return None
+        for evt in events:
+            payload = evt.setdefault("payload", {})
+            payload["reflex"] = True
+            payload["reflex_streak"] = agent.reflex_streak
+            if cadence_reason is not None:
+                payload["cadence_reason"] = cadence_reason
+        outcome = "failed" if events[0].get("kind") == "parse_failure" else "ok"
+
+        # EM-079 — commitments still advance on reflex turns: a successful
+        # non-talk reflex action resets the staleness clock exactly as if the
+        # LLM had chosen it; a failed one ages every commitment.
+        lapsed = self._advance_commitments(
+            agent, action_dict["action"], outcome == "ok", None,
+            profile_name, profile_color,
+        )
+        if lapsed:
+            if "_multi" in result_event:
+                result_event["_multi"].extend(lapsed)
+            else:
+                result_event = {"_multi": [result_event] + lapsed}
+
+        recent_events = self._memory.get(agent.id, [])
+        perceived, memory = _perceived_context(
+            agent, self.world, recent_events, self.world.params
+        )
+        result_event["_trace"] = {
+            "perceived": {**perceived, "perceived_summary": None},
+            "memory": memory,
+            # EM-159: ZERO calls and the loop emits zero spans. EM-173: the
+            # timed-out consult's span rides here so its llm_call row (with
+            # timed_out: true) is still emitted.
+            "llm_attempts": llm_attempts if llm_attempts is not None else [],
+            "reflex": True,
+            "reasoning": {
+                "reasoning": None,
+                "perceived_summary": None,
+                "memories_used": None,
+            },
+            "action_chosen": {
+                "chosen_tool": action_dict["action"],
+                "args": action_dict.get("args") or {},
+                "tier": "reflex",
+            },
+            "resolved": {"outcome": outcome, "state_deltas": {}},
+        }
+        return result_event
+
     async def run_turn(self, agent: AgentState) -> dict:
         """
         Execute one agent turn. Returns an event dict describing what happened.
@@ -1569,6 +2099,31 @@ class AgentRuntime:
         temperature = profile.temperature if profile else 0.8
 
         recent_events = self._memory.get(agent.id, [])
+
+        # ── Wave D2 / EM-159+160 — background-tier gate, BEFORE any context is
+        # consumed (overheard lines / whispers / board notes stay queued for
+        # the next LLM turn). Background ONLY: protagonists and supporting
+        # always take full LLM turns when due. A non-salient due turn resolves
+        # the deterministic reflex routine with ZERO router calls — unless the
+        # EM-160 floor (streak limit) or wildcard (seeded spontaneity) forces
+        # a full LLM "reassess" turn anyway.
+        cadence_meta: dict | None = None
+        if getattr(agent, "cadence_tier", "protagonist") == "background":
+            salient, triggers = self._background_salience(agent)
+            if salient:
+                cadence_meta = {
+                    "cadence_reason": "salient",
+                    "salience_triggers": triggers,
+                }
+            elif (
+                int(getattr(agent, "reflex_streak", 0))
+                >= self._reflex_streak_limit()
+            ):
+                cadence_meta = {"cadence_reason": "reassess"}
+            elif self._spontaneity_roll(agent):
+                cadence_meta = {"cadence_reason": "wildcard"}
+            else:
+                return self._reflex_turn(agent, profile_name, profile_color)
 
         # W11b — pending overheard lines are consumed by THIS turn (EM-081), the
         # commitments block rides the prompt when non-empty (EM-079), and the
@@ -1644,7 +2199,11 @@ class AgentRuntime:
         )
         llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
 
-        if parse_error and action_dict is None:
+        # EM-170 — a TIMED-OUT consult never retries: the budget already burned
+        # the turn's wall-clock allowance, and a retry would risk stalling the
+        # world for a second budget. The turn drops straight to the idle
+        # fallback below with reason llm_timeout; the world moves on.
+        if parse_error and action_dict is None and not llm_meta.get("timed_out"):
             # One retry with error fed back; a truncated first attempt retries
             # with a boosted token budget — whether the provider admitted it
             # (finish_reason='length') or lied (mistral 'stop' cuts, run 126).
@@ -1671,10 +2230,59 @@ class AgentRuntime:
 
         routed = self.router.last_routed_via(profile_name)
 
+        # ── EM-173 — survival reflex on llm_timeout ───────────────────────────
+        # Run 321: a degraded proxy night put 38% of calls into the EM-170 12s
+        # budget; agents burned turn after turn as llm_timeout idles, could not
+        # recharge, and Ada starved. A WALL-CLOCK timeout means the agent never
+        # got to speak — so ANY tier (protagonist included) resolves the EM-159
+        # reflex routine instead of idling. Content failures (provider_error /
+        # parse failures) stay honest idles below — only the timeout earns the
+        # reflex. The timed-out llm_call span (timed_out: true) still rides the
+        # trace, every reflex event is stamped payload.reflex: true +
+        # payload.cadence_reason: "llm_timeout_reflex", and the EM-170 lane
+        # demerit / cache-no-poison behavior is untouched (both happened in
+        # _call_and_parse). Salience baselines / reflex-streak reset are NOT
+        # noted here: the LLM never answered, so a background agent's pending
+        # triggers stay queued and its next due turn consults the LLM again.
+        if action_dict is None and llm_meta.get("timed_out"):
+            reflex_event = self._reflex_turn(
+                agent, profile_name, profile_color,
+                llm_attempts=llm_attempts,
+                cadence_reason="llm_timeout_reflex",
+                require_resolution=True,
+            )
+            if reflex_event is not None:
+                # Feed legibility: the action line itself says the call timed
+                # out and instinct took over.
+                primary = (
+                    reflex_event["_multi"][0] if "_multi" in reflex_event
+                    else reflex_event
+                )
+                primary["text"] += " ⏱ (LLM call timed out — instinct took over)"
+                # EM-145 — the god's voice rode the timed-out prompt: the
+                # delivery still happened, so it stays legible (same as the
+                # idle-fallback path below).
+                if delivery_events:
+                    trace = reflex_event.pop("_trace", None)
+                    if "_multi" in reflex_event:
+                        reflex_event["_multi"].extend(delivery_events)
+                    else:
+                        reflex_event = {"_multi": [reflex_event] + delivery_events}
+                    if trace is not None:
+                        reflex_event["_trace"] = trace
+                return reflex_event
+            # Reflex could not resolve (validation failure) — fall through to
+            # the existing idle fallback below; never crash.
+
         if action_dict is None:
             # Second failure or ProviderError: idle + log. Still return a trace so
             # the dead-air turn remains inspectable (resolved.outcome == "failed").
+            # Wave D2 / EM-159+160 — the router WAS consulted: reset the reflex
+            # streak and re-baseline salience even though the turn failed.
+            self._note_llm_turn(agent)
             payload: dict = {"reason": parse_error or "parse_failure"}
+            if cadence_meta:
+                payload.update(cadence_meta)
             if routed is not None:
                 payload["routed_via"] = routed
             # Forensics: the feed text caps the snippet at 400 chars, which hid
@@ -1744,6 +2352,19 @@ class AgentRuntime:
                 evt.setdefault("payload", {})["routed_via"] = routed
         else:
             result_event.setdefault("payload", {})["routed_via"] = routed
+
+        # Wave D2 / EM-159+160 — WHY a background agent got this full LLM turn
+        # (salient + the exact triggers / wildcard / reassess), additive on the
+        # domain event payload(s) for the feed/inspector. The LLM was consulted:
+        # reset the reflex streak and re-baseline salience on the POST-action
+        # state (the agent may have moved / recharged this turn).
+        if cadence_meta:
+            if "_multi" in result_event:
+                for evt in result_event["_multi"]:
+                    evt.setdefault("payload", {}).update(cadence_meta)
+            else:
+                result_event.setdefault("payload", {}).update(cadence_meta)
+        self._note_llm_turn(agent)
 
         # Assemble the decision-trace chain for loop._execute_turn to emit. The
         # `resolved` outcome reads the applied event(s): a parse_failure kind from
@@ -1831,7 +2452,7 @@ class AgentRuntime:
         """
         usage = meta.get("usage")
         usage = usage if isinstance(usage, dict) else None
-        return {
+        span = {
             "gen_ai.request.model": profile_name,
             "gen_ai.response.model": meta.get("routed_via"),
             "usage": usage,
@@ -1840,6 +2461,12 @@ class AgentRuntime:
             "cached": bool(usage.get("cached")) if usage else False,
             "attempt": meta.get("attempt", 1),
         }
+        # EM-170 — ADDITIVE: only attempts cancelled by the turn-latency guard
+        # carry the flag (latency_ms above is the real elapsed wall-clock ms),
+        # so non-timeout llm_call rows keep their exact pre-EM-170 key set.
+        if meta.get("timed_out"):
+            span["timed_out"] = True
+        return span
 
     async def _call_and_parse(
         self,
@@ -1868,12 +2495,41 @@ class AgentRuntime:
             "routed_via": None,
             "usage": None,
         }
+        budget = self._turn_llm_budget()
         started = time.perf_counter()
         try:
-            text = await self.router.chat(
+            # ── Wave D2 / EM-170 — turn-latency guard ──────────────────────────
+            # The FULL consult (router.chat → adapter, including the adapter's
+            # internal timeout+retry chain) runs under one wall-clock budget.
+            # asyncio.wait_for cancels the inner task on timeout and AWAITS the
+            # cancellation itself, so the underlying HTTP task is reaped — never
+            # abandoned to spam "Task exception was never retrieved". A cancelled
+            # call also never reaches the router's cache-store line, so a
+            # timed-out call can NOT poison the decision cache. budget<=0 ⇒
+            # guard disabled ⇒ byte-for-byte today's await.
+            chat_coro = self.router.chat(
                 profile_name, messages,
                 max_tokens=max_tokens, temperature=temperature,
             )
+            if budget > 0:
+                text = await asyncio.wait_for(chat_coro, timeout=budget)
+            else:
+                text = await chat_coro
+        except asyncio.TimeoutError:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            meta["latency_ms"] = elapsed_ms
+            meta["timed_out"] = True
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
+            # EM-135 lane health: a turn-budget timeout is a lane demerit
+            # (same window mechanism truncation uses) so chronic stallers
+            # surface in lane_health(); the world moves on regardless.
+            self._note_timeout_demerit(profile_name)
+            log.warning(
+                "EM-170: %s's LLM call exceeded the %.1fs turn budget "
+                "(%.0f ms, profile=%s) — cancelled, idle fallback",
+                agent.name, budget, elapsed_ms, profile_name,
+            )
+            return None, f"llm_timeout: LLM call exceeded the {budget:g}s turn budget", meta
         except ProviderError as exc:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
             # On error the adapter may still expose the routed model from a prior
@@ -1958,6 +2614,31 @@ class AgentRuntime:
         note = getattr(self.router, "note_parse_outcome", None)
         if callable(note):
             note(profile_name, parsed=parsed, truncated=truncated)
+
+    def _turn_llm_budget(self) -> float:
+        """EM-170 — the per-turn LLM wall-clock budget in seconds, read
+        defensively from world params (`world.turn_llm_budget_seconds`).
+        <= 0 / absent / malformed ⇒ 0.0 ⇒ guard fully disabled."""
+        try:
+            budget = float(getattr(
+                self.world.params, "turn_llm_budget_seconds", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return budget if budget > 0 else 0.0
+
+    def _note_timeout_demerit(self, profile_name: str) -> None:
+        """EM-170 — report a turn-budget timeout into the router's EM-135
+        lane-health window (the same mechanism truncation demerits use).
+        Guarded for duck-typed test routers: missing method is a no-op, and a
+        router predating the `timed_out` kwarg degrades to a plain unparsed
+        demerit rather than breaking the turn."""
+        note = getattr(self.router, "note_parse_outcome", None)
+        if not callable(note):
+            return
+        try:
+            note(profile_name, parsed=False, truncated=False, timed_out=True)
+        except TypeError:
+            note(profile_name, parsed=False, truncated=False)
 
     def _apply_action(
         self,

@@ -289,6 +289,8 @@ class TickLoop:
                 location=a.location,
                 energy=config.world.starting_energy,
                 credits=config.world.starting_credits,
+                # Wave D2 / EM-158 — optional per-agent tier from world.yaml.
+                cadence_tier=getattr(a, "cadence_tier", "protagonist"),
             )
             for a in config.agents
         ]
@@ -493,6 +495,9 @@ class TickLoop:
                     "energy": round(agent.energy, 2),
                     "credits": agent.credits,
                     "day": world.day,
+                    # Wave D2 / EM-166 — additive observability keys.
+                    "cadence_tier": getattr(agent, "cadence_tier", "protagonist"),
+                    "reflex_streak": int(getattr(agent, "reflex_streak", 0)),
                 },
             })
 
@@ -513,7 +518,12 @@ class TickLoop:
                 events_to_emit = [raw_result]
 
             # 7 (domain action events) — emitted between action_chosen and action_resolved.
+            # Wave D2 / EM-166 — every turn event carries the acting agent's
+            # cadence_tier (additive payload key; reflex turns already carry
+            # payload.reflex from the runtime).
+            tier = getattr(agent, "cadence_tier", "protagonist")
             for evt in events_to_emit:
+                evt.setdefault("payload", {}).setdefault("cadence_tier", tier)
                 self._emit_event(evt)
 
             # 8. action_resolved span
@@ -527,7 +537,12 @@ class TickLoop:
                 "payload": {
                     "outcome": resolved.get("outcome", "ok"),
                     "state_deltas": resolved.get("state_deltas", {}),
-                    "routed_via": self._router.last_routed_via(profile_name),
+                    # Wave D2 / EM-159 — a reflex turn never routed anywhere.
+                    "routed_via": (
+                        None if trace.get("reflex")
+                        else self._router.last_routed_via(profile_name)
+                    ),
+                    "cadence_tier": tier,  # Wave D2 / EM-166 — additive
                 },
             })
 
@@ -1015,7 +1030,12 @@ class TickLoop:
         # present-but-null and the per-turn chain keeps its uniform shape.
         llm_attempts = trace.get("llm_attempts")
         if not isinstance(llm_attempts, list) or not llm_attempts:
-            llm_attempts = [{}]
+            # Wave D2 / EM-159 — a REFLEX turn made zero router calls BY
+            # DESIGN: emit NO llm_call rows for it (an empty span would
+            # pollute the usage-cap accounting and the free-scale call-count
+            # proof). Non-reflex turns keep the one empty span so the chain
+            # keeps its uniform pre-D2 shape.
+            llm_attempts = [] if trace.get("reflex") else [{}]
         reasoning = trace.get("reasoning", {}) or {}
         chosen = trace.get("action_chosen", {}) or {}
 
@@ -1096,7 +1116,7 @@ class TickLoop:
         usage = llm.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         finish_reason = llm.get("finish_reason")
-        return {
+        payload = {
             "gen_ai.request.model": llm.get("gen_ai.request.model", profile_name),
             "gen_ai.response.model": llm.get("gen_ai.response.model"),
             "gen_ai.usage.input_tokens": usage.get("input_tokens"),
@@ -1106,6 +1126,12 @@ class TickLoop:
             "cached": llm.get("cached", False),
             "attempt": llm.get("attempt", 1),
         }
+        # Wave D2 / EM-170 — ADDITIVE: only an attempt cancelled by the
+        # turn-latency guard carries `timed_out: true` (latency_ms is the real
+        # elapsed ms). Normal rows keep the exact §3.4 key set unchanged.
+        if llm.get("timed_out"):
+            payload["timed_out"] = True
+        return payload
 
     def _sim_time(self, tick: int) -> float:
         """Simulation seconds for a tick (event-log.md §2)."""

@@ -49,6 +49,11 @@ profiles:
 
 EMBEDDED_WORLD_YAML = """
 world:
+  # EM-175 — target roster size: pads from the persona library when `agents:`
+  # lists fewer; never truncates (a longer list always wins). Padded extras
+  # join at cadence_tier "supporting"; the hand-listed cast keeps whatever it
+  # declares (default protagonist). Citizen-N extras fill if the library runs
+  # short. MUST stay in sync with config/world.yaml.
   agent_count: 5
   tick_interval_seconds: 0.5
   turns_per_day: 20
@@ -64,33 +69,47 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+  # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
+  # config/world.yaml. 0/absent disables the guard entirely.
+  turn_llm_budget_seconds: 12
+  # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
+  # MUST stay in sync with config/world.yaml. Agent entries may also carry an
+  # optional `cadence_tier: protagonist|supporting|background` (EM-158).
+  cadence:
+    spontaneity_chance: 0.15
+    reflex_streak_limit: 8
+  # W15 / EM-155 — deterministic seed for the generated 3D city ring.
+  # MUST stay in sync with config/world.yaml.
+  city_seed: 1337
 
 places:
-  # Wave C / EM-147 — the district town (~15 places over the existing five
-  # kinds). MUST stay in sync with config/world.yaml's places block. The five
-  # original ids (plaza/market/townhall/commons/home) survive with their kinds
-  # so old snapshots and agent locations stay valid; `district` is the one
-  # additive optional key (core/market/residential/civic/farm).
-  # core — the heart of town
-  - { id: plaza,           name: "Central Plaza",     x: 500, y: 500, kind: social,     district: core,        description: "Open square where everyone mingles." }
-  - { id: well,            name: "The Old Well",      x: 510, y: 420, kind: social,     district: core,        description: "Mossy stone well where the day's gossip is drawn up with the water." }
-  # market — the working east end
-  - { id: market,          name: "Market",            x: 750, y: 400, kind: work,       district: market,      description: "Earn credits by working." }
-  - { id: forge,           name: "The Ember Forge",   x: 840, y: 340, kind: work,       district: market,      description: "Sparks and hammer-song; the smith pays good coin for steady hands." }
-  - { id: workshop,        name: "Tinker's Workshop", x: 820, y: 470, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
-  # civic — the quiet north-west
-  - { id: townhall,        name: "Town Hall",         x: 250, y: 350, kind: governance, district: civic,       description: "Propose and vote on rules." }
-  - { id: archive,         name: "The Records Hall",  x: 180, y: 260, kind: governance, district: civic,       description: "Dusty shelves of town ledgers, old maps, and older grievances." }
-  # residential — lamplit lanes to the south-west
-  - { id: home,            name: "Hearth",            x: 300, y: 650, kind: home,       district: residential, description: "Rest and recharge." }
-  - { id: rosehip_cottage, name: "Rosehip Cottage",   x: 210, y: 640, kind: home,       district: residential, description: "A snug cottage wrapped in climbing roses. Rest and recharge." }
-  - { id: mossy_row,       name: "Mossy Row",         x: 250, y: 740, kind: home,       district: residential, description: "A crooked lane of moss-roofed homes. Rest and recharge." }
-  - { id: lantern_loft,    name: "Lantern Loft",      x: 340, y: 740, kind: home,       district: residential, description: "An attic room above the lane, warm with lamplight. Rest and recharge." }
-  # farm — the wild south-east edge
-  - { id: commons,         name: "The Commons",       x: 500, y: 750, kind: wild,       district: farm,        description: "Forage for scraps." }
-  - { id: willow_pond,     name: "Willow Pond",       x: 610, y: 690, kind: wild,       district: farm,        description: "Still water under trailing willows; frogs, reeds, and easy foraging." }
-  - { id: orchard,         name: "Bramble Orchard",   x: 640, y: 790, kind: wild,       district: farm,        description: "Crab apples and brambles at the town's edge; sweet pickings in season." }
-  - { id: farmstead,       name: "Sunfall Farmstead", x: 730, y: 700, kind: work,       district: farm,        description: "Fields and a weathered barn; honest work from dawn to dusk." }
+  # Wave D1.5 / contracts/wave-d1.5.md — the city grid (~15 places over the
+  # existing five kinds). MUST stay in sync with config/world.yaml's places
+  # block. The five original ids (plaza/market/townhall/commons/home) survive
+  # with their kinds so old snapshots and agent locations stay valid;
+  # `district` is the one additive optional key
+  # (core/market/residential/civic/farm). Coordinates sit on the 5x5
+  # city-block centers (106/303/500/697/894 on each axis).
+  # core — the plaza blocks at the heart of the grid
+  - { id: plaza,           name: "Central Plaza",     x: 500, y: 500, kind: social,     district: core,        description: "Open square at the heart of the grid where everyone mingles." }
+  - { id: well,            name: "Fountain Court",    x: 500, y: 303, kind: social,     district: core,        description: "Plaza fountain where the day's gossip circles with the spray." }
+  # market — the working east blocks
+  - { id: market,          name: "Market Hall",       x: 697, y: 303, kind: work,       district: market,      description: "Earn credits by working." }
+  - { id: forge,           name: "The Steelworks",    x: 894, y: 303, kind: work,       district: market,      description: "Sparks and rolling steel; the mill pays good coin for steady hands." }
+  - { id: workshop,        name: "Tinker's Workshop", x: 894, y: 500, kind: work,       district: market,      description: "Cluttered benches of half-finished marvels; there is always paid work." }
+  # civic — the records corner, north-west
+  - { id: townhall,        name: "City Hall",         x: 106, y: 106, kind: governance, district: civic,       description: "Propose and vote on rules." }
+  - { id: archive,         name: "The Records Office", x: 303, y: 106, kind: governance, district: civic,      description: "Filing rows of city ledgers, old permits, and older grievances." }
+  # residential — lamplit blocks to the south-west
+  - { id: home,            name: "Hearth House",      x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
+  - { id: rosehip_cottage, name: "Rosehip Walk-up",   x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }
+  - { id: mossy_row,       name: "Mossy Row Flats",   x: 303, y: 894, kind: home,       district: residential, description: "A crooked row of ivy-clad flats. Rest and recharge." }
+  - { id: lantern_loft,    name: "Lantern Lofts",     x: 303, y: 697, kind: home,       district: residential, description: "Top-floor lofts above the avenue, warm with lamplight. Rest and recharge." }
+  # farm — the greenbelt park blocks of the south-east
+  - { id: commons,         name: "The Commons Park",  x: 697, y: 697, kind: wild,       district: farm,        description: "Forage for scraps." }
+  - { id: willow_pond,     name: "Willow Pond Park",  x: 697, y: 894, kind: wild,       district: farm,        description: "Still water under trailing willows; ducks, reeds, and easy foraging." }
+  - { id: orchard,         name: "Orchard Green",     x: 894, y: 894, kind: wild,       district: farm,        description: "Crab apples and brambles in a pocket park; sweet pickings in season." }
+  - { id: farmstead,       name: "Sunfall Depot",     x: 894, y: 697, kind: work,       district: farm,        description: "Loading docks and pallet rows; honest work from dawn to dusk." }
 
 agents:
   - { name: Ada,  personality: "Pragmatic engineer; values fairness, distrusts freeloaders.", profile: mock, location: plaza }
@@ -160,6 +179,10 @@ class AgentConfig:
     personality: str
     profile: str
     location: str
+    # Wave D2 / EM-158 — optional scheduler cadence tier for the seed agent
+    # (protagonist | supporting | background). ADDITIVE: default protagonist,
+    # so pre-D2 configs parse and behave identically.
+    cadence_tier: str = "protagonist"
 
 
 @dataclass
@@ -322,6 +345,27 @@ class ProcgenParams:
 
 
 @dataclass
+class CadenceParams:
+    """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
+    floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
+    like these defaults; the runtime reads it via the defensive _world_block_get
+    accessor with IDENTICAL defaults. EM-159 (salience gating) never ships
+    without EM-160 (this floor) — background agents must never flatten into
+    NPCs-on-rails.
+
+      spontaneity_chance  — seeded probability (0..1) that a due-but-NON-salient
+                            background turn takes a full LLM turn anyway (the
+                            wildcard half of the floor). Seeded from world
+                            state (agent id + tick hash) — deterministic,
+                            replay-safe. 0 disables the wildcard.
+      reflex_streak_limit — consecutive reflex-only due turns before a forced
+                            LLM "reassess" turn (the floor-timer half).
+    """
+    spontaneity_chance: float = 0.15
+    reflex_streak_limit: int = 8
+
+
+@dataclass
 class AnimalSeed:
     """W8 / EM-064 — a seed critter from the top-level `animals:` list. Spawned at
     world init when `world.animals.enabled`. `personality` is optional flavour fed
@@ -349,6 +393,19 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # Wave D2 / EM-170 — turn-latency guard: hard wall-clock budget (seconds)
+    # for ONE agent-turn LLM consult (router.chat, including the adapter's
+    # internal retry). On timeout the call is cancelled and the turn resolves
+    # via the existing idle-fallback path (reason `llm_timeout`) so a single
+    # slow call can never freeze the world (run 248: 14-32s stalls). The
+    # DATACLASS default is 0.0 = guard fully disabled = exactly today's
+    # behavior (tests build WorldParams directly); the shipped yamls set 12.
+    turn_llm_budget_seconds: float = 0.0
+    # W15 / EM-155 — deterministic seed for the generated 3D city ring (config
+    # `world.city_seed`). The engine copies it onto World and persists it in
+    # to_snapshot()/world_state, so live/replay/fork render the SAME city.
+    # Additive with a safe default — configs without the key are unchanged.
+    city_seed: int = 1337
     # W9 / EM-070 — survival pressure: energy below this threshold marks an agent
     # as starving (one-shot `agent_starving` warning + prompt urgency).
     starving_warn_threshold: float = 25.0
@@ -386,6 +443,10 @@ class WorldParams:
     commitments: CommitmentParams = field(default_factory=CommitmentParams)
     reflection: ReflectionParams = field(default_factory=ReflectionParams)
     procgen: ProcgenParams = field(default_factory=ProcgenParams)
+    # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity
+    # floor. Additive with engine-matching defaults, so a world.yaml without
+    # the `cadence` block behaves exactly as the shipped defaults.
+    cadence: CadenceParams = field(default_factory=CadenceParams)
 
 
 @dataclass
@@ -640,6 +701,40 @@ def _parse_procgen(raw: dict | None) -> ProcgenParams:
     )
 
 
+def _parse_cadence(raw: dict | None) -> CadenceParams:
+    """Parse the optional `world.cadence` block (Wave D2 / EM-159+160).
+    Absent/empty/malformed -> engine-matching defaults. spontaneity_chance is
+    clamped to 0..1; reflex_streak_limit to >= 1 (a 0/negative floor timer
+    would mean perpetual forced reassessment)."""
+    if not isinstance(raw, dict):
+        return CadenceParams()
+    d = CadenceParams()
+    try:
+        chance = float(raw.get("spontaneity_chance", d.spontaneity_chance))
+    except (TypeError, ValueError):
+        chance = d.spontaneity_chance
+    try:
+        limit = max(1, int(raw.get("reflex_streak_limit", d.reflex_streak_limit)))
+    except (TypeError, ValueError):
+        limit = d.reflex_streak_limit
+    return CadenceParams(
+        spontaneity_chance=max(0.0, min(1.0, chance)),
+        reflex_streak_limit=limit,
+    )
+
+
+# Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
+# kept literal here so the loader stays engine-import-free).
+_VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
+
+
+def _norm_cadence_tier(value: Any) -> str:
+    """Normalize an agent entry's optional cadence_tier; anything unknown or
+    absent falls back to protagonist (the zero-behavior-change default)."""
+    tier = str(value or "").strip().lower()
+    return tier if tier in _VALID_CADENCE_TIERS else "protagonist"
+
+
 def _parse_animal_seeds(raw: dict) -> list[AnimalSeed]:
     """Parse the top-level `animals:` seed list (the cat & dog). Absent -> [].
     Each entry needs species + name; location defaults to the first place."""
@@ -682,6 +777,10 @@ def _parse_world(
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        # Wave D2 / EM-170 — absent/0 ⇒ guard disabled (today's behavior).
+        turn_llm_budget_seconds=float(w.get("turn_llm_budget_seconds", 0) or 0),
+        # W15 / EM-155 — optional deterministic city seed; absent → 1337.
+        city_seed=int(w.get("city_seed", 1337)),
         starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
         auto_pause_on_extinction=bool(w.get("auto_pause_on_extinction", True)),
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
@@ -696,6 +795,7 @@ def _parse_world(
         commitments=_parse_commitments(w.get("commitments")),
         reflection=_parse_reflection(w.get("reflection")),
         procgen=_parse_procgen(w.get("procgen")),
+        cadence=_parse_cadence(w.get("cadence")),
     )
 
     places = [
@@ -718,11 +818,113 @@ def _parse_world(
             personality=a.get("personality", ""),
             profile=a["profile"],
             location=a.get("location", places[0].id if places else "plaza"),
+            # Wave D2 / EM-158 — optional per-agent tier; absent → protagonist.
+            cadence_tier=_norm_cadence_tier(a.get("cadence_tier")),
         )
         for a in raw.get("agents", [])
     ]
 
     return params, places, agents
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-175 — agent_count roster padding
+# ──────────────────────────────────────────────────────────────────────────────
+
+_CITIZEN_PERSONALITY = (
+    "An ordinary citizen of the town; even-keeled and adaptable, works a bit, "
+    "chats a bit, and mostly just gets by."
+)
+
+
+def _pad_agents(
+    agents: list[AgentConfig],
+    agent_count: int,
+    places: list[PlaceConfig],
+    profiles: list[ModelProfile],
+    personas: list[dict],
+) -> list[AgentConfig]:
+    """EM-175 — make `world.agent_count` real: pad, never truncate.
+
+    config/world.yaml has always promised agent_count is "used if `agents:`
+    not fully specified", but the padding was never implemented — the world
+    booted exactly the hand-listed cast. Rules, as shipped:
+
+      - len(agents) >= agent_count  ⇒  the list is returned UNCHANGED. The
+        hand-authored `agents:` list always wins; agent_count never truncates.
+      - Otherwise the roster pads from the persona library
+        (config/personas.yaml, EM-092). Cards whose name collides
+        (case-insensitively) with a listed agent are skipped. Each padded
+        agent takes the card's name + personality, the card's
+        suggested_profile when it names a registered profile (else a
+        round-robin pick across the non-mock profiles), the default place
+        (plaza when it exists, else the first place), and
+        cadence_tier "supporting" — extras at supporting keeps the free-tier
+        turn economics sane, while the hand-listed cast keeps whatever tier
+        it declares (default protagonist).
+      - If the library runs short, numbered citizens (Citizen-N, neutral
+        personality, round-robin across non-mock profiles) fill the rest, so
+        agent_count is ALWAYS honored.
+
+    Called by load_config() BEFORE the mock profile_override remap, so the
+    test suite's forced-mock path applies to padded agents too.
+    """
+    if agent_count <= len(agents):
+        return agents
+
+    place_ids = [p.id for p in places]
+    default_loc = (
+        "plaza" if "plaza" in place_ids
+        else (place_ids[0] if place_ids else "plaza")
+    )
+
+    profile_names = {p.name for p in profiles}
+    # Round-robin lanes for cards without a usable suggestion + Citizen-N fill.
+    rr_lanes = [p.name for p in profiles if p.adapter != "mock"] or ["mock"]
+    rr_cursor = 0
+
+    def _pick_profile(suggested: str = "") -> str:
+        nonlocal rr_cursor
+        if suggested and suggested in profile_names:
+            return suggested
+        lane = rr_lanes[rr_cursor % len(rr_lanes)]
+        rr_cursor += 1
+        return lane
+
+    used_names = {a.name.strip().lower() for a in agents}
+    out = list(agents)
+
+    for card in personas:
+        if len(out) >= agent_count:
+            break
+        name = str(card.get("name") or "").strip()
+        if not name or name.lower() in used_names:
+            continue
+        used_names.add(name.lower())
+        out.append(AgentConfig(
+            name=name,
+            personality=str(card.get("personality") or ""),
+            profile=_pick_profile(str(card.get("suggested_profile") or "")),
+            location=default_loc,
+            cadence_tier="supporting",
+        ))
+
+    n = 1
+    while len(out) < agent_count:
+        name = f"Citizen-{n}"
+        n += 1
+        if name.lower() in used_names:
+            continue
+        used_names.add(name.lower())
+        out.append(AgentConfig(
+            name=name,
+            personality=_CITIZEN_PERSONALITY,
+            profile=_pick_profile(),
+            location=default_loc,
+            cadence_tier="supporting",
+        ))
+
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -771,6 +973,13 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
             color="#2ecc71",
         ))
 
+    # EM-175 — honor world.agent_count: pad the roster from the persona
+    # library (then Citizen-N) when `agents:` lists fewer; never truncate.
+    # Runs BEFORE the mock override below so padded agents are remapped too.
+    agents = _pad_agents(
+        agents, world_params.agent_count, places, profiles, load_personas(),
+    )
+
     # If profile_override == "mock", remap all agents to mock profile
     if profile_override == "mock":
         agents = [
@@ -779,6 +988,7 @@ def load_config(profile_override: str | None = None) -> WorldConfig:
                 personality=a.personality,
                 profile="mock",
                 location=a.location,
+                cadence_tier=a.cadence_tier,  # Wave D2 / EM-158 — preserved
             )
             for a in agents
         ]
