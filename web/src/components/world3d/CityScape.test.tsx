@@ -21,7 +21,12 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import * as THREE from 'three';
 import type { Place } from '../../types';
-import { computeCityPlan, townCenter, CITY_PIECE_KEYS, TILE, type CityInstance, type CityPieceKey } from './cityLayout';
+import {
+  computeCityPlan,
+  CITY_PIECE_KEYS,
+  type CityInstance,
+  type CityPlan,
+} from './cityLayout';
 import { CITY_MODEL_REGISTRY } from './assets/cityModels';
 import type { ModelSpec } from './assets/models';
 
@@ -47,6 +52,7 @@ import {
   CityScape,
   CHUNK_SPLIT_4,
   CHUNK_SPLIT_8,
+  GRID_CENTER,
   chunkCount,
   chunkIndexOf,
   chunkInstances,
@@ -60,27 +66,28 @@ import {
 
 afterEach(cleanup);
 
-/** The Wave C 15-place district town (mirrors cityLayout.test.ts). */
+/** The Wave D1.5 15-place city (the frozen landmark table — ids, kinds and
+ *  districts unchanged from Wave C; positions snapped to the 5×5 grid). */
 const TOWN: Place[] = [
   { id: 'plaza', name: 'Central Plaza', x: 500, y: 500, kind: 'social', district: 'core', description: '' },
-  { id: 'well', name: 'The Old Well', x: 510, y: 420, kind: 'social', district: 'core', description: '' },
-  { id: 'market', name: 'Market', x: 750, y: 400, kind: 'work', district: 'market', description: '' },
-  { id: 'forge', name: 'The Ember Forge', x: 840, y: 340, kind: 'work', district: 'market', description: '' },
-  { id: 'workshop', name: "Tinker's Workshop", x: 820, y: 470, kind: 'work', district: 'market', description: '' },
-  { id: 'townhall', name: 'Town Hall', x: 250, y: 350, kind: 'governance', district: 'civic', description: '' },
-  { id: 'archive', name: 'The Records Hall', x: 180, y: 260, kind: 'governance', district: 'civic', description: '' },
-  { id: 'home', name: 'Hearth', x: 300, y: 650, kind: 'home', district: 'residential', description: '' },
-  { id: 'rosehip_cottage', name: 'Rosehip Cottage', x: 210, y: 640, kind: 'home', district: 'residential', description: '' },
-  { id: 'mossy_row', name: 'Mossy Row', x: 250, y: 740, kind: 'home', district: 'residential', description: '' },
-  { id: 'lantern_loft', name: 'Lantern Loft', x: 340, y: 740, kind: 'home', district: 'residential', description: '' },
-  { id: 'commons', name: 'The Commons', x: 500, y: 750, kind: 'wild', district: 'farm', description: '' },
-  { id: 'willow_pond', name: 'Willow Pond', x: 610, y: 690, kind: 'wild', district: 'farm', description: '' },
-  { id: 'orchard', name: 'Bramble Orchard', x: 640, y: 790, kind: 'wild', district: 'farm', description: '' },
-  { id: 'farmstead', name: 'Sunfall Farmstead', x: 730, y: 700, kind: 'work', district: 'farm', description: '' },
+  { id: 'well', name: 'Fountain Court', x: 500, y: 303, kind: 'social', district: 'core', description: '' },
+  { id: 'market', name: 'Market Hall', x: 697, y: 303, kind: 'work', district: 'market', description: '' },
+  { id: 'forge', name: 'The Steelworks', x: 894, y: 303, kind: 'work', district: 'market', description: '' },
+  { id: 'workshop', name: "Tinker's Workshop", x: 894, y: 500, kind: 'work', district: 'market', description: '' },
+  { id: 'townhall', name: 'City Hall', x: 106, y: 106, kind: 'governance', district: 'civic', description: '' },
+  { id: 'archive', name: 'The Records Office', x: 303, y: 106, kind: 'governance', district: 'civic', description: '' },
+  { id: 'home', name: 'Hearth House', x: 106, y: 697, kind: 'home', district: 'residential', description: '' },
+  { id: 'rosehip_cottage', name: 'Rosehip Walk-up', x: 106, y: 894, kind: 'home', district: 'residential', description: '' },
+  { id: 'mossy_row', name: 'Mossy Row Flats', x: 303, y: 894, kind: 'home', district: 'residential', description: '' },
+  { id: 'lantern_loft', name: 'Lantern Lofts', x: 303, y: 697, kind: 'home', district: 'residential', description: '' },
+  { id: 'commons', name: 'The Commons Park', x: 697, y: 697, kind: 'wild', district: 'farm', description: '' },
+  { id: 'willow_pond', name: 'Willow Pond Park', x: 697, y: 894, kind: 'wild', district: 'farm', description: '' },
+  { id: 'orchard', name: 'Orchard Green', x: 894, y: 894, kind: 'wild', district: 'farm', description: '' },
+  { id: 'farmstead', name: 'Sunfall Depot', x: 894, y: 697, kind: 'work', district: 'farm', description: '' },
 ];
 
 const PLAN = computeCityPlan({ places: TOWN });
-const CENTER = townCenter(TOWN);
+const CENTER = GRID_CENTER; // the D1.5 grid is origin-centered
 const SPEC: ModelSpec = { url: '/models/test.glb', scale: 2.0, yOffset: 0.1, rotation: Math.PI / 2 };
 
 function planTotal(): number {
@@ -108,6 +115,28 @@ describe('renderableEntries (plan → render mapping, rule 10)', () => {
     expect(mapped).toBe(
       planTotal() - PLAN.pieces.road_straight.length - PLAN.pieces.lamp.length,
     );
+  });
+
+  it('v2 plan additions (landmarks / landmark zone) are render-inert metadata', () => {
+    // The Wave D1.5 seam: CityPlan carries `landmarks` and may zone blocks
+    // 'landmark'. The renderer must consume the plan through `pieces` ONLY —
+    // landmark blocks emit no generated buildings (place anchors render via
+    // Building.tsx), so the additions change nothing about instancing.
+    const pieces = {} as CityPlan['pieces'];
+    for (const k of CITY_PIECE_KEYS) pieces[k] = [];
+    pieces.com_a = [
+      { x: 6.5, z: -6.5, rotY: 0 },
+      { x: -6.5, z: 6.5, rotY: Math.PI / 2 },
+    ];
+    const v2Plan: CityPlan = {
+      pieces,
+      blocks: [{ cx: 0, cz: 0, zone: 'landmark' }],
+      landmarks: { plaza: { x: 0, z: 0 } },
+      extent: 33,
+    };
+    const entries = renderableEntries(v2Plan, CITY_MODEL_REGISTRY);
+    expect(entries.map((e) => e.key)).toEqual(['com_a']);
+    expect(entries[0].instances).toHaveLength(2);
   });
 });
 
@@ -309,13 +338,14 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
     expect(straightChunks.length).toBeGreaterThan(1);
   });
 
-  it('keeps every emitted piece outside the historic core (EM-156 spot check)', () => {
-    // belt-and-braces over cityLayout's own tests: what CityScape RENDERS is
-    // the plan, and the plan keeps the core clear.
-    const all = CITY_PIECE_KEYS.flatMap((k: CityPieceKey) => PLAN.pieces[k]);
-    for (const inst of all) {
-      const d = Math.hypot(inst.x - CENTER.x, inst.z - CENTER.z);
-      expect(d).toBeGreaterThan(PLAN.extent / 2 - TILE); // coreRadius = extent/2
+  it('renders every plan instance exactly once across all chunks', () => {
+    // What CityScape RENDERS is the plan: the chunked instanced meshes must
+    // carry the full instance population, no piece lost, none duplicated.
+    const entries = renderableEntries(PLAN, CITY_MODEL_REGISTRY);
+    for (const e of entries) {
+      const chunked = chunkInstances(e.instances, CENTER).flat();
+      expect(chunked).toHaveLength(e.instances.length);
+      expect(new Set(chunked).size).toBe(e.instances.length);
     }
   });
 });

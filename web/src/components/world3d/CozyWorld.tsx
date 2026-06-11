@@ -52,7 +52,10 @@ import type { AnimalModelId } from '../../lib/animalIdentity';
 preloadHeroModels();
 
 /**
- * Wave D1 (EM-154): warm the city-kit GLBs the same way. Rejections are
+ * Wave D1 (EM-154): warm the city-kit GLBs the same way. Both preload lists
+ * derive from the live registries (allModelSpecs / allCityModelSpecs), so the
+ * Wave D1.5 asset swap — medieval kit deleted, city kits shared between the
+ * registries — keeps them correct with no hand-kept url list. Rejections are
  * handled — drei's preload routes failures through suspend-react's internal
  * catch (the error surfaces only at render time, where CityScape's per-piece
  * ModelBoundary skips the piece), and the try/catch guards any synchronous
@@ -98,11 +101,12 @@ const BUBBLE_LIFETIME_MS = 5200;
 const MAX_BUBBLES_PER_AGENT = 3;
 const SPEECH_TRUNCATE = 120;
 
-// ── EM-095 camera constants (Wave D1 / EM-154: retuned so the generated city
-// ring reads from the default framing and the user can pan/zoom out to it) ──
-const DEFAULT_CAMERA = new THREE.Vector3(46, 38, 46);
+// ── EM-095 camera constants (Wave D1.5: retuned for ONE compact dense 66u
+// city — the default framing shows the whole grid, blocks and landmarks
+// legible, matching the EW reference) ──
+const DEFAULT_CAMERA = new THREE.Vector3(54, 46, 54);
 const DEFAULT_TARGET = new THREE.Vector3(0, 1.5, 0);
-/** The orbit target stays within this XZ box (pan bounds: town + city ring). */
+/** The orbit target stays within this XZ box (pan bounds: city + apron). */
 const PAN_BOUND = WORLD_REACH * 0.9;
 /** Comfortable viewing radius zoom-to-place eases toward. */
 const FOCUS_DOLLY_DIST = 20;
@@ -286,7 +290,7 @@ function CameraDirector({
       enableDamping
       dampingFactor={0.08}
       minDistance={14}
-      maxDistance={160}
+      maxDistance={130}
       minPolarAngle={0.25}
       maxPolarAngle={Math.PI / 2.3}
       target={[DEFAULT_TARGET.x, DEFAULT_TARGET.y, DEFAULT_TARGET.z]}
@@ -503,7 +507,7 @@ export function CozyWorld({
         shadows
         dpr={[1, 2]}
         gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
-        camera={{ position: [46, 38, 46], fov: 42, near: 0.1, far: 420 }}
+        camera={{ position: [54, 46, 54], fov: 42, near: 0.1, far: 420 }}
       >
         <color attach="background" args={[GOLDEN_HOUR.background]} />
         {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
@@ -626,12 +630,13 @@ function Scene({
       {/* Faint warm ambient only — the directional must dominate so the toon
           bands read; it also keeps shadows warm, never black. */}
       <ambientLight intensity={0.15} color={GOLDEN_HOUR.ambient} />
-      {/* EM-154: shadow frustum nudged out (±52 → ±64) to take in the
-          commercial ring hugging the historic core — deliberately NOT the
-          whole city: the far ring sits outside the shadow frustum so the
-          2048 map keeps its texel density on the core, where the eye lives.
-          Fog pushed out (70/160 → 90/300) so the city ring reads instead of
-          dissolving; same low golden-hour sun ANGLE as Wave C. */}
+      {/* Wave D1.5: the whole 66u city fits ONE shadow frustum now — ±48
+          covers the grid's ~47u half-diagonal (verified against the light
+          axis), so every block gets shadows AND the 2048 map gains texel
+          density over D1's ±64. Fog pulled back in (90/300 → 75/230): the
+          far half of the compact grid picks up gentle depth haze and nothing
+          ever dissolves inside the 130u zoom range; same low golden-hour sun
+          ANGLE as Wave C. */}
       <directionalLight
         position={[27, 13.5, 12]}
         intensity={2.2}
@@ -641,13 +646,13 @@ function Scene({
         shadow-mapSize-height={2048}
         shadow-camera-near={1}
         shadow-camera-far={150}
-        shadow-camera-left={-64}
-        shadow-camera-right={64}
-        shadow-camera-top={64}
-        shadow-camera-bottom={-64}
+        shadow-camera-left={-48}
+        shadow-camera-right={48}
+        shadow-camera-top={48}
+        shadow-camera-bottom={-48}
         shadow-bias={-0.0004}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 90, 300]} />
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 75, 230]} />
 
       <Ground places={places} />
       <Scenery places={places} />
@@ -655,8 +660,9 @@ function Scene({
       <Foliage places={places} />
       <TownProps places={places} />
 
-      {/* Wave D1 (EM-154/156/157): the generated city ring — non-interactive
-          instanced set dressing AROUND the historic core, never inside it. */}
+      {/* Wave D1.5: THE city — non-interactive instanced set dressing for
+          the whole compact grid (roads, zoned blocks, props, parked cars);
+          the places' own anchors render via <Building> below. */}
       <CityScape world={world} />
 
       {places.map((p) => (

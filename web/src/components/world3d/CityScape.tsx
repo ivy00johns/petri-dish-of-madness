@@ -1,11 +1,19 @@
 /**
- * CityScape — the instanced render path for the EW-grade generated city ring
- * (EM-154, Wave D1d), wrapping the Wave C historic core in zoned districts of
- * Kenney/KayKit set dressing.
+ * CityScape — the instanced render path for THE city (EM-154, re-aimed by
+ * Wave D1.5): the compact dense EW-style grid the sim lives on — roads,
+ * fully-developed zoned blocks, street props and parked cars in Kenney/KayKit
+ * set dressing. Pure renderer: ALL layout policy lives in cityLayout.
  *
- * Pipeline: computeCityPlan (D1b, deterministic — seed = world.city_seed ??
- * 1337) × CITY_MODEL_REGISTRY (D1a) → one raw THREE.InstancedMesh per
+ * Pipeline: computeCityPlan (deterministic — seed = world.city_seed ?? 1337)
+ * × CITY_MODEL_REGISTRY → one raw THREE.InstancedMesh per
  * (piece key × spatial chunk × material part).
+ *
+ *   • V2 PLAN (Wave D1.5 seam): CityPlan carries `landmarks` (place id →
+ *     snapped block-center anchor) and blocks may be zoned 'landmark'. Both
+ *     are LAYOUT metadata — landmark blocks emit no generated buildings (the
+ *     place anchors themselves render through Building.tsx/PLACE_MODELS), so
+ *     this renderer consumes them implicitly through `pieces`: nothing extra
+ *     to draw, and the instanced path needs no policy of its own.
  *
  *   • PLAN MEMO: the plan is cached on a content signature of (places,
  *     city_seed) — snapshot polling replaces the world object every tick, so
@@ -18,7 +26,7 @@
  *     so a car key still costs one draw call per chunk. Parts are cached per
  *     scene; materials are the shared toon conversions (never cloned).
  *   • CHUNKING: instances split into 1/4/8 spatial chunks (quadrants/octants
- *     around the town centroid) by count, so frustum culling can drop the
+ *     around the grid center) by count, so frustum culling can drop the
  *     city behind the camera without exploding draw calls. Per-chunk bounding
  *     spheres are computed from the real instance matrices.
  *   • NON-INTERACTIVE (EM-157): set dressing carries NO pointer handlers and
@@ -41,7 +49,6 @@ import type { Place, WorldState } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
-  townCenter,
   type CityInstance,
   type CityPieceKey,
   type CityPlan,
@@ -55,8 +62,12 @@ import { ModelBoundary } from './ModelBoundary';
 
 /** Piece keys with more instances than this split into 4 quadrant chunks. */
 export const CHUNK_SPLIT_4 = 96;
-/** …and beyond this, into 8 octant chunks (road_straight is ~700 alone). */
+/** …and beyond this, into 8 octant chunks (road_straight dominates). */
 export const CHUNK_SPLIT_8 = 360;
+
+/** The chunking origin: the D1.5 grid is centered on the world origin
+ *  (cityLayout's frozen plan), so spatial buckets pivot there. */
+export const GRID_CENTER: { x: number; z: number } = { x: 0, z: 0 };
 
 /** How many spatial chunks a piece key with `n` instances gets (1 | 4 | 8). */
 export function chunkCount(n: number): number {
@@ -65,7 +76,7 @@ export function chunkCount(n: number): number {
 
 /**
  * Which chunk an instance belongs to: quadrant (count 4) or angular octant
- * (count 8) around the town centroid. Pure + deterministic, so the same plan
+ * (count 8) around the grid center. Pure + deterministic, so the same plan
  * always buckets identically.
  */
 export function chunkIndexOf(
@@ -258,7 +269,7 @@ export function extractInstanceParts(scene: THREE.Object3D): CityPart[] {
 // ── Plan memo (content-keyed — see file header) ──────────────────────────────
 
 /** Everything the plan depends on: seed + each place's position/kind/district
- *  (deriveCoreRadius reads computeTownLayout, which reads kind + district). */
+ *  (cityLayout zones generated blocks from the nearest landmark's district). */
 export function citySignature(
   places: readonly Place[],
   citySeed: number | null | undefined,
@@ -271,7 +282,8 @@ export function citySignature(
 }
 
 /**
- * The deterministic city plan + town centroid, cached on citySignature so
+ * The deterministic city plan + chunking center (GRID_CENTER — the D1.5 grid
+ * is origin-centered by the frozen plan), cached on citySignature so
  * per-tick world-object churn never rebuilds instance buffers.
  */
 export function useCityPlan(
@@ -288,7 +300,7 @@ export function useCityPlan(
     ref.current = {
       sig,
       plan: computeCityPlan({ places, city_seed: citySeed }),
-      center: townCenter(places),
+      center: GRID_CENTER,
     };
   }
   return ref.current;
@@ -377,9 +389,11 @@ function CityPiece({
 }
 
 /**
- * The generated city ring. Mounted by CozyWorld inside the canvas, OUTSIDE
- * the historic-core groups — the Wave C town renders exactly as before
- * (EM-156); this is pure set dressing around it (EM-157).
+ * THE city (Wave D1.5). Mounted by CozyWorld inside the canvas — every road
+ * tile, generated building, prop and parked car of the compact grid, as pure
+ * non-interactive set dressing (EM-157). Place anchors, agent-built
+ * structures, villagers and critters render through their own components on
+ * top of this.
  */
 export function CityScape({ world }: { world: Pick<WorldState, 'places' | 'city_seed'> }) {
   const { plan, center } = useCityPlan(world.places, world.city_seed);
