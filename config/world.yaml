@@ -33,6 +33,22 @@ world:
   # to disable the guard entirely — exactly the pre-EM-170 behavior.
   turn_llm_budget_seconds: 12
 
+  # Wave D3 / EM-187 — resume-on-boot. On startup the backend resumes the most
+  # recent persisted run from its latest snapshot (tick > 0) as a NEW run row
+  # with fork lineage (forked_from / forked_at_tick — the run browser's
+  # lineage chip applies), announced by one `run_resumed` feed event. Resume
+  # happens only when the world-defining config still matches the parent
+  # run's (agent roster after EM-175 padding, places set, city_seed); any
+  # mismatch logs a reason and starts fresh. Tunable params (cadence, budgets,
+  # lane_failover, cap_governor, …) always adopt the values in this file and
+  # never block a resume. Runs whose only snapshot is tick 0 are skipped (they
+  # ARE the fresh state), so uvicorn hot-reload streaks don't chain empty
+  # lineage. POST /api/control/reset stays the explicit fresh start — and a
+  # reset-created run is itself resumable later. Set false for the
+  # byte-identical pre-D3 boot (always a fresh run). MUST stay in sync with
+  # the default-config mirror in backend/petridish/config/loader.py.
+  resume_on_boot: true
+
   # Wave D3 / EM-177 — lane failover with recovery probes. A lane whose recent
   # outcome window (EM-135, last 6 parse outcomes) holds >= sick_threshold
   # turn-budget timeouts is SICK: its agents' calls are detoured per-call to

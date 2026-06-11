@@ -72,6 +72,13 @@ world:
   # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
   # config/world.yaml. 0/absent disables the guard entirely.
   turn_llm_budget_seconds: 12
+  # Wave D3 / EM-187 — resume-on-boot: at startup, resume the most recent run
+  # whose latest snapshot tick is > 0 as a NEW run row with fork lineage,
+  # provided the world-defining config (roster/places/city_seed) still
+  # matches; tunable params always adopt the current config. Boot behavior
+  # only — it never rides snapshots. MUST stay in sync with
+  # config/world.yaml. false = byte-identical pre-D3 boot (always fresh).
+  resume_on_boot: true
   # Wave D3 / EM-177 — lane failover with recovery probes. MUST stay in sync
   # with config/world.yaml. enabled:false = byte-identical pre-D3 routing.
   lane_failover:
@@ -453,6 +460,14 @@ class WorldParams:
     # DATACLASS default is 0.0 = guard fully disabled = exactly today's
     # behavior (tests build WorldParams directly); the shipped yamls set 12.
     turn_llm_budget_seconds: float = 0.0
+    # Wave D3 / EM-187 — resume-on-boot (config `world.resume_on_boot`). When
+    # true (default), startup resumes the most recent run whose latest
+    # snapshot tick is > 0 as a NEW run row with fork lineage — provided the
+    # world-defining config (agent roster, places set, city_seed) still
+    # matches the parent run's; tunable params always adopt the current
+    # config. BOOT behavior only — it does not ride snapshots. False ⇒
+    # byte-identical pre-D3 boot (always a fresh run).
+    resume_on_boot: bool = True
     # W15 / EM-155 — deterministic seed for the generated 3D city ring (config
     # `world.city_seed`). The engine copies it onto World and persists it in
     # to_snapshot()/world_state, so live/replay/fork render the SAME city.
@@ -870,6 +885,8 @@ def _parse_world(
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
         # Wave D2 / EM-170 — absent/0 ⇒ guard disabled (today's behavior).
         turn_llm_budget_seconds=float(w.get("turn_llm_budget_seconds", 0) or 0),
+        # Wave D3 / EM-187 — absent ⇒ resume-on-boot ON (the shipped default).
+        resume_on_boot=bool(w.get("resume_on_boot", True)),
         # W15 / EM-155 — optional deterministic city seed; absent → 1337.
         city_seed=int(w.get("city_seed", 1337)),
         starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),

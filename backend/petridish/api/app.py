@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..config.loader import load_config, load_personas, WorldConfig
 from ..engine.world import World, AgentState, PlaceState
-from ..engine.loop import TickLoop
+from ..engine.loop import TickLoop, _run_config_json
 from ..agents.runtime import AgentRuntime
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
@@ -243,20 +243,255 @@ def _emit_lane_detour(payload: dict) -> None:
         log.debug("lane_detour emission failed: %s", exc)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Snapshot-restore machinery shared by POST /api/runs/fork (W11b EM-101) and
+# resume-on-boot (Wave D3 EM-187). Factored from the fork endpoint so resume
+# reuses the exact same restore + spin-up path instead of duplicating it.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _restore_world_from_snapshot(
+    state: dict, params: Any = None, place_overrides: list | None = None
+) -> World:
+    """Rebuild a live World from a snapshot `state` via the EM-101 seam
+    (`World.from_snapshot`) — the shared restore half of fork and resume.
+
+    ADDITIVE to the contracted 2-arg seam: when the engine's from_snapshot
+    accepts `params`, the given WorldParams ride along (fork passes the PARENT
+    run's params; resume passes the CURRENT config's — snapshot state stays
+    authoritative over params on restore either way). Signature-sniffed so the
+    contracted form keeps working; exceptions propagate to the caller (fork
+    maps them to 400, resume falls back to a fresh boot)."""
+    kwargs: dict = {"place_overrides": place_overrides}
+    try:
+        import inspect
+        if params is not None and \
+                "params" in inspect.signature(World.from_snapshot).parameters:
+            kwargs["params"] = params
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("could not sniff from_snapshot params support: %s", exc)
+        kwargs.pop("params", None)
+    return World.from_snapshot(state, **kwargs)
+
+
+def _spin_up_run_from_world(
+    new_world: World,
+    *,
+    parent_run_id: int,
+    snapshot_tick: int,
+    config_json: str,
+) -> tuple[AgentRuntime, TickLoop, int]:
+    """Wire a snapshot-restored world into a NEW run — the shared spin-up half
+    of fork and resume-on-boot: router reassignment (vanished profiles degrade
+    to mock), world injection for the mock providers, the EM-168 usage-window
+    probe, a decision-cache flush (audit B12: parent-run cached decisions must
+    not serve here), a fresh runtime + loop, and the new runs row with fork
+    lineage (forked_from / forked_at_tick) re-seeded with places + agents.
+    The caller swaps the module singletons and emits its own lineage event
+    (run_forked / run_resumed)."""
+    for agent in new_world.agents.values():
+        try:
+            _router.reassign(agent.id, agent.profile)
+        except ValueError:
+            # Profile vanished from the registry since the parent run: degrade
+            # to mock (always present) rather than failing the restore.
+            _router.reassign(agent.id, "mock")
+            agent.profile = "mock"
+    _router.inject_world(new_world)
+    # Wave D3 / EM-168 — re-wire the usage-window probe onto the restored world
+    # so cap-governor demotions carried by the snapshot still lift at the
+    # tracker's day rollover.
+    set_probe = getattr(new_world, "set_usage_window_probe", None)
+    if callable(set_probe):
+        set_probe(_usage_alert_window)
+    clear_cache = getattr(_router, "clear_cache", None)
+    if callable(clear_cache):
+        clear_cache()
+
+    new_runtime = AgentRuntime(new_world, _router)
+    new_loop = TickLoop(
+        world=new_world,
+        runtime=new_runtime,
+        repo=_repo,
+        router=_router,
+        broadcaster=_broadcast,
+    )
+    new_run_id = _repo.start_run(
+        config_json, forked_from=parent_run_id, forked_at_tick=snapshot_tick
+    )
+    new_loop._run_id = new_run_id
+    _repo.save_places(new_run_id, list(new_world.places.values()))
+    for agent in new_world.agents.values():
+        _repo.save_agent(new_run_id, agent, new_world.tick)
+    return new_runtime, new_loop, new_run_id
+
+
+def _resume_block_reason(
+    parent_run: dict, snapshot_state: dict, config: WorldConfig
+) -> str | None:
+    """Wave D3 / EM-187 §B4.3 — the config-compatibility guard. None ⇒ resume;
+    else a short reason for the boot log (log.info, no feed noise).
+
+    WORLD-DEFINING bits only: agent roster (names, after EM-175 padding — both
+    the parent's stored config_json and the current config are the padded
+    effective rosters of their respective boots), places set, and city_seed.
+    Tunable params (cadence, budgets, lane_failover, cap_governor, …) adopt
+    the CURRENT config and never block a resume."""
+    try:
+        parent_cfg = json.loads(parent_run.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        parent_cfg = {}
+    if not isinstance(parent_cfg, dict):
+        parent_cfg = {}
+
+    # Roster: names are the stable identity (agent ids are minted per run).
+    parent_agents = parent_cfg.get("agents")
+    if not isinstance(parent_agents, list):
+        # Legacy/foreign blob with no roster: fail closed — never resume into
+        # a world we cannot prove matches.
+        return f"run {parent_run.get('id')} stored no agent roster"
+    parent_names = sorted(
+        str(a.get("name"))
+        for a in parent_agents
+        if isinstance(a, dict) and a.get("name")
+    )
+    current_names = sorted(a.name for a in config.agents)
+    if parent_names != current_names:
+        return (
+            f"agent roster changed (run {parent_run.get('id')}: "
+            f"{parent_names} vs current: {current_names})"
+        )
+
+    # Places set: stored in config_json since EM-187; legacy rows fall back to
+    # the snapshot's geometry — which IS what from_snapshot would restore.
+    parent_places = parent_cfg.get("places")
+    if isinstance(parent_places, list):
+        parent_place_ids = sorted(str(p) for p in parent_places)
+    else:
+        parent_place_ids = sorted(
+            str(d.get("id"))
+            for d in (snapshot_state.get("places") or [])
+            if isinstance(d, dict) and d.get("id")
+        )
+    current_place_ids = sorted(p.id for p in config.places)
+    if parent_place_ids != current_place_ids:
+        return (
+            f"places set changed (run {parent_run.get('id')}: "
+            f"{parent_place_ids} vs current: {current_place_ids})"
+        )
+
+    # city_seed: world-defining (the 3D city renders as f(snapshot, seed)).
+    parent_world = parent_cfg.get("world")
+    parent_world = parent_world if isinstance(parent_world, dict) else {}
+    try:
+        parent_seed = int(parent_world.get("city_seed", 1337))
+    except (TypeError, ValueError):
+        parent_seed = 1337
+    current_seed = int(getattr(config.world, "city_seed", 1337))
+    if parent_seed != current_seed:
+        return f"city_seed changed ({parent_seed} -> {current_seed})"
+
+    return None
+
+
+def _try_resume_on_boot() -> bool:
+    """Wave D3 / EM-187 — resume-on-boot. Called from lifespan AFTER
+    _build_world set the module singletons but BEFORE the fresh TickLoop /
+    init_run exist. When `world.resume_on_boot` (default true) and the most
+    recent run with a >tick-0 snapshot is config-compatible, rebuild the world
+    from that snapshot (CURRENT config params + snapshot state) via the shared
+    fork machinery, start a NEW run row with fork lineage, emit ONE
+    `run_resumed` event into the new run, and swap the world/runtime/loop
+    singletons. Returns True when the boot was resumed (the caller then skips
+    the fresh init_run). Any mismatch or failure logs ONE info reason and
+    falls back to the fresh boot — resume must never stop the backend from
+    starting. `resume_on_boot: false` returns immediately (no DB reads):
+    byte-identical pre-D3 boot."""
+    global _world, _runtime, _loop
+
+    if _config is None or _repo is None:
+        return False
+    if not bool(getattr(_config.world, "resume_on_boot", True)):
+        return False
+    finder = getattr(_repo, "latest_resumable_run", None)
+    if not callable(finder):  # pragma: no cover - defensive
+        return False
+    try:
+        found = finder()
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("resume-on-boot: snapshot lookup failed (%s) — fresh run", exc)
+        return False
+    if found is None:
+        return False  # nothing resumable: fresh run exactly as today
+
+    parent = found["run"]
+    snapshot_tick = int(found["snapshot"]["tick"])
+    state = found["snapshot"]["state"]
+    reason = _resume_block_reason(parent, state, _config)
+    if reason is not None:
+        log.info("resume-on-boot: config mismatch — starting a fresh run (%s)", reason)
+        return False
+    try:
+        # CURRENT config's params + the snapshot's state (snapshot stays
+        # authoritative on restore) — tunables adopt today's world.yaml.
+        new_world = _restore_world_from_snapshot(state, _config.world)
+    except Exception as exc:
+        log.info("resume-on-boot: snapshot restore failed (%s) — fresh run", exc)
+        return False
+
+    new_runtime, new_loop, new_run_id = _spin_up_run_from_world(
+        new_world,
+        parent_run_id=int(parent["id"]),
+        snapshot_tick=snapshot_tick,
+        config_json=_run_config_json(_config),  # tunables: the CURRENT config
+    )
+    _world, _runtime, _loop = new_world, new_runtime, new_loop
+
+    # ONE system event announces the resume (§B4.2 feed transparency).
+    new_loop._emit_event({
+        "kind": "run_resumed",
+        "actor_id": None,
+        "actor_type": "system",
+        "text": f"▶ resumed run {parent['id']} from tick {snapshot_tick}",
+        "payload": {
+            "parent_run_id": int(parent["id"]),
+            "snapshot_tick": snapshot_tick,
+        },
+    })
+    # Seed critters the snapshot does NOT already carry (§B4.4 — e.g. animals
+    # newly enabled since the parent run); never a duplicate cat/dog.
+    new_loop._spawn_seed_animals(_config)
+    # Snapshot the resumed base (after the event: a snapshot at tick T includes
+    # all tick-T events, event-log.md §boundary) so replay has its base.
+    new_loop._save_snapshot(new_world.tick)
+    log.info(
+        "resume-on-boot: resumed run %s from tick %s as run %s",
+        parent["id"], snapshot_tick, new_run_id,
+    )
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _world, _router, _runtime, _repo, _loop, _config
 
     _config = load_config()
     _world, _router, _runtime, _repo = _build_world(_config)
-    _loop = TickLoop(
-        world=_world,
-        runtime=_runtime,
-        repo=_repo,
-        router=_router,
-        broadcaster=_broadcast,
-    )
-    _loop.init_run(_config)
+    # Wave D3 / EM-187 — resume-on-boot: when a config-compatible run with a
+    # >tick-0 snapshot exists (and world.resume_on_boot, default true), the
+    # fresh world built above is replaced by the snapshot-restored one and a
+    # NEW lineage-stamped run row starts; otherwise (or when disabled) the
+    # boot below is byte-identical to the pre-D3 fresh start. All the D3
+    # wiring that follows (mock-world injection, usage-alert + lane-event
+    # sinks, usage-window probe) targets the post-resume singletons either way.
+    if not _try_resume_on_boot():
+        _loop = TickLoop(
+            world=_world,
+            runtime=_runtime,
+            repo=_repo,
+            router=_router,
+            broadcaster=_broadcast,
+        )
+        _loop.init_run(_config)
     # Inject world reference into mock providers for dynamic voting
     _router.inject_world(_world)
     # W11b / EM-083 (platform half) — route usage_alert payloads from the
@@ -1087,70 +1322,41 @@ async def fork_run(body: ForkBody):
         raise HTTPException(
             503, "engine fork support (World.from_snapshot) not available yet"
         )
-    kwargs: dict = {"place_overrides": overrides}
-    # ADDITIVE to the contracted seam: when the engine accepts `params`, carry
-    # the parent run's world params into the fork (else it defaults to fresh
-    # WorldParams). Signature-sniffed so the contracted 2-arg form keeps working.
+    # Carry the parent run's world params into the fork (the shared restore
+    # helper signature-sniffs `params` support, so the contracted 2-arg form
+    # keeps working; resume-on-boot uses the same helper with CURRENT params).
+    parent_params = None
     try:
-        import inspect
-        if "params" in inspect.signature(World.from_snapshot).parameters and \
-                isinstance(child_cfg.get("world"), dict):
+        if isinstance(child_cfg.get("world"), dict):
             from ..config.loader import _parse_world
             parent_params, _, _ = _parse_world({"world": child_cfg["world"]})
-            kwargs["params"] = parent_params
     except Exception as exc:  # pragma: no cover - defensive
         log.debug("could not derive parent world params for fork: %s", exc)
-        kwargs.pop("params", None)
+        parent_params = None
     try:
-        new_world = World.from_snapshot(base["state"], **kwargs)
+        new_world = _restore_world_from_snapshot(
+            base["state"], parent_params, place_overrides=overrides
+        )
     except (TypeError, ValueError, KeyError) as exc:
         raise HTTPException(400, f"invalid fork state/overrides: {exc}")
 
     # ── Swap: fork is "reset to a computed state". Retire the old loop, keep
     # the SAME repo (one DB = one runs table) and the SAME router (profiles +
-    # usage-alert tracker survive); rebuild runtime + loop around the new world.
+    # usage-alert tracker survive); the shared spin-up helper rebuilds
+    # runtime + loop around the new world and stamps the lineage run row
+    # (config carried from the parent + the forked_from marker,
+    # event-log.md v1.3.0 note 4).
     old_loop = _loop
     await _retire_loop(old_loop)
 
-    for agent in new_world.agents.values():
-        try:
-            _router.reassign(agent.id, agent.profile)
-        except ValueError:
-            # Profile vanished from the registry since the parent run: degrade
-            # to mock (always present) rather than failing the fork.
-            _router.reassign(agent.id, "mock")
-            agent.profile = "mock"
-    _router.inject_world(new_world)
-    # Wave D3 / EM-168 — re-wire the usage-window probe onto the forked world
-    # so restored cap-governor demotions (carried by the snapshot) still lift
-    # at the tracker's day rollover.
-    set_probe = getattr(new_world, "set_usage_window_probe", None)
-    if callable(set_probe):
-        set_probe(_usage_alert_window)
-    clear_cache = getattr(_router, "clear_cache", None)
-    if callable(clear_cache):
-        clear_cache()  # audit B12: parent-run cached decisions must not serve here
-
-    new_runtime = AgentRuntime(new_world, _router)
-    new_loop = TickLoop(
-        world=new_world,
-        runtime=new_runtime,
-        repo=_repo,
-        router=_router,
-        broadcaster=_broadcast,
-    )
-
-    # ── New run row: config carried from the parent + a forked_from marker,
-    # lineage stamped in the dedicated columns (event-log.md v1.3.0 note 4). ──
     child_cfg["forked_from"] = body.run_id
     child_cfg["forked_at_tick"] = actual_tick
-    new_run_id = _repo.start_run(
-        json.dumps(child_cfg), forked_from=body.run_id, forked_at_tick=actual_tick
+    new_runtime, new_loop, new_run_id = _spin_up_run_from_world(
+        new_world,
+        parent_run_id=body.run_id,
+        snapshot_tick=actual_tick,
+        config_json=json.dumps(child_cfg),
     )
-    new_loop._run_id = new_run_id
-    _repo.save_places(new_run_id, list(new_world.places.values()))
-    for agent in new_world.agents.values():
-        _repo.save_agent(new_run_id, agent, new_world.tick)
 
     # Swap the module singletons; the forked run is now "the" world, PAUSED.
     new_world.running = False
