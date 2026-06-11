@@ -21,12 +21,38 @@ from commercial games.
 | Kenney Fantasy Town Kit 2.0 — round fountain | `web/public/models/kenney-fantasy-town/fountain.glb` (~102 KB) | [kenney.nl](https://kenney.nl/assets/fantasy-town-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `monument` building variant |
 | Quaternius — animated Cat | `web/public/models/quaternius/cat.glb` (~91 KB) | [Poly Pizza](https://poly.pizza/m/2f54vbV0In) (mirror of the Quaternius pack) | Quaternius ([quaternius.com](https://quaternius.com)) | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | Critter cat (EM-124). Clips renamed to drop armature prefixes: Idle, Walk, Jump, Dance, Death, Bite_Front, HitRecieve, No, Yes |
 | Quaternius — animated Dog | `web/public/models/quaternius/dog.glb` (~270 KB) | [Poly Pizza](https://poly.pizza/m/2kUk0QqpCg) (mirror of the Quaternius pack) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | Critter dog (EM-124). Clips renamed to drop armature prefixes: Idle, Walk, Run, Idle_Eating, Jump_Start, Jump_Loop, Headbutt, Death |
+| Kenney City Kit Roads 2.0 — road straight | `web/public/models/kenney-city/road-straight.glb` (~12 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-roads) | Kenney ([kenney.nl](https://www.kenney.nl)) | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (per bundled `License.txt`) | `road_straight` city piece (EM-152, `CITY_MODEL_REGISTRY`) |
+| Kenney City Kit Roads 2.0 — road bend | `web/public/models/kenney-city/road-bend.glb` (~22 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-roads) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `road_corner` city piece |
+| Kenney City Kit Roads 2.0 — road intersection (T) | `web/public/models/kenney-city/road-intersection.glb` (~13 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-roads) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `road_tee` city piece |
+| Kenney City Kit Roads 2.0 — road crossroad | `web/public/models/kenney-city/road-crossroad.glb` (~15 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-roads) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `road_cross` city piece |
+| Kenney City Kit Roads 2.0 — road end (round) | `web/public/models/kenney-city/road-end-round.glb` (~20 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-roads) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `road_end` city piece (caps roads at the historic-core boundary, EM-156) |
+| Kenney City Kit Roads 2.0 — curved streetlight | `web/public/models/kenney-city/lamp-curved.glb` (~15 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-roads) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `lamp` street prop |
+| Kenney City Kit Commercial 2.1 — building A | `web/public/models/kenney-city/commercial-a.glb` (~84 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-commercial) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `com_a` city building |
+| Kenney City Kit Commercial 2.1 — building G | `web/public/models/kenney-city/commercial-g.glb` (~123 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-commercial) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `com_b` city building |
+| Kenney City Kit Commercial 2.1 — building E | `web/public/models/kenney-city/commercial-e.glb` (~97 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-commercial) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `com_c` city building (wide storefront) |
+| Kenney City Kit Commercial 2.1 — building N | `web/public/models/kenney-city/civic-n.glb` (~241 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-commercial) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `civic_a` city building (civic landmark) |
+| Kenney City Kit Suburban 2.0 — house type A | `web/public/models/kenney-city/suburban-a.glb` (~78 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-suburban) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `res_a` city building |
+| Kenney City Kit Suburban 2.0 — house type B | `web/public/models/kenney-city/suburban-b.glb` (~110 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-suburban) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `res_b` city building |
+| Kenney City Kit Suburban 2.0 — house type Q | `web/public/models/kenney-city/suburban-q.glb` (~78 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-suburban) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `res_c` city building |
+| Kenney City Kit Suburban 2.0 — picket fence | `web/public/models/kenney-city/fence.glb` (~18 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-suburban) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `fence` street prop |
+| Kenney City Kit Suburban 2.0 — tree (large) | `web/public/models/kenney-city/tree-large.glb` (~15 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-suburban) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `tree_city` greenery (parks + residential) |
+| Kenney City Kit Industrial 1.0 — building G | `web/public/models/kenney-city/industrial-g.glb` (~82 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-industrial) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `ind_a` city building (factory) |
+| Kenney City Kit Industrial 1.0 — building H | `web/public/models/kenney-city/industrial-h.glb` (~53 KB) | [kenney.nl](https://kenney.nl/assets/city-kit-industrial) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `ind_b` city building (warehouse) |
+| Kenney Car Kit 3.1 — sedan | `web/public/models/kenney-city/car-sedan.glb` (~85 KB) | [kenney.nl](https://kenney.nl/assets/car-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `car_a` parked car |
+| Kenney Car Kit 3.1 — SUV | `web/public/models/kenney-city/car-suv.glb` (~102 KB) | [kenney.nl](https://kenney.nl/assets/car-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `car_b` parked car |
+| Kenney Car Kit 3.1 — taxi | `web/public/models/kenney-city/car-taxi.glb` (~85 KB) | [kenney.nl](https://kenney.nl/assets/car-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `car_c` parked car |
+| Kenney Furniture Kit 2.0 — bench | `web/public/models/kenney-city/bench.glb` (~8 KB) | [kenney.nl](https://kenney.nl/assets/furniture-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `bench` street prop |
+| Kenney Furniture Kit 2.0 — trashcan | `web/public/models/kenney-city/trashcan.glb` (~4 KB) | [kenney.nl](https://kenney.nl/assets/furniture-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `bin` street prop |
+| KayKit City Builder Bits 1.0 — fire hydrant | `web/public/models/kaykit-city/firehydrant.glb` (~28 KB) | [GitHub](https://github.com/KayKit-Game-Assets/KayKit-City-Builder-Bits-1.0) | Kay Lousberg ([kaylousberg.com](https://www.kaylousberg.com)) | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (per bundled `LICENSE.txt`) | `hydrant` street prop (gltf+bin+png repacked to GLB with `citybits_texture.png` embedded) |
 
 All vendored GLBs were re-packed headlessly with `@gltf-transform` (gltf→glb
 embedding, `resample`/`dedup`/`prune`); no art content was authored or altered
-beyond the node/clip removals noted above. No DRACO/meshopt compression is
-used, so no decoder lives under `web/public/`. Total payload under
-`web/public/models/`: ~3.6 MB.
+beyond the node/clip removals noted above. The W15 city kits (`kenney-city/`,
+`kaykit-city/`, EM-152) had their CC0 `License.txt` verified inside each
+downloaded archive before vendoring; their per-kit `colormap.png` textures are
+embedded at repack time. No DRACO/meshopt compression is used, so no decoder
+lives under `web/public/`. Total payload under `web/public/models/`: ~5.1 MB
+(~1.5 MB of that is the W15 city set).
 
 Everything NOT listed above in the 3-D village (the procedural building
 variants and Suspense fallbacks, scenery, foliage) is procedural geometry
