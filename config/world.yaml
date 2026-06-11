@@ -19,6 +19,12 @@ world:
   memory_window: 12
   attack_energy_cost: 6
 
+  # W15 / EM-155 — deterministic seed for the generated 3D city ring. The city
+  # renders as a pure function f(snapshot, city_seed); the engine persists the
+  # seed in every snapshot so live, replay, and fork all draw the SAME city.
+  # Change the value to reroll the city layout. Default 1337 when absent.
+  city_seed: 1337
+
   # W10 / EM-085 — persist runs by default so run history + replay survive
   # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
   # Path rule: a RELATIVE path resolves against the repo root (the parent of

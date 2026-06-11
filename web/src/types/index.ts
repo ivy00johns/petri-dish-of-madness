@@ -171,6 +171,10 @@ export interface WorldState {
   // W11b (EM-091): the notice-board posts, newest capped at 20. Optional so a
   // pre-W11b backend stays valid; the panel/3D board derive from history then.
   billboard?: BillboardPost[];
+  // W15 (EM-155): deterministic seed for the generated city ring — the 3D city
+  // renders as f(snapshot, city_seed). Optional/additive (pre-W15 backends and
+  // snapshots lack it); consumers default with `city_seed ?? 1337`.
+  city_seed?: number | null;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds

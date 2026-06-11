@@ -463,6 +463,16 @@ class World:
         # hot-reloads kept eating them before delivery, which made the god
         # console look broken. Delivered whispers still leave no trace.
         self.pending_whispers: dict[str, list[str]] = {}
+        # W15 / EM-155 — deterministic city seed (config `world.city_seed`,
+        # default 1337). The generated 3D city ring is rendered as a pure
+        # function f(snapshot, city_seed): the seed rides to_snapshot() /
+        # world_state and survives fork (EM-101) + replay (EM-075), so live,
+        # replay, and fork all draw the SAME city. Int-coerced defensively —
+        # params may be a bare dataclass/dict/None without the key.
+        try:
+            self.city_seed: int = int(_block_get(params, "city_seed", 1337))
+        except (TypeError, ValueError):
+            self.city_seed = 1337
 
         self.tick: int = 0
         self.day: int = 0
@@ -1876,6 +1886,10 @@ class World:
             ],
             # PROTOTYPE (god-channel) — the consensus-set town name ("" = unnamed).
             "town_name": self.town_name,
+            # W15 / EM-155 — deterministic city seed: the frontend renders the
+            # generated city ring as f(snapshot, city_seed). Additive key;
+            # consumers default with `city_seed ?? 1337` when absent.
+            "city_seed": self.city_seed,
             # EM-145 — queued-but-undelivered god whispers, so a restart/restore
             # no longer eats them (additive key; consumers may ignore).
             "pending_whispers": {
@@ -1976,6 +1990,10 @@ class World:
         world.tick = _int(state.get("tick"))
         world.day = _int(state.get("day"))
         world.round = _int(state.get("round"))
+        # W15 / EM-155 — restore the city seed (int-coerced). A pre-W15
+        # snapshot lacks the key and restores the default 1337, matching the
+        # frontend's `city_seed ?? 1337` so fork/replay render the same city.
+        world.city_seed = _int(state.get("city_seed", 1337), 1337)
         world.running = False  # a restored/forked world starts paused
         try:
             world.tick_interval_seconds = float(

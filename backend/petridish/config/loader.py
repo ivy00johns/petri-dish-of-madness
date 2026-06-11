@@ -64,6 +64,9 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+  # W15 / EM-155 — deterministic seed for the generated 3D city ring.
+  # MUST stay in sync with config/world.yaml.
+  city_seed: 1337
 
 places:
   # Wave C / EM-147 — the district town (~15 places over the existing five
@@ -349,6 +352,11 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # W15 / EM-155 — deterministic seed for the generated 3D city ring (config
+    # `world.city_seed`). The engine copies it onto World and persists it in
+    # to_snapshot()/world_state, so live/replay/fork render the SAME city.
+    # Additive with a safe default — configs without the key are unchanged.
+    city_seed: int = 1337
     # W9 / EM-070 — survival pressure: energy below this threshold marks an agent
     # as starving (one-shot `agent_starving` warning + prompt urgency).
     starving_warn_threshold: float = 25.0
@@ -682,6 +690,8 @@ def _parse_world(
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        # W15 / EM-155 — optional deterministic city seed; absent → 1337.
+        city_seed=int(w.get("city_seed", 1337)),
         starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
         auto_pause_on_extinction=bool(w.get("auto_pause_on_extinction", True)),
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),

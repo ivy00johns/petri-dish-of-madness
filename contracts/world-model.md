@@ -237,3 +237,14 @@ on the replay timeline (the legend slot already exists).
    credits, and total agent credits are unchanged by animal actions.
 8. Animal damage to a building obeys the W7 building state machine (operational→damaged→destroyed);
    an animal can't push a building below 0 health or above 100.
+
+## §W15 — City snapshot contract (EM-155) — ADDITIVE delta
+
+`World` gains `city_seed: int` (config `world.city_seed`, default **1337**).
+`to_snapshot()` emits `"city_seed"`; `from_snapshot()` restores it int-coerced
+(absent ⇒ 1337, so pre-W15 snapshots stay valid). It therefore rides the WS
+`world_state` payload and survives fork (EM-101) and replay (EM-075).
+Frontend: `WorldState.city_seed?: number | null` (additive, optional);
+consumers default with `city_seed ?? 1337`. The generated 3D city ring is a
+pure function `f(snapshot, city_seed)` — same snapshot + same seed ⇒
+byte-identical city plan across live/replay/fork.
