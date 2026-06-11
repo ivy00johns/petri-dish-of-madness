@@ -121,6 +121,14 @@ class Router:
         # adapter's stale state. Cleared on a MISS so real adapter state surfaces.
         # profile_name -> {"routed_via": str|None, "usage": dict|None}
         self._pending_cached: dict[str, dict] = {}
+        # Wave D2 / EM-162 — additive cache bookkeeping. Counts CACHEABLE
+        # traffic only (mock-profile calls bypass the cache and are not
+        # counted); a MISS is counted even if the adapter call then fails
+        # (the cache was consulted and could not serve). Reset by
+        # clear_cache(); read via cache_stats(). Observability only — no
+        # behavior rides on these.
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
         # ── W11b / EM-083 (platform half) — usage-alert tracking ───────────────
         # Day-window rpd/tpd caps come from the profile entries (profiles.yaml
@@ -235,11 +243,13 @@ class Router:
                 # last_routed_via(profile) reads report cached=true (tokens null,
                 # latency ~0) and the cached routed value.
                 self._cache.move_to_end(key)  # LRU: mark most-recently-used
+                self._cache_hits += 1  # EM-162 bookkeeping
                 self._pending_cached[profile_name] = {
                     "routed_via": hit.get("routed_via"),
                     "usage": self._cached_usage_snapshot(hit.get("usage")),
                 }
                 return hit["text"]
+            self._cache_misses += 1  # EM-162 bookkeeping (cacheable miss)
 
         # ── MISS (or non-cacheable) ── call the adapter as today. Clear any stale
         # pending HIT snapshot so the adapter's real last_routed_via/last_usage
@@ -279,8 +289,22 @@ class Router:
         prior-run decisions never serve into a new run."""
         self._cache.clear()
         self._pending_cached.clear()
+        self._cache_hits = 0       # EM-162 — bookkeeping resets with the cache
+        self._cache_misses = 0
         self._lane_outcomes.clear()
         self._lane_routed_via.clear()
+
+    def cache_stats(self) -> dict:
+        """Wave D2 / EM-162 — additive decision-cache bookkeeping:
+        {hits, misses, entries}. Counts only cacheable traffic (mock-profile
+        calls bypass the cache entirely and are not counted). Reset alongside
+        the cache by clear_cache(). The EM-162 prompt normalization's payoff
+        is measured against these numbers."""
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "entries": len(self._cache),
+        }
 
     # ── EM-135 — reroute-aware lane health ─────────────────────────────────────
 

@@ -176,6 +176,51 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Wave D2 / EM-163 — tier-gated world-mutating tools.
+#
+# The world-mutating PROPOSAL-side tools are reserved for the protagonist +
+# supporting cadence tiers. Enforced at RESOLUTION time in _validate_world
+# (the billboard location-gate pattern — EM-108's lesson is that prompt-only
+# gating is not enforcement) AND omitted from the background valid-actions
+# menu in _assemble_context, so menu and resolution always agree. Background
+# agents keep talk / move / economy / billboard — and VOTING: only PROPOSING
+# gates (vote stays for everyone).
+# ──────────────────────────────────────────────────────────────────────────────
+
+TIER_GATED_ACTIONS = frozenset({
+    "propose_project", "build_step", "contribute_funds", "propose_rule",
+})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wave D2 / EM-161 — prompt diet (supporting + background tiers; protagonists
+# keep today's full prompt byte-for-byte):
+#   - relationships capped to the top-_DIET_RELATIONSHIP_CAP by |trust|;
+#   - open_projects + the move_to place menu scoped to the agent's district
+#     horizon. ADJACENCY RULE (the documented simple derivation): a diet agent
+#     sees its OWN district plus the always-visible core district
+#     (_DIET_CORE_DISTRICT); places without a district tag are always visible;
+#     an agent standing at an un-districted (or unknown) place gets the full
+#     map. The diet narrows the MENU, never the rules — _validate_world still
+#     accepts any valid place / any visible project.
+#   - BACKGROUND only: the decision-trace instruction block is dropped (their
+#     completions shrink — the trace fields are optional in ACTION_SCHEMA, so
+#     the parser is unaffected) and the memory window shrinks to
+#     _DIET_BACKGROUND_MEMORY_WINDOW.
+#
+# Wave D2 / EM-162 — cache-key normalization (BACKGROUND prompts only): energy
+# renders bucketed to 10s ("~70", floored) and the tick line floors to the day
+# (`Tick: day N`), so quiet rounds assemble byte-identical prompts and the
+# router's sha1 decision cache can hit. Router.forget() semantics untouched.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_DIET_RELATIONSHIP_CAP = 8
+_DIET_BACKGROUND_MEMORY_WINDOW = 8
+_DIET_CORE_DISTRICT = "core"
+_ENERGY_DISPLAY_BUCKET = 10
+
+
 # W11b / EM-079 — commitment lifecycle action sets.
 #   _TALK_ACTIONS: pure-talk turns; commitments go STALE during these (a phantom
 #   commitment is one claimed in speech and never enacted).
@@ -268,6 +313,47 @@ def _action_tier(action: str) -> str:
     """The registry tier for an action (defaults to 'llm' for unknown actions)."""
     meta = TOOL_REGISTRY.get(action)
     return meta.get("tier", "llm") if meta else "llm"
+
+
+def _cadence_tier(agent: Any) -> str:
+    """The agent's cadence tier, defensively defaulted to protagonist (the
+    pre-D2 behavior) for duck-typed agents or unknown values."""
+    tier = getattr(agent, "cadence_tier", "protagonist") or "protagonist"
+    return tier if tier in ("protagonist", "supporting", "background") else "protagonist"
+
+
+def _effective_memory_window(agent: Any, params: Any) -> int:
+    """EM-161 — the per-turn memory window: config memory_window, shrunk to
+    _DIET_BACKGROUND_MEMORY_WINDOW for the background tier only (min() so a
+    smaller configured window still wins)."""
+    window = params.memory_window
+    if _cadence_tier(agent) == "background":
+        window = min(window, _DIET_BACKGROUND_MEMORY_WINDOW)
+    return window
+
+
+def _energy_display(energy: float) -> str:
+    """EM-162 — the background-tier display form of an energy value: floored
+    to the 10s bucket and prefixed '~' ("~70"), clamped to 0..100, so quiet
+    rounds render identical bytes while energy drifts within a bucket."""
+    try:
+        e = max(0.0, min(100.0, float(energy)))
+    except (TypeError, ValueError):
+        e = 0.0
+    return f"~{int(e // _ENERGY_DISPLAY_BUCKET) * _ENERGY_DISPLAY_BUCKET}"
+
+
+def _diet_visible_districts(world: World, agent: AgentState) -> set[str] | None:
+    """EM-161 — the diet agent's district horizon: its current place's district
+    plus the always-visible core district (the documented adjacency rule).
+    Returns None (= no scoping, full map) when the agent stands at an
+    un-districted or unknown place — the diet must never hide the whole world
+    where district data is absent."""
+    here = world.places.get(agent.location)
+    district = getattr(here, "district", None) if here is not None else None
+    if not district:
+        return None
+    return {district, _DIET_CORE_DISTRICT}
 
 IDLE_ACTION = {"action": "idle", "args": {}}
 
@@ -739,6 +825,18 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     if not agent.alive:
         return "agent is dead"
 
+    # ── Wave D2 / EM-163 — tier gate (RESOLUTION time, the billboard pattern;
+    # EM-108: prompt-only gating is not enforcement). Background agents keep
+    # talk/move/economy/billboard/vote — only PROPOSING gates. The background
+    # valid-actions menu omits these (see _assemble_context), so a rejection
+    # here means the model invented an off-menu action.
+    if action in TIER_GATED_ACTIONS and _cadence_tier(agent) == "background":
+        return (
+            f"{action} is reserved for protagonist and supporting agents "
+            "(tier rule) — background agents keep to talking, moving, working, "
+            "the billboard, and voting"
+        )
+
     if action == "work":
         place = world.places.get(agent.location)
         if place is None or place.kind != "work":
@@ -948,6 +1046,30 @@ def _assemble_context(
     place_name = place.name if place else agent.location
     place_kind = place.kind if place else "unknown"
 
+    # ── Wave D2 / EM-161+162+163 — tier flags. The diet applies to supporting
+    # AND background; protagonists keep today's full prompt byte-for-byte. The
+    # EM-162 normalization + the trace-block/memory cuts + the EM-163 menu
+    # omission are BACKGROUND only.
+    tier = _cadence_tier(agent)
+    diet = tier in ("supporting", "background")
+    background = tier == "background"
+    visible_districts = _diet_visible_districts(world, agent) if diet else None
+
+    def _place_visible(place_id: str) -> bool:
+        """EM-161 — is this place inside the diet agent's district horizon?
+        Always True for protagonists / when scoping is off; un-districted
+        places are always visible."""
+        if visible_districts is None:
+            return True
+        p = world.places.get(place_id)
+        district = getattr(p, "district", None) if p is not None else None
+        return district is None or district in visible_districts
+
+    def _tier_ok(action: str) -> bool:
+        """EM-163 — offer this action on the menu? Mirrors the resolution-time
+        gate in _validate_world exactly (menu and resolution agree)."""
+        return not (background and action in TIER_GATED_ACTIONS)
+
     co_located = [
         a for a in world.living_agents()
         if a.location == agent.location and a.id != agent.id
@@ -969,6 +1091,14 @@ def _assemble_context(
         b for b in _buildings(world).values()
         if _building_field(b, "status") in ("planned", "under_construction")
     ]
+    # EM-161 — diet tiers see only the projects inside their district horizon
+    # (current + core; see _diet_visible_districts). Menu narrowing only:
+    # _validate_world still accepts contributions to ANY open project.
+    if visible_districts is not None:
+        open_projects = [
+            b for b in open_projects
+            if _place_visible(_building_field(b, "location"))
+        ]
 
     # ── Tool-registry-driven valid_actions (EM-060) ───────────────────────────
     # Filter the per-turn action list by each action's registry gates: place-kind
@@ -995,8 +1125,11 @@ def _assemble_context(
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
     # (destination/to/null) and burned turns on 'unknown place' world errors.
+    # EM-161 — diet tiers get the district-horizon menu only (protagonists the
+    # full map); resolution still accepts ANY valid place.
     valid_actions.append(
-        f"move_to (place) - go to one of: {', '.join(world.places.keys())}")
+        "move_to (place) - go to one of: "
+        + ", ".join(pid for pid in world.places.keys() if _place_visible(pid)))
     valid_actions.append("say (text) - speak to everyone here")
     if co_located:
         target_names = ", ".join(a.name for a in co_located)
@@ -1011,16 +1144,18 @@ def _assemble_context(
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
         valid_actions.append("(work requires a work place)")
-    # Governance actions are gated to a governance place.
-    if _gate_ok("propose_rule"):
+    # Governance actions are gated to a governance place. EM-163: PROPOSING is
+    # tier-gated off the background menu (_tier_ok); voting stays for everyone.
+    if _gate_ok("propose_rule") and _tier_ok("propose_rule"):
         valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town (name_town also needs name=<the town's new name>; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
 
-    # ── W7 construction actions (offered per gates) ───────────────────────────
-    valid_actions.append("propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place")
-    if open_projects:
+    # ── W7 construction actions (offered per gates; EM-163 tier gate) ──────────
+    if _tier_ok("propose_project"):
+        valid_actions.append("propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place")
+    if open_projects and _tier_ok("contribute_funds"):
         valid_actions.append("contribute_funds (building_id, amount) - fund an active project below to push it toward construction")
     for b in here_buildings:
         bid = _building_field(b, "id")
@@ -1031,7 +1166,7 @@ def _assemble_context(
             status == "planned"
             and _building_field(b, "funds_committed", 0) >= _building_field(b, "funds_required", 0)
         )
-        if (status == "under_construction" or funded_planned) and _gate_ok("build_step"):
+        if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step"):
             valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
         if status in ("damaged", "offline") and _gate_ok("repair"):
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
@@ -1058,17 +1193,23 @@ def _assemble_context(
             "answer_proclamation (text) - answer the god's proclamation directly; "
             "your reply is threaded under it for the watchers to see")
 
-    # Recent events summary
+    # Recent events summary (EM-161: background window shrinks 12→8)
     event_lines = []
-    for evt in recent_events[-params.memory_window:]:
+    for evt in recent_events[-_effective_memory_window(agent, params):]:
         event_lines.append(f"  [tick {evt.get('tick', '?')}] {evt.get('text', '')}")
 
     # Beliefs
     belief_lines = "\n".join(f"  - {b}" for b in agent.beliefs) if agent.beliefs else "  (none)"
 
-    # Relationships
+    # Relationships — EM-161: diet tiers keep only the top-8 by |trust| (their
+    # strongest bonds and feuds); protagonists keep the full O(N) block.
+    rel_items = list(agent.relationships.items())
+    if diet and len(rel_items) > _DIET_RELATIONSHIP_CAP:
+        rel_items = sorted(
+            rel_items, key=lambda kv: -abs(getattr(kv[1], "trust", 0) or 0)
+        )[:_DIET_RELATIONSHIP_CAP]
     rel_lines = []
-    for other_id, rel in agent.relationships.items():
+    for other_id, rel in rel_items:
         other = world.agents.get(other_id)
         other_name = other.name if other else other_id
         rel_lines.append(f"  {other_name}: {rel.type} (trust={rel.trust})")
@@ -1109,8 +1250,12 @@ def _assemble_context(
     if world.has_active_rule("recharge_subsidy"):
         recharge_cost = max(1, recharge_cost // 2)
     starve_threshold = getattr(params, "starving_warn_threshold", 25)
+    # EM-162 — background prompts render energy bucketed to 10s ("~70") so
+    # quiet-round prompts stay byte-identical while energy drifts within a
+    # bucket; protagonists/supporting keep the exact figures byte-for-byte.
+    needs_energy = _energy_display(agent.energy) if background else f"{agent.energy:.0f}"
     needs_lines = [
-        f"Energy {agent.energy:.0f}/100 — at 0 you start DYING. "
+        f"Energy {needs_energy}/100 — at 0 you start DYING. "
         f"recharge restores energy (costs {recharge_cost} credits)."
     ]
     if agent.energy <= 0:
@@ -1226,14 +1371,68 @@ def _assemble_context(
     _town = (getattr(world, "town_name", "") or "").strip()
     town_line = f"\nTown: {_town}" if _town else ""
 
+    # ── Wave D2 / EM-162 — cache-key normalization (BACKGROUND only): the tick
+    # line floors to the day and every displayed energy buckets to 10s, so a
+    # quiet background round assembles byte-identical bytes and the router's
+    # sha1 decision cache hits. Protagonists/supporting render exactly as
+    # before (byte-for-byte).
+    if background:
+        tick_display = f"day {world.tick // max(1, getattr(params, 'turns_per_day', 20))}"
+        status_energy = _energy_display(agent.energy)
+        _co_energy = lambda a: _energy_display(a.energy)  # noqa: E731
+    else:
+        tick_display = str(world.tick)
+        status_energy = f"{agent.energy:.1f}"
+        _co_energy = lambda a: f"{a.energy:.0f}"  # noqa: E731
+
+    # ── Wave D2 / EM-161 — the decision-trace instruction block is dropped for
+    # BACKGROUND only (their completions shrink; the trace fields are optional
+    # in ACTION_SCHEMA so the parser is unaffected). The ⚠ words-change-nothing
+    # warning stops naming the EM-163-gated tools for background — the prompt
+    # must never suggest an action resolution would reject. Protagonists and
+    # supporting keep today's text byte-for-byte.
+    if background:
+        action_warning = (
+            "⚠ SAYING you will do something does NOT do it — words change "
+            "nothing. Use real actions (work / forage / give / move_to) to "
+            "actually act. Your action THIS TURN is the only thing that happens."
+        )
+        format_template = (
+            '{"action": "<verb>", "args": {...}, '
+            '"mood": "optional mood update", "thought": "one short sentence"}'
+        )
+        trace_instructions = ""
+    else:
+        action_warning = (
+            "⚠ SAYING you will build/fund/work on something does NOT do it — "
+            "words change nothing. Use propose_project / contribute_funds / "
+            "build_step (or work / forage / give) to actually act. Your action "
+            "THIS TURN is the only thing that happens."
+        )
+        format_template = (
+            '{"action": "<verb>", "args": {...}, "mood": "optional mood update", '
+            '"thought": "one short sentence", "perceived_summary": "one sentence '
+            'on who/what was nearby or overheard", "memories_used": ["the memory '
+            'snippets you leaned on"], "reasoning": "a brief why, kept inside '
+            'this JSON"}'
+        )
+        trace_instructions = (
+            '\nALSO include (in the SAME json object — do NOT make a second '
+            'call): "perceived_summary" (one sentence on what you perceived '
+            'this turn), "memories_used" (the recent-event/memory snippets you '
+            'actually relied on), and "reasoning" (your fuller reasoning, '
+            'distinct from the short "thought"). These three are optional but '
+            "strongly preferred — they are recorded into the decision trace."
+        )
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-Tick: {world.tick}{town_line}
+Tick: {tick_display}{town_line}
 Personality: {agent.personality}
 
 === YOUR STATUS ===
 Location: {place_name} (kind={place_kind})
-Energy: {agent.energy:.1f}/100
+Energy: {status_energy}/100
 Credits: {agent.credits}
 Mood: {agent.mood}
 
@@ -1241,7 +1440,7 @@ Mood: {agent.mood}
 {needs_text}
 {proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
-{chr(10).join(f"  {a.name} (id={a.id}, energy={a.energy:.0f}, credits={a.credits})" for a in co_located) or "  (none)"}
+{chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
 === RECENT EVENTS ===
 {chr(10).join(event_lines) or "  (none)"}
@@ -1264,13 +1463,12 @@ Mood: {agent.mood}
 === VALID ACTIONS ===
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
-⚠ SAYING you will build/fund/work on something does NOT do it — words change nothing. Use propose_project / contribute_funds / build_step (or work / forage / give) to actually act. Your action THIS TURN is the only thing that happens.
+{action_warning}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
-{{"action": "<verb>", "args": {{...}}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}}
+{format_template}
 
-The "action" field is required and must come first. "args" must match the action.
-ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
+The "action" field is required and must come first. "args" must match the action.{trace_instructions}
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
@@ -1307,7 +1505,9 @@ def _perceived_context(
     # over-broad; v1 perception is "where I am", so nearby = current place only.
     nearby_places = [agent.location] if agent.location in world.places else []
 
-    window = params.memory_window
+    # EM-161 — the SAME effective window _assemble_context fed the model
+    # (background shrinks to 8), so the trace stays truthful to the prompt.
+    window = _effective_memory_window(agent, params)
     fed = recent_events[-window:]
     # overheard: seqs of the events the agent witnessed this window (best-effort;
     # the per-agent memory buffer stores text/tick/kind, seq may be absent).
