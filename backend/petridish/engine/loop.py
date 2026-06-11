@@ -42,10 +42,14 @@ def _run_config_json(config: WorldConfig) -> str:
     """The runs.config_json blob for a new run row. W11a / EM-086: alongside the
     world params it carries the seed agents' {name, profile} so RunRow's
     config_summary can project them without the full config (pre-W11a runs lack
-    the agents key; the projection degrades to an empty list)."""
+    the agents key; the projection degrades to an empty list). Wave D3 /
+    EM-187: it also carries the place ids, so resume-on-boot's compatibility
+    guard can compare world-defining geometry (pre-EM-187 rows lack the key;
+    the guard falls back to the snapshot's places)."""
     return json.dumps({
         "world": _world_params_json(config.world),
         "agents": [{"name": a.name, "profile": a.profile} for a in config.agents],
+        "places": [p.id for p in config.places],
     })
 
 # Random event templates
@@ -633,8 +637,18 @@ class TickLoop:
             self._animals_spawned = True
             return
         seeds = getattr(config, "animals", None) or []
+        # Wave D3 / EM-187 (contract §B4.4) — a RESUMED world's snapshot may
+        # already carry the seed critters: never spawn a duplicate (matched on
+        # species+name); only critters the snapshot lacks are spawned. Fresh
+        # init/reset worlds start with an empty animals dict, so this is a
+        # no-op for them.
+        existing = {
+            (a.species, a.name) for a in self._world.animals.values()
+        }
         spawned_any = False
         for seed in seeds:
+            if (seed.species, seed.name) in existing:
+                continue
             try:
                 animal = self._world.spawn_animal(
                     species=seed.species,
@@ -1131,6 +1145,16 @@ class TickLoop:
         # elapsed ms). Normal rows keep the exact §3.4 key set unchanged.
         if llm.get("timed_out"):
             payload["timed_out"] = True
+        # Wave D3 / EM-177 — ADDITIVE (same precedent): only a call routed off
+        # its home lane carries `requested_profile` (the home lane) plus
+        # `detoured: true` or `probe: true`. The model keys above stay the
+        # lane ACTUALLY called; home-lane rows keep the exact §3.4 key set.
+        if llm.get("requested_profile") is not None:
+            payload["requested_profile"] = llm["requested_profile"]
+        if llm.get("detoured"):
+            payload["detoured"] = True
+        if llm.get("probe"):
+            payload["probe"] = True
         return payload
 
     def _sim_time(self, tick: int) -> float:

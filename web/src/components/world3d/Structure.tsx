@@ -44,11 +44,12 @@ import {
   type BuildingStyle,
   type VariantKey,
 } from './worldSpace';
-import { toonGradientMap, toonMaterial } from './toon';
+import { GOLDEN_HOUR, toonGradientMap, toonMaterial } from './toon';
 import { Model } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
 import type { ModelSpec } from './assets/models';
 import {
+  isFundBuilding,
   modelRotationY,
   resolveStructureModel,
   structureModelTint,
@@ -93,18 +94,27 @@ const STATUS_TINT: Record<string, string> = {
   destroyed: '#8a8a8a',
 };
 
+/** Max chars for the subtitle readout before it's clamped to one tidy line. */
+const SUB_MAX = 34;
+
 function StructureLabel({
   building,
   style,
   y,
+  fund = false,
 }: {
   building: Building;
   style: BuildingStyle;
   y: number;
+  /** EM-180: a fund reads as a treasury, so its subtitle shows funding, not a tag. */
+  fund?: boolean;
 }) {
   const tint = STATUS_TINT[building.status] ?? '#fff3e0';
-  const sub =
-    building.status === 'under_construction'
+  const rawSub = fund
+    ? building.funds_required > 0
+      ? `Treasury · ${building.funds_committed}/${building.funds_required} ¢`
+      : 'Commons fund'
+    : building.status === 'under_construction'
       ? `${style.tag} · ${building.progress}%`
       : building.status === 'planned'
         ? `${style.tag} · planned`
@@ -118,7 +128,15 @@ function StructureLabel({
                 ? `${style.tag} · offline`
                 : `${style.tag}${building.function ? ` · ${building.function}` : ''}`;
 
-  const w = Math.max(2.6, building.name.length * 0.32);
+  // Models sometimes overflow `function` with a whole sentence (e.g. a
+  // "Commons Fund" whose function reads "A pooled resource managed by community
+  // vote") — clamp the readout to one line so it never sprawls past the plate.
+  const sub = rawSub.length > SUB_MAX ? `${rawSub.slice(0, SUB_MAX - 1).trimEnd()}…` : rawSub;
+
+  // Plate fits the WIDER of the two lines — title (0.46 font) AND subtitle
+  // (0.30 font) — so a long status line no longer spills past a title-sized
+  // backdrop. (Previously sized to the title alone → the overflow you saw.)
+  const w = Math.max(2.6, building.name.length * 0.32, sub.length * 0.21) + 0.4;
   return (
     <Billboard position={[0, y, 0]}>
       <mesh position={[0, 0, -0.02]}>
@@ -133,7 +151,8 @@ function StructureLabel({
         anchorY="middle"
         outlineWidth={0.014}
         outlineColor="#241b14"
-        maxWidth={10}
+        whiteSpace="nowrap"
+        maxWidth={w}
       >
         {building.name}
       </Text>
@@ -145,7 +164,8 @@ function StructureLabel({
         anchorY="middle"
         outlineWidth={0.01}
         outlineColor="#241b14"
-        maxWidth={10}
+        whiteSpace="nowrap"
+        maxWidth={w}
       >
         {sub}
       </Text>
@@ -1077,12 +1097,86 @@ const GLB_LABEL_Y: Partial<Record<VariantKey, number>> = {
   stall: 3.9,
 };
 
+// ── EM-180: a fund is a shared treasury, not a house. Render it as a small
+//    on-lot community chest whose gold rises and glows with its funding —
+//    detection is structureModel.isFundBuilding (name/kind keyword). ──────────
+function FundStructure({ building }: { building: Building }) {
+  const frac =
+    building.funds_required > 0
+      ? Math.max(0, Math.min(1, building.funds_committed / building.funds_required))
+      : Math.max(0, Math.min(1, building.progress / 100));
+  const dead = building.status === 'destroyed';
+  const dim = building.status === 'offline' || building.status === 'abandoned';
+  const broken = building.status === 'damaged' || building.status === 'abandoned' || dead;
+  const wood = broken ? '#5e4a33' : WOOD;
+  const coinH = 0.1 + frac * 0.4; // gold rises as the pot fills
+  const glow = dead || dim ? 0 : 0.3 + frac * 1.2;
+  return (
+    <group>
+      {/* the lot pad reads as the fund's footing */}
+      <mesh position={[0, 0.02, 0]} receiveShadow material={toonMaterial('#caa873')}>
+        <cylinderGeometry args={[1.5, 1.5, 0.04, 20]} />
+      </mesh>
+      {/* chest body + iron band */}
+      <RoundedBox
+        args={[1.3, 0.6, 0.9]}
+        radius={0.07}
+        smoothness={3}
+        position={[0, 0.34, 0]}
+        castShadow
+        receiveShadow
+        material={toonMaterial(wood)}
+      />
+      <mesh position={[0, 0.34, 0]} castShadow material={toonMaterial(WOOD_DARK)}>
+        <boxGeometry args={[1.34, 0.12, 0.94]} />
+      </mesh>
+      {/* the gold inside — height + warm glow scale with how funded it is */}
+      {!dead && (
+        <mesh
+          position={[0, 0.6 + coinH / 2 - 0.06, 0]}
+          castShadow
+          material={toonMaterial('#ffcf5a', {
+            emissive: GOLDEN_HOUR.glow,
+            emissiveIntensity: glow,
+          })}
+        >
+          <boxGeometry args={[1.04, coinH, 0.64]} />
+        </mesh>
+      )}
+      {/* open lid tilted back (left open to receive contributions) */}
+      {!dead && (
+        <mesh
+          position={[0, 0.66, -0.46]}
+          rotation={[-0.95, 0, 0]}
+          castShadow
+          material={toonMaterial(broken ? '#5e4a33' : PLANK)}
+        >
+          <boxGeometry args={[1.3, 0.12, 0.55]} />
+        </mesh>
+      )}
+      {/* a destroyed fund: the chest is gone, a few coins spilled on the pad */}
+      {dead && (
+        <>
+          <mesh position={[0.5, 0.1, 0.3]} castShadow material={toonMaterial('#caa24a')}>
+            <cylinderGeometry args={[0.16, 0.16, 0.05, 12]} />
+          </mesh>
+          <mesh position={[-0.4, 0.09, -0.2]} castShadow material={toonMaterial('#b8923f')}>
+            <cylinderGeometry args={[0.13, 0.13, 0.05, 12]} />
+          </mesh>
+        </>
+      )}
+    </group>
+  );
+}
+
 export function Structure({ building, x, z, focusedId, onPick }: StructureProps) {
   const style = useMemo(() => buildingStyle(building.kind), [building.kind]);
   const { variant, spec } = useMemo(
     () => resolveStructureModel(building.kind),
     [building.kind],
   );
+  // EM-180: funds render as a treasury object, never a building shell.
+  const fund = isFundBuilding(building);
   const bobRef = useRef<THREE.Group>(null);
   const [hovered, setHovered] = useState(false);
   useCursor(hovered && Boolean(onPick));
@@ -1116,8 +1210,9 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
   const grow = building.progress / 100;
 
   // Label height tuned per status (and per variant) so it clears the geometry.
-  const labelY =
-    building.status === 'operational' || building.status === 'offline'
+  const labelY = fund
+    ? 1.7 // the treasury chest is short — keep its card low
+    : building.status === 'operational' || building.status === 'offline'
       ? (spec ? GLB_LABEL_Y[variant] : undefined) ?? OPERATIONAL_LABEL_Y[variant]
       : building.status === 'under_construction'
         ? 0.6 + grow * 3.4 + 1.4
@@ -1133,6 +1228,10 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
       onPointerOut={() => setHovered(false)}
     >
       <group ref={bobRef}>
+        {fund ? (
+          <FundStructure building={building} />
+        ) : (
+          <>
         {building.status === 'planned' && <PlannedSite accent={style.accent} />}
 
         {building.status === 'under_construction' && (
@@ -1174,10 +1273,12 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
         )}
 
         {building.status === 'destroyed' && <RubblePile />}
+          </>
+        )}
       </group>
 
       {showFull ? (
-        <StructureLabel building={building} style={style} y={labelY} />
+        <StructureLabel building={building} style={style} y={labelY} fund={fund} />
       ) : (
         <MiniMarker y={labelY} color={STATUS_TINT[building.status] ?? style.accent} />
       )}

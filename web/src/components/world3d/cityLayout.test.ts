@@ -485,7 +485,7 @@ describe('EM-174 — real buildings claim real lots', () => {
     for (const id of ids) expect(reversed.get(id)).toEqual(spots.get(id));
   });
 
-  it('overflow spills to the NEAREST blocks: block-center distance, then lot index', () => {
+  it('overflow round-robins across the NEAREST blocks: lot index, then block-center distance (EM-181)', () => {
     const buildings = mkBuildings(REAL_LOTS_PER_LANDMARK + 5, 'operational', 'plaza');
     const spots = assignBuildingLots(plan, buildings, centers);
     const ids = buildings.map((b) => b.id).sort();
@@ -497,13 +497,20 @@ describe('EM-174 — real buildings claim real lots', () => {
         z: plan.realLots.plaza[i].z,
       });
     }
-    // …the rest exactly on the deterministic nearest-block candidate walk
+    // …the rest on the deterministic round-robin walk: lot index 0 of every
+    // block (nearest-first), then lot index 1, and so on (EM-181 spread sooner).
     const blockOrder = [...plan.blockLots.keys()].sort((a, b) => {
       const da = Math.hypot(plan.blockLots[a].cx - anchor.x, plan.blockLots[a].cz - anchor.z);
       const db = Math.hypot(plan.blockLots[b].cx - anchor.x, plan.blockLots[b].cz - anchor.z);
       return da - db || a - b;
     });
-    const expected = blockOrder.flatMap((bi) => plan.blockLots[bi].lots);
+    const maxLots = Math.max(...plan.blockLots.map((b) => b.lots.length));
+    const expected: Array<{ x: number; z: number }> = [];
+    for (let li = 0; li < maxLots; li++) {
+      for (const bi of blockOrder) {
+        if (li < plan.blockLots[bi].lots.length) expected.push(plan.blockLots[bi].lots[li]);
+      }
+    }
     const overflow = ids.slice(REAL_LOTS_PER_LANDMARK);
     overflow.forEach((id, i) => {
       expect(spots.get(id), `overflow ${i}`).toEqual({ x: expected[i].x, z: expected[i].z });

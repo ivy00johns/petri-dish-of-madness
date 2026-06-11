@@ -72,6 +72,25 @@ world:
   # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
   # config/world.yaml. 0/absent disables the guard entirely.
   turn_llm_budget_seconds: 12
+  # Wave D3 / EM-187 — resume-on-boot: at startup, resume the most recent run
+  # whose latest snapshot tick is > 0 as a NEW run row with fork lineage,
+  # provided the world-defining config (roster/places/city_seed) still
+  # matches; tunable params always adopt the current config. Boot behavior
+  # only — it never rides snapshots. MUST stay in sync with
+  # config/world.yaml. false = byte-identical pre-D3 boot (always fresh).
+  resume_on_boot: true
+  # Wave D3 / EM-177 — lane failover with recovery probes. MUST stay in sync
+  # with config/world.yaml. enabled:false = byte-identical pre-D3 routing.
+  lane_failover:
+    enabled: true
+    sick_threshold: 3
+    probe_every: 4
+  # Wave D3 / EM-168 — cap-pressure governor: a lane's usage_alert demotes its
+  # agents one cadence tier until the alert tracker's UTC-day rollover. MUST
+  # stay in sync with config/world.yaml. enabled:false = alerts stay
+  # alert-only (byte-identical pre-D3 behavior).
+  cap_governor:
+    enabled: true
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -345,6 +364,46 @@ class ProcgenParams:
 
 
 @dataclass
+class LaneFailoverParams:
+    """Wave D3 / EM-177 — lane failover with recovery probes (config
+    `world.lane_failover`). The router (providers/router.py) reads this block
+    via its defensive _lf_value accessor with IDENTICAL defaults, so an absent
+    block behaves exactly like these values. `enabled: false` restores the
+    byte-identical pre-D3 routing (effective_profile always returns the home
+    lane, zero lane_detour events).
+
+      enabled        — master toggle (default ON).
+      sick_threshold — timed_out entries in the EM-135 6-window that mark a
+                       lane SICK (mock lanes are never sick; provider_error
+                       turns never count).
+      probe_every    — every Nth would-be-detour goes through the home lane
+                       instead (a recovery probe), so a clean outcome ages the
+                       demerits out of the window. Counters only — no clocks.
+    """
+    enabled: bool = True
+    sick_threshold: int = 3
+    probe_every: int = 4
+
+
+@dataclass
+class CapGovernorParams:
+    """Wave D3 / EM-168 — cap-pressure governor (config `world.cap_governor`).
+    When a usage_alert fires for a lane (UsageAlertTracker ≥70% of its rpd/tpd
+    day cap), every agent ASSIGNED to that lane is demoted ONE cadence tier
+    (protagonist→supporting→background; background stays) with the prior tier
+    recorded on AgentState.demoted_from; demoted agents are restored at the
+    tracker's UTC-day rollover. The engine reads the block via its defensive
+    _block_get accessor with an IDENTICAL default, so an absent block behaves
+    exactly like these values.
+
+      enabled — master toggle (default ON). `false` ⇒ usage alerts stay
+                alert-only: byte-identical pre-D3 behavior (no demotions, no
+                cap_pressure events, no new snapshot keys).
+    """
+    enabled: bool = True
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -401,6 +460,14 @@ class WorldParams:
     # DATACLASS default is 0.0 = guard fully disabled = exactly today's
     # behavior (tests build WorldParams directly); the shipped yamls set 12.
     turn_llm_budget_seconds: float = 0.0
+    # Wave D3 / EM-187 — resume-on-boot (config `world.resume_on_boot`). When
+    # true (default), startup resumes the most recent run whose latest
+    # snapshot tick is > 0 as a NEW run row with fork lineage — provided the
+    # world-defining config (agent roster, places set, city_seed) still
+    # matches the parent run's; tunable params always adopt the current
+    # config. BOOT behavior only — it does not ride snapshots. False ⇒
+    # byte-identical pre-D3 boot (always a fresh run).
+    resume_on_boot: bool = True
     # W15 / EM-155 — deterministic seed for the generated 3D city ring (config
     # `world.city_seed`). The engine copies it onto World and persists it in
     # to_snapshot()/world_state, so live/replay/fork render the SAME city.
@@ -447,6 +514,14 @@ class WorldParams:
     # floor. Additive with engine-matching defaults, so a world.yaml without
     # the `cadence` block behaves exactly as the shipped defaults.
     cadence: CadenceParams = field(default_factory=CadenceParams)
+    # Wave D3 / EM-177 — lane failover with recovery probes. Additive with
+    # router-matching defaults (default ON); `enabled: false` restores the
+    # byte-identical pre-D3 routing.
+    lane_failover: LaneFailoverParams = field(default_factory=LaneFailoverParams)
+    # Wave D3 / EM-168 — cap-pressure governor. Additive with engine-matching
+    # defaults (default ON); `enabled: false` keeps usage alerts alert-only
+    # (byte-identical pre-D3 behavior).
+    cap_governor: CapGovernorParams = field(default_factory=CapGovernorParams)
 
 
 @dataclass
@@ -723,6 +798,37 @@ def _parse_cadence(raw: dict | None) -> CadenceParams:
     )
 
 
+def _parse_lane_failover(raw: dict | None) -> LaneFailoverParams:
+    """Parse the optional `world.lane_failover` block (Wave D3 / EM-177).
+    Absent/empty/malformed -> router-matching defaults (failover ON).
+    sick_threshold and probe_every are clamped to >= 1 (a 0/negative
+    threshold would mark every lane sick; probe_every 0 would never probe)."""
+    if not isinstance(raw, dict):
+        return LaneFailoverParams()
+    d = LaneFailoverParams()
+
+    def _pos_int(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return LaneFailoverParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        sick_threshold=_pos_int("sick_threshold", d.sick_threshold),
+        probe_every=_pos_int("probe_every", d.probe_every),
+    )
+
+
+def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
+    """Parse the optional `world.cap_governor` block (Wave D3 / EM-168).
+    Absent/empty/malformed -> engine-matching defaults (governor ON)."""
+    if not isinstance(raw, dict):
+        return CapGovernorParams()
+    d = CapGovernorParams()
+    return CapGovernorParams(enabled=bool(raw.get("enabled", d.enabled)))
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -779,6 +885,8 @@ def _parse_world(
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
         # Wave D2 / EM-170 — absent/0 ⇒ guard disabled (today's behavior).
         turn_llm_budget_seconds=float(w.get("turn_llm_budget_seconds", 0) or 0),
+        # Wave D3 / EM-187 — absent ⇒ resume-on-boot ON (the shipped default).
+        resume_on_boot=bool(w.get("resume_on_boot", True)),
         # W15 / EM-155 — optional deterministic city seed; absent → 1337.
         city_seed=int(w.get("city_seed", 1337)),
         starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
@@ -796,6 +904,8 @@ def _parse_world(
         reflection=_parse_reflection(w.get("reflection")),
         procgen=_parse_procgen(w.get("procgen")),
         cadence=_parse_cadence(w.get("cadence")),
+        lane_failover=_parse_lane_failover(w.get("lane_failover")),
+        cap_governor=_parse_cap_governor(w.get("cap_governor")),
     )
 
     places = [

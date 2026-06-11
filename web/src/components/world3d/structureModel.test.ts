@@ -22,6 +22,7 @@ import { MODEL_REGISTRY, PLACE_MODELS } from './assets/models';
 import { effectiveTint } from './assets/Model';
 import {
   OFFLINE_MODEL_TINT,
+  isFundBuilding,
   modelRotationY,
   placeModelRotationY,
   resolvePlaceModel,
@@ -172,5 +173,34 @@ describe('rotation helpers', () => {
     }
     for (const k of EVIL_KINDS) expect(placeModelRotationY(k)).toBe(0);
     expect(placeModelRotationY('volcano')).toBe(0);
+  });
+});
+
+describe('isFundBuilding (EM-180)', () => {
+  const b = (name: string, kind: string) => ({ name, kind });
+
+  it('flags fund-ish names', () => {
+    expect(isFundBuilding(b('Community Commons Fund', 'commons'))).toBe(true);
+    expect(isFundBuilding(b('Relief Treasury', 'building'))).toBe(true);
+    expect(isFundBuilding(b('The Coffers', 'building'))).toBe(true);
+    expect(isFundBuilding(b('Winter Reserve', 'monument'))).toBe(true);
+  });
+
+  it('flags fund-ish kinds even when the name is plain', () => {
+    expect(isFundBuilding(b('Old Stone Vault', 'endowment'))).toBe(true);
+    expect(isFundBuilding(b('Pooled Pot', 'treasury'))).toBe(true);
+    expect(isFundBuilding(b('The Stash', 'warchest'))).toBe(true);
+  });
+
+  it('leaves ordinary buildings alone', () => {
+    expect(isFundBuilding(b('Village Clock Tower', 'clocktower'))).toBe(false);
+    expect(isFundBuilding(b('The Commons Park', 'wild'))).toBe(false);
+    expect(isFundBuilding(b("Ada's Cottage", 'house'))).toBe(false);
+    expect(isFundBuilding(b('Old Library', 'library'))).toBe(false);
+  });
+
+  it('respects word boundaries (no false hits on refund/founders)', () => {
+    expect(isFundBuilding(b('Refund Booth', 'stall'))).toBe(false);
+    expect(isFundBuilding(b("Founders' Statue", 'monument'))).toBe(false);
   });
 });

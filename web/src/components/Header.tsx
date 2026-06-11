@@ -82,8 +82,24 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
         </div>
       </div>
 
-      {/* Right — status badges */}
+      {/* Right — support link + status badges */}
       <div className="flex items-center gap-2">
+        {/* Buy-me-a-coffee — opens in a new tab so it never leaves the live
+            world; height-capped to sit in the compact header row. */}
+        <a
+          href="https://www.buymeacoffee.com/john00ivyz"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="shrink-0 leading-none"
+          title="Buy me a coffee"
+          aria-label="Buy me a coffee"
+        >
+          <img
+            src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=&slug=john00ivyz&button_colour=5F7FFF&font_colour=ffffff&font_family=Cookie&outline_colour=000000&coffee_colour=FFDD00"
+            alt="Buy me a coffee"
+            className="h-6 w-auto block"
+          />
+        </a>
         {mockMode && (
           <span className="font-mono text-[10px] font-bold px-2 py-1 border border-lab-acid text-lab-acid bg-lab-acid/10">
             MOCK

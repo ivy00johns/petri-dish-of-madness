@@ -47,6 +47,21 @@ export function resolveStructureModel(kind: string): StructureModelResolution {
 }
 
 /**
+ * EM-180 — a "fund" is an economic/governance pool (a shared treasury), not a
+ * physical structure. Agents author these as W7 Buildings with fund-ish names
+ * or kinds ("Community Commons Fund", kind "endowment", …); the renderer shows
+ * them as an on-lot treasury object instead of a building shell. Backend kinds
+ * are model-authored, so detection is a name/kind keyword heuristic — bare
+ * "commons" is intentionally NOT a fund (it collides with the wild park) unless
+ * the name also says "fund". "Refund"/"founders" don't match (word boundary).
+ */
+const FUND_WORDS = /\b(funds?|treasur\w*|coffers?|endowment|reserves?|warchest)\b/i;
+
+export function isFundBuilding(building: { name: string; kind: string }): boolean {
+  return FUND_WORDS.test(building.name) || FUND_WORDS.test(building.kind);
+}
+
+/**
  * Resolve a place-anchor GLB by place kind (Building.tsx). Unknown kinds (or
  * registry nulls — wild stays procedural by design) return null.
  */

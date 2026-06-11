@@ -432,6 +432,35 @@ class SQLiteRepository:
         ).fetchone()
         return int(row[0] or 0)
 
+    def latest_resumable_run(self) -> dict | None:
+        """Wave D3 / EM-187 (resume-on-boot): the most recent run — highest
+        run id — that has a snapshot with tick > 0, together with that run's
+        LATEST snapshot. Runs whose only snapshot is tick 0 are not resume
+        sources (they ARE the fresh state, contract §B4.7), so hot-reload
+        streaks never chain empty lineage. Returns
+        {"run": <get_run dict>, "snapshot": {"tick", "state"}} | None."""
+        row = self._conn.execute(
+            "SELECT run_id, MAX(tick) FROM snapshots "
+            "GROUP BY run_id HAVING MAX(tick) > 0 "
+            "ORDER BY run_id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        run_id, tick = int(row[0]), int(row[1])
+        run = self.get_run(run_id)
+        if run is None:  # pragma: no cover - orphan snapshot row
+            return None
+        snap = self._conn.execute(
+            "SELECT state_json FROM snapshots WHERE run_id = ? AND tick = ?",
+            (run_id, tick),
+        ).fetchone()
+        if snap is None:  # pragma: no cover - raced delete
+            return None
+        return {
+            "run": run,
+            "snapshot": {"tick": tick, "state": json.loads(snap[0] or "{}")},
+        }
+
     def get_events(
         self,
         run_id: int,

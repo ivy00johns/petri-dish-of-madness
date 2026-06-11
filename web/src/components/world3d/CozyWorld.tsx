@@ -629,10 +629,12 @@ function Scene({
       {/* Wave D1.5: the whole 66u city fits ONE shadow frustum now — ±48
           covers the grid's ~47u half-diagonal (verified against the light
           axis), so every block gets shadows AND the 2048 map gains texel
-          density over D1's ±64. Fog pulled back in (90/300 → 75/230): the
-          far half of the compact grid picks up gentle depth haze and nothing
-          ever dissolves inside the 130u zoom range; same low golden-hour sun
-          ANGLE as Wave C. */}
+          density over D1's ±64. Fog (80/215): the far half of the compact
+          grid picks up gentle depth haze and the outer terrain ring dissolves
+          before it can shimmer at a full zoom-out, while the city itself stays
+          crisp inside the 130u zoom range; same low golden-hour sun ANGLE as
+          Wave C. shadow-normalBias kills the shadow-acne crawl that made the
+          grass look "jittery" at the edge of the view when zoomed out. */}
       <directionalLight
         position={[27, 13.5, 12]}
         intensity={2.2}
@@ -647,8 +649,9 @@ function Scene({
         shadow-camera-top={48}
         shadow-camera-bottom={-48}
         shadow-bias={-0.0004}
+        shadow-normalBias={0.04}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 75, 230]} />
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 80, 215]} />
 
       <Ground places={places} />
       <Scenery places={places} />

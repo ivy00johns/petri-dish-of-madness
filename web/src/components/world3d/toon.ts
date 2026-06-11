@@ -97,6 +97,14 @@ export interface ToonMaterialOpts {
   emissiveIntensity?: number;
   transparent?: boolean;
   opacity?: number;
+  /**
+   * Coplanar transparent decals (e.g. the ground-zone tints) pass
+   * `depthWrite:false` + `polygonOffset:true` so they blend OVER the terrain
+   * without z-fighting it at grazing angles / distance — the "jittery grass"
+   * shimmer at the edge of the view when zoomed out.
+   */
+  depthWrite?: boolean;
+  polygonOffset?: boolean;
 }
 
 const materialCache = new Map<string, THREE.MeshToonMaterial>();
@@ -109,6 +117,8 @@ function cacheKey(color: string, opts: ToonMaterialOpts): string {
     opts.emissiveIntensity ?? 1,
     opts.transparent ? 1 : 0,
     opts.opacity ?? 1,
+    opts.depthWrite === false ? 0 : 1,
+    opts.polygonOffset ? 1 : 0,
   ].join('|');
 }
 
@@ -134,6 +144,10 @@ export function toonMaterial(
     emissiveIntensity: opts.emissiveIntensity ?? 1,
     transparent: opts.transparent ?? false,
     opacity: opts.opacity ?? 1,
+    depthWrite: opts.depthWrite ?? true,
+    polygonOffset: opts.polygonOffset ?? false,
+    polygonOffsetFactor: opts.polygonOffset ? -1 : 0,
+    polygonOffsetUnits: opts.polygonOffset ? -1 : 0,
   });
 
   materialCache.set(key, mat);

@@ -65,14 +65,24 @@ export function Ground({ places }: GroundProps) {
           <mesh
             rotation={[-Math.PI / 2, 0, 0]}
             position={[z.x, 0.004, z.z]}
-            material={toonMaterial(z.tint, { transparent: true, opacity: 0.26 })}
+            material={toonMaterial(z.tint, {
+              transparent: true,
+              opacity: 0.26,
+              depthWrite: false,
+              polygonOffset: true,
+            })}
           >
             <circleGeometry args={[z.radius, 40]} />
           </mesh>
           <mesh
             rotation={[-Math.PI / 2, 0, 0]}
             position={[z.x, 0.007, z.z]}
-            material={toonMaterial(z.tint, { transparent: true, opacity: 0.3 })}
+            material={toonMaterial(z.tint, {
+              transparent: true,
+              opacity: 0.3,
+              depthWrite: false,
+              polygonOffset: true,
+            })}
           >
             <circleGeometry args={[z.radius * 0.62, 36]} />
           </mesh>
