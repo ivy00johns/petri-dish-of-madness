@@ -1131,6 +1131,16 @@ class TickLoop:
         # elapsed ms). Normal rows keep the exact §3.4 key set unchanged.
         if llm.get("timed_out"):
             payload["timed_out"] = True
+        # Wave D3 / EM-177 — ADDITIVE (same precedent): only a call routed off
+        # its home lane carries `requested_profile` (the home lane) plus
+        # `detoured: true` or `probe: true`. The model keys above stay the
+        # lane ACTUALLY called; home-lane rows keep the exact §3.4 key set.
+        if llm.get("requested_profile") is not None:
+            payload["requested_profile"] = llm["requested_profile"]
+        if llm.get("detoured"):
+            payload["detoured"] = True
+        if llm.get("probe"):
+            payload["probe"] = True
         return payload
 
     def _sim_time(self, tick: int) -> float:

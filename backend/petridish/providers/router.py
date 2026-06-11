@@ -35,6 +35,11 @@ _LANE_WINDOW = 6                  # outcomes remembered per profile
 _LANE_TRUNCATION_TRIGGER = 2      # truncations in window that flag the lane
 _LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_FLOOR
 
+# ── Wave D3 / EM-177 — lane failover with recovery probes ─────────────────────
+# Defaults mirror config.loader.LaneFailoverParams (config `world.lane_failover`).
+_LANE_SICK_THRESHOLD_DEFAULT = 3  # timed_out entries in the 6-window ⇒ SICK
+_LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home lane
+
 
 def _cache_key(profile_name: str, messages: list[dict]) -> str:
     """sha1(profile_name + json(messages, sort_keys=True)).
@@ -94,6 +99,7 @@ class Router:
         *,
         cache_enabled: bool = True,
         cache_max: int = _DEFAULT_CACHE_MAX,
+        lane_failover: Any = None,
     ):
         self._profiles: dict[str, ModelProfile] = {p.name: p for p in profiles}
         self._adapters: dict[str, Provider] = {
@@ -151,6 +157,30 @@ class Router:
         # profile_name -> deque[{"parsed": bool, "truncated": bool}]
         self._lane_outcomes: dict[str, deque[dict]] = {}
         self._lane_routed_via: dict[str, str | None] = {}
+
+        # ── Wave D3 / EM-177 — lane failover with recovery probes ──────────────
+        # `lane_failover` is the config `world.lane_failover` block (a
+        # LaneFailoverParams dataclass, a plain dict, or None ⇒ defaults). The
+        # 2026-06-11 incident: every FreeLLMAPI lane but one was silently
+        # rerouted to a reasoning model that blew the EM-170 budget; the router
+        # KNEW (EM-135/170 windows) but nothing ACTED. effective_profile()
+        # detours a SICK home lane's calls to the healthiest substitute and
+        # probes home every Nth would-be-detour so the window can age the
+        # demerits out. ALL failover state below is in-memory only and cleared
+        # by clear_cache() on world reset, like the lane windows. No clock
+        # reads anywhere — counters only.
+        self._lane_failover = lane_failover
+        # substitute profile -> detours routed there this run (load-spread
+        # tie-break + /api/lanes `detours_routed_here`).
+        self._lane_detours_routed: dict[str, int] = {}
+        # home profile -> consecutive would-be-detour counter (probe cadence).
+        self._lane_detour_counter: dict[str, int] = {}
+        # home profile -> substitute recorded at streak start. Presence of the
+        # key IS the "detour streak active" flag (lane_detour edge events).
+        self._lane_streak_substitute: dict[str, str] = {}
+        # Sink for `lane_detour` edge payloads (the API layer routes them into
+        # the event log, same pattern as set_usage_alert_sink). No sink ⇒ drop.
+        self._lane_event_sink: Callable[[dict], None] | None = None
 
     def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
         """Register the callback that receives `usage_alert` payloads
@@ -293,6 +323,11 @@ class Router:
         self._cache_misses = 0
         self._lane_outcomes.clear()
         self._lane_routed_via.clear()
+        # Wave D3 / EM-177 — failover state is in-memory only: detour counters
+        # and streak flags reset with the lane windows on world reset.
+        self._lane_detours_routed.clear()
+        self._lane_detour_counter.clear()
+        self._lane_streak_substitute.clear()
 
     def cache_stats(self) -> dict:
         """Wave D2 / EM-162 — additive decision-cache bookkeeping:
@@ -363,18 +398,173 @@ class Router:
 
     def lane_health(self) -> dict:
         """Introspection snapshot (EM-135): profile -> {window, boosted,
-        timeouts, last_routed_via}. For a future UI; no API/event consumers
-        this wave. `timeouts` (EM-170, additive) counts turn-budget timeouts
-        in the current window — chronic stalling lanes surface here."""
+        timeouts, last_routed_via}. Served by GET /api/lanes (Wave D3).
+        `timeouts` (EM-170, additive) counts turn-budget timeouts in the
+        current window — chronic stalling lanes surface here. Wave D3 /
+        EM-177 augments each entry with `sick` (the failover predicate) and
+        `detours_routed_here` (detoured calls this lane absorbed this run) —
+        both additive keys."""
         return {
             profile: {
                 "window": [dict(o) for o in window],
                 "boosted": self._lane_boosted(profile),
                 "timeouts": sum(1 for o in window if o.get("timed_out")),
                 "last_routed_via": self._lane_routed_via.get(profile),
+                "sick": self.lane_sick(profile),
+                "detours_routed_here": self._lane_detours_routed.get(profile, 0),
             }
             for profile, window in self._lane_outcomes.items()
         }
+
+    # ── Wave D3 / EM-177 — lane failover with recovery probes ──────────────────
+
+    def set_lane_event_sink(self, sink: Callable[[dict], None] | None) -> None:
+        """Register the callback that receives `lane_detour` edge payloads
+        ({phase: degraded|recovered, home, substitute, agent_id}). Emitted
+        ONLY on streak transitions — the first detour of a streak and the
+        recovery — never per turn (per-turn truth rides the llm_call payload).
+        Called synchronously from effective_profile(); the sink must be cheap
+        and never raise."""
+        self._lane_event_sink = sink
+
+    def _lf_value(self, key: str, default: Any) -> Any:
+        """Read one `world.lane_failover` knob defensively: the block may be a
+        LaneFailoverParams dataclass, a plain dict, or absent (⇒ defaults)."""
+        cfg = self._lane_failover
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            value = cfg.get(key, default)
+        else:
+            value = getattr(cfg, key, default)
+        return default if value is None else value
+
+    def _failover_enabled(self) -> bool:
+        return bool(self._lf_value("enabled", True))
+
+    def _sick_threshold(self) -> int:
+        try:
+            return max(1, int(self._lf_value(
+                "sick_threshold", _LANE_SICK_THRESHOLD_DEFAULT)))
+        except (TypeError, ValueError):
+            return _LANE_SICK_THRESHOLD_DEFAULT
+
+    def _probe_every(self) -> int:
+        try:
+            return max(1, int(self._lf_value(
+                "probe_every", _LANE_PROBE_EVERY_DEFAULT)))
+        except (TypeError, ValueError):
+            return _LANE_PROBE_EVERY_DEFAULT
+
+    def lane_sick(self, profile_name: str) -> bool:
+        """EM-177 sickness predicate: ≥ sick_threshold (default 3) timed_out
+        entries in the existing EM-135 6-window. Mock lanes are never sick.
+        provider_error turns never enter the window as timed_out (EM-173
+        keeps those idle on purpose), so they do not count."""
+        if self._is_mock_profile(profile_name):
+            return False
+        window = self._lane_outcomes.get(profile_name)
+        if not window:
+            return False
+        timeouts = sum(1 for o in window if o.get("timed_out"))
+        return timeouts >= self._sick_threshold()
+
+    def _pick_detour_candidate(self, home: str) -> str | None:
+        """Healthiest substitute for a sick home lane: non-mock, available(),
+        not sick. Ranked by (fewest timed_out in window, fewest detours
+        already routed there this run, stable profile order). None ⇒ no
+        healthy candidate (caller keeps the home lane — never detour to mock,
+        never give up the turn)."""
+        best: str | None = None
+        best_key: tuple | None = None
+        for idx, (name, profile) in enumerate(self._profiles.items()):
+            if name == home or profile.adapter == "mock":
+                continue
+            try:
+                if not profile.available():
+                    continue
+            except Exception:  # pragma: no cover - defensive
+                continue
+            if self.lane_sick(name):
+                continue
+            window = self._lane_outcomes.get(name) or ()
+            timeouts = sum(1 for o in window if o.get("timed_out"))
+            key = (timeouts, self._lane_detours_routed.get(name, 0), idx)
+            if best_key is None or key < best_key:
+                best, best_key = name, key
+        return best
+
+    def _emit_lane_event(self, payload: dict) -> None:
+        """Hand one lane_detour edge payload to the sink; never raise."""
+        sink = self._lane_event_sink
+        if sink is None:
+            return
+        try:
+            sink(payload)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("lane_detour sink failed: %s", exc)
+
+    def effective_profile(
+        self, agent_id: str, preferred: str
+    ) -> tuple[str, str | None]:
+        """EM-177 — resolve the lane ONE call should actually go through.
+
+        Returns (profile_to_call, reason) with reason in {None, "detour",
+        "probe"}. The agent's ASSIGNED profile never changes — identity, UI
+        chip, and reassign semantics are untouched; detours are per-call.
+
+          - failover disabled, home healthy, or no healthy candidate
+            ⇒ (preferred, None) — byte-identical pre-D3 routing.
+          - home SICK with a healthy candidate ⇒ every probe_every-th
+            would-be-detour goes home as (preferred, "probe") so a clean
+            outcome ages the demerits out of the window (automatic recovery,
+            no timers, no clock reads); the rest detour to the healthiest
+            candidate as (candidate, "detour").
+
+        `lane_detour` edge events fire ONLY on streak transitions: the first
+        detour of a streak (degraded) and the first healthy call after one
+        (recovered) — exactly two per sick→recovered cycle."""
+        if not self._failover_enabled():
+            return preferred, None
+
+        if not self.lane_sick(preferred):
+            # Recovery edge: a streak was active and the lane is healthy again.
+            substitute = self._lane_streak_substitute.pop(preferred, None)
+            if substitute is not None:
+                self._lane_detour_counter.pop(preferred, None)
+                self._emit_lane_event({
+                    "phase": "recovered",
+                    "home": preferred,
+                    "substitute": substitute,
+                    "agent_id": agent_id,
+                })
+            return preferred, None
+
+        candidate = self._pick_detour_candidate(preferred)
+        if candidate is None:
+            # All-sick (or nothing available): home lane unchanged — never
+            # detour to mock, never give up the turn.
+            return preferred, None
+
+        # This call WOULD detour: count it toward the probe cadence.
+        n = self._lane_detour_counter.get(preferred, 0) + 1
+        self._lane_detour_counter[preferred] = n
+        if n % self._probe_every() == 0:
+            return preferred, "probe"
+
+        self._lane_detours_routed[candidate] = (
+            self._lane_detours_routed.get(candidate, 0) + 1
+        )
+        if preferred not in self._lane_streak_substitute:
+            # First detour of this streak — the one "degraded" edge event.
+            self._lane_streak_substitute[preferred] = candidate
+            self._emit_lane_event({
+                "phase": "degraded",
+                "home": preferred,
+                "substitute": candidate,
+                "agent_id": agent_id,
+            })
+        return candidate, "detour"
 
     def last_routed_via(self, profile_name: str) -> str | None:
         """Return the model the proxy actually routed the last request to for

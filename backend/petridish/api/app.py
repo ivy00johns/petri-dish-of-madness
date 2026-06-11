@@ -118,7 +118,12 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     ]
 
     world = World(params=cfg.world, places=places, agents=agents)
-    router = Router(cfg.profiles)
+    # Wave D3 / EM-177 — thread the `world.lane_failover` block to the router
+    # (defensive getattr: pre-D3 configs lack the field and get the defaults).
+    router = Router(
+        cfg.profiles,
+        lane_failover=getattr(cfg.world, "lane_failover", None),
+    )
 
     # Register each agent's profile with the router
     for agent in agents:
@@ -160,6 +165,44 @@ def _emit_usage_alert(alert: dict) -> None:
         log.debug("usage_alert emission failed: %s", exc)
 
 
+def _emit_lane_detour(payload: dict) -> None:
+    """Sink for Router lane-failover edge events (Wave D3 / EM-177).
+
+    Persists + broadcasts ONE `lane_detour` row per streak transition — the
+    first detour of a streak (degraded) and the recovery — never per turn
+    (per-turn truth rides the llm_call payload). Same pattern as
+    _emit_usage_alert: reads the CURRENT _loop/_world globals so events keep
+    landing in the right run after reset/fork. Defensive: feed transparency
+    must never break a turn."""
+    if _loop is None:
+        return
+    try:
+        agent = (_world.agents or {}).get(payload.get("agent_id")) if _world else None
+        who = agent.name if agent is not None else (payload.get("agent_id") or "an agent")
+        home = payload.get("home")
+        substitute = payload.get("substitute")
+        phase = payload.get("phase")
+        if phase == "recovered":
+            text = f"✓ {home} lane recovered — {who} is back home"
+        else:
+            text = f"⚠ {home} lane is degraded — {who} is borrowing {substitute}"
+        _loop._emit_event({
+            "kind": "lane_detour",
+            "actor_type": "system",
+            "actor_id": None,
+            "profile": home,
+            "text": text,
+            "payload": {
+                "phase": phase,
+                "home": home,
+                "substitute": substitute,
+                "agent_id": payload.get("agent_id"),
+            },
+        })
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("lane_detour emission failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _world, _router, _runtime, _repo, _loop, _config
@@ -180,6 +223,10 @@ async def lifespan(app: FastAPI):
     # Router's day-cap tracker into the event log. The sink reads the CURRENT
     # _loop global, so alerts keep landing in the right run after reset/fork.
     _router.set_usage_alert_sink(_emit_usage_alert)
+    # Wave D3 / EM-177 — route lane_detour streak-edge payloads into the event
+    # log the same way. The sink reads the CURRENT _loop/_world globals, so
+    # events keep landing in the right run after reset/fork.
+    _router.set_lane_event_sink(_emit_lane_detour)
 
     log.info("PetriDishOfMadness backend started (tick_interval=%.2fs)",
              _config.world.tick_interval_seconds)
@@ -276,6 +323,18 @@ async def get_profiles():
             "available": p["available"],
         })
     return result
+
+
+@app.get("/api/lanes")
+async def get_lanes():
+    """Wave D3 / EM-177 — lane-health observability. Returns the router's
+    EM-135 lane_health() snapshot (profile -> {window, boosted, timeouts,
+    last_routed_via}) augmented per profile with `sick` (the failover
+    predicate) and `detours_routed_here` (detoured calls this lane absorbed
+    this run). Lanes appear once they have at least one recorded outcome."""
+    if _router is None:
+        raise HTTPException(503, "Not initialized")
+    return _router.lane_health()
 
 
 # Control endpoints

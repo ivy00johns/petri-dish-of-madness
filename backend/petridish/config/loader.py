@@ -72,6 +72,12 @@ world:
   # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
   # config/world.yaml. 0/absent disables the guard entirely.
   turn_llm_budget_seconds: 12
+  # Wave D3 / EM-177 — lane failover with recovery probes. MUST stay in sync
+  # with config/world.yaml. enabled:false = byte-identical pre-D3 routing.
+  lane_failover:
+    enabled: true
+    sick_threshold: 3
+    probe_every: 4
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -345,6 +351,28 @@ class ProcgenParams:
 
 
 @dataclass
+class LaneFailoverParams:
+    """Wave D3 / EM-177 — lane failover with recovery probes (config
+    `world.lane_failover`). The router (providers/router.py) reads this block
+    via its defensive _lf_value accessor with IDENTICAL defaults, so an absent
+    block behaves exactly like these values. `enabled: false` restores the
+    byte-identical pre-D3 routing (effective_profile always returns the home
+    lane, zero lane_detour events).
+
+      enabled        — master toggle (default ON).
+      sick_threshold — timed_out entries in the EM-135 6-window that mark a
+                       lane SICK (mock lanes are never sick; provider_error
+                       turns never count).
+      probe_every    — every Nth would-be-detour goes through the home lane
+                       instead (a recovery probe), so a clean outcome ages the
+                       demerits out of the window. Counters only — no clocks.
+    """
+    enabled: bool = True
+    sick_threshold: int = 3
+    probe_every: int = 4
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -447,6 +475,10 @@ class WorldParams:
     # floor. Additive with engine-matching defaults, so a world.yaml without
     # the `cadence` block behaves exactly as the shipped defaults.
     cadence: CadenceParams = field(default_factory=CadenceParams)
+    # Wave D3 / EM-177 — lane failover with recovery probes. Additive with
+    # router-matching defaults (default ON); `enabled: false` restores the
+    # byte-identical pre-D3 routing.
+    lane_failover: LaneFailoverParams = field(default_factory=LaneFailoverParams)
 
 
 @dataclass
@@ -723,6 +755,28 @@ def _parse_cadence(raw: dict | None) -> CadenceParams:
     )
 
 
+def _parse_lane_failover(raw: dict | None) -> LaneFailoverParams:
+    """Parse the optional `world.lane_failover` block (Wave D3 / EM-177).
+    Absent/empty/malformed -> router-matching defaults (failover ON).
+    sick_threshold and probe_every are clamped to >= 1 (a 0/negative
+    threshold would mark every lane sick; probe_every 0 would never probe)."""
+    if not isinstance(raw, dict):
+        return LaneFailoverParams()
+    d = LaneFailoverParams()
+
+    def _pos_int(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return LaneFailoverParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        sick_threshold=_pos_int("sick_threshold", d.sick_threshold),
+        probe_every=_pos_int("probe_every", d.probe_every),
+    )
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -796,6 +850,7 @@ def _parse_world(
         reflection=_parse_reflection(w.get("reflection")),
         procgen=_parse_procgen(w.get("procgen")),
         cadence=_parse_cadence(w.get("cadence")),
+        lane_failover=_parse_lane_failover(w.get("lane_failover")),
     )
 
     places = [

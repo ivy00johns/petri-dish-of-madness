@@ -33,6 +33,24 @@ world:
   # to disable the guard entirely — exactly the pre-EM-170 behavior.
   turn_llm_budget_seconds: 12
 
+  # Wave D3 / EM-177 — lane failover with recovery probes. A lane whose recent
+  # outcome window (EM-135, last 6 parse outcomes) holds >= sick_threshold
+  # turn-budget timeouts is SICK: its agents' calls are detoured per-call to
+  # the healthiest available lane (fewest window timeouts, then fewest detours
+  # absorbed this run; never to mock — and the agent's ASSIGNED profile never
+  # changes). Every probe_every-th would-be-detour goes through the home lane
+  # instead, so a clean probe outcome ages the demerits out of the window and
+  # the lane recovers automatically — counters only, no timers. The feed gets
+  # ONE `lane_detour` event per streak edge (degraded/recovered); per-turn
+  # truth rides the llm_call payload (`requested_profile` + `detoured`/
+  # `probe`). Set enabled:false for the byte-identical pre-D3 routing.
+  # MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  lane_failover:
+    enabled: true        # default ON
+    sick_threshold: 3    # timed_out entries in the 6-window that mark a lane sick
+    probe_every: 4       # every Nth would-be-detour probes the home lane
+
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
   # POST /api/agents/{id}/tier): protagonists act every round, supporting every

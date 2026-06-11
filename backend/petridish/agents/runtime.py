@@ -2095,8 +2095,6 @@ class AgentRuntime:
         profile_name = self.router.profile_name_for(agent.id, agent.profile)
         profile = self.router.get_profile(profile_name)
         profile_color = profile.color if profile else "#888888"
-        max_tokens = profile.max_tokens if profile else 512
-        temperature = profile.temperature if profile else 0.8
 
         recent_events = self._memory.get(agent.id, [])
 
@@ -2124,6 +2122,30 @@ class AgentRuntime:
                 cadence_meta = {"cadence_reason": "wildcard"}
             else:
                 return self._reflex_turn(agent, profile_name, profile_color)
+
+        # ── Wave D3 / EM-177 — lane failover with recovery probes ─────────────
+        # Resolved ONCE per turn, AFTER the cadence gate (a reflex turn makes
+        # zero router calls, so it must never tick the probe cadence). The
+        # agent's ASSIGNED profile (identity, chip, events) stays
+        # `profile_name`; only THIS turn's call routes through `call_profile`.
+        # The effective profile's max_tokens/temperature apply — a detoured
+        # call runs at the substitute lane's budget. Guarded getattr:
+        # duck-typed test routers without effective_profile() are unchanged.
+        call_profile = profile_name
+        lane_reason: str | None = None
+        effective = getattr(self.router, "effective_profile", None)
+        if callable(effective):
+            try:
+                call_profile, lane_reason = effective(agent.id, profile_name)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("effective_profile failed for %s: %s", agent.name, exc)
+                call_profile, lane_reason = profile_name, None
+        call_prof = (
+            profile if call_profile == profile_name
+            else self.router.get_profile(call_profile)
+        )
+        max_tokens = call_prof.max_tokens if call_prof else 512
+        temperature = call_prof.temperature if call_prof else 0.8
 
         # W11b — pending overheard lines are consumed by THIS turn (EM-081), the
         # commitments block rides the prompt when non-empty (EM-079), and the
@@ -2190,14 +2212,19 @@ class AgentRuntime:
         # repeated truncations gets the boosted budget UP FRONT instead of
         # burning attempt 1 at a cap the lane keeps cutting. Guarded getattr:
         # duck-typed test routers don't implement first_attempt_max_tokens.
+        # EM-177: budgets, the call itself, and the parse-outcome attribution
+        # all use the EFFECTIVE lane — "what did this lane do" keeps meaning
+        # the lane actually called.
         attempt_tokens = max_tokens
         first_budget = getattr(self.router, "first_attempt_max_tokens", None)
         if callable(first_budget):
-            attempt_tokens = first_budget(profile_name, max_tokens)
+            attempt_tokens = first_budget(call_profile, max_tokens)
         action_dict, parse_error, llm_meta = await self._call_and_parse(
-            profile_name, messages, attempt_tokens, temperature, agent, attempt=1
+            call_profile, messages, attempt_tokens, temperature, agent, attempt=1
         )
-        llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
+        llm_attempts.append(self._lane_stamped_span(
+            call_profile, llm_meta, profile_name, lane_reason
+        ))
 
         # EM-170 — a TIMED-OUT consult never retries: the budget already burned
         # the turn's wall-clock allowance, and a retry would risk stalling the
@@ -2224,11 +2251,13 @@ class AgentRuntime:
                 },
             ]
             action_dict, parse_error, llm_meta = await self._call_and_parse(
-                profile_name, retry_messages, retry_tokens, temperature, agent, attempt=2
+                call_profile, retry_messages, retry_tokens, temperature, agent, attempt=2
             )
-            llm_attempts.append(self._llm_attempt_span(profile_name, llm_meta))
+            llm_attempts.append(self._lane_stamped_span(
+                call_profile, llm_meta, profile_name, lane_reason
+            ))
 
-        routed = self.router.last_routed_via(profile_name)
+        routed = self.router.last_routed_via(call_profile)
 
         # ── EM-173 — survival reflex on llm_timeout ───────────────────────────
         # Run 321: a degraded proxy night put 38% of calls into the EM-170 12s
@@ -2466,6 +2495,29 @@ class AgentRuntime:
         # so non-timeout llm_call rows keep their exact pre-EM-170 key set.
         if meta.get("timed_out"):
             span["timed_out"] = True
+        return span
+
+    def _lane_stamped_span(
+        self,
+        call_profile: str,
+        meta: dict,
+        requested_profile: str,
+        lane_reason: str | None,
+    ) -> dict:
+        """Wave D3 / EM-177 — build the per-attempt llm_call span, stamped with
+        the ADDITIVE failover keys when this turn's call left its home lane:
+        `requested_profile` (the home lane) plus `detoured: true` or
+        `probe: true`. The span's profile keys stay the lane ACTUALLY called
+        (forensics compatibility: per-profile timeout queries keep meaning
+        "what the lane did"); a home-lane call (reason None) keeps the exact
+        pre-D3 key set."""
+        span = self._llm_attempt_span(call_profile, meta)
+        if lane_reason == "detour":
+            span["requested_profile"] = requested_profile
+            span["detoured"] = True
+        elif lane_reason == "probe":
+            span["requested_profile"] = requested_profile
+            span["probe"] = True
         return span
 
     async def _call_and_parse(
