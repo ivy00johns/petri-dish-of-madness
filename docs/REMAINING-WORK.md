@@ -278,7 +278,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-192 | P3 | — | frontend | qe wave-E / B7 | Frontend follow-ups: declare town_name on the WorldState type (B7 reads it via a defensive cast), migrate Building/Structure label hex literals onto the new toon.ts LABEL_INK/LABEL_OUTLINE constants, consider a real opacity fade for proximity-gated labels | open | — |
 | EM-193 | P3 | — | frontend | design-token-guard 2026-06-11 | Token-discipline backlog: design-token-guard reports 338 pre-existing errors across web/src (Header/ControlPanel chrome hardcoding hex with matching tokens, e.g. #27ae60 → --rel-ally); wave gates now hold the line at zero NEW violations — burn the backlog down file-by-file in report-only ratchet mode | open | — |
 
-_Next free ID: EM-194._
+| EM-194 | P1 | W18 | frontend+backend | user 2026-06-12 | Inspector at long-session scale: boot pages ALL events to exhaustion (~50×1000 chunks at 99k events) before the page is usable, every scrub tick re-folds the full 50k-event history through 4-6 O(n) selectors, and nothing is virtualized — "infinite scroll and useless" on long sessions. Tail-first boot (newest chunk renders immediately, background backfill with real progress via a new /api/events/stats + desc keyset tail), incremental scrub-time projection caching (golden-equal to the full fold), bounded-row virtualization on the unbounded panel lists, truncation honesty at the 50k cap. Pairs EM-151 (error boundaries + archive windowing — same wave). Contract: `contracts/wave-f.md` | open | — |
+
+_Next free ID: EM-195._
 
 ## Notes
 
