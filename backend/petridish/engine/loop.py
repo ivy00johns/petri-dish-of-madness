@@ -338,6 +338,11 @@ class TickLoop:
         self._world.animals = {}
         # W11b — clear the billboard for the fresh run.
         self._world.billboard = []
+        # Wave E / EM-120 — clear factions: stale clusters from the prior run
+        # reference replaced agent ids and would emit spurious dissolutions at
+        # the fresh run's first round boundary. (No drain change — faction
+        # events ride the existing pending_spawn_events outbox, cleared above.)
+        self._world.factions = {}
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0

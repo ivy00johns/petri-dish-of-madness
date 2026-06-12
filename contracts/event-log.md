@@ -195,6 +195,26 @@ Wave E kinds (contracts/wave-e.md):
   (the EM-062/168 governance-spawn drain) as standalone system events
   (`turn_id` null).
 
+- `faction_formed` / `faction_joined` / `faction_left` / `faction_dissolved`
+  (B3 / EM-120) — emitted at the ROUND boundary (after the birth check) when
+  the faction recompute DIFFS against the stored memberships; a stable round
+  emits NOTHING. All four ride the same `pending_spawn_events` outbox as
+  births (standalone system events, `actor_type` system, `turn_id` null) and
+  carry ONLY agent ids in actor_id/target_id (EM-141; `target_id` null).
+  - `faction_formed` — a new component (size >= `factions.faction_min_size`
+    over mutual warm edges) with no >= 50%-overlap match to an existing
+    faction. `actor_id` = the oldest founding member (LOWEST agent id).
+    Payload: `{faction_id, name, members: [sorted agent ids]}` where
+    `faction_id = fct_{8 hex of sha1(sorted founding members + tick)}` and
+    `name = "{oldest founding member's name}'s circle"`.
+  - `faction_joined` / `faction_left` — membership churn on a faction that
+    KEPT its identity. `actor_id` = the joining/leaving agent. Payload:
+    `{faction_id, name}`.
+  - `faction_dissolved` — an old faction with no >= 50%-overlap successor
+    component (including shrinking under `faction_min_size`). `actor_id` =
+    the lowest member id of the OLD membership. Payload:
+    `{faction_id, name, members: [the old membership]}`.
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:

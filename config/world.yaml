@@ -127,6 +127,27 @@ world:
     birth_chance: 0.25           # seeded per-pair unit-float gate per round
     pair_cooldown_ticks: 600     # min ticks between children of the same pair
 
+  # Wave E / EM-120 — factions, feuds & reputation (contracts/wave-e.md B3).
+  # At each ROUND boundary — after the EM-114 birth check (contract order:
+  # births first, then factions) — the world recomputes candidate clusters:
+  # connected components over MUTUAL warm edges (both directions typed
+  # ally|friend|partner|family AND both trusts >= faction_trust) among living
+  # agents; components of size >= faction_min_size are factions. Identity is
+  # continuous across churn (>= 50% overlap of the OLD membership keeps the
+  # faction's id and name); unmatched old factions dissolve. Pure derived /
+  # reflex state — zero LLM calls (the wave's free-scale law) — and the
+  # faction_formed/joined/left/dissolved events fire on DIFFS only (stable
+  # rounds emit nothing). Reputation is fully derived (mean incoming trust
+  # from living agents with interactions >= 1) and rides world_state agents
+  # as an additive `reputation` key while enabled. Set enabled:false for
+  # byte-identical pre-E behavior (no recompute, no events, no new snapshot
+  # keys). MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  factions:
+    enabled: true
+    faction_trust: 25            # warm edge needs BOTH trusts >= this
+    faction_min_size: 3          # smaller clusters never form / dissolve
+
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
   # POST /api/agents/{id}/tier): protagonists act every round, supporting every

@@ -114,6 +114,17 @@ world:
     birth_cost_credits: 6
     birth_chance: 0.25
     pair_cooldown_ticks: 600
+  # Wave E / EM-120 — factions, feuds & reputation: at each round boundary
+  # (after the birth check) connected components over MUTUAL warm edges
+  # (both directions ally|friend|partner|family AND both trusts >=
+  # faction_trust) of size >= faction_min_size form factions. Derived state,
+  # zero LLM calls; events fire on diffs only. MUST stay in sync with
+  # config/world.yaml. enabled:false = no recompute, no factions/reputation
+  # snapshot keys (byte-identical pre-E behavior).
+  factions:
+    enabled: true
+    faction_trust: 25
+    faction_min_size: 3
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -480,6 +491,30 @@ class ChildrenParams:
 
 
 @dataclass
+class FactionParams:
+    """Wave E / EM-120 — factions, feuds & reputation (config `world.factions`).
+    At each ROUND boundary (after the EM-114 birth check — contract order:
+    births first, then factions) the world recomputes candidate clusters:
+    connected components over MUTUAL warm edges — both directions typed
+    ally|friend|partner|family AND both trusts >= faction_trust — among living
+    agents; components of size >= faction_min_size are factions. Pure derived
+    state, zero LLM calls (the wave's free-scale law); events fire on DIFFS
+    only, never on stable rounds. The engine reads this block via its
+    defensive _fct_param accessor with IDENTICAL defaults.
+
+      enabled          — master toggle (default ON). `false` ⇒ no recompute,
+                         no faction events, no `factions`/`reputation`
+                         snapshot keys: byte-identical pre-E behavior.
+      faction_trust    — a warm edge needs BOTH directions' trust >= this.
+      faction_min_size — components below this size never form (and an
+                         existing faction shrinking under it dissolves).
+    """
+    enabled: bool = True
+    faction_trust: int = 25
+    faction_min_size: int = 3
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -607,6 +642,10 @@ class WorldParams:
     # without partners (every pre-E world) behaves byte-identically.
     # `enabled: false` skips the birth check entirely.
     children: ChildrenParams = field(default_factory=ChildrenParams)
+    # Wave E / EM-120 — factions, feuds & reputation. Additive with
+    # engine-matching defaults (default ON); `enabled: false` skips the
+    # round-boundary recompute entirely (byte-identical pre-E behavior).
+    factions: FactionParams = field(default_factory=FactionParams)
 
 
 @dataclass
@@ -967,6 +1006,28 @@ def _parse_children(raw: dict | None) -> ChildrenParams:
     )
 
 
+def _parse_factions(raw: dict | None) -> FactionParams:
+    """Parse the optional `world.factions` block (Wave E / EM-120).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually; faction_min_size clamps to >= 1 (a malformed
+    value never breaks the block)."""
+    if not isinstance(raw, dict):
+        return FactionParams()
+    d = FactionParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return FactionParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        faction_trust=_int("faction_trust", d.faction_trust),
+        faction_min_size=max(1, _int("faction_min_size", d.faction_min_size)),
+    )
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -1046,6 +1107,7 @@ def _parse_world(
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
         children=_parse_children(w.get("children")),
+        factions=_parse_factions(w.get("factions")),
     )
 
     places = [

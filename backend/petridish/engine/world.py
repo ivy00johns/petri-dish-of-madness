@@ -514,6 +514,17 @@ class World:
         # gracefully (Kit-N names; profile derived from living agents).
         self.birth_personas: list[dict] = []
         self.birth_profile_roster: list[str] = []
+        # Wave E / EM-120 — factions: {id: {name, founded_tick, members}}.
+        # Recomputed (connected components over mutual warm edges) at each
+        # round boundary AFTER the birth check; identity is continuous across
+        # churn (>= 50% overlap of the OLD membership keeps id/name). The
+        # faction_* events are DIFF-driven and park in the SAME
+        # pending_spawn_events outbox as births (documented choice: they are
+        # standalone system events drained by the loop's _flush_spawn_events,
+        # turn_id null — no sibling drain needed). Serialized in to_snapshot()
+        # only when non-empty (the cap_demotions pattern), so pre-E snapshots
+        # stay byte-identical.
+        self.factions: dict[str, dict] = {}
         # W11b / EM-091 — the public billboard. List of {tick, actor_id,
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
@@ -720,6 +731,11 @@ class World:
         # the due set AFTER this returns, and a background-tier child only
         # joins rounds where its tier is due (EM-158/172 invariant intact).
         self.check_births()
+        # Wave E / EM-120 — the once-per-round faction recompute, AFTER the
+        # birth check (contract order: births first, then factions) so a
+        # newborn's family edges count toward this round's clusters. Diff-
+        # driven events park in the same pending_spawn_events outbox.
+        self.recompute_factions()
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -2440,6 +2456,220 @@ class World:
             },
         ]
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-120 — factions, feuds & reputation (contracts/wave-e.md B3).
+    # Pure derived / reflex state — zero LLM calls (the wave's free-scale law).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # A faction edge needs BOTH directions typed warm (and both trusts at/above
+    # faction_trust). Feuds/enemies/rivals never bind a faction together.
+    FACTION_WARM_TYPES = ("ally", "friend", "partner", "family")
+
+    def _fct_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.factions` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _chl_param)."""
+        return _block_get(getattr(self.params, "factions", None), name, default)
+
+    def _factions_enabled(self) -> bool:
+        """Config gate `world.factions.enabled` (default ON). Disabled ⇒ no
+        recompute, no faction events, no factions/reputation snapshot keys —
+        byte-identical pre-E behavior."""
+        return bool(self._fct_param("enabled", True))
+
+    def reputation(self, agent_id: str) -> int:
+        """EM-120 item 1 — DERIVED reputation, zero storage: round(mean
+        incoming trust over LIVING agents with interactions >= 1 toward this
+        agent). Nobody has a (used) relationship toward them ⇒ 0. Computed at
+        serialization time (to_snapshot) — never persisted."""
+        trusts = [
+            rel.trust
+            for a in self.living_agents()
+            if a.id != agent_id
+            for rel in (a.relationships.get(agent_id),)
+            if rel is not None and rel.interactions >= 1
+        ]
+        if not trusts:
+            return 0
+        return round(sum(trusts) / len(trusts))
+
+    def faction_of(self, agent_id: str) -> dict | None:
+        """The faction this agent belongs to, as {id, name, members} (a copy),
+        or None. Components are disjoint, so membership is unique. This is the
+        world-side seam for the contracted one-line faction prompt
+        ("Your circle: {name} ({k} members)") — runtime.py is owned by B4,
+        which wires the line via this accessor (deviation noted in B3's
+        report; the fixture world has no factions, so the protagonist prompt
+        guard is unaffected either way)."""
+        for fid in sorted(self.factions):
+            f = self.factions[fid]
+            if agent_id in f.get("members", []):
+                return {
+                    "id": fid,
+                    "name": f.get("name", ""),
+                    "members": list(f.get("members", [])),
+                }
+        return None
+
+    def _mutual_warm_edge(self, a: AgentState, b: AgentState, threshold: int) -> bool:
+        """True when BOTH directions are typed warm (FACTION_WARM_TYPES) AND
+        both trusts >= threshold — the only edge kind factions cluster over."""
+        rel_ab = a.relationships.get(b.id)
+        rel_ba = b.relationships.get(a.id)
+        return (
+            rel_ab is not None and rel_ba is not None
+            and rel_ab.type in self.FACTION_WARM_TYPES
+            and rel_ba.type in self.FACTION_WARM_TYPES
+            and rel_ab.trust >= threshold and rel_ba.trust >= threshold
+        )
+
+    def _warm_components(self, threshold: int) -> list[list[str]]:
+        """Connected components over mutual warm edges among LIVING agents.
+        Deterministic: agents are walked in sorted-id order, so components
+        come out ordered by their lowest member id, members sorted."""
+        living = sorted(self.living_agents(), key=lambda a: a.id)
+        adjacency: dict[str, list[str]] = {a.id: [] for a in living}
+        for i, a in enumerate(living):
+            for b in living[i + 1:]:
+                if self._mutual_warm_edge(a, b, threshold):
+                    adjacency[a.id].append(b.id)
+                    adjacency[b.id].append(a.id)
+        components: list[list[str]] = []
+        seen: set[str] = set()
+        for a in living:
+            if a.id in seen:
+                continue
+            stack, comp = [a.id], []
+            seen.add(a.id)
+            while stack:
+                cur = stack.pop()
+                comp.append(cur)
+                for nxt in adjacency[cur]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            components.append(sorted(comp))
+        return components
+
+    def _agent_name(self, agent_id: str) -> str:
+        a = self.agents.get(agent_id)
+        return a.name if a is not None else agent_id
+
+    def _faction_event(self, kind: str, actor_id: str, text: str, payload: dict) -> dict:
+        """A ready-to-park faction event. EM-141: actor_id is ALWAYS an agent
+        id (the social-graph selector drops non-agent endpoints); these are
+        standalone system events — the loop's drain stamps turn_id null."""
+        return {
+            "kind": kind,
+            "actor_id": actor_id,
+            "actor_type": "system",
+            "text": text,
+            "payload": payload,
+        }
+
+    def recompute_factions(self) -> list[dict]:
+        """EM-120 items 2-4 — the once-per-round faction recompute, called
+        from _apply_round_start AFTER check_births (contract order). Clusters
+        = connected components over mutual warm edges among living agents;
+        components of size >= faction_min_size are factions.
+
+        Identity continuity: a component keeps an existing faction's id/name
+        when it overlaps >= 50% of that faction's OLD membership (best
+        overlap wins; ties break by faction id, then component order — all
+        deterministic). Unmatched components found NEW factions
+        (id = fct_{8 hex of sha1(sorted founding members + tick)}, name =
+        "{oldest founding member's name}'s circle", oldest = LOWEST agent id);
+        unmatched old factions DISSOLVE.
+
+        Events fire on DIFFS ONLY — a stable round emits nothing — and park
+        in the pending_spawn_events outbox (same drain as births). Returns
+        the parked events ([] when stable/disabled)."""
+        if not self._factions_enabled():
+            return []
+        threshold = int(self._fct_param("faction_trust", 25))
+        min_size = max(1, int(self._fct_param("faction_min_size", 3)))
+        components = [
+            c for c in self._warm_components(threshold) if len(c) >= min_size
+        ]
+
+        # Identity continuity — overlap >= 50% of the OLD membership, matched
+        # greedily best-overlap-first (deterministic tie-break: faction id,
+        # then component order = lowest-member-id order).
+        candidates: list[tuple[int, str, int]] = []
+        for ci, comp in enumerate(components):
+            comp_set = set(comp)
+            for fid, f in self.factions.items():
+                old_members = f.get("members", [])
+                overlap = len(comp_set & set(old_members))
+                if overlap > 0 and 2 * overlap >= len(old_members):
+                    candidates.append((-overlap, fid, ci))
+        candidates.sort()
+        assigned: dict[int, str] = {}
+        taken: set[str] = set()
+        for neg_overlap, fid, ci in candidates:
+            if fid in taken or ci in assigned:
+                continue
+            assigned[ci] = fid
+            taken.add(fid)
+
+        events: list[dict] = []
+        new_factions: dict[str, dict] = {}
+        for ci, comp in enumerate(components):
+            if ci in assigned:
+                # Continuity: keep id/name/founded_tick, diff the membership.
+                fid = assigned[ci]
+                old = self.factions[fid]
+                name = str(old.get("name", ""))
+                old_members = set(old.get("members", []))
+                for m in comp:
+                    if m not in old_members:
+                        events.append(self._faction_event(
+                            "faction_joined", m,
+                            f"⚑ {self._agent_name(m)} joins {name}",
+                            {"faction_id": fid, "name": name},
+                        ))
+                for m in sorted(old_members - set(comp)):
+                    events.append(self._faction_event(
+                        "faction_left", m,
+                        f"⚑ {self._agent_name(m)} drifts away from {name}",
+                        {"faction_id": fid, "name": name},
+                    ))
+                new_factions[fid] = {
+                    "name": name,
+                    "founded_tick": int(old.get("founded_tick", 0)),
+                    "members": list(comp),
+                }
+            else:
+                # A NEW faction. Deterministic id (sha1 — never the salted
+                # builtin hash) and name; oldest member = lowest agent id.
+                key = f"{':'.join(comp)}:{self.tick}".encode()
+                fid = f"fct_{hashlib.sha1(key).hexdigest()[:8]}"
+                name = f"{self._agent_name(comp[0])}'s circle"
+                new_factions[fid] = {
+                    "name": name,
+                    "founded_tick": self.tick,
+                    "members": list(comp),
+                }
+                member_names = ", ".join(self._agent_name(m) for m in comp)
+                events.append(self._faction_event(
+                    "faction_formed", comp[0],
+                    f"⚑ {name} has formed — {member_names}",
+                    {"faction_id": fid, "name": name, "members": list(comp)},
+                ))
+        for fid, f in self.factions.items():
+            if fid not in new_factions:
+                name = str(f.get("name", ""))
+                old_members = [str(m) for m in f.get("members", [])]
+                anchor = min(old_members) if old_members else ""
+                events.append(self._faction_event(
+                    "faction_dissolved", anchor,
+                    f"⚑ {name} has dissolved",
+                    {"faction_id": fid, "name": name, "members": old_members},
+                ))
+        self.factions = new_factions
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
     def spawn_agent(
         self,
         name: str,
@@ -2545,6 +2775,14 @@ class World:
 
     def to_snapshot(self, profile_colors: dict[str, str] | None = None) -> dict:
         pc = profile_colors or {}
+        # Wave E / EM-120 — reputation is DERIVED (zero storage) and computed
+        # at serialization. Documented seam choice: AgentState.to_dict has no
+        # world backref and its only production call site is THIS method (the
+        # loop's world_state broadcast and /api/state both go through
+        # to_snapshot), so the additive `reputation` key is attached here,
+        # beside turns_until_death. Gated on factions.enabled so a disabled
+        # world keeps the exact pre-E agent dict shape (byte-identical proof).
+        fct_enabled = self._factions_enabled()
         snap = {
             "tick": self.tick,
             "day": self.day,
@@ -2563,6 +2801,9 @@ class World:
                     **a.to_dict(pc.get(a.profile, "#888888")),
                     # W9 / EM-070 — starvation countdown (null when energy > 0).
                     "turns_until_death": self.turns_until_death(a),
+                    # Wave E / EM-120 — derived reputation (additive key;
+                    # consumers may ignore; absent while factions disabled).
+                    **({"reputation": self.reputation(a.id)} if fct_enabled else {}),
                 }
                 for a in self.agents.values()
             ],
@@ -2599,6 +2840,19 @@ class World:
         # already carries each governed agent's demoted_from (AgentState.to_dict).
         if self.cap_demotions:
             snap["cap_demotions"] = dict(self.cap_demotions)
+        # Wave E / EM-120 — factions {id: {name, founded_tick, members}}.
+        # Serialized only when non-empty (the cap_demotions pattern), so a
+        # faction-free world — and every pre-E snapshot — keeps the exact
+        # pre-E key set (absent ⇒ {} on restore).
+        if self.factions:
+            snap["factions"] = {
+                fid: {
+                    "name": str(f.get("name", "")),
+                    "founded_tick": int(f.get("founded_tick", 0)),
+                    "members": [str(m) for m in f.get("members", [])],
+                }
+                for fid, f in self.factions.items()
+            }
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -2820,6 +3074,18 @@ class World:
             str(lane): str(win)
             for lane, win in (state.get("cap_demotions") or {}).items()
             if lane and win
+        }
+        # Wave E / EM-120 — restore factions (additive: pre-E snapshots lack
+        # the key and restore {} — identity continuity then survives a
+        # fork/restore, so a stable membership re-keeps its id with no events).
+        world.factions = {
+            str(fid): {
+                "name": str(_block_get(f, "name", "")),
+                "founded_tick": _int(_block_get(f, "founded_tick", 0)),
+                "members": [str(m) for m in (_block_get(f, "members", []) or [])],
+            }
+            for fid, f in (state.get("factions") or {}).items()
+            if fid
         }
         # EM-145 — restore queued god whispers (only for agents that exist).
         world.pending_whispers = {

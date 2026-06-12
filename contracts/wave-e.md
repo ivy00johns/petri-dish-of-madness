@@ -199,7 +199,13 @@ relationships_json round-trip spec below), `config/world.yaml`,
 **Owner:** backend-agent-B3 (after B2 gate).
 **Files owned:** `backend/petridish/engine/world.py`,
 `backend/petridish/config/loader.py`, `config/world.yaml`,
-`contracts/event-log.md`, `backend/tests/test_wave_e_factions.py` (new).
+`contracts/event-log.md`, `backend/tests/test_wave_e_factions.py` (new),
+plus ratified v1.1: `backend/petridish/engine/loop.py` (reset-path
+`factions = {}` clear) and one assertion in
+`backend/tests/test_wave_e_children.py` (the shared round boundary appends
+the newborn-completed faction's formed event to the same drain).
+Spec item 6 (faction prompt line) DEFERRED to B4 via `World.faction_of()` —
+B4 must wire it (runtime.py ownership).
 
 ### Behavior spec
 

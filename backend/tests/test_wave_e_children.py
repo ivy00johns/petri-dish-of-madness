@@ -183,7 +183,12 @@ def test_birth_fires_at_round_boundary_and_events_drain():
     child = children[0]
     assert child.id not in world._turn_order   # background not due round 1
     drained = world.drain_spawn_events()
-    assert [e["kind"] for e in drained] == ["child_spawned", "agent_spawned"]
+    # Wave E / B3 (EM-120): the faction recompute shares this round boundary
+    # and runs AFTER the birth check (contract order: births first, then
+    # factions) — the newborn's family ties complete a 3-member warm
+    # component, so a faction_formed rides the same drain behind the birth.
+    assert [e["kind"] for e in drained] == [
+        "child_spawned", "agent_spawned", "faction_formed"]
     assert world.drain_spawn_events() == []    # idempotent
     # The remaining round walks the original pair only.
     assert world.next_agent().id == "agent_bram"
