@@ -1424,6 +1424,8 @@ async def get_events(
     actor_id: str | None = Query(default=None),
     turn_id: str | None = Query(default=None),
     after_seq: int | None = Query(default=None),
+    before_seq: int | None = Query(default=None,
+                                   description="keyset for order=desc tail pages (seq < before_seq)"),
     limit: int | None = Query(default=None),
     order: str = Query(default="asc"),
 ):
@@ -1439,9 +1441,22 @@ async def get_events(
         actor_id=actor_id,
         turn_id=turn_id,
         after_seq=after_seq,
+        before_seq=before_seq,
         limit=limit,
         order=order,
     )
+
+
+@app.get("/api/events/stats")
+async def get_event_stats(run_id: int | None = None):
+    """Run-scoped event-log bounds (Wave F / EM-194): {total, max_seq,
+    max_tick, min_seq} via a single cheap COUNT/MAX/MIN — sizes the client's
+    tail-first backfill. Same ?run_id scoping as GET /api/events (omitted →
+    active run; unknown id → 404). Uninitialized → all-zeros, never 500."""
+    run_id = _resolve_run_id(run_id)
+    if _repo is None or run_id is None:
+        return {"total": 0, "max_seq": 0, "max_tick": 0, "min_seq": 0}
+    return _repo.get_event_stats(run_id)
 
 
 @app.get("/api/turns/{turn_id}")
