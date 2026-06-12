@@ -25,13 +25,34 @@
   <a href="#-acknowledgments">Acknowledgments</a>
 </p>
 
-</div>
+<p align="center">
+  <img src="https://img.shields.io/badge/Python_3.11+-3776AB?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/Pydantic_v2-E92063?logo=pydantic&logoColor=white" alt="Pydantic" />
+  <img src="https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <img src="https://img.shields.io/badge/React_18-20232A?logo=react&logoColor=61DAFB" alt="React" />
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <br>
+  <img src="https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white" alt="Vite" />
+  <img src="https://img.shields.io/badge/Tailwind-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS" />
+  <img src="https://img.shields.io/badge/Three.js-000000?logo=threedotjs&logoColor=white" alt="Three.js" />
+  <img src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white" alt="Docker" />
+  <img src="https://img.shields.io/badge/nginx-009639?logo=nginx&logoColor=white" alt="nginx" />
+</p>
 
 ---
 
 ## ✨ What it is
 
 PetriDishOfMadness is a multi-agent sandbox where every agent is powered by a **different, hot-swappable LLM** — and the UI shows the model that *actually* answered each turn. It's a small, cheap reinterpretation of [Emergence-World](https://github.com/EmergenceAI/Emergence-World), built from the ground up to stay runnable on **free** model tiers while still growing a real society: typed relationships, factions, families, governance, economy, and emergent drama.
+
+---
+
+## 💛 Support
+
+If PetriDishOfMadness made you smile, you can [**buy me a coffee** ☕](https://www.buymeacoffee.com/john00ivyz). *(The in-app coffee button can be hidden with `VITE_COFFEE_BUTTON=false` in the `.env` file.)*
+
+</div>
 
 ---
 
@@ -155,34 +176,6 @@ flowchart TB
 ```
 
 **Data flow (one tick):** tick → scheduler picks agent → assemble context → `router.chat()` → parse JSON action → mutate world + persist → broadcast over WebSocket → frontend renders.
-
----
-
-## 🧰 Tech Stack
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Python_3.11+-3776AB?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
-  <img src="https://img.shields.io/badge/Pydantic_v2-E92063?logo=pydantic&logoColor=white" alt="Pydantic" />
-  <img src="https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
-  <img src="https://img.shields.io/badge/React_18-20232A?logo=react&logoColor=61DAFB" alt="React" />
-  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white" alt="Vite" />
-  <img src="https://img.shields.io/badge/Tailwind-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS" />
-  <img src="https://img.shields.io/badge/Three.js-000000?logo=threedotjs&logoColor=white" alt="Three.js" />
-  <img src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white" alt="Docker" />
-  <img src="https://img.shields.io/badge/nginx-009639?logo=nginx&logoColor=white" alt="nginx" />
-</p>
-
-- **Backend** — Python 3.11+ · FastAPI · Pydantic v2 · SQLite (append-only event log + snapshots).
-- **Frontend** — React 18 · TypeScript · Vite · Tailwind · Three.js / React-Three-Fiber (the 3D town) · force-graph + Observable Plot (the inspector).
-- **Ops** — Docker Compose · nginx · WebSocket streaming.
-
----
-
-## 💛 Support
-
-If PetriDishOfMadness made you smile, you can [**buy me a coffee** ☕](https://www.buymeacoffee.com/john00ivyz). *(The in-app coffee button hides with `VITE_COFFEE_BUTTON=false`.)*
 
 ---
 
