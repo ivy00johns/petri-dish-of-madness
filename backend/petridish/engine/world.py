@@ -2225,6 +2225,25 @@ class World:
             and rel_ab.trust >= threshold and rel_ba.trust >= threshold
         )
 
+    def apply_bond(
+        self, agent: AgentState, target_id: str, rel_type: str, tick: int
+    ) -> tuple[bool, str]:
+        """Wave E / EM-125 — apply a reflection-declared bond
+        (contracts/wave-e.md B4). EXACTLY set_relationship semantics: the same
+        B1 guards (`family` engine-only, `partner` trust-gated) and, on an
+        actual type change, the same relationship_changed event parked in the
+        pending_relationship_events outbox so the declaring agent's turn chain
+        carries it. `tick` is the declaring turn's tick per the contract
+        signature — callers pass the current world tick, which is what
+        action_set_relationship stamps into since_tick. Dead/unknown targets
+        are rejected (the runtime resolves names to ids before calling)."""
+        target = self.agents.get(target_id)
+        if target is None:
+            return False, f"unknown target: {target_id!r}"
+        if not target.alive:
+            return False, f"{target.name} is no longer among the living"
+        return self.action_set_relationship(agent, target, rel_type)
+
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
 

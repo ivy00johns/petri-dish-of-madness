@@ -215,6 +215,15 @@ Wave E kinds (contracts/wave-e.md):
     the lowest member id of the OLD membership. Payload:
     `{faction_id, name, members: [the old membership]}`.
 
+- `reflection` payload gains ADDITIVE `bond_applied: {target_id, type}`
+  (B4 / EM-125) — present ONLY when the reflection-declared bond landed
+  (type ∈ `friend|partner|mentor|feud`; B1 guards applied). The bond's own
+  `relationship_changed` rides the SAME turn chain (same turn_id) as the
+  reflection; rejected bonds add NO event kind and NO payload key — the
+  reason lands in the decision trace as `bond_rejected` only. No new kinds,
+  no extra `llm_call` rows: the bond rides the existing single reflection
+  call.
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:
