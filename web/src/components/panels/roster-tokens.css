@@ -15,4 +15,13 @@
   --rel-neutral: #5a5a72;
   --rel-rival: #ff9900;
   --rel-enemy: #ff3333;
+
+  /* Wave E (EM-113, contracts/wave-e.md B6) — the four new relationship
+     registers. partner/family read warm-distinct (pink / amber — nothing else
+     in the lab palette owns these), mentor reads sky, and feud is DARKER than
+     enemy (the contract's "drama has hardened" register). */
+  --rel-partner: #ff6fa5;
+  --rel-family: #ffb347;
+  --rel-mentor: #4cc9f0;
+  --rel-feud: #a31621;
 }

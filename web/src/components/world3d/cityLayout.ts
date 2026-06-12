@@ -38,6 +38,11 @@
  *   • SIDEWALK PROPS (lamp/bench/hydrant/bin) sit at block corners along the
  *     road edges; `car_a..c` park sparsely on the curbs of the adjacent road
  *     tiles.
+ *   • STREET NAMES (EM-188): `CityPlan.streets` names every road centerline
+ *     of the frozen grid (12 streets) from a seeded two-part name bank —
+ *     pure data, seeded ONLY by city_seed via the hashUnit idiom, part of
+ *     the EM-155 byte-identical output. Interior avenues carry mid-block
+ *     label anchors; the outer ring road stays unlabeled (sparse-label law).
  *
  * Determinism is a contract invariant (EM-155): the plan is a pure function
  * of (places, city_seed) — same snapshot + same seed ⇒ byte-identical plan
@@ -111,6 +116,33 @@ export interface CityInstance { x: number; z: number; rotY: number; s?: number }
 
 export interface CityBlock { cx: number; cz: number; zone: CityZone }
 
+/** EM-188: a ground-plane anchor where a street's name label may render. */
+export interface StreetLabelAnchor { x: number; z: number }
+
+/**
+ * EM-188: one named street of the frozen grid. The 5×5 plan has exactly 12
+ * full-span streets — 6 north–south (constant x) + 6 east–west (constant z)
+ * road centerlines. PURE DETERMINISTIC DATA: names derive ONLY from the
+ * city seed via the hashUnit idiom (no Math.random, no clock), so they are
+ * part of the EM-155 byte-identical plan output.
+ */
+export interface CityStreet {
+  /** Stable id: `${axis}:${roadTileIndex}` (the frozen grid never moves). */
+  id: string;
+  /** Two-part seeded name from the bank (e.g. "Rowan Lane"). */
+  name: string;
+  /** 'ns' runs along Z at constant x = `at`; 'ew' runs along X at z = `at`. */
+  axis: 'ns' | 'ew';
+  /** World coordinate of the road centerline on the cross axis. */
+  at: number;
+  /** Interior avenue (labeled) vs the outer ring road (kept unlabeled —
+   *  the EM-188 "sparse: main lanes, not every alley stub" law). */
+  main: boolean;
+  /** Mid-block label anchors ON the road (never intersections); [] for the
+   *  unlabeled ring. */
+  labels: StreetLabelAnchor[];
+}
+
 /** One generated block's platted lots (EM-174 overflow pool entry). */
 export interface CityBlockLots { cx: number; cz: number; lots: CityInstance[] }
 
@@ -148,6 +180,12 @@ export interface CityPlan {
    * stands ON its pad (the pad reads as the building's foundation).
    */
   emptyLots: CityInstance[];
+  /**
+   * EM-188: the named streets of the frozen grid (12 — see CityStreet).
+   * Names are seeded ONLY from city_seed (hashUnit idiom) and are part of
+   * the EM-155 byte-identical deterministic output.
+   */
+  streets: CityStreet[];
   /** Outer half-size of the city (Chebyshev from the world origin). */
   extent: number;
 }
@@ -296,6 +334,80 @@ export const CARS_ENABLED = false;
 
 function h(seed: number, purpose: string, gridX = 0, gridZ = 0): number {
   return hashUnit(`city:${seed}:${gridX}:${gridZ}:${purpose}`);
+}
+
+// ── EM-188: street names (pure deterministic plan data) ──────────────────────
+
+/**
+ * Two-part street-name bank: stem × suffix. Stems mix trees, trades and
+ * founder names (the contract's tree/trade/founder vocabulary). 24 stems ×
+ * 4 suffixes = 96 distinct names, comfortably ≥ the grid's 12 streets, so
+ * the deterministic walk-forward dedupe below ALWAYS terminates and a full
+ * city never repeats a name (proven in cityLayout.test).
+ */
+export const STREET_NAME_STEMS = [
+  // trees
+  'Alder', 'Aspen', 'Birch', 'Cedar', 'Elm', 'Hazel',
+  'Juniper', 'Linden', 'Maple', 'Oak', 'Rowan', 'Willow',
+  // trades
+  'Chandler', 'Cooper', 'Mason', 'Miller', 'Potter', 'Tanner', 'Weaver', 'Tinker',
+  // founders
+  'Ada', 'Bram', 'Vesper', 'Quill',
+] as const;
+
+export const STREET_NAME_SUFFIXES = ['Lane', 'Row', 'Way', 'Street'] as const;
+
+/** Size of the full name bank (stem × suffix combinations). */
+export const STREET_NAME_BANK_SIZE =
+  STREET_NAME_STEMS.length * STREET_NAME_SUFFIXES.length;
+
+/** The k-th bank name — stem-major so adjacent indices change stems first. */
+export function streetNameAt(k: number): string {
+  const n = STREET_NAME_STEMS.length;
+  const i = ((k % STREET_NAME_BANK_SIZE) + STREET_NAME_BANK_SIZE) % STREET_NAME_BANK_SIZE;
+  return `${STREET_NAME_STEMS[i % n]} ${STREET_NAME_SUFFIXES[Math.floor(i / n)]}`;
+}
+
+/** Cross-axis label anchors: the three odd block-center rows — mid-block road
+ *  stretches, never intersections (roads cross at ±6.5/±19.5/±32.5). */
+const STREET_LABEL_CROSS = [-2 * BLOCK_PITCH, 0, 2 * BLOCK_PITCH];
+
+/**
+ * The 12 named streets of the frozen grid, in canonical order (ns ascending
+ * by `at`, then ew ascending). Pure function of the city seed ONLY: each
+ * street draws a seeded start index into the name bank (hashUnit idiom,
+ * keyed on seed/axis/road tile index) and walks FORWARD to the first unused
+ * name — deterministic dedupe, no randomness, no clock. Interior avenues
+ * are `main` and carry mid-block label anchors; the outer ring road stays
+ * unlabeled (sparse-label law).
+ */
+export function computeStreets(seed: number): CityStreet[] {
+  const used = new Set<number>();
+  const out: CityStreet[] = [];
+  for (const axis of ['ns', 'ew'] as const) {
+    for (let i = TILE_MIN; i <= TILE_MAX; i++) {
+      if (!isRoadIndex(i)) continue;
+      const at = tileCenter(i);
+      const main = i !== TILE_MIN && i !== TILE_MAX; // ring road ⇒ not main
+      const start = Math.floor(h(seed, `street-name-${axis}`, i) * STREET_NAME_BANK_SIZE);
+      let k = start % STREET_NAME_BANK_SIZE;
+      while (used.has(k)) k = (k + 1) % STREET_NAME_BANK_SIZE;
+      used.add(k);
+      out.push({
+        id: `${axis}:${i}`,
+        name: streetNameAt(k),
+        axis,
+        at,
+        main,
+        labels: main
+          ? STREET_LABEL_CROSS.map((c) =>
+              axis === 'ns' ? { x: at, z: c } : { x: c, z: at },
+            )
+          : [],
+      });
+    }
+  }
+  return out;
 }
 
 // ── Emission ─────────────────────────────────────────────────────────────────
@@ -622,6 +734,7 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     realLots,
     blockLots,
     emptyLots,
+    streets: computeStreets(seed), // EM-188: seeded names, part of the plan
     extent: Math.abs(tileCenter(TILE_MIN)) + TILE / 2, // 33.8: outer ring road edge
   };
 }

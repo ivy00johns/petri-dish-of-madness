@@ -17,7 +17,20 @@ export interface Place {
   district?: string | null;
 }
 
-export type RelationshipType = 'ally' | 'rival' | 'neutral' | 'friend' | 'enemy';
+// Wave E (EM-113, contracts/wave-e.md shared vocabulary): the relationship
+// type vocabulary grows partner/family/mentor/feud. Open union — the chips /
+// graph tolerate unknown future types (they fall back to the neutral register).
+export type RelationshipType =
+  | 'ally'
+  | 'rival'
+  | 'neutral'
+  | 'friend'
+  | 'enemy'
+  | 'partner'
+  | 'family'
+  | 'mentor'
+  | 'feud'
+  | (string & {});
 
 // Wave D2 (EM-158): scheduler cadence tier. Protagonists act every round,
 // supporting every 3rd, background every 10th (salience-gated, EM-159, with
@@ -55,6 +68,13 @@ export interface Agent {
   reflex_streak?: number | null;
   beliefs: string[];
   relationships: Record<string, Relationship>;
+  // Wave E (EM-120, additive) — derived reputation: round(mean incoming trust
+  // over living agents with interactions ≥ 1). Optional so pre-E backends /
+  // snapshots stay valid; the roster shows REP only when this is a number.
+  reputation?: number | null;
+  // Wave E (EM-114, additive) — parent agent ids (births only). Optional so
+  // pre-E backends stay valid; absent ⇒ not a born child.
+  parents?: string[] | null;
 }
 
 // ============================================================
@@ -244,6 +264,21 @@ export type EventKind =
   // god billboard post is consumed into an agent's prompt. payload
   // {channel:"whisper"|"billboard", count}; actor = the hearing agent.
   | 'god_voice_heard'
+  // Wave E (contracts/wave-e.md shared vocabulary) — the social-city kinds:
+  // relationship_changed {from_type, to_type, trust, since_tick} (B1, agent
+  // endpoints only per EM-141); child_spawned {child_id, parents, name,
+  // profile, place} (B2 — agent_spawned fires too, payload.method:"birth");
+  // faction_formed {faction_id, name, members} / faction_joined /
+  // faction_left (actor = the agent) / faction_dissolved (B3);
+  // god_miracle {kind, until_tick?} (actor 'god') / miracle_expired {kind} (B5).
+  | 'relationship_changed'
+  | 'child_spawned'
+  | 'faction_formed'
+  | 'faction_joined'
+  | 'faction_left'
+  | 'faction_dissolved'
+  | 'god_miracle'
+  | 'miracle_expired'
   // W11a (EM-094, event-log.md v1.2.0 note 1) — the optional LLM narrator's
   // periodic recap: actor_type:"system", actor_id:"narrator", text = the 2–3
   // sentence recap, payload {from_tick, to_tick, profile, routed_via?}. Only

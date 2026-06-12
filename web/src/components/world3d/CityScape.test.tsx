@@ -135,6 +135,9 @@ describe('renderableEntries (plan → render mapping, rule 10)', () => {
       realLots: { plaza: [{ x: 3.6, z: 1.9, rotY: 0 }] },
       blockLots: [{ cx: 13, cz: 0, lots: [{ x: 13, z: 3.7, rotY: 0 }] }],
       emptyLots: [{ x: -3.6, z: -1.9, rotY: 0 }],
+      // EM-188: street names are layout metadata too — render-inert here
+      // (labels render via StreetLabels in CozyWorld, never this instancer).
+      streets: [],
       extent: 33,
     };
     const entries = renderableEntries(v2Plan, CITY_MODEL_REGISTRY);

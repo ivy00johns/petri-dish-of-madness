@@ -16,7 +16,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { WorldState, ModelProfile, Rule, SpawnSpec, SpawnMode, Agent } from '../../types';
 import { PersonaPicker, usePersonaLibrary } from './PersonaPicker';
 import { inspectorApi } from '../../inspector/api';
-import type { PersonaRow } from '../../inspector/api';
+import type { PersonaRow, GodMiracleKind } from '../../inspector/api';
 
 interface ControlPanelProps {
   world: WorldState | null;
@@ -668,6 +668,91 @@ function GodIntervene({ agents }: { agents: Agent[] }) {
 }
 
 /**
+ * GodMiracles (Wave E EM-184/185) — the INTERVENE group's MIRACLES row:
+ * pick one of the three WORLD-scale miracle kinds and CAST it. World kinds
+ * take no target — the api client posts {kind} with NO agent_id key (the
+ * backend 422s a world kind carrying one). OPTIMISTIC-FREE like the rest of
+ * the console: the god_miracle event (actor 'god', whole town perceives it)
+ * arrives via the WS feed; failures render inline via the labeled-result
+ * idiom (godMiracle never throws).
+ */
+const MIRACLE_KINDS: Array<{ kind: GodMiracleKind; label: string }> = [
+  { kind: 'send_rain', label: '🌧 Send rain — forage flourishes' },
+  { kind: 'bountiful_harvest', label: '🌾 Bountiful harvest — decay halves' },
+  { kind: 'calm_spirits', label: '🕊 Calm spirits — hope + trust' },
+];
+
+function GodMiracles() {
+  const [kind, setKind] = useState<GodMiracleKind>('send_rain');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const sentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+  }, []);
+
+  const cast = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setSent(false);
+    const result = await inspectorApi.godMiracle(kind);
+    setBusy(false);
+    if (result.ok) {
+      setSent(true);
+      if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+      sentTimerRef.current = setTimeout(() => setSent(false), 3000);
+    } else {
+      setError(result.message);
+    }
+  }, [busy, kind]);
+
+  return (
+    <div className="px-2 pb-2 space-y-1.5">
+      <span
+        className="block font-mono text-[10px] uppercase tracking-wider"
+        style={{ color: 'var(--lab-god-bright)' }}
+      >
+        🌧 Miracles
+      </span>
+      <div className="flex gap-1.5">
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value as GodMiracleKind)}
+          className="lab-select flex-1 text-[10px]"
+          aria-label="Miracle to cast"
+        >
+          {MIRACLE_KINDS.map((m) => (
+            <option key={m.kind} value={m.kind}>{m.label}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="lab-btn lab-btn-secondary px-2"
+          onClick={() => void cast()}
+          disabled={busy}
+          aria-label="Cast the miracle"
+          title="World-scale — the whole town perceives the god_miracle event"
+        >
+          {busy ? '…' : 'CAST'}
+        </button>
+      </div>
+      {error && (
+        <p role="alert" className="m-0 font-mono text-[9px] text-lab-warn leading-snug">
+          ⚠ {error}
+        </p>
+      )}
+      {sent && (
+        <p className="m-0 font-mono text-[9px] text-lab-acid leading-snug" role="status" aria-live="polite">
+          cast — the whole town perceives it via the feed (no local echo).
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
  * GroupedActiveRules (W11b EM-087) — the live rules strip. Identical-effect
  * ACTIVE rules collapse into ONE row with a ×N stack badge; expanding it
  * lists the instances (tick + proposer). Pairs with the backend's
@@ -920,10 +1005,12 @@ export function ControlPanel({
         </button>
       </div>
 
-      {/* Group 2 — INTERVENE: bless/grant/whisper one living agent (EM-136/137). */}
+      {/* Group 2 — INTERVENE: bless/grant/whisper one living agent (EM-136/137),
+          plus the Wave-E MIRACLES row (EM-184: world-scale, no target). */}
       <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
       <GodGroupLabel>INTERVENE</GodGroupLabel>
       <GodIntervene agents={liveAgents} />
+      <GodMiracles />
 
       {/* Group 3 — VOICE: the billboard reply (W11b EM-091d), behavior unchanged. */}
       <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />

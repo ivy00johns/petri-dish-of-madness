@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS agents (
   zero_energy_turns INTEGER NOT NULL DEFAULT 0,
   beliefs_json  TEXT NOT NULL DEFAULT '[]',
   relationships_json TEXT NOT NULL DEFAULT '{}',
+  parents_json  TEXT NOT NULL DEFAULT '[]',          -- Wave E EM-114: sorted parent agent ids ('[]' = not a born child)
   updated_tick  INTEGER NOT NULL DEFAULT 0
 );
 
@@ -125,6 +126,7 @@ class SQLiteRepository:
         self._migrate_events_v1_1_0()
         self._migrate_runs_v1_3_0()
         self._migrate_runs_v1_4_0()
+        self._migrate_agents_wave_e()
         self._conn.commit()
 
     def _migrate_events_v1_1_0(self) -> None:
@@ -165,6 +167,19 @@ class SQLiteRepository:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)")}
         if "ended_at" not in cols:
             self._conn.execute("ALTER TABLE runs ADD COLUMN ended_at TEXT")
+
+    def _migrate_agents_wave_e(self) -> None:
+        """Idempotent agents-table upgrade for pre-Wave-E file DBs (EM-114
+        children): add `parents_json` (sorted parent agent ids; '[]' for every
+        agent that isn't a born child). Fresh DBs get it from SCHEMA's CREATE;
+        the guard skips them. ADDITIVE by contract — existing rows default to
+        '[]', byte-identical to pre-E reads."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(agents)")}
+        if "parents_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE agents ADD COLUMN parents_json TEXT NOT NULL "
+                "DEFAULT '[]'"
+            )
 
     def _migrate_runs_v1_4_0(self) -> None:
         """Idempotent runs-table upgrade for pre-W11b file DBs (EM-101 fork
@@ -208,16 +223,22 @@ class SQLiteRepository:
         self._conn.execute(
             """INSERT OR REPLACE INTO agents
                (id, run_id, name, personality, profile, location, energy, credits,
-                mood, alive, zero_energy_turns, beliefs_json, relationships_json, updated_tick)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                mood, alive, zero_energy_turns, beliefs_json, relationships_json,
+                parents_json, updated_tick)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 a.id, run_id, a.name, a.personality, a.profile, a.location,
                 a.energy, a.credits, a.mood, int(a.alive), a.zero_energy_turns,
                 json.dumps(a.beliefs),
                 json.dumps({
-                    aid: {"type": r.type, "trust": r.trust, "interactions": r.interactions}
+                    # Wave E / EM-113 — since_tick is additive (absent ⇒ 0).
+                    aid: {"type": r.type, "trust": r.trust,
+                          "interactions": r.interactions, "since_tick": r.since_tick}
                     for aid, r in a.relationships.items()
                 }),
+                # Wave E / EM-114 — additive; defensive getattr so pre-E
+                # AgentState stand-ins (tests/older snapshots) store '[]'.
+                json.dumps(list(getattr(a, "parents", []) or [])),
                 tick,
             ),
         )

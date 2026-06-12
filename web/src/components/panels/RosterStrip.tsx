@@ -47,6 +47,12 @@ const REL_COLOR: Record<string, string> = {
   neutral: 'var(--rel-neutral)',
   rival: 'var(--rel-rival)',
   enemy: 'var(--rel-enemy)',
+  // Wave E (EM-113/B6) — the four new typed-bond registers (roster-tokens.css):
+  // partner/family warm-distinct, mentor sky, feud darker than enemy.
+  partner: 'var(--rel-partner)',
+  family: 'var(--rel-family)',
+  mentor: 'var(--rel-mentor)',
+  feud: 'var(--rel-feud)',
 };
 
 // Wave D2 (EM-158/166) — the cadence tier chip (matches the model-chip idiom,
@@ -220,12 +226,22 @@ function AgentCard({
           </span>
         </div>
 
-        {/* Row 2: energy + credits + mood */}
+        {/* Row 2: energy + credits + REP + mood */}
         <div className="flex items-center gap-2 mt-1">
           <EnergyBar value={agent.energy} color={color} />
           <span className="font-mono text-[10px] text-lab-acid font-semibold tabular-nums shrink-0">
             ¢{agent.credits}
           </span>
+          {/* Wave E (EM-120): derived reputation — rendered ONLY when the
+              backend sends it (absent-safe for pre-E backends/snapshots). */}
+          {typeof agent.reputation === 'number' && (
+            <span
+              className="font-mono text-[10px] text-lab-muted tabular-nums shrink-0"
+              title={`reputation ${agent.reputation} — mean incoming trust from villagers who know them`}
+            >
+              REP {agent.reputation > 0 ? `+${agent.reputation}` : agent.reputation}
+            </span>
+          )}
           <span className="font-mono text-[10px] text-lab-muted truncate max-w-[4.5rem]" title={`mood: ${agent.mood}`}>
             {agent.mood}
           </span>

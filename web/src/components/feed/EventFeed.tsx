@@ -21,14 +21,24 @@
 import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import type { WorldEvent, EventKind } from '../../types';
 import { llmDecidedAnimalTurns, isLlmDecidedAction } from '../../lib/animalIdentity';
+import { inspectorApi } from '../../inspector/api';
+import type { GodInterveneKind, GodMiracleKind } from '../../inspector/api';
 
 interface EventFeedProps {
   events: WorldEvent[];
+  /**
+   * Wave E (EM-185): the GRANT-a-petition reply channel — wired from
+   * useSimulation.postBillboard (the SAME optimistic-free in_reply_to path
+   * the god console's VOICE group uses). When absent (e.g. a context without
+   * the god channel) the GRANT affordance does not render.
+   */
+  onGrantReply?: (text: string, inReplyTo?: string) => void;
 }
 
 // Icon per event kind. EventKind is permissive (open string union); FeedEntry
 // falls back to '·' for kinds not listed here, so this stays a partial map.
-const KIND_ICON: Partial<Record<EventKind, string>> = {
+// Exported for the Wave-E registry test (every new kind in all three registries).
+export const KIND_ICON: Partial<Record<EventKind, string>> = {
   turn_start:       '▷',
   agent_action:     '◆',
   agent_speech:     '◉',
@@ -70,6 +80,17 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   commitment_lapsed: '⌛',
   usage_alert:       '⚠',
   run_forked:        '⑂',
+  // Wave E (contracts/wave-e.md B6) — the social-city kinds. ♥ a typed bond
+  // shifting, 👶 a birth, ⚑ the faction lifecycle, 🌧/☀ a miracle cast /
+  // passing (the rains arrive, the rains pass).
+  relationship_changed: '♥',
+  child_spawned:        '👶',
+  faction_formed:       '⚑',
+  faction_joined:       '⚑',
+  faction_left:         '⚑',
+  faction_dissolved:    '⚑',
+  god_miracle:          '🌧',
+  miracle_expired:      '☀',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
   // category so these don't flood the live feed.
   perceived:        '◌',
@@ -80,8 +101,12 @@ const KIND_ICON: Partial<Record<EventKind, string>> = {
   action_resolved:  '◆',
 };
 
-// Color tint for event kinds without a profile color
-const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
+// Color tint for event kinds without a profile color.
+// Exported for the Wave-E registry test. New (Wave E) entries are CSS token
+// var() references (declared in roster-tokens.css / inspector-tokens.css —
+// design-token-guard clean); they intentionally skip the hex-only
+// alpha-append badge paths below, like --marker-animal does.
+export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   agent_died:       '#ff3333',
   agent_spawned:    '#c8ff00',
   rule_passed:      '#c8ff00',
@@ -90,6 +115,16 @@ const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   model_reassigned: '#c8ff00',
   parse_failure:    '#ff9900',
   control:          '#5a5a72',
+  // Wave E — bonds read in the partner register, births in the family warmth,
+  // the faction lifecycle in the shared faction tint, miracles in god-gold.
+  relationship_changed: 'var(--rel-partner)',
+  child_spawned:        'var(--rel-family)',
+  faction_formed:       'var(--faction-tint)',
+  faction_joined:       'var(--faction-tint)',
+  faction_left:         'var(--faction-tint)',
+  faction_dissolved:    'var(--faction-tint)',
+  god_miracle:          'var(--marker-miracle)',
+  miracle_expired:      'var(--marker-miracle)',
 };
 
 // W8 — the animal chaos magenta, referenced as the shared --marker-animal token
@@ -112,6 +147,164 @@ function isAnimalEvent(e: WorldEvent): boolean {
   );
 }
 
+// ── GRANT-a-petition (Wave E EM-185) ──────────────────────────────────────────
+//
+// Petition-shaped entries — an AGENT's billboard post or proclamation answer —
+// grow a small GRANT affordance. Clicking it expands a compact INLINE picker
+// inside the feed entry (not a god-console handoff: the petition is right
+// there, the answer should be too; an inline expander also survives the feed's
+// overflow scroll without portal/clipping games). Granting fires BOTH halves
+// of the ask→answer loop, optimistic-free:
+//   (a) POST /api/god/intervene — world kinds carry NO agent_id key (the
+//       backend 422s otherwise); targeted kinds aim at the petitioner;
+//   (b) the god billboard reply quoting the petition via the existing
+//       in_reply_to mechanism (the same postBillboard path VOICE uses).
+// No local echo anywhere — the god_miracle / god_intervention and
+// billboard_posted (actor_type 'god') WS events are the only confirmation.
+
+/** True for a petition-shaped entry: an agent (never god) asking the watchers. */
+export function isPetitionEvent(e: WorldEvent): boolean {
+  return (
+    (e.kind === 'billboard_posted' || e.kind === 'proclamation_answered') &&
+    e.actor_type !== 'god'
+  );
+}
+
+interface GrantOption {
+  kind: GodMiracleKind | GodInterveneKind;
+  label: string;
+  /** World-scale ⇒ POST without agent_id; targeted ⇒ aimed at the petitioner. */
+  world: boolean;
+  /** The reply verb quoted back onto the billboard. */
+  granted: string;
+}
+
+const GRANT_OPTIONS: GrantOption[] = [
+  { kind: 'send_rain',         label: '🌧 SEND RAIN',     world: true,  granted: 'rain falls on the gardens' },
+  { kind: 'bountiful_harvest', label: '🌾 HARVEST',       world: true,  granted: 'a bountiful harvest eases every belly' },
+  { kind: 'calm_spirits',      label: '🕊 CALM SPIRITS',  world: true,  granted: 'calm settles over every spirit' },
+  { kind: 'bless_energy',      label: '☀ BLESS +25⚡',    world: false, granted: 'the petitioner is blessed with energy' },
+  { kind: 'grant_credits',     label: '✦ GRANT +10₡',    world: false, granted: 'the petitioner is granted credits' },
+];
+
+/** The petition's own words (payload.text is the post body; e.text is prose). */
+function petitionQuote(e: WorldEvent): string {
+  const p = e.payload?.text;
+  return (typeof p === 'string' && p.trim() ? p : e.text ?? '').trim();
+}
+
+function GrantAffordance({
+  event,
+  onReply,
+}: {
+  event: WorldEvent;
+  onReply: (text: string, inReplyTo?: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [granted, setGranted] = useState<string | null>(null);
+
+  const quote = petitionQuote(event);
+  const petitionerId = event.actor_id ?? null;
+
+  const grant = async (opt: GrantOption) => {
+    if (busy) return;
+    setBusy(opt.kind);
+    setError(null);
+    const result = opt.world
+      ? await inspectorApi.godMiracle(opt.kind as GodMiracleKind)
+      : await inspectorApi.godIntervene(opt.kind as GodInterveneKind, petitionerId ?? '');
+    setBusy(null);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    // Half (b): the god's billboard answer, quoting the petition. in_reply_to
+    // is backend-capped at 120; postBillboard caps the text at 280 itself.
+    onReply(
+      `✦ Granted — ${opt.granted}. In answer to: “${quote.slice(0, 160)}”`,
+      quote.slice(0, 120) || undefined,
+    );
+    setGranted(opt.label);
+    setOpen(false);
+  };
+
+  if (granted) {
+    return (
+      <span
+        className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap uppercase tracking-wider"
+        style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+        role="status"
+        title="Granted — the miracle/intervention and the god's billboard answer arrive via the feed (no local echo)."
+      >
+        ✦ granted
+      </span>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => { setOpen((o) => !o); setError(null); }}
+        aria-expanded={open}
+        aria-label="Grant this petition"
+        title="Answer this petition as the god — cast a miracle or intervene, and post the reply on the billboard"
+        className="ml-1.5 font-mono text-[9px] font-bold px-1 py-px border rounded-sm align-middle
+                   whitespace-nowrap uppercase tracking-wider cursor-pointer transition-colors duration-100
+                   hover:bg-lab-chrome"
+        style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+      >
+        ✦ grant{open ? ' ▾' : ''}
+      </button>
+
+      {open && (
+        <div
+          className="mt-1 p-1.5 border border-lab-border rounded-sm bg-lab-chrome/60 space-y-1"
+          role="group"
+          aria-label="Grant the petition — pick a miracle or intervention"
+        >
+          <p className="m-0 font-mono text-[9px] text-lab-muted italic leading-snug break-words">
+            “{quote || '(no petition text)'}”
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {GRANT_OPTIONS.map((opt) => {
+              const needsTarget = !opt.world && !petitionerId;
+              return (
+                <button
+                  key={opt.kind}
+                  type="button"
+                  onClick={() => void grant(opt)}
+                  disabled={busy !== null || needsTarget}
+                  aria-label={`Grant via ${opt.kind}`}
+                  title={
+                    needsTarget
+                      ? 'No petitioner on this entry — targeted grants need one'
+                      : opt.world
+                        ? `World-scale miracle: ${opt.granted} (no target)`
+                        : `Targeted at the petitioner: ${opt.granted}`
+                  }
+                  className="font-mono text-[9px] px-1 py-px border border-lab-border rounded-sm cursor-pointer
+                             text-lab-muted hover:text-lab-acid hover:border-lab-acid transition-colors duration-100
+                             disabled:opacity-40 disabled:cursor-default"
+                >
+                  {busy === opt.kind ? '…' : opt.label}
+                </button>
+              );
+            })}
+          </div>
+          {error && (
+            <p role="alert" className="m-0 font-mono text-[9px] text-lab-warn leading-snug">
+              ⚠ {error}
+            </p>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── Filter categories ─────────────────────────────────────────────────────────
 // Every EventKind maps to exactly one category so nothing is orphaned.
 interface FeedCategory {
@@ -121,11 +314,13 @@ interface FeedCategory {
   kinds: EventKind[];
 }
 
-const CATEGORIES: FeedCategory[] = [
+export const CATEGORIES: FeedCategory[] = [
   { key: 'chat',    label: 'Chat',    icon: '◉', kinds: ['agent_speech'] },
   { key: 'actions', label: 'Actions', icon: '◆', kinds: ['agent_action', 'agent_moved'] },
   { key: 'economy', label: 'Economy', icon: '¢', kinds: ['economy'] },
-  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'conflict', 'agent_died', 'agent_spawned', 'agent_starving', 'world_extinct'] },
+  // Wave E: the social fabric grows typed-bond shifts, births, and the
+  // faction lifecycle — all social-texture kinds, one chip.
+  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'relationship_changed', 'conflict', 'agent_died', 'agent_spawned', 'child_spawned', 'agent_starving', 'world_extinct', 'faction_formed', 'faction_joined', 'faction_left', 'faction_dissolved'] },
   { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
   // W11b (EM-091): the notice board gets its own chip — also the contract's
   // suggested feed-filter affordance for billboard traffic.
@@ -133,7 +328,10 @@ const CATEGORIES: FeedCategory[] = [
   // W11b (EM-079/080): the inner-life channel — diary reflections + spoken
   // commitments (made / kept / 👻 phantom-lapsed).
   { key: 'diary',   label: 'Diary',   icon: '✎', kinds: ['reflection', 'commitment_made', 'commitment_lapsed'] },
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'memory', 'run_forked'] },
+  // Wave E: god miracles live with the other world-scale levers (random_event
+  // is the closest sibling — god_intervention itself is uncategorized ON
+  // PURPOSE, but miracles are filterable world events, not feedback receipts).
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
@@ -184,9 +382,11 @@ interface FeedEntryProps {
    * llm_call fell out of the window — get no marker (graceful degradation).
    */
   llmDecided?: boolean;
+  /** Wave E (EM-185): the GRANT reply channel; absent ⇒ no GRANT affordance. */
+  onGrantReply?: (text: string, inReplyTo?: string) => void;
 }
 
-function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
+function FeedEntry({ event, isNew, llmDecided = false, onGrantReply }: FeedEntryProps) {
   // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
   // no model profile_color, and we want them to pop out of the human-agent feed).
   const animal = isAnimalEvent(event);
@@ -306,6 +506,12 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
           </span>
         )}
 
+        {/* Wave E (EM-185): GRANT on petition-shaped entries — an AGENT's
+            billboard post / proclamation answer, never the god's own ink. */}
+        {onGrantReply && isPetitionEvent(event) && (
+          <GrantAffordance event={event} onReply={onGrantReply} />
+        )}
+
         {/* W11b (EM-079): the phantom-commitment chip — promised aloud, never
             enacted. A 👻 haunts the line so the failure mode is legible. */}
         {phantom && (
@@ -395,7 +601,7 @@ function FeedEntry({ event, isNew, llmDecided = false }: FeedEntryProps) {
 // How close to the top counts as "pinned to newest" (px).
 const TOP_THRESHOLD = 8;
 
-export function EventFeed({ events }: EventFeedProps) {
+export function EventFeed({ events, onGrantReply }: EventFeedProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const highlightLenRef = useRef(0);
   const newEventIdsRef = useRef<Set<number>>(new Set());
@@ -582,6 +788,7 @@ export function EventFeed({ events }: EventFeedProps) {
                 event={event}
                 isNew={newEventIdsRef.current.has(event.seq)}
                 llmDecided={isLlmDecidedAction(event, llmAnimalTurns)}
+                onGrantReply={onGrantReply}
               />
             ))
           )}

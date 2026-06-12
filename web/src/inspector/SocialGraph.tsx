@@ -31,19 +31,29 @@ import type { PanelProps } from './types';
 import type { SocialNode, SocialEdge } from './types';
 import { socialGraph } from './selectors';
 import './inspector-tokens.css';
+// Wave E: the --rel-* relationship registers (incl. partner/family/mentor/feud)
+// live in the roster token sheet — the graph edges read the SAME tokens the
+// roster chips wear, so a partner tie is one color everywhere.
+import '../components/panels/roster-tokens.css';
 
 // ── graph element shapes (our SocialNode/SocialEdge carried on the lib's bag) ──
 
 type GraphNode = NodeObject<SocialNode>;
 type GraphLink = LinkObject<SocialNode, SocialEdge>;
 
-// Relationship types, for the legend + the dim/spotlight readout.
-const REL_LEGEND: Array<{ key: string; label: string; tone: 'pos' | 'neg' | 'flat' }> = [
-  { key: 'ally', label: 'ally', tone: 'pos' },
-  { key: 'friend', label: 'friend', tone: 'pos' },
-  { key: 'neutral', label: 'neutral', tone: 'flat' },
-  { key: 'rival', label: 'rival', tone: 'neg' },
-  { key: 'enemy', label: 'enemy', tone: 'neg' },
+// Relationship types, for the legend + the dim/spotlight readout. Wave E:
+// the four new types carry their OWN token swatch (type-keyed edge tint);
+// the original five keep the trust-sign tone the edges fall back to.
+const REL_LEGEND: Array<{ key: string; label: string; swatch: string }> = [
+  { key: 'ally', label: 'ally', swatch: 'var(--lab-acid)' },
+  { key: 'friend', label: 'friend', swatch: 'var(--lab-acid)' },
+  { key: 'neutral', label: 'neutral', swatch: 'var(--lab-muted)' },
+  { key: 'rival', label: 'rival', swatch: 'var(--marker-crime)' },
+  { key: 'enemy', label: 'enemy', swatch: 'var(--marker-crime)' },
+  { key: 'partner', label: 'partner', swatch: 'var(--rel-partner)' },
+  { key: 'family', label: 'family', swatch: 'var(--rel-family)' },
+  { key: 'mentor', label: 'mentor', swatch: 'var(--rel-mentor)' },
+  { key: 'feud', label: 'feud', swatch: 'var(--rel-feud)' },
 ];
 
 const COOLDOWN_TICKS = 120; // bounded settle, then the sim freezes (battery).
@@ -96,6 +106,8 @@ export default function SocialGraph(props: PanelProps) {
         prev.label = n.label;
         prev.color = n.color;
         prev.alive = n.alive;
+        prev.factionId = n.factionId;
+        prev.factionName = n.factionName;
         return prev;
       }
       const fresh: GraphNode = { ...n };
@@ -198,6 +210,18 @@ export default function SocialGraph(props: PanelProps) {
       ctx.save();
       ctx.globalAlpha = dim ? 0.18 : node.alive ? 1 : 0.4;
 
+      // Wave E (EM-120): faction membership reads as a soft per-node ring in
+      // the shared --faction-tint (the hull-tint fallback the contract allows:
+      // a convex-hull canvas pass would redraw geometry on a layout the
+      // battery design FREEZES — the ring is per-node, cheap, and stable).
+      if (node.factionId && node.alive) {
+        ctx.beginPath();
+        ctx.arc(node.x ?? 0, node.y ?? 0, r + 2, 0, Math.PI * 2);
+        ctx.lineWidth = 2 / scale;
+        ctx.strokeStyle = withAlpha(tokens.faction, dim ? 0.15 : 0.5);
+        ctx.stroke();
+      }
+
       // Spotlight ring on the active node.
       if (id === activeId) {
         ctx.beginPath();
@@ -244,11 +268,16 @@ export default function SocialGraph(props: PanelProps) {
     [],
   );
 
-  // Edge color: tinted by trust sign; spotlight-aware.
+  // Edge color: keyed by relationship TYPE for the Wave-E bonds (partner /
+  // family warm-distinct, mentor sky, feud darker than enemy — token vars);
+  // everything else keeps the trust-sign tint. Spotlight-aware.
   const linkColor = useCallback(
     (l: GraphLink): string => {
       const trust = typeof l.trust === 'number' ? l.trust : 0;
-      const base = trust > 4 ? tokens.acid : trust < -4 ? tokens.danger : tokens.edgeFlat;
+      const typed =
+        typeof l.type === 'string' ? typeEdgeColor(l.type, tokens) : null;
+      const base =
+        typed ?? (trust > 4 ? tokens.acid : trust < -4 ? tokens.danger : tokens.edgeFlat);
       if (!activeId) return withAlpha(base, 0.55);
       return linkActive(l) ? withAlpha(base, 0.95) : withAlpha(base, 0.08);
     },
@@ -290,7 +319,7 @@ export default function SocialGraph(props: PanelProps) {
             <span key={r.key} className="flex items-center gap-1">
               <i
                 className="inline-block w-3 h-0.5 rounded-full"
-                style={{ backgroundColor: legendVar(r.tone) }}
+                style={{ backgroundColor: r.swatch }}
                 aria-hidden="true"
               />
               <span className="font-mono text-[9px] text-lab-muted uppercase tracking-wide">{r.label}</span>
@@ -388,7 +417,8 @@ function EmptyState({
 function nodeTooltip(n: GraphNode, edges: SocialEdge[]): string {
   const ties = edges.filter((e) => e.source === n.id || e.target === n.id).length;
   const state = n.alive ? 'alive' : 'deceased';
-  return `${n.label ?? n.id} — ${state} · ${ties} tie${ties === 1 ? '' : 's'}`;
+  const faction = n.factionName ? ` · ⚑ ${n.factionName}` : '';
+  return `${n.label ?? n.id} — ${state} · ${ties} tie${ties === 1 ? '' : 's'}${faction}`;
 }
 
 function edgeTooltip(l: GraphLink): string {
@@ -415,6 +445,12 @@ interface ResolvedTokens {
   danger: string;
   edgeFlat: string;
   nodeNeutral: string;
+  // Wave E — typed-bond edge registers + the faction ring tint.
+  relPartner: string;
+  relFamily: string;
+  relMentor: string;
+  relFeud: string;
+  faction: string;
 }
 
 /** Resolve the lab tokens the canvas paints with (re-reads on mount). */
@@ -427,15 +463,26 @@ function useResolvedTokens(): ResolvedTokens {
     danger: cssVar('--marker-crime'),
     edgeFlat: cssVar('--lab-muted'),
     nodeNeutral: cssVar('--inspector-node-neutral'),
+    relPartner: cssVar('--rel-partner'),
+    relFamily: cssVar('--rel-family'),
+    relMentor: cssVar('--rel-mentor'),
+    relFeud: cssVar('--rel-feud'),
+    faction: cssVar('--faction-tint'),
   }));
   return tokens;
 }
 
-/** Legend swatch color by trust tone — reads the same tokens the canvas uses. */
-function legendVar(tone: 'pos' | 'neg' | 'flat'): string {
-  if (tone === 'pos') return 'var(--lab-acid)';
-  if (tone === 'neg') return 'var(--marker-crime)';
-  return 'var(--lab-muted)';
+/** Wave E: the type-keyed edge tint — only the four new bond types override
+ *  the trust-sign tint (feud deliberately DARKER than enemy's danger red).
+ *  Unknown/legacy types return null → the caller's trust-sign fallback. */
+function typeEdgeColor(type: string, tokens: ResolvedTokens): string | null {
+  switch (type) {
+    case 'partner': return tokens.relPartner || null;
+    case 'family':  return tokens.relFamily || null;
+    case 'mentor':  return tokens.relMentor || null;
+    case 'feud':    return tokens.relFeud || null;
+    default:        return null;
+  }
 }
 
 /** Read a declared CSS custom property for Canvas use (no DOM ⇒ ''). */

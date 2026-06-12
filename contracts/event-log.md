@@ -171,6 +171,81 @@ add, e.g., `usage_sampled`, `structure_state_changed`, `project_proposed`,
 The registry of kind→payload lives here and grows per wave; consumers default-render
 unknown kinds with the generic feed line.
 
+Wave E kinds (contracts/wave-e.md):
+
+- `relationship_changed` (B1 / EM-113) — emitted ONLY on relationship TYPE
+  transitions (reflex friend/feud shifts after a trust mutation, or an accepted
+  `set_relationship` type change), riding the triggering action's `_multi`
+  chain (same turn_id). `actor_id` = the relationship's owner, `target_id` =
+  the other agent — both AGENT ids only (EM-141: the social-graph selector
+  drops non-agent endpoints). Payload:
+  `{from_type, to_type, trust, since_tick}` where `to_type` ∈
+  `neutral|ally|friend|rival|enemy|partner|family|mentor|feud` and
+  `since_tick` is the tick the type changed.
+
+- `child_spawned` (B2 / EM-114) — the birth narrative event, emitted at the
+  ROUND boundary when a mutual-partner pair co-located at a home passes every
+  birth gate (population/housing caps, credits/energy, pair + world cooldown,
+  the seeded chance gate). `actor_id` = the CHILD's agent id,
+  `actor_type` = system, `target_id` = null (agent-id-only endpoints, EM-141).
+  Text `"👶 {name} is born to {p1} and {p2}"`. Payload:
+  `{child_id, parents: [sorted parent agent ids], name, profile, place}`.
+  ALWAYS paired with a standard `agent_spawned{method: "birth", parents}` for
+  the frontend roster contract — both ride the `pending_spawn_events` outbox
+  (the EM-062/168 governance-spawn drain) as standalone system events
+  (`turn_id` null).
+
+- `faction_formed` / `faction_joined` / `faction_left` / `faction_dissolved`
+  (B3 / EM-120) — emitted at the ROUND boundary (after the birth check) when
+  the faction recompute DIFFS against the stored memberships; a stable round
+  emits NOTHING. All four ride the same `pending_spawn_events` outbox as
+  births (standalone system events, `actor_type` system, `turn_id` null) and
+  carry ONLY agent ids in actor_id/target_id (EM-141; `target_id` null).
+  - `faction_formed` — a new component (size >= `factions.faction_min_size`
+    over mutual warm edges) with no >= 50%-overlap match to an existing
+    faction. `actor_id` = the oldest founding member (LOWEST agent id).
+    Payload: `{faction_id, name, members: [sorted agent ids]}` where
+    `faction_id = fct_{8 hex of sha1(sorted founding members + tick)}` and
+    `name = "{oldest founding member's name}'s circle"`.
+  - `faction_joined` / `faction_left` — membership churn on a faction that
+    KEPT its identity. `actor_id` = the joining/leaving agent. Payload:
+    `{faction_id, name}`.
+  - `faction_dissolved` — an old faction with no >= 50%-overlap successor
+    component (including shrinking under `faction_min_size`). `actor_id` =
+    the lowest member id of the OLD membership. Payload:
+    `{faction_id, name, members: [the old membership]}`.
+
+- `reflection` payload gains ADDITIVE `bond_applied: {target_id, type}`
+  (B4 / EM-125) — present ONLY when the reflection-declared bond landed
+  (type ∈ `friend|partner|mentor|feud`; B1 guards applied). The bond's own
+  `relationship_changed` rides the SAME turn chain (same turn_id) as the
+  reflection; rejected bonds add NO event kind and NO payload key — the
+  reason lands in the decision trace as `bond_rejected` only. No new kinds,
+  no extra `llm_call` rows: the bond rides the existing single reflection
+  call.
+
+- `god_miracle` (B5 / EM-184) — a WORLD-scale god intervention, cast via
+  `POST /api/god/intervene` with NO agent_id (the targeted
+  bless_energy/grant_credits keep emitting `god_intervention`).
+  `actor_id` = `'god'`, `actor_type` = `'god'`, `target_id` = null,
+  `turn_id` = null (god mutations happen outside any agent turn). Payload:
+  `{kind, until_tick?}` where `kind` ∈ `send_rain|bountiful_harvest|
+  calm_spirits` and `until_tick` is present for the two TIMED kinds only
+  (`tick + days × turns_per_day`; re-casting an active kind refreshes it —
+  never stacks, never re-adds). Globally witnessed (every living agent's
+  memory, like `random_event`) and importance-weighted 2.0 so the whole town
+  can react — this closes the petition→miracle belief loop. A `calm_spirits`
+  cast may be accompanied IN THE SAME emission batch by the
+  `relationship_changed` events its trust nudges triggered (B1 reflex
+  transitions, turn_id null — the god path drains the B1 outbox itself).
+
+- `miracle_expired` (B5 / EM-184) — a timed miracle's window elapsed
+  (`tick >= until_tick`), swept in the same per-tick loop path as blackout
+  expiry. Standalone system event: `actor_id` null, `actor_type` = system,
+  `target_id` null, `turn_id` null. Text e.g. `"☀ The rains pass — forage
+  returns to normal."`. Payload: `{kind, until_tick}`. Emitted exactly once
+  per expiry; the one-time `calm_spirits` never produces one.
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:

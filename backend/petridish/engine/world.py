@@ -3,6 +3,7 @@ World state: pure data model.  No I/O, no asyncio.  Testable in isolation.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 import re
@@ -48,11 +49,30 @@ def _humanize_project_name(raw: str) -> str:
     return text[:60]
 
 
+# Wave E / EM-113 — the full relationship-type vocabulary (contracts/wave-e.md
+# shared vocabulary). The first five predate Wave E and must never break in
+# snapshots or prompts; the last four are additive.
+RELATIONSHIP_TYPES = (
+    "neutral", "ally", "friend", "rival", "enemy",
+    "partner", "family", "mentor", "feud",
+)
+
+# Wave E / EM-113 — agent-declarable subset of RELATIONSHIP_TYPES. `family` is
+# engine-assigned only (births, EM-114): agent declarations are rejected with
+# guidance. `partner` is declarable but trust-gated (see action_set_relationship).
+DECLARABLE_RELATIONSHIP_TYPES = (
+    "neutral", "ally", "friend", "rival", "enemy", "partner", "mentor", "feud",
+)
+
+
 @dataclass
 class RelationshipState:
-    type: str = "neutral"  # ally|rival|neutral|friend|enemy
-    trust: int = 0          # -100..100
+    type: str = "neutral"  # one of RELATIONSHIP_TYPES
+    trust: int = 0          # -100..100 (strength = |trust|, valence = sign)
     interactions: int = 0
+    # Wave E / EM-113 — tick of the last TYPE change. ADDITIVE: pre-E snapshots
+    # lack the key and restore 0, so serialization stays backward-compatible.
+    since_tick: int = 0
 
 
 @dataclass
@@ -84,6 +104,13 @@ class AgentState:
     # it (user intent overrides the governor). ADDITIVE: serialized only when
     # set, so pre-D3 snapshots and world_state agents are byte-identical.
     demoted_from: str | None = None
+    # Wave E / EM-114 — sorted agent ids of this agent's parents ([] for
+    # everyone but born children). ADDITIVE: serialized only when non-empty,
+    # so pre-E snapshots and birth-free worlds keep the exact pre-E dict
+    # shape (the enabled:false byte-identical guarantee). The pair birth
+    # cooldown is DERIVED from this field + the child's family-tie
+    # since_tick — no extra clock state (EM-126 generations hook).
+    parents: list[str] = field(default_factory=list)
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -105,7 +132,9 @@ class AgentState:
             "reflex_streak": self.reflex_streak,
             "beliefs_count": len(self.beliefs),
             "relationships": {
-                aid: {"type": r.type, "trust": r.trust, "interactions": r.interactions}
+                # Wave E / EM-113 — since_tick is additive (absent ⇒ 0 on restore).
+                aid: {"type": r.type, "trust": r.trust,
+                      "interactions": r.interactions, "since_tick": r.since_tick}
                 for aid, r in self.relationships.items()
             },
         }
@@ -113,6 +142,10 @@ class AgentState:
         # every pre-D3 world) keep the exact pre-D3 dict shape.
         if self.demoted_from is not None:
             d["demoted_from"] = self.demoted_from
+        # Wave E / EM-114 — only for born children, so birth-free worlds (and
+        # every pre-E world) keep the exact pre-E dict shape.
+        if self.parents:
+            d["parents"] = list(self.parents)
         return d
 
 
@@ -466,6 +499,40 @@ class World:
         # emits it through the normal event pipeline. Keeps action_vote's signature
         # intact while letting the spawn happen world-side (single source of truth).
         self.pending_spawn_events: list[dict] = []
+        # Wave E / EM-113 — relationship_changed outbox. Reflex type transitions
+        # (and accepted set_relationship type changes) park their ready-to-emit
+        # event dicts here; the runtime drains them at the end of _apply_action
+        # so they ride the SAME action `_multi` chain (same turn_id) as the
+        # action that mutated trust. NOT serialized: drained within the turn.
+        self.pending_relationship_events: list[dict] = []
+        # Wave E / EM-114 — the birth casting pool. The world has no view of
+        # the persona library or the router's profile roster (both are
+        # config-side), so the TickLoop seeds them at construction via
+        # set_birth_casting() (the documented seam — the loop already owns
+        # per-round world hooks). NOT serialized: like the router itself,
+        # casting is config state, not world state. Empty pools degrade
+        # gracefully (Kit-N names; profile derived from living agents).
+        self.birth_personas: list[dict] = []
+        self.birth_profile_roster: list[str] = []
+        # Wave E / EM-120 — factions: {id: {name, founded_tick, members}}.
+        # Recomputed (connected components over mutual warm edges) at each
+        # round boundary AFTER the birth check; identity is continuous across
+        # churn (>= 50% overlap of the OLD membership keeps id/name). The
+        # faction_* events are DIFF-driven and park in the SAME
+        # pending_spawn_events outbox as births (documented choice: they are
+        # standalone system events drained by the loop's _flush_spawn_events,
+        # turn_id null — no sibling drain needed). Serialized in to_snapshot()
+        # only when non-empty (the cap_demotions pattern), so pre-E snapshots
+        # stay byte-identical.
+        self.factions: dict[str, dict] = {}
+        # Wave E / EM-184 — active world-scale miracles: [{kind, until_tick}].
+        # Timed god miracles (send_rain / bountiful_harvest) live here while
+        # active; re-casting REFRESHES until_tick (never stacks); expiry is
+        # swept in the loop's per-tick path beside expire_blackouts(). The
+        # one-time calm_spirits never adds an entry. Serialized in
+        # to_snapshot() only when non-empty (the cap_demotions pattern), so
+        # pre-E snapshots stay byte-identical.
+        self.active_miracles: list[dict] = []
         # W11b / EM-091 — the public billboard. List of {tick, actor_id,
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
@@ -664,6 +731,19 @@ class World:
         if ubi_rule:
             for agent in self.living_agents():
                 agent.credits += self.params.ubi_amount
+        # Wave E / EM-114 — the once-per-round birth check (contract: "hook
+        # beside the existing per-round effects"). At most ONE birth per
+        # round; events park in pending_spawn_events and are drained by the
+        # loop's existing _flush_spawn_events (EM-062/168 pattern). Spawning
+        # here is pointer-safe: _start_new_round overwrites _turn_order with
+        # the due set AFTER this returns, and a background-tier child only
+        # joins rounds where its tier is due (EM-158/172 invariant intact).
+        self.check_births()
+        # Wave E / EM-120 — the once-per-round faction recompute, AFTER the
+        # birth check (contract order: births first, then factions) so a
+        # newborn's family edges count toward this round's clusters. Diff-
+        # driven events park in the same pending_spawn_events outbox.
+        self.recompute_factions()
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -857,7 +937,15 @@ class World:
     # ──────────────────────────────────────────────────────────────────────────
 
     def apply_energy_decay(self, agent: AgentState) -> None:
-        agent.energy = max(0.0, agent.energy - self.params.energy_decay_per_turn)
+        decay = self.params.energy_decay_per_turn
+        # Wave E / EM-184 — while a bountiful_harvest miracle is active, decay
+        # is multiplied by harvest_decay_factor (default 0.5: half the hunger).
+        if self.miracle_active("bountiful_harvest"):
+            try:
+                decay *= float(self._mir_param("harvest_decay_factor", 0.5))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                pass
+        agent.energy = max(0.0, agent.energy - decay)
 
     def check_death(self, agent: AgentState) -> bool:
         """Increment zero_energy counter; return True if agent should die."""
@@ -897,6 +985,13 @@ class World:
             or self.operational_building_at(agent.location, "farm") is not None
         ):
             reward += self._bld_param("forage_bonus", 0)
+        # Wave E / EM-184 — while a send_rain miracle is active, every forage
+        # yields +rain_forage_bonus ON TOP of the base + garden/farm bonuses.
+        if self.miracle_active("send_rain"):
+            try:
+                reward += int(self._mir_param("rain_forage_bonus", 2))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                pass
         agent.credits += reward
         return True, "ok", reward
 
@@ -943,9 +1038,11 @@ class World:
         # Trust damage
         self._update_trust(agent, target, -15)
         self._update_trust(target, agent, -10)
-        # Relationship escalation for target
+        # Relationship escalation for target. Wave E / EM-113: an existing feud
+        # is the deeper state — never downgraded back to rival/enemy (the -40
+        # reflex in _update_trust may have just hardened it).
         rel = target.relationships.get(agent.id)
-        if rel is None or rel.type not in ("rival", "enemy"):
+        if rel is None or rel.type not in ("rival", "enemy", "feud"):
             if rel is None:
                 rel = RelationshipState()
                 target.relationships[agent.id] = rel
@@ -953,6 +1050,7 @@ class World:
                 rel.type = "enemy"
             else:
                 rel.type = "rival"
+            rel.since_tick = self.tick  # EM-113 — type changed here
         return True, "ok", amount
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -979,12 +1077,33 @@ class World:
     def action_set_relationship(
         self, agent: AgentState, target: AgentState, rel_type: str
     ) -> tuple[bool, str]:
-        valid = {"ally", "rival", "neutral", "friend", "enemy"}
-        if rel_type not in valid:
+        # Wave E / EM-113 — full vocabulary with guards. `family` is
+        # engine-assigned only (births, EM-114); `partner` is trust-gated.
+        if rel_type == "family":
+            return False, ("family ties are made by birth, not declaration — "
+                           "you cannot declare someone family")
+        if rel_type not in DECLARABLE_RELATIONSHIP_TYPES:
             return False, f"invalid relationship type: {rel_type!r}"
-        if agent.id not in agent.relationships:
-            agent.relationships[target.id] = RelationshipState()
-        agent.relationships[target.id].type = rel_type
+        rel = agent.relationships.get(target.id)
+        if rel_type == "partner":
+            threshold = int(self._rel_param("partner_trust_threshold", 40))
+            trust = rel.trust if rel is not None else 0
+            if trust < threshold:
+                return False, (f"you barely know them — build trust to "
+                               f"{threshold} (now {trust}) before declaring "
+                               f"{target.name} your partner")
+        if rel is None:
+            rel = RelationshipState()
+            agent.relationships[target.id] = rel
+        if rel.type != rel_type:
+            from_type = rel.type
+            rel.type = rel_type
+            rel.since_tick = self.tick
+            # EM-113 — accepted type change emits relationship_changed via the
+            # outbox (rides the declaring action's turn chain).
+            self.pending_relationship_events.append(
+                self._relationship_changed_event(agent, target, from_type, rel)
+            )
         return True, "ok"
 
     def action_remember(self, agent: AgentState, fact: str) -> tuple[bool, str]:
@@ -1876,6 +1995,12 @@ class World:
         "grant_credits": 10,
     }
 
+    # Wave E / EM-184 — the WORLD-scale miracle kinds. Cast through the same
+    # god_intervene seam but with NO agent_id (the targeted kinds above keep
+    # requiring one). send_rain / bountiful_harvest are timed (active_miracles
+    # entries swept beside expire_blackouts); calm_spirits is one-time.
+    GOD_MIRACLE_KINDS = ("send_rain", "bountiful_harvest", "calm_spirits")
+
     def _living_agent_or_raise(self, agent_id: str) -> AgentState:
         """Resolve a LIVING agent for a targeted god action. ValueError (the api
         maps it to 422) on unknown or dead targets — resurrection is explicitly
@@ -1887,15 +2012,35 @@ class World:
             raise ValueError(f"{agent.name} is dead — the god cannot reach them")
         return agent
 
-    def god_intervene(self, kind: str, agent_id: str, amount: Any = None) -> dict:
-        """God-mode targeted intervention (EM-136): bless ONE agent's energy
-        (clamped at 100) or grant them credits. amount defaults per kind
-        (GOD_INTERVENTION_DEFAULTS) and is validated 1..100; unknown kind and
-        unknown/dead agent raise ValueError (api → 422). Returns a ready-to-emit
-        `god_intervention` event dict (actor_type 'god', target_id the agent,
-        payload carries before/after so a clamp is visible)."""
+    def god_intervene(
+        self, kind: str, agent_id: str | None = None, amount: Any = None
+    ) -> dict | list[dict]:
+        """God-mode intervention. Two families behind one seam:
+
+        - TARGETED (EM-136, unchanged): bless ONE agent's energy (clamped at
+          100) or grant them credits. Requires agent_id; amount defaults per
+          kind (GOD_INTERVENTION_DEFAULTS) and is validated 1..100; unknown
+          kind and unknown/dead agent raise ValueError (api → 422). Returns
+          the ready-to-emit `god_intervention` event DICT (actor_type 'god',
+          target_id the agent, payload carries before/after so a clamp is
+          visible) — byte-identical to pre-E behavior.
+        - WORLD-scale miracles (Wave E / EM-184): send_rain /
+          bountiful_harvest / calm_spirits REJECT an agent_id (ValueError →
+          api 422) and return a LIST of ready-to-emit event dicts: the
+          `god_miracle` event first, plus — for calm_spirits — any
+          relationship_changed events its trust nudges parked (drained here
+          because no action turn ever drains a god-initiated mutation; all
+          turn_id null, same API emission batch).
+        """
+        if kind in self.GOD_MIRACLE_KINDS:
+            if agent_id is not None:
+                raise ValueError(
+                    f"{kind} is a world-scale miracle — it takes no agent_id")
+            return self.god_miracle(kind)
         if kind not in self.GOD_INTERVENTION_DEFAULTS:
             raise ValueError(f"Unknown intervention kind: {kind!r}")
+        if agent_id is None:
+            raise ValueError(f"{kind} targets one agent — agent_id is required")
         agent = self._living_agent_or_raise(agent_id)
         if amount is None:
             amount = self.GOD_INTERVENTION_DEFAULTS[kind]
@@ -2016,6 +2161,165 @@ class World:
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-184 — world-scale god miracles (contracts/wave-e.md B5).
+    # Timed world modifiers (active_miracles entries) + the one-time
+    # calm_spirits. Pure state modifiers — zero LLM calls (the wave's
+    # free-scale law); expiry rides the same per-tick sweep as blackouts.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _mir_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.miracles` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _rel_param)."""
+        return _block_get(getattr(self.params, "miracles", None), name, default)
+
+    def _miracles_enabled(self) -> bool:
+        """Config gate `world.miracles.enabled` (default ON). Disabled ⇒ the
+        world kinds raise (api → 422) and no buff/sweep state ever exists —
+        byte-identical pre-E behavior; targeted bless/grant are untouched."""
+        return bool(self._mir_param("enabled", True))
+
+    def miracle_active(self, kind: str) -> bool:
+        """True while a timed miracle of `kind` is in effect (tick strictly
+        before until_tick — the place_blacked_out convention)."""
+        for m in self.active_miracles:
+            try:
+                until = int(m.get("until_tick", 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                continue
+            if m.get("kind") == kind and self.tick < until:
+                return True
+        return False
+
+    # Per-kind cast/expiry flavour text (the feed lines).
+    _MIRACLE_CAST_TEXTS = {
+        "send_rain": "🌧 Rain falls on the gardens — forage flourishes",
+        "bountiful_harvest":
+            "🌾 A bountiful harvest blesses the town — hunger bites slower",
+        "calm_spirits":
+            "🕊 A great calm settles over the town — every heart lifts",
+    }
+    _MIRACLE_EXPIRED_TEXTS = {
+        "send_rain": "☀ The rains pass — forage returns to normal.",
+        "bountiful_harvest":
+            "🍂 The bountiful season ends — hunger bites as before.",
+    }
+
+    def god_miracle(self, kind: str) -> list[dict]:
+        """Cast a WORLD-scale miracle (EM-184). Returns the ready-to-emit
+        event batch: the `god_miracle` event (actor 'god', target_id None,
+        turn_id null) first, plus — for calm_spirits — the
+        relationship_changed events its trust nudges parked in the B1 outbox
+        (drained HERE: god mutations happen outside any action turn, so no
+        runtime drain would ever pick them up). Timed kinds add/refresh an
+        active_miracles entry — re-casting an active kind REFRESHES
+        until_tick, never stacks. Disabled config raises ValueError."""
+        if kind not in self.GOD_MIRACLE_KINDS:
+            raise ValueError(f"Unknown miracle kind: {kind!r}")
+        if not self._miracles_enabled():
+            raise ValueError(
+                "miracles are disabled (world.miracles.enabled: false)")
+        if kind == "calm_spirits":
+            return self._cast_calm_spirits()
+        # Timed kinds: duration is days × turns_per_day ticks.
+        days_key = "rain_days" if kind == "send_rain" else "harvest_days"
+        try:
+            days = max(1, int(self._mir_param(days_key, 2)))
+        except (TypeError, ValueError):
+            days = 2
+        try:
+            turns_per_day = max(1, int(getattr(self.params, "turns_per_day", 20)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            turns_per_day = 20
+        until = self.tick + days * turns_per_day
+        existing = next(
+            (m for m in self.active_miracles if m.get("kind") == kind), None)
+        if existing is not None:
+            existing["until_tick"] = until  # refresh, never stack
+        else:
+            self.active_miracles.append({"kind": kind, "until_tick": until})
+        return [{
+            "kind": "god_miracle",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": None,
+            "turn_id": None,
+            "text": self._MIRACLE_CAST_TEXTS[kind],
+            "payload": {"kind": kind, "until_tick": until},
+        }]
+
+    def _cast_calm_spirits(self) -> list[dict]:
+        """ONE-TIME calm_spirits: every living agent's mood becomes 'hopeful',
+        and every living↔living relationship with interactions >= 1 gets
+        +calm_trust_bonus through _update_trust — the B1 reflex seam, so
+        clamps apply and friend/feud transitions may fire (that's the point).
+        Deterministic order (sorted agent ids both levels). No duration entry
+        is ever added. Returns [god_miracle, *relationship_changed]."""
+        living = sorted(self.living_agents(), key=lambda a: a.id)
+        living_ids = {a.id for a in living}
+        for agent in living:
+            agent.mood = "hopeful"
+        try:
+            bonus = int(self._mir_param("calm_trust_bonus", 3))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            bonus = 3
+        if bonus > 0:
+            for agent in living:
+                for other_id in sorted(agent.relationships):
+                    if other_id == agent.id or other_id not in living_ids:
+                        continue
+                    if agent.relationships[other_id].interactions >= 1:
+                        self._update_trust(agent, self.agents[other_id], bonus)
+        events: list[dict] = [{
+            "kind": "god_miracle",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": None,
+            "turn_id": None,
+            "text": self._MIRACLE_CAST_TEXTS["calm_spirits"],
+            "payload": {"kind": "calm_spirits"},
+        }]
+        # Drain the B1 outbox OURSELVES (QE carry-over): _update_trust parks
+        # relationship_changed events there, and the per-action drain in
+        # runtime._apply_action never runs for a god mutation — without this
+        # drain the events would sit parked forever. They ride the same API
+        # emission batch as the miracle, turn_id null.
+        for evt in self.drain_relationship_events():
+            evt.setdefault("turn_id", None)
+            events.append(evt)
+        return events
+
+    def expire_miracles(self) -> list[dict]:
+        """Sweep expired timed miracles (tick >= until_tick). Returns the
+        miracle_expired event dicts to emit (empty when nothing expired).
+        Called from the tick loop each turn beside expire_blackouts() —
+        cheap, no allocation when idle."""
+        if not self.active_miracles:
+            return []
+        events: list[dict] = []
+        remaining: list[dict] = []
+        for m in self.active_miracles:
+            kind = str(m.get("kind", ""))
+            try:
+                until = int(m.get("until_tick", 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                until = 0
+            if self.tick >= until:
+                events.append({
+                    "kind": "miracle_expired",
+                    "actor_id": None,
+                    "actor_type": "system",
+                    "target_id": None,
+                    "turn_id": None,
+                    "text": self._MIRACLE_EXPIRED_TEXTS.get(
+                        kind, f"The {kind} miracle fades."),
+                    "payload": {"kind": kind, "until_tick": until},
+                })
+            else:
+                remaining.append(m)
+        self.active_miracles = remaining
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Utility
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -2026,9 +2330,572 @@ class World:
             from_agent.relationships[to_agent.id] = rel
         rel.trust = max(-100, min(100, rel.trust + delta))
         rel.interactions += 1
+        # Wave E / EM-113 — the SINGLE reflex-transition seam: every trust
+        # mutation (give/steal/insult/attack/arson-witness, and future callers)
+        # is evaluated for a type transition right after the clamp.
+        self._maybe_shift_relationship(from_agent, to_agent)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-113 — relationship depth (contracts/wave-e.md B1)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _rel_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.relationships` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _bld_param)."""
+        return _block_get(getattr(self.params, "relationships", None), name, default)
+
+    def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
+        """Reflex type transitions, evaluated after every trust clamp:
+
+          neutral|ally -> friend  when trust >= friend_trust AND
+                                  interactions >= friend_interactions
+          rival|enemy  -> feud    when trust <= feud_trust
+
+        Types never auto-downgrade this wave (drama persists; an explicit
+        set_relationship can still overwrite, subject to its guards). On a
+        transition the relationship_changed event is parked in the outbox so
+        the runtime can ride it on the triggering action's `_multi` chain."""
+        rel = from_agent.relationships.get(to_agent.id)
+        if rel is None:
+            return
+        new_type: str | None = None
+        if rel.type in ("neutral", "ally"):
+            friend_trust = int(self._rel_param("friend_trust", 30))
+            friend_interactions = int(self._rel_param("friend_interactions", 5))
+            if rel.trust >= friend_trust and rel.interactions >= friend_interactions:
+                new_type = "friend"
+        elif rel.type in ("rival", "enemy"):
+            feud_trust = int(self._rel_param("feud_trust", -40))
+            if rel.trust <= feud_trust:
+                new_type = "feud"
+        if new_type is None or new_type == rel.type:
+            return
+        from_type = rel.type
+        rel.type = new_type
+        rel.since_tick = self.tick
+        self.pending_relationship_events.append(
+            self._relationship_changed_event(from_agent, to_agent, from_type, rel)
+        )
+
+    def _relationship_changed_event(
+        self, from_agent: AgentState, to_agent: AgentState,
+        from_type: str, rel: RelationshipState,
+    ) -> dict:
+        """Build a ready-to-emit relationship_changed event. EM-141: both
+        endpoints are AGENT ids only (the social-graph selector drops events
+        with non-agent endpoints)."""
+        a, b = from_agent.name, to_agent.name
+        texts = {
+            "friend": f"{a} and {b} are now friends",
+            "feud": f"the rivalry between {a} and {b} has hardened into a feud",
+            "partner": f"{a} and {b} are now partners",
+            "family": f"{a} and {b} are family",
+            "mentor": f"{a} now looks to {b} as a mentor",
+            "ally": f"{a} now counts {b} as an ally",
+            "rival": f"{a} now sees {b} as a rival",
+            "enemy": f"{a} now sees {b} as an enemy",
+            "neutral": f"{a} lets things cool with {b}",
+        }
+        return {
+            "kind": "relationship_changed",
+            "actor_id": from_agent.id,
+            "target_id": to_agent.id,
+            "text": texts.get(rel.type, f"{a} now sees {b} as {rel.type}"),
+            "payload": {
+                "from_type": from_type,
+                "to_type": rel.type,
+                "trust": rel.trust,
+                "since_tick": rel.since_tick,
+            },
+        }
+
+    def drain_relationship_events(self) -> list[dict]:
+        """Pop the parked relationship_changed events (runtime calls this at
+        the end of _apply_action so transitions ride the action's turn chain)."""
+        out = self.pending_relationship_events
+        self.pending_relationship_events = []
+        return out
+
+    def are_partners(self, a_id: str, b_id: str) -> bool:
+        """Mutual-partner predicate (EM-113 item 4; EM-114 consumes it as the
+        consent mechanic): BOTH directions typed `partner` AND both trusts >=
+        partner_trust_threshold."""
+        a = self.agents.get(a_id)
+        b = self.agents.get(b_id)
+        if a is None or b is None:
+            return False
+        threshold = int(self._rel_param("partner_trust_threshold", 40))
+        rel_ab = a.relationships.get(b_id)
+        rel_ba = b.relationships.get(a_id)
+        return (
+            rel_ab is not None and rel_ba is not None
+            and rel_ab.type == "partner" and rel_ba.type == "partner"
+            and rel_ab.trust >= threshold and rel_ba.trust >= threshold
+        )
+
+    def apply_bond(
+        self, agent: AgentState, target_id: str, rel_type: str, tick: int
+    ) -> tuple[bool, str]:
+        """Wave E / EM-125 — apply a reflection-declared bond
+        (contracts/wave-e.md B4). EXACTLY set_relationship semantics: the same
+        B1 guards (`family` engine-only, `partner` trust-gated) and, on an
+        actual type change, the same relationship_changed event parked in the
+        pending_relationship_events outbox so the declaring agent's turn chain
+        carries it. `tick` is the declaring turn's tick per the contract
+        signature — callers pass the current world tick, which is what
+        action_set_relationship stamps into since_tick. Dead/unknown targets
+        are rejected (the runtime resolves names to ids before calling)."""
+        target = self.agents.get(target_id)
+        if target is None:
+            return False, f"unknown target: {target_id!r}"
+        if not target.alive:
+            return False, f"{target.name} is no longer among the living"
+        return self.action_set_relationship(agent, target, rel_type)
 
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _chl_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.children` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _rel_param)."""
+        return _block_get(getattr(self.params, "children", None), name, default)
+
+    def set_birth_casting(
+        self, personas: list[dict], profile_roster: list[str]
+    ) -> None:
+        """Seed the birth casting pool (the EM-114 config seam, called by the
+        TickLoop at construction): `personas` = the EM-092 persona-library
+        cards; `profile_roster` = non-mock profile names in STABLE config
+        order (the load-spread tiebreak order for a child's profile)."""
+        self.birth_personas = [c for c in (personas or []) if isinstance(c, dict)]
+        self.birth_profile_roster = [str(p) for p in (profile_roster or []) if p]
+
+    def home_bed_capacity(self) -> int:
+        """Total beds across home-kind places: a cottage (no capacity field)
+        counts 1 bed; the bunkhouse counts its `capacity` (EM-098)."""
+        return sum(
+            (p.capacity if p.capacity is not None else 1)
+            for p in self.places.values()
+            if p.kind == "home"
+        )
+
+    def _birth_roll(self, a_id: str, b_id: str) -> float:
+        """Deterministic unit float in [0, 1) for the birth chance gate,
+        derived from a STABLE hash of (city_seed, tick, pair). sha1, not
+        Python hash() (salted per-process) and never the `random` module —
+        replay/fork reproduce the same rolls (EM-155 determinism)."""
+        lo, hi = sorted((a_id, b_id))
+        key = f"{self.city_seed}:{self.tick}:{lo}:{hi}".encode()
+        return int.from_bytes(hashlib.sha1(key).digest()[:8], "big") / float(1 << 64)
+
+    def _latest_pair_child_tick(self, a_id: str, b_id: str) -> int | None:
+        """The youngest shared child's birth tick for this pair, derived from
+        AgentState.parents + the child's family-tie since_tick (stamped at
+        birth). None when the pair has no child. NO new clock state — this
+        round-trips snapshots, so a restored world never re-births inside the
+        cooldown window. Dead children still count (kill keeps the record)."""
+        pair = sorted((a_id, b_id))
+        latest: int | None = None
+        for child in self.agents.values():
+            if sorted(child.parents) != pair:
+                continue
+            rel = child.relationships.get(pair[0]) or child.relationships.get(pair[1])
+            born = rel.since_tick if rel is not None else 0
+            if latest is None or born > latest:
+                latest = born
+        return latest
+
+    @staticmethod
+    def _first_clause(text: str) -> str:
+        """First clause of a personality string (up to the first ./;/,) —
+        the deterministic blend ingredient for a child's personality."""
+        return re.split(r"[.;,]", str(text or "").strip(), maxsplit=1)[0].strip()
+
+    def _pick_child_persona(self, personas: list[dict]) -> tuple[str, str]:
+        """(name, personality) from the first UNUSED persona-library card —
+        'unused' means not matching any LIVING OR DEAD agent name
+        case-insensitively (a dead agent's identity is never recycled).
+        Library exhausted ⇒ ("Kit-{n}", "") with the smallest free n."""
+        taken = {a.name.strip().lower() for a in self.agents.values()}
+        for card in personas:
+            name = str(card.get("name") or "").strip()
+            if name and name.lower() not in taken:
+                return name, str(card.get("personality") or "").strip()
+        n = 1
+        while f"kit-{n}" in taken:
+            n += 1
+        return f"Kit-{n}", ""
+
+    def _pick_child_profile(self) -> str:
+        """The non-mock profile with the FEWEST living assigned agents, ties
+        broken by stable roster order (load-spread, mirrors _pad_agents'
+        non-mock rule). The roster comes from set_birth_casting (config
+        order); when unseeded (direct construction / from_snapshot) it
+        degrades to the living agents' non-mock profiles in sorted-id
+        first-seen order, then to "mock" (an all-mock test world has nothing
+        else to assign — same fallback as _pad_agents)."""
+        roster = [p for p in self.birth_profile_roster if p != "mock"]
+        if not roster:
+            seen: list[str] = []
+            for a in sorted(self.living_agents(), key=lambda x: x.id):
+                if a.profile != "mock" and a.profile not in seen:
+                    seen.append(a.profile)
+            roster = seen or ["mock"]
+        counts = {name: 0 for name in roster}
+        for a in self.living_agents():
+            if a.profile in counts:
+                counts[a.profile] += 1
+        return min(roster, key=lambda name: (counts[name], roster.index(name)))
+
+    def _child_personality(
+        self, card_personality: str, p1: AgentState, p2: AgentState
+    ) -> str:
+        """"Child of {p1} and {p2}. " prefix + the persona card's personality
+        + a deterministic blend (first clause of each parent's personality)."""
+        parts = [f"Child of {p1.name} and {p2.name}."]
+        if card_personality:
+            parts.append(card_personality)
+        for parent in (p1, p2):
+            clause = self._first_clause(parent.personality)
+            if clause:
+                parts.append(clause if clause.endswith(".") else clause + ".")
+        return " ".join(parts)
+
+    def check_births(self, personas: list[dict] | None = None) -> list[dict]:
+        """The EM-114 birth check, run once per ROUND boundary
+        (_apply_round_start). Walks partner pairs in deterministic sorted-id
+        order; the FIRST pair meeting ALL conditions has a child (at most ONE
+        birth per round — the world cooldown). Conditions:
+
+          · mutual partners (B1 are_partners) co-located at a home-kind place;
+          · living humans < children.max_population AND < total home beds;
+          · both parents' credits >= birth_cost_credits AND energy >= 30;
+          · pair cooldown (youngest shared child's birth tick, derived);
+          · the seeded chance gate (_birth_roll < birth_chance).
+
+        The child spawns via the existing spawn_agent machinery at BACKGROUND
+        tier (free-scale law: never a new standing LLM call), energy 70,
+        credits 0, parents set, family ties both ways, a "born in {town}"
+        belief line. Both the `child_spawned` narrative event and the
+        standard `agent_spawned` roster event park in pending_spawn_events
+        (the proven EM-062/168 outbox, drained by the loop). Returns the
+        parked events ([] when no birth). `personas` defaults to the
+        loop-seeded casting pool (set_birth_casting); children.enabled false
+        ⇒ no checks at all, byte-identical pre-E behavior."""
+        cfg = getattr(self.params, "children", None)
+        if not bool(_block_get(cfg, "enabled", True)):
+            return []
+
+        living = sorted(self.living_agents(), key=lambda a: a.id)
+        max_population = int(self._chl_param("max_population", 25))
+        # Free-scale proof obligation: AT (or over) the cap, no birth — ever.
+        if len(living) >= max_population:
+            return []
+        if len(living) >= self.home_bed_capacity():
+            return []
+
+        cost = int(self._chl_param("birth_cost_credits", 6))
+        cooldown = int(self._chl_param("pair_cooldown_ticks", 600))
+        chance = float(self._chl_param("birth_chance", 0.25))
+        pool = personas if personas is not None else self.birth_personas
+
+        for i, a in enumerate(living):
+            for b in living[i + 1:]:
+                if not self.are_partners(a.id, b.id):
+                    continue
+                place = self.places.get(a.location)
+                if place is None or place.kind != "home" or b.location != a.location:
+                    continue
+                if a.credits < cost or b.credits < cost:
+                    continue
+                if a.energy < 30 or b.energy < 30:
+                    continue
+                last = self._latest_pair_child_tick(a.id, b.id)
+                if last is not None and self.tick - last < cooldown:
+                    continue
+                if self._birth_roll(a.id, b.id) >= chance:
+                    continue
+                events = self._spawn_child(a, b, pool, cost)
+                self.pending_spawn_events.extend(events)
+                return events  # world cooldown: at most ONE birth per round
+        return []
+
+    def _spawn_child(
+        self, p1: AgentState, p2: AgentState, personas: list[dict], cost: int
+    ) -> list[dict]:
+        """Create the child for a qualified pair (check_births gates). Returns
+        the ready-to-emit [child_spawned, agent_spawned] event dicts."""
+        name, card_personality = self._pick_child_persona(personas)
+        child = self.spawn_agent(
+            name=name,
+            personality=self._child_personality(card_personality, p1, p2),
+            profile=self._pick_child_profile(),
+            location=p1.location,           # the birth home
+            cadence_tier="background",      # free-scale law
+        )
+        child.energy = 70.0
+        child.credits = 0
+        child.parents = sorted((p1.id, p2.id))
+        # Both parents pay — a credits sink, not a transfer.
+        p1.credits -= cost
+        p2.credits -= cost
+        # Family ties both ways (engine-assigned `family`, the B1 rule),
+        # since_tick = birth tick — the derived pair-cooldown anchor.
+        for parent in (p1, p2):
+            child.relationships[parent.id] = RelationshipState(
+                type="family", trust=40, interactions=1, since_tick=self.tick)
+            parent.relationships[child.id] = RelationshipState(
+                type="family", trust=40, interactions=1, since_tick=self.tick)
+        # The contracted "memory line": beliefs is the world-side memory seam
+        # (it rides every prompt via the runtime's belief lines).
+        child.beliefs.append(f"Born in {self.town_name or 'the town'}.")
+        return [
+            {
+                "kind": "child_spawned",
+                "actor_id": child.id,
+                "actor_type": "system",
+                "text": f"👶 {child.name} is born to {p1.name} and {p2.name}",
+                "payload": {
+                    "child_id": child.id,
+                    "parents": list(child.parents),
+                    "name": child.name,
+                    "profile": child.profile,
+                    "place": child.location,
+                },
+            },
+            {
+                "kind": "agent_spawned",
+                "actor_id": child.id,
+                "actor_type": "system",
+                "text": f"{child.name} is born to {p1.name} and {p2.name}.",
+                "payload": {
+                    "method": "birth",
+                    "agent_id": child.id,
+                    "name": child.name,
+                    "profile": child.profile,
+                    "location": child.location,
+                    "parents": list(child.parents),
+                },
+            },
+        ]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-120 — factions, feuds & reputation (contracts/wave-e.md B3).
+    # Pure derived / reflex state — zero LLM calls (the wave's free-scale law).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # A faction edge needs BOTH directions typed warm (and both trusts at/above
+    # faction_trust). Feuds/enemies/rivals never bind a faction together.
+    FACTION_WARM_TYPES = ("ally", "friend", "partner", "family")
+
+    def _fct_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.factions` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _chl_param)."""
+        return _block_get(getattr(self.params, "factions", None), name, default)
+
+    def _factions_enabled(self) -> bool:
+        """Config gate `world.factions.enabled` (default ON). Disabled ⇒ no
+        recompute, no faction events, no factions/reputation snapshot keys —
+        byte-identical pre-E behavior."""
+        return bool(self._fct_param("enabled", True))
+
+    def reputation(self, agent_id: str) -> int:
+        """EM-120 item 1 — DERIVED reputation, zero storage: round(mean
+        incoming trust over LIVING agents with interactions >= 1 toward this
+        agent). Nobody has a (used) relationship toward them ⇒ 0. Computed at
+        serialization time (to_snapshot) — never persisted."""
+        trusts = [
+            rel.trust
+            for a in self.living_agents()
+            if a.id != agent_id
+            for rel in (a.relationships.get(agent_id),)
+            if rel is not None and rel.interactions >= 1
+        ]
+        if not trusts:
+            return 0
+        return round(sum(trusts) / len(trusts))
+
+    def faction_of(self, agent_id: str) -> dict | None:
+        """The faction this agent belongs to, as {id, name, members} (a copy),
+        or None. Components are disjoint, so membership is unique. This is the
+        world-side seam for the contracted one-line faction prompt
+        ("Your circle: {name} ({k} members)") — runtime.py is owned by B4,
+        which wires the line via this accessor (deviation noted in B3's
+        report; the fixture world has no factions, so the protagonist prompt
+        guard is unaffected either way)."""
+        for fid in sorted(self.factions):
+            f = self.factions[fid]
+            if agent_id in f.get("members", []):
+                return {
+                    "id": fid,
+                    "name": f.get("name", ""),
+                    "members": list(f.get("members", [])),
+                }
+        return None
+
+    def _mutual_warm_edge(self, a: AgentState, b: AgentState, threshold: int) -> bool:
+        """True when BOTH directions are typed warm (FACTION_WARM_TYPES) AND
+        both trusts >= threshold — the only edge kind factions cluster over."""
+        rel_ab = a.relationships.get(b.id)
+        rel_ba = b.relationships.get(a.id)
+        return (
+            rel_ab is not None and rel_ba is not None
+            and rel_ab.type in self.FACTION_WARM_TYPES
+            and rel_ba.type in self.FACTION_WARM_TYPES
+            and rel_ab.trust >= threshold and rel_ba.trust >= threshold
+        )
+
+    def _warm_components(self, threshold: int) -> list[list[str]]:
+        """Connected components over mutual warm edges among LIVING agents.
+        Deterministic: agents are walked in sorted-id order, so components
+        come out ordered by their lowest member id, members sorted."""
+        living = sorted(self.living_agents(), key=lambda a: a.id)
+        adjacency: dict[str, list[str]] = {a.id: [] for a in living}
+        for i, a in enumerate(living):
+            for b in living[i + 1:]:
+                if self._mutual_warm_edge(a, b, threshold):
+                    adjacency[a.id].append(b.id)
+                    adjacency[b.id].append(a.id)
+        components: list[list[str]] = []
+        seen: set[str] = set()
+        for a in living:
+            if a.id in seen:
+                continue
+            stack, comp = [a.id], []
+            seen.add(a.id)
+            while stack:
+                cur = stack.pop()
+                comp.append(cur)
+                for nxt in adjacency[cur]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            components.append(sorted(comp))
+        return components
+
+    def _agent_name(self, agent_id: str) -> str:
+        a = self.agents.get(agent_id)
+        return a.name if a is not None else agent_id
+
+    def _faction_event(self, kind: str, actor_id: str, text: str, payload: dict) -> dict:
+        """A ready-to-park faction event. EM-141: actor_id is ALWAYS an agent
+        id (the social-graph selector drops non-agent endpoints); these are
+        standalone system events — the loop's drain stamps turn_id null."""
+        return {
+            "kind": kind,
+            "actor_id": actor_id,
+            "actor_type": "system",
+            "text": text,
+            "payload": payload,
+        }
+
+    def recompute_factions(self) -> list[dict]:
+        """EM-120 items 2-4 — the once-per-round faction recompute, called
+        from _apply_round_start AFTER check_births (contract order). Clusters
+        = connected components over mutual warm edges among living agents;
+        components of size >= faction_min_size are factions.
+
+        Identity continuity: a component keeps an existing faction's id/name
+        when it overlaps >= 50% of that faction's OLD membership (best
+        overlap wins; ties break by faction id, then component order — all
+        deterministic). Unmatched components found NEW factions
+        (id = fct_{8 hex of sha1(sorted founding members + tick)}, name =
+        "{oldest founding member's name}'s circle", oldest = LOWEST agent id);
+        unmatched old factions DISSOLVE.
+
+        Events fire on DIFFS ONLY — a stable round emits nothing — and park
+        in the pending_spawn_events outbox (same drain as births). Returns
+        the parked events ([] when stable/disabled)."""
+        if not self._factions_enabled():
+            return []
+        threshold = int(self._fct_param("faction_trust", 25))
+        min_size = max(1, int(self._fct_param("faction_min_size", 3)))
+        components = [
+            c for c in self._warm_components(threshold) if len(c) >= min_size
+        ]
+
+        # Identity continuity — overlap >= 50% of the OLD membership, matched
+        # greedily best-overlap-first (deterministic tie-break: faction id,
+        # then component order = lowest-member-id order).
+        candidates: list[tuple[int, str, int]] = []
+        for ci, comp in enumerate(components):
+            comp_set = set(comp)
+            for fid, f in self.factions.items():
+                old_members = f.get("members", [])
+                overlap = len(comp_set & set(old_members))
+                if overlap > 0 and 2 * overlap >= len(old_members):
+                    candidates.append((-overlap, fid, ci))
+        candidates.sort()
+        assigned: dict[int, str] = {}
+        taken: set[str] = set()
+        for neg_overlap, fid, ci in candidates:
+            if fid in taken or ci in assigned:
+                continue
+            assigned[ci] = fid
+            taken.add(fid)
+
+        events: list[dict] = []
+        new_factions: dict[str, dict] = {}
+        for ci, comp in enumerate(components):
+            if ci in assigned:
+                # Continuity: keep id/name/founded_tick, diff the membership.
+                fid = assigned[ci]
+                old = self.factions[fid]
+                name = str(old.get("name", ""))
+                old_members = set(old.get("members", []))
+                for m in comp:
+                    if m not in old_members:
+                        events.append(self._faction_event(
+                            "faction_joined", m,
+                            f"⚑ {self._agent_name(m)} joins {name}",
+                            {"faction_id": fid, "name": name},
+                        ))
+                for m in sorted(old_members - set(comp)):
+                    events.append(self._faction_event(
+                        "faction_left", m,
+                        f"⚑ {self._agent_name(m)} drifts away from {name}",
+                        {"faction_id": fid, "name": name},
+                    ))
+                new_factions[fid] = {
+                    "name": name,
+                    "founded_tick": int(old.get("founded_tick", 0)),
+                    "members": list(comp),
+                }
+            else:
+                # A NEW faction. Deterministic id (sha1 — never the salted
+                # builtin hash) and name; oldest member = lowest agent id.
+                key = f"{':'.join(comp)}:{self.tick}".encode()
+                fid = f"fct_{hashlib.sha1(key).hexdigest()[:8]}"
+                name = f"{self._agent_name(comp[0])}'s circle"
+                new_factions[fid] = {
+                    "name": name,
+                    "founded_tick": self.tick,
+                    "members": list(comp),
+                }
+                member_names = ", ".join(self._agent_name(m) for m in comp)
+                events.append(self._faction_event(
+                    "faction_formed", comp[0],
+                    f"⚑ {name} has formed — {member_names}",
+                    {"faction_id": fid, "name": name, "members": list(comp)},
+                ))
+        for fid, f in self.factions.items():
+            if fid not in new_factions:
+                name = str(f.get("name", ""))
+                old_members = [str(m) for m in f.get("members", [])]
+                anchor = min(old_members) if old_members else ""
+                events.append(self._faction_event(
+                    "faction_dissolved", anchor,
+                    f"⚑ {name} has dissolved",
+                    {"faction_id": fid, "name": name, "members": old_members},
+                ))
+        self.factions = new_factions
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
 
     def spawn_agent(
         self,
@@ -2135,6 +3002,14 @@ class World:
 
     def to_snapshot(self, profile_colors: dict[str, str] | None = None) -> dict:
         pc = profile_colors or {}
+        # Wave E / EM-120 — reputation is DERIVED (zero storage) and computed
+        # at serialization. Documented seam choice: AgentState.to_dict has no
+        # world backref and its only production call site is THIS method (the
+        # loop's world_state broadcast and /api/state both go through
+        # to_snapshot), so the additive `reputation` key is attached here,
+        # beside turns_until_death. Gated on factions.enabled so a disabled
+        # world keeps the exact pre-E agent dict shape (byte-identical proof).
+        fct_enabled = self._factions_enabled()
         snap = {
             "tick": self.tick,
             "day": self.day,
@@ -2153,6 +3028,9 @@ class World:
                     **a.to_dict(pc.get(a.profile, "#888888")),
                     # W9 / EM-070 — starvation countdown (null when energy > 0).
                     "turns_until_death": self.turns_until_death(a),
+                    # Wave E / EM-120 — derived reputation (additive key;
+                    # consumers may ignore; absent while factions disabled).
+                    **({"reputation": self.reputation(a.id)} if fct_enabled else {}),
                 }
                 for a in self.agents.values()
             ],
@@ -2189,6 +3067,29 @@ class World:
         # already carries each governed agent's demoted_from (AgentState.to_dict).
         if self.cap_demotions:
             snap["cap_demotions"] = dict(self.cap_demotions)
+        # Wave E / EM-120 — factions {id: {name, founded_tick, members}}.
+        # Serialized only when non-empty (the cap_demotions pattern), so a
+        # faction-free world — and every pre-E snapshot — keeps the exact
+        # pre-E key set (absent ⇒ {} on restore).
+        if self.factions:
+            snap["factions"] = {
+                fid: {
+                    "name": str(f.get("name", "")),
+                    "founded_tick": int(f.get("founded_tick", 0)),
+                    "members": [str(m) for m in f.get("members", [])],
+                }
+                for fid, f in self.factions.items()
+            }
+        # Wave E / EM-184 — active timed miracles [{kind, until_tick}].
+        # Serialized only when non-empty (the cap_demotions pattern), so a
+        # miracle-free world — and every pre-E snapshot — keeps the exact
+        # pre-E key set (absent ⇒ [] on restore).
+        if self.active_miracles:
+            snap["active_miracles"] = [
+                {"kind": str(m.get("kind", "")),
+                 "until_tick": int(m.get("until_tick", 0))}
+                for m in self.active_miracles
+            ]
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -2278,12 +3179,18 @@ class World:
                     if d.get("demoted_from") in cls.CADENCE_TIERS
                     else None
                 ),
+                # Wave E / EM-114 — additive: pre-E snapshots lack the key and
+                # restore [] (the pair birth cooldown derives from this field,
+                # so a restored world never re-births inside the window).
+                parents=[str(p) for p in (d.get("parents") or [])],
             )
             a.relationships = {
                 str(aid): RelationshipState(
                     type=str(_block_get(r, "type", "neutral")),
                     trust=_int(_block_get(r, "trust", 0)),
                     interactions=_int(_block_get(r, "interactions", 0)),
+                    # Wave E / EM-113 — additive; pre-E snapshots restore 0.
+                    since_tick=_int(_block_get(r, "since_tick", 0)),
                 )
                 for aid, r in (d.get("relationships") or {}).items()
             }
@@ -2405,6 +3312,27 @@ class World:
             for lane, win in (state.get("cap_demotions") or {}).items()
             if lane and win
         }
+        # Wave E / EM-120 — restore factions (additive: pre-E snapshots lack
+        # the key and restore {} — identity continuity then survives a
+        # fork/restore, so a stable membership re-keeps its id with no events).
+        world.factions = {
+            str(fid): {
+                "name": str(_block_get(f, "name", "")),
+                "founded_tick": _int(_block_get(f, "founded_tick", 0)),
+                "members": [str(m) for m in (_block_get(f, "members", []) or [])],
+            }
+            for fid, f in (state.get("factions") or {}).items()
+            if fid
+        }
+        # Wave E / EM-184 — restore active timed miracles (additive: pre-E
+        # snapshots lack the key and restore [] — a mid-rain snapshot keeps
+        # its buff on resume and still expires on schedule).
+        world.active_miracles = [
+            {"kind": str(m.get("kind", "")),
+             "until_tick": _int(m.get("until_tick", 0))}
+            for m in (state.get("active_miracles") or [])
+            if isinstance(m, dict) and m.get("kind")
+        ]
         # EM-145 — restore queued god whispers (only for agents that exist).
         world.pending_whispers = {
             str(aid): [str(t) for t in (lines or []) if str(t).strip()]

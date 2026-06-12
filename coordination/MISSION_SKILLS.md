@@ -119,3 +119,12 @@ The W9 mission text names no external skills explicitly; orchestrator defaults a
 - [x] render-level verification — orchestrator Playwright at every D1.5/D1.6 gate (dense city, landmark labels at default framing, street-level agents-at-plaza shot); live-run evidence in docs/build-evidence/wave-d15-*, wave-d16-*, d16-stage-*.
 - [x] `git-commit` conventions — all commits.
 - [ ] `ux-review` full-skill repo-wide pass — STILL OWED (standing deferral; now covers W9–W16).
+
+## Wave E — the social city (2026-06-11)
+Source: user /orchestrator request ("review plan and workflow ultracode them") · contracts/wave-e.md
+
+- [x] `orchestrator` — ran the wave (ultracode Workflow mode: one workflow per batch, implement + adversarial verify; orchestrator gates + commits inline).
+- [x] `design-token-guard` — source gate run at the B6/B7 UI gates via its checker script; zero NEW violations (338 pre-existing filed as EM-193).
+- [x] QE agent — coordination/qa-report.json (wave-E, proceed=true); MAJOR fixed same-wave (d13a63c).
+- [ ] `frontend-design` / `ui-ux-pro-max` — offered to B6/B7; not invoked: both batches extend an established token/design system with no novel styling decisions (documented in B6 report).
+- [ ] `render-sanity` / `ux-review` — deferred: feed/console/graph changes are component-tested (579 web tests) and the 3-D label work is proximity-gated; a browser pass rides the next UX review on merged main (standing deferral, see ledger).

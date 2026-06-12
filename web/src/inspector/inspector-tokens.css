@@ -53,6 +53,14 @@
   --chaos-border: rgba(217, 87, 217, 0.35);
   --chaos-chaotic: #ff7ad9; /* a brighter magenta for the "is_chaotic" badge */
 
+  /* Wave E (contracts/wave-e.md B6) — the social-city accents. The miracle
+     accent is a god-gold (distinct from the violet god ink: a miracle is the
+     ANSWER, not the voice); the faction tint is a mint register no other
+     surface owns — the SocialGraph faction ring and the feed's ⚑ faction rows
+     read the same token, so factions are one color everywhere. */
+  --marker-miracle: #ffd75e;
+  --faction-tint: #2ee6a8;
+
   /* W7 building-status markers (mini-map squares + projects readout dots).
      Both the canvas (getComputedStyle) and the DOM legend (var(--…)) read these
      same tokens, so a building marker can never drift from the theme. */

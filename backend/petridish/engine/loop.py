@@ -160,9 +160,36 @@ class TickLoop:
         self._narrator_task: asyncio.Task | None = None
         self._last_narrator_tick: int = -1
 
+        # Wave E / EM-114 — seed the world's birth casting pool (the persona
+        # library + the non-mock profile roster). The world has no view of
+        # config-side casting state, so the loop — which owns every per-round
+        # world hook — injects it once here; the birth check itself runs
+        # world-side at the round boundary and its events ride the existing
+        # _flush_spawn_events drain.
+        self._seed_birth_casting()
+
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
+
+    def _seed_birth_casting(self) -> None:
+        """Wave E / EM-114 — inject the birth casting pool into the world:
+        the EM-092 persona library (config/personas.yaml, fail-soft []) and
+        the router's non-mock profile names in STABLE config order (the
+        child-profile load-spread tiebreak). Defensive throughout: casting is
+        flavour, never a reason a loop fails to construct."""
+        setter = getattr(self._world, "set_birth_casting", None)
+        if not callable(setter):
+            return
+        try:
+            from ..config.loader import load_personas
+            roster = [
+                name for name in self._router.profile_names()
+                if getattr(self._router.get_profile(name), "adapter", "") != "mock"
+            ]
+            setter(load_personas(), roster)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("birth casting seed failed: %s", exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Control API
@@ -311,6 +338,15 @@ class TickLoop:
         self._world.animals = {}
         # W11b — clear the billboard for the fresh run.
         self._world.billboard = []
+        # Wave E / EM-120 — clear factions: stale clusters from the prior run
+        # reference replaced agent ids and would emit spurious dissolutions at
+        # the fresh run's first round boundary. (No drain change — faction
+        # events ride the existing pending_spawn_events outbox, cleared above.)
+        self._world.factions = {}
+        # Wave E / EM-184 — clear active miracles: tick resets to 0 below, so
+        # a stale entry's until_tick would keep its buff alive deep into the
+        # fresh run (and its expiry would emit a spurious miracle_expired).
+        self._world.active_miracles = []
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0
@@ -470,6 +506,15 @@ class TickLoop:
                 self._emit_event(evt)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("blackout expiry failed: %s", exc)
+
+        # Wave E / EM-184 — expire timed god miracles in the SAME per-tick
+        # path (miracle_expired, standalone system events, turn_id null).
+        try:
+            for evt in self._world.expire_miracles():
+                evt.setdefault("turn_id", None)
+                self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("miracle expiry failed: %s", exc)
 
         # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
         # each living animal takes ONE animal turn (mostly zero-LLM reflex). It is

@@ -83,6 +83,98 @@ world:
   cap_governor:
     enabled: true        # default ON
 
+  # Wave E / EM-113 — relationship depth (contracts/wave-e.md B1). Trust stays
+  # the single scalar (strength = |trust|, valence = sign); these thresholds
+  # drive the zero-LLM reflex type transitions evaluated after every trust
+  # mutation: neutral|ally → friend at trust >= friend_trust with
+  # interactions >= friend_interactions; rival|enemy → feud at trust <=
+  # feud_trust. Types never auto-downgrade (explicit set_relationship can
+  # still overwrite, subject to guards). `partner` declarations require the
+  # declarer's trust toward the target >= partner_trust_threshold, and
+  # World.are_partners() (the EM-114 consent mechanic) needs BOTH directions
+  # typed partner at/above it. No `enabled` flag by design: thresholds only
+  # fire on NEW trust mutations, so pre-E snapshots restore byte-identical.
+  # MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  relationships:
+    friend_trust: 30             # neutral|ally → friend at trust >= this …
+    friend_interactions: 5       # … AND interactions >= this
+    feud_trust: -40              # rival|enemy → feud at trust <= this
+    partner_trust_threshold: 40  # partner declarations / are_partners gate
+
+  # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
+  # ROUND boundary the world checks every mutual-partner pair (are_partners,
+  # the B1 consent mechanic) co-located at a home-kind place for a birth.
+  # A child is a NEW agent: it spawns at cadence_tier `background` and only
+  # into VACANCIES — living humans must stay under max_population AND under
+  # total home-bed capacity (cottages count 1 bed, the bunkhouse its
+  # `capacity`) — so births never grow the LLM call budget past today's (the
+  # wave's free-scale law). Both parents pay birth_cost_credits (a credits
+  # sink) and both need energy >= 30; at most ONE birth per round, and the
+  # same pair waits pair_cooldown_ticks between children (derived from the
+  # youngest shared child's family-tie since_tick — no extra clock state).
+  # The chance gate is a unit float seeded from sha1(city_seed, tick, pair) —
+  # deterministic and replay-safe, never the `random` module. The child takes
+  # the first UNUSED persona-library card (config/personas.yaml; Kit-N when
+  # exhausted) and the non-mock profile with the fewest living assigned
+  # agents. Set enabled:false for byte-identical pre-E behavior (no birth
+  # checks at all). MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  children:
+    enabled: true
+    max_population: 25           # living-humans ceiling (measured v4 budget)
+    birth_cost_credits: 6        # paid by BOTH parents (credits sink)
+    birth_chance: 0.25           # seeded per-pair unit-float gate per round
+    pair_cooldown_ticks: 600     # min ticks between children of the same pair
+
+  # Wave E / EM-120 — factions, feuds & reputation (contracts/wave-e.md B3).
+  # At each ROUND boundary — after the EM-114 birth check (contract order:
+  # births first, then factions) — the world recomputes candidate clusters:
+  # connected components over MUTUAL warm edges (both directions typed
+  # ally|friend|partner|family AND both trusts >= faction_trust) among living
+  # agents; components of size >= faction_min_size are factions. Identity is
+  # continuous across churn (>= 50% overlap of the OLD membership keeps the
+  # faction's id and name); unmatched old factions dissolve. Pure derived /
+  # reflex state — zero LLM calls (the wave's free-scale law) — and the
+  # faction_formed/joined/left/dissolved events fire on DIFFS only (stable
+  # rounds emit nothing). Reputation is fully derived (mean incoming trust
+  # from living agents with interactions >= 1) and rides world_state agents
+  # as an additive `reputation` key while enabled. Set enabled:false for
+  # byte-identical pre-E behavior (no recompute, no events, no new snapshot
+  # keys). MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  factions:
+    enabled: true
+    faction_trust: 25            # warm edge needs BOTH trusts >= this
+    faction_min_size: 3          # smaller clusters never form / dissolve
+
+  # Wave E / EM-184 — world-scale god miracles (contracts/wave-e.md B5).
+  # POST /api/god/intervene grows three WORLD kinds (cast with NO agent_id;
+  # the targeted bless_energy/grant_credits keep requiring one):
+  #   send_rain         — forage yields +rain_forage_bonus while active,
+  #                       for rain_days in-world days (days × turns_per_day
+  #                       ticks).
+  #   bountiful_harvest — energy decay × harvest_decay_factor while active,
+  #                       for harvest_days in-world days.
+  #   calm_spirits      — ONE-TIME: every living agent's mood becomes
+  #                       'hopeful' and every living↔living relationship with
+  #                       interactions >= 1 gets +calm_trust_bonus trust
+  #                       through the B1 reflex seam (clamped; friend/feud
+  #                       transitions may fire — that's the point).
+  # Re-casting an active kind REFRESHES its until_tick (never stacks); timed
+  # miracles expire in the same per-tick sweep as blackouts and emit
+  # miracle_expired. Pure state modifiers — zero LLM calls (the wave's
+  # free-scale law). Set enabled:false to reject the world kinds (API 422)
+  # while leaving bless/grant byte-identical. MUST stay in sync with the
+  # default-config mirror in backend/petridish/config/loader.py.
+  miracles:
+    enabled: true
+    rain_forage_bonus: 2         # extra forage credits while rain is active
+    rain_days: 2                 # send_rain duration, in-world days
+    harvest_decay_factor: 0.5    # energy decay multiplier while active
+    harvest_days: 2              # bountiful_harvest duration, in-world days
+    calm_trust_bonus: 3          # one-time trust nudge per warm relationship
+
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
   # POST /api/agents/{id}/tier): protagonists act every round, supporting every

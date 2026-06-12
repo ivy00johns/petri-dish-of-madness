@@ -60,6 +60,22 @@ ACTION_SCHEMA = {
         # W11b / EM-080 — OPTIONAL reflection/diary entry, requested in-prompt
         # only when the importance accumulator trips; same single response.
         "reflection": {"type": "string", "maxLength": 400},
+        # Wave E / EM-125 — OPTIONAL reflection-declared bond, offered in-prompt
+        # ONLY alongside a reflection request; rides the SAME single response
+        # (zero extra calls). Malformed/disallowed bonds are stripped BEFORE
+        # validation (_sanitize_bond) so a bad bond can never fail the turn.
+        "bond": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["target", "type"],
+            "properties": {
+                "target": {"type": "string", "maxLength": 60},
+                "type": {
+                    "type": "string",
+                    "enum": ["friend", "partner", "mentor", "feud"],
+                },
+            },
+        },
         "action": {
             "type": "string",
             "enum": [
@@ -258,6 +274,10 @@ _IMPORTANCE_WEIGHTS: dict[str, float] = {
     "agent_starving": 2.0,
     "structure_state_changed": 1.0,
     "building_operational": 2.0,
+    # Wave E / EM-184 — a god miracle is town-news (globally witnessed in
+    # push_event, like random_event) and salient enough to pull a background
+    # agent's next due turn (existing EM-159 machinery — no new calls).
+    "god_miracle": 2.0,
 }
 _IMPORTANCE_ECONOMY_SWING = 8      # |credits moved| at/above this scores...
 _IMPORTANCE_ECONOMY_WEIGHT = 2.0   # ...this much
@@ -659,6 +679,44 @@ def _sanitize_optional_trace_fields(action_dict: dict) -> None:
         else:
             # Wrong type entirely — drop it rather than fail the turn.
             action_dict.pop("memories_used", None)
+
+
+# Wave E / EM-125 — agent-declarable bond types (the ACTION_SCHEMA enum).
+# `family` is engine-only (births, B1 rule); the other relationship words
+# (neutral/ally/rival/enemy) are trust-driven, not bond-declarable.
+_BOND_TYPES = ("friend", "partner", "mentor", "feud")
+_BOND_TARGET_CAP = 60
+
+
+def _sanitize_bond(action_dict: dict) -> str | None:
+    """Wave E / EM-125 — pre-validate the optional reflection `bond` IN PLACE
+    so a malformed/disallowed bond can never fail the turn (the same leniency
+    rule as the optional trace fields above). A conforming bond is rewritten
+    to exactly {target, type} (extra keys dropped, target truncated to the
+    schema cap, type lower-cased); anything else is POPPED before schema
+    validation and the rejection reason returned for the decision trace."""
+    if "bond" not in action_dict:
+        return None
+    bond = action_dict.pop("bond")
+    if not isinstance(bond, dict):
+        return "malformed bond object"
+    target = bond.get("target")
+    btype = bond.get("type")
+    if not isinstance(target, str) or not target.strip():
+        return "malformed bond: missing target"
+    if not isinstance(btype, str) or not btype.strip():
+        return "malformed bond: missing type"
+    btype = btype.strip().lower()
+    if btype == "family":
+        # B1 rule — engine-assigned only (births); declaring it is rejected.
+        return ("family ties are made by birth, not declaration — "
+                "you cannot declare someone family")
+    if btype not in _BOND_TYPES:
+        return f"invalid bond type: {btype!r}"
+    action_dict["bond"] = {
+        "target": target.strip()[:_BOND_TARGET_CAP], "type": btype,
+    }
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1358,13 +1416,35 @@ def _assemble_context(
 """
 
     # ── W11b / EM-080 — reflection request (only when importance tripped) ─────
+    # Wave E / EM-125 — the SAME injected instruction also offers the optional
+    # `bond` field (one at most), so a bond declaration rides the SAME single
+    # turn call. Gated on request_reflection: the non-reflection prompt stays
+    # byte-identical to pre-E (protagonist fixture guard).
     reflection_line = ""
     if request_reflection:
         reflection_line = (
             '\nMuch has happened around you lately. ALSO include "reflection": '
             "1-2 sentences on what you have learned and how you feel (in the SAME "
-            "JSON object — never a separate reply)."
+            "JSON object — never a separate reply). If these events changed how "
+            'you see someone, you may ALSO include "bond": {"target": "<their '
+            'name>", "type": "friend|partner|mentor|feud"} — at most one, in the '
+            "same JSON."
         )
+
+    # ── Wave E / EM-120 item 6 (wired here by B4 per contract) — ONE faction
+    # line for agents that belong to a faction. Empty (⇒ byte-identical prompt)
+    # when the world has no factions — the protagonist fixture guard is
+    # unaffected. Zero extra LLM calls: it rides this turn's context.
+    # (getattr keeps callers safe if the engine seam is ever absent.)
+    faction_line = ""
+    _faction_of = getattr(world, "faction_of", None)
+    if callable(_faction_of):
+        _fac = _faction_of(agent.id)
+        if _fac and _fac.get("name"):
+            faction_line = (
+                f"\nYour circle: {_fac['name']} "
+                f"({len(_fac.get('members', []))} members)"
+            )
 
     # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
     # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
@@ -1494,7 +1574,7 @@ Agent ID: {agent.id}
 Location: {place_name} (kind={place_kind})
 Energy: {status_energy}/100
 Credits: {agent.credits}
-Mood: {agent.mood}
+Mood: {agent.mood}{faction_line}
 
 === NEEDS ===
 {needs_text}
@@ -1724,7 +1804,7 @@ class AgentRuntime:
                 agent.id == actor_id
                 or agent.id == target_id
                 or (evt_location and agent.location == evt_location)
-                or event.get("kind") in ("random_event", "rule_passed", "rule_rejected", "rule_proposed")
+                or event.get("kind") in ("random_event", "rule_passed", "rule_rejected", "rule_proposed", "god_miracle")
             ):
                 buf = self._memory.setdefault(agent.id, [])
                 buf.append(evt_payload)
@@ -2499,19 +2579,73 @@ class AgentRuntime:
             profile_name, profile_color,
         ))
 
+        # ── Wave E / EM-125 — reflection-declared bond (contracts/wave-e.md B4).
+        # The bond rode the SAME single response as the reflection (zero extra
+        # calls — the llm_call rows for this turn are identical to a plain
+        # reflection turn). It is honored ONLY on a turn that requested a
+        # reflection (the importance throttle ⇒ at most one bond per
+        # reflection). Application is pure reflex: the target resolves through
+        # the EM-140 name→id machinery, then world.apply_bond (set_relationship
+        # semantics — B1 guards: family engine-only, partner trust-gated).
+        # Invalid bonds are silently dropped: recorded as trace bond_rejected,
+        # never failing the turn.
+        bond_applied: dict | None = None
+        bond_rejected: str | None = action_dict.pop("_bond_rejected", None)
+        bond = action_dict.get("bond")
+        if isinstance(bond, dict) and bond_rejected is None:
+            target_raw = str(bond.get("target", ""))
+            bond_type = str(bond.get("type", ""))
+            if not request_reflection:
+                bond_rejected = "no reflection was requested this turn"
+            else:
+                target_id = (
+                    target_raw if target_raw in self.world.agents
+                    else _resolve_agent_target(target_raw, agent, self.world)
+                )
+                if target_id is None:
+                    bond_rejected = f"unknown target: {target_raw!r}"
+                elif target_id == agent.id:
+                    bond_rejected = "cannot declare a bond with yourself"
+                else:
+                    ok, msg = self.world.apply_bond(
+                        agent, target_id, bond_type, self.world.tick
+                    )
+                    if ok:
+                        bond_applied = {"target_id": target_id, "type": bond_type}
+                        # The bond's relationship_changed (parked by apply_bond
+                        # when the type actually changed) rides THIS turn's
+                        # chain — _apply_action already drained its own batch,
+                        # so this drain holds only the bond's event.
+                        shifts = self.world.drain_relationship_events()
+                        _tick = self.world.tick
+                        extra_events.extend(
+                            {"tick": _tick, **evt} for evt in shifts
+                        )
+                    else:
+                        bond_rejected = msg
+        if bond_rejected is not None:
+            trace["bond_rejected"] = bond_rejected
+
         # EM-080 — reflection/diary entry (emitted whenever present; resets the
         # importance accumulator; the loop pushes it into the memory buffer).
         reflection_text = action_dict.get("reflection")
         if isinstance(reflection_text, str) and reflection_text.strip():
             importance = round(self._importance.get(agent.id, 0.0), 2)
             self._importance[agent.id] = 0.0
+            reflection_payload: dict = {
+                "text": reflection_text.strip(), "importance": importance,
+            }
+            # EM-125 — ADDITIVE observability key, present only when a bond
+            # landed this reflection (EM-166 spirit).
+            if bond_applied is not None:
+                reflection_payload["bond_applied"] = bond_applied
             extra_events.append({
                 "kind": "reflection",
                 "actor_id": agent.id,
                 "profile": profile_name,
                 "profile_color": profile_color,
                 "text": f"{agent.name} reflects: \"{reflection_text.strip()}\"",
-                "payload": {"text": reflection_text.strip(), "importance": importance},
+                "payload": reflection_payload,
             })
 
         # EM-081 — distribute this turn's speech to co-located overhearers.
@@ -2691,6 +2825,11 @@ class AgentRuntime:
 
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
         _sanitize_optional_trace_fields(action_dict)
+        # EM-125 — a malformed/disallowed bond is popped HERE (before schema
+        # validation, where additionalProperties=False would otherwise fail the
+        # whole turn over an optional field); the reason is stamped back on
+        # AFTER validation so run_turn can surface it as trace bond_rejected.
+        bond_rejected = _sanitize_bond(action_dict)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
@@ -2708,6 +2847,10 @@ class AgentRuntime:
             self._forget_response(profile_name, messages)
             return None, f"world error: {world_error}", meta
 
+        if bond_rejected is not None:
+            # EM-125 — stamped after validation (the underscore key would fail
+            # additionalProperties=False); run_turn pops it into the trace.
+            action_dict["_bond_rejected"] = bond_rejected
         return action_dict, None, meta
 
     def _forget_response(self, profile_name: str, messages: list[dict]) -> None:
@@ -2762,7 +2905,43 @@ class AgentRuntime:
         profile_name: str,
         profile_color: str,
     ) -> dict:
-        """Apply the validated action to world state. Return event dict."""
+        """Apply the validated action to world state. Return event dict.
+
+        Wave E / EM-113 — after the action resolves, drain the world's
+        relationship_changed outbox (reflex type transitions triggered by this
+        action's trust mutations, plus accepted set_relationship changes) and
+        append them to the action's `_multi` chain so they share its turn_id.
+        Both turn paths (LLM and reflex) come through here, so every
+        action-triggered transition rides its triggering turn."""
+        try:
+            result = self._apply_action_inner(
+                agent, action_dict, profile_name, profile_color
+            )
+        finally:
+            # Wave E B4 carry-over (ratified B1 QE finding) — drain even when a
+            # handler raises: a parked relationship_changed must never leak
+            # onto the NEXT agent's turn chain. On the exception path the
+            # drained events are dropped with the failed action that parked
+            # them (the state change itself stands; only its feed echo is
+            # lost — strictly better than mis-attributing it to a stranger).
+            shifts = self.world.drain_relationship_events()
+        if shifts:
+            tick = self.world.tick
+            decorated = [{"tick": tick, **evt} for evt in shifts]
+            if "_multi" in result:
+                result["_multi"].extend(decorated)
+            else:
+                result = {"_multi": [result] + decorated}
+        return result
+
+    def _apply_action_inner(
+        self,
+        agent: AgentState,
+        action_dict: dict,
+        profile_name: str,
+        profile_color: str,
+    ) -> dict:
+        """The action dispatch table (see _apply_action for the EM-113 drain)."""
         action = action_dict["action"]
         args = action_dict.get("args") or {}
         thought = action_dict.get("thought", "")

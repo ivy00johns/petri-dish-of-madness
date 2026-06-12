@@ -45,6 +45,8 @@ import { preloadHeroModels } from './assets/Model';
 import { allCityModelSpecs } from './assets/cityModels';
 import { CityScape, useCityPlan } from './CityScape';
 import { assignBuildingLots } from './cityLayout';
+import { StreetLabels } from './StreetLabels';
+import { CityNameChip } from './CityNameChip';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
 // Wave C (EM-148/149): warm the GLB cache for the hero set (place anchors,
@@ -497,8 +499,13 @@ export function CozyWorld({
     );
   }
 
+  // EM-188: the city's title — absent-safe (town_name is additive backend
+  // state; mock mode / old snapshots may lack it, and it is not yet part of
+  // the frontend WorldState type, so it is read defensively).
+  const townName = (world as { town_name?: unknown }).town_name;
+
   return (
-    <div className="h-full w-full">
+    <div className="relative h-full w-full">
       <Canvas
         shadows
         dpr={[1, 2]}
@@ -524,6 +531,11 @@ export function CozyWorld({
           focus={focus}
           onPick={onPick}
         />
+        {/* EM-188: painted street-name labels — proximity-gated (EM-102
+            threshold), flat on the roads so they never collide with the
+            floating place/structure labels. Lives here (not CityScape):
+            useProximity needs the R3F frame loop. */}
+        <StreetLabels streets={cityPlan.streets} />
         <CameraDirector
           focus={focus}
           resetNonce={resetNonce}
@@ -531,6 +543,8 @@ export function CozyWorld({
           onFocusBreak={onFocusBreak}
         />
       </Canvas>
+      {/* EM-188: the city's name, once, as a HUD chip (absent-safe). */}
+      <CityNameChip name={typeof townName === 'string' ? townName : null} />
     </div>
   );
 }

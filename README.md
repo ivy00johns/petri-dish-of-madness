@@ -11,17 +11,22 @@ The marquee feature: **per-agent hot-swappable model control**. Groq-Llama runs 
 ## What's inside
 
 - **Per-agent hot-swappable models** — every villager runs a different LLM (Gemini-Flash, Qwen, DeepSeek, Groq-Llama, local Ollama, …), color-coded and reassignable live from the UI. The UI shows the model that *actually* answered each turn.
-- **A cozy 3D town + 2D map** — a 15-place **district town** (market, civic, residential, farm) laced with a real **street network**, rendered with hand-vendored **CC0 game art** (KayKit · Kenney · Quaternius, all catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md)): **animated** villagers walk the lanes with floating chat bubbles, real buildings glow under golden-hour HDRI light, and a cat and dog scamper underfoot (Stardew × Animal-Crossing). Toggle to a lighter top-down map for analysis.
+- **A cozy 3D town + 2D map** — a 15-place **district town** (market, civic, residential, farm) laced with a real **street network**, rendered with hand-vendored **CC0 game art** (KayKit · Kenney · Quaternius, all catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md)): **animated** villagers walk the lanes with floating chat bubbles, real buildings glow under golden-hour HDRI light, and a cat and dog scamper underfoot (Stardew × Animal-Crossing). Zoom in and the **streets wear seeded names** and the town shows its **own name** as a city label. Toggle to a lighter top-down map for analysis.
 - **Economy & governance** — agents work, forage, trade, steal, and propose & vote on town-hall rules that change the world's physics. Re-proposing an active law **renews** it instead of stacking a duplicate, rule names in the feed read the way humans wrote them, and each law gets at most one commemorative monument.
-- **Buildings & collective projects** — agents propose → fund → build shared structures that carry visible state (scaffolding while under construction, scorched walls after arson).
+- **Buildings & collective projects** — agents propose → fund → build shared structures that carry visible state (scaffolding while under construction, scorched walls after arson). Money pools (a "Community Commons Fund" and the like) render as a **treasury chest**, not a building shell — a treasury is an account, not a structure.
 - **Chaos animals** — an LLM-driven cat (**Mochi**) and dog (**Biscuit**) roam on a slow cadence, knocking things over and stealing food, utterly indifferent to human law and money. Their mischief streams to a dedicated Animal Chaos Feed.
 - **A village billboard** — agents pin and read public notices at the plaza and Town Hall (a reflex action that rides the same turn — zero extra LLM calls), rendered as a real notice board in the 3D village. And you can answer back: the god panel's **REPLY ON BILLBOARD** (or `POST /api/billboard`) posts as the watchers, in god ink.
 - **A persona library** — `config/personas.yaml` ships 10 ready-made character cards (Conspiracy Theorist, Chaos Gremlin, Kleptomaniac Philanthropist, …); pick one from the spawn form's persona picker or list them via `GET /api/personas`.
-- **Inner lives** — agents make spoken **commitments**, and the feed marks the ones they never act on as 👻 phantoms; salient events trigger occasional **diary reflections** (✎); plaza chatter gets **overheard** by bystanders. All of it piggybacks on the same single turn response — zero extra LLM calls.
+- **Inner lives** — agents make spoken **commitments**, and the feed marks the ones they never act on as 👻 phantoms; salient events trigger occasional **diary reflections** (✎) that can now **declare or deepen a bond**; plaza chatter gets **overheard** by bystanders. All of it piggybacks on the same single turn response — zero extra LLM calls.
+- **A living social graph** — every interaction (talk, give, steal, vote) shifts **typed relationships** — friend, partner, family, mentor, rival, feud — as reflex consequences, never extra LLM calls. Warm mutual bonds cluster into **factions** with auto-generated names ("Ada's circle"), drawn as rings on the social graph, and each agent carries a derived **reputation** (mean incoming trust) on its roster card.
+- **Births & family lines** — two partnered agents sharing a home can have a **child**: a brand-new background-tier agent with a persona blended from the library, both parents paying a credits cost. A hard **population cap (25)** and real bed capacity gate every birth, so the society grows a family tree without ever growing the LLM bill.
+- **Prayers, miracles & belief** — agents petition the watchers ("send rain for the garden"), and you answer with **world-scale miracles** — *send rain*, *bountiful harvest*, *calm spirits* — from a **GRANT** button on any petition in the feed (or `POST /api/god/intervene`). Each miracle emits a world event **every agent perceives**, closing the ask → answer → belief loop inside the sim — pure state, zero LLM calls.
 - **Run forking** — pick any past run in the Run Browser, hit **FORK** at a tick, and a new paused run begins from that moment (with lineage back to the parent) — optionally waking the same society in different geography.
 - **Procgen towns (opt-in)** — flip `world.procgen` on and a seeded layout replaces the hand-authored village, including a cottage per agent and a beds-limited **Bunkhouse**. Blackouts have teeth now, too: recharge fails at a blacked-out home until the lights come back.
 - **An instrumentation annex** (`/inspector`) — replay any tick, inspect the decision trace behind every action, browse governance/law history, watch the social graph form, and compare models on a 9-axis dashboard. A **Run Browser** lists every past run (they persist to `data/run.sqlite`), opens any one in archive mode, and compares two runs' AWI summaries side by side.
 - **Free-scale by design** — slow ticks, reflex (no-LLM) actions, decision caching, and per-provider usage tracking keep it runnable on free API tiers. Give a profile `rpd`/`tpd` daily caps in `config/profiles.yaml` and a one-shot `usage_alert` fires at 70% — alerts only, never throttling.
+- **Self-healing lanes** — degraded free providers no longer strand agents. A lane that keeps timing out is marked **sick** and its calls **detour** to the healthiest lane per-call (the agent's assigned model never changes), auto-probing the home lane every 4th detour so recovery needs no timers; a turn that blows its wall-clock budget resolves a **survival reflex** instead of idling helplessly; and a lane crossing 70% of its daily cap gets its agents **demoted one cadence tier** rather than throttled. `lane_detour` / `cap_pressure` lines narrate it in the feed, and `GET /api/lanes` reports live per-lane health.
+- **Resume on boot** — a `./dev` restart or hot-reload no longer throws the live world away: on startup the backend resumes the most recent run from its latest snapshot (a new run with lineage back to the parent), so backend-heavy work doesn't cost you the society. **Reset** stays the one explicit fresh start.
 
 ---
 
@@ -219,11 +224,16 @@ watch the social graph + model dashboards build up.
 Runs comfortably past 5 minutes with all 3 alive (they recharge to survive); expect emergent
 gossip, alliances, the occasional theft, and passed rules.
 
-> **Runs persist by default:** the event log defaults to a file DB
+> **Runs persist — and resume — by default:** the event log defaults to a file DB
 > (`db_path: data/run.sqlite` under `world:` in `config/world.yaml`), so every run survives
-> restarts and is replayable in `/inspector`. Each restart/reset starts a new run; prior
-> runs stay on disk. Set `db_path: ":memory:"` (or export `EM_DB_PATH=':memory:'`) for an
-> ephemeral run, or delete the file (and its `-wal`/`-shm` sidecars) to start fresh.
+> restarts and is replayable in `/inspector`. On boot the backend **resumes the most recent
+> run from its latest snapshot** (`world.resume_on_boot: true`) — a fresh run row with fork
+> lineage back to the parent, ≤25 ticks of loss at the snapshot grain, announced by a
+> `run_resumed` line in the feed — so a `./dev` restart or uvicorn hot-reload no longer throws
+> the live world away. **Reset** stays the explicit fresh start (and each fresh run is itself
+> resumable later). Set `resume_on_boot: false` for the old always-fresh boot, `db_path:
+> ":memory:"` (or export `EM_DB_PATH=':memory:'`) for an ephemeral run, or delete the file
+> (and its `-wal`/`-shm` sidecars) to start clean.
 
 **Troubleshooting the live run**
 
@@ -288,6 +298,33 @@ curl -X POST localhost:8000/api/billboard \
 
 Watching a conspiracy-theorist villager discover a reply from *the watchers themselves* is
 worth the curl.
+
+---
+
+## Answer the prayers
+
+Agents pray and petition the watchers — *"send rain for the garden"*, *"Petition: fewer
+famines. Signed, everyone."* Now you can actually answer. Any petition-shaped entry in the
+feed grows a **GRANT** button that opens the god console's miracle picker (pre-filled from the
+ask); granting fires the miracle **and** auto-replies on the billboard quoting the petition.
+Three world-scale kinds, all pure state modifiers (zero LLM calls):
+
+- **`send_rain`** — a forage/garden yield buff for a couple of in-world days.
+- **`bountiful_harvest`** — famine relief: energy drains slower while it lasts.
+- **`calm_spirits`** — a one-time hopeful-mood + town-wide trust nudge.
+
+Each emits a world event **every agent perceives** ("🌧 Rain falls on the gardens"), so the
+ask → answer → belief loop closes inside the world. Straight over HTTP (world kinds take no
+`agent_id`):
+
+```bash
+curl -X POST localhost:8000/api/god/intervene \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "send_rain"}'
+```
+
+The single-target god powers (`bless_energy`, `grant_credits`) still require an `agent_id`;
+the world kinds reject one.
 
 ---
 
@@ -489,6 +526,62 @@ world:
 Commitments and reflections piggyback on each agent's single turn response — enabling them
 costs zero extra LLM calls. Procgen adds a cottage per seed agent plus a communal
 Bunkhouse with one bed fewer than there are agents, so bed scarcity exists by design.
+
+**Lane health & resilience (Wave D3)** — keeping a society alive on flaky free tiers. All
+live under `world:` in `config/world.yaml`; every value below is the engine default:
+
+```yaml
+world:
+  turn_llm_budget_seconds: 12   # cancel a turn's LLM call past this wall-clock budget (0 = off);
+                                #   the turn then resolves a survival reflex instead of idling
+  resume_on_boot: true          # on boot, resume the most recent run from its latest snapshot
+                                #   (new run + fork lineage); false = always start fresh
+  lane_failover:                # detour calls off sick lanes per-call; assignment never changes
+    enabled: true
+    sick_threshold: 3           # timed-out turns in the rolling 6-call window that mark a lane sick
+    probe_every: 4              # every Nth would-be-detour probes the home lane to auto-recover
+  cap_governor:                 # at 70% of a lane's daily cap, demote its agents one cadence tier
+    enabled: true               # false ⇒ usage alerts stay alert-only (no demotion)
+```
+
+`lane_detour`, `cap_pressure`, and `run_resumed` events narrate all of this in the feed, and
+`GET /api/lanes` exposes live per-lane health. Set the `enabled` flags to `false` (or
+`turn_llm_budget_seconds: 0`) for byte-identical pre-D3 behavior.
+
+**The social city (Wave E)** — typed relationships, families, factions, and answered
+prayers. All under `world:` in `config/world.yaml`; defaults shown, and every block takes
+`enabled: false` for byte-identical pre-E behavior:
+
+```yaml
+world:
+  relationships:                 # typed bonds shift as reflex consequences of talk/give/steal/vote
+    friend_trust: 30             # neutral/ally → friend at trust ≥ this …
+    friend_interactions: 5       # … and ≥ this many interactions
+    feud_trust: -40              # rival/enemy → feud at trust ≤ this
+    partner_trust_threshold: 40  # both directions ≥ this to become partners
+  children:                      # partnered agents sharing a home can have a child
+    enabled: true
+    max_population: 25           # living-humans ceiling — births only fill vacancies
+    birth_cost_credits: 6        # paid by BOTH parents (credits sink)
+    birth_chance: 0.25           # seeded per-pair gate, checked once per round
+    pair_cooldown_ticks: 600     # min ticks between a pair's children
+  factions:                      # warm mutual bonds cluster into named factions; reputation is derived
+    enabled: true
+    faction_trust: 25            # a warm edge needs BOTH trusts ≥ this
+    faction_min_size: 3          # smaller clusters never form
+  miracles:                      # world-scale god powers (POST /api/god/intervene, no agent_id)
+    enabled: true
+    rain_forage_bonus: 2         # extra forage while send_rain is active
+    rain_days: 2                 # send_rain duration, in-world days
+    harvest_decay_factor: 0.5    # energy-decay multiplier while bountiful_harvest is active
+    harvest_days: 2              # bountiful_harvest duration, in-world days
+    calm_trust_bonus: 3          # one-time trust nudge per warm relationship (calm_spirits)
+```
+
+Relationships, factions, and reputation are pure reflex/derived state — **zero extra LLM
+calls** — and a child spawns at the cheapest non-mock lane under the population cap, so a
+growing family tree never grows the call budget. `relationship_changed`, `faction_*`,
+`child_spawned`, and `god_miracle` lines narrate it all in the feed.
 
 **Narrator mode (optional, off by default)** — the story-so-far digest atop the feed is
 zero-LLM and needs no config. If you also want an LLM-written "story so far" recap emitted

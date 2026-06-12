@@ -91,6 +91,56 @@ world:
   # alert-only (byte-identical pre-D3 behavior).
   cap_governor:
     enabled: true
+  # Wave E / EM-113 — relationship-depth thresholds (reflex friend/feud
+  # transitions + the partner declaration gate). MUST stay in sync with
+  # config/world.yaml. No `enabled` flag by design: thresholds only fire on
+  # NEW trust mutations, so pre-E snapshots restore byte-identical.
+  relationships:
+    friend_trust: 30
+    friend_interactions: 5
+    feud_trust: -40
+    partner_trust_threshold: 40
+  # Wave E / EM-114 — lightweight children: once per round boundary, mutual
+  # partners (are_partners) co-located at a home may have a child — a NEW
+  # agent at background tier, only into vacancies under max_population AND
+  # home-bed capacity (the free-scale law: births never grow the call
+  # budget). Both parents pay birth_cost_credits and need energy >= 30; the
+  # chance gate is seeded from (city_seed, tick, pair). MUST stay in sync
+  # with config/world.yaml. enabled:false = no birth checks (byte-identical
+  # pre-E behavior).
+  children:
+    enabled: true
+    max_population: 25
+    birth_cost_credits: 6
+    birth_chance: 0.25
+    pair_cooldown_ticks: 600
+  # Wave E / EM-120 — factions, feuds & reputation: at each round boundary
+  # (after the birth check) connected components over MUTUAL warm edges
+  # (both directions ally|friend|partner|family AND both trusts >=
+  # faction_trust) of size >= faction_min_size form factions. Derived state,
+  # zero LLM calls; events fire on diffs only. MUST stay in sync with
+  # config/world.yaml. enabled:false = no recompute, no factions/reputation
+  # snapshot keys (byte-identical pre-E behavior).
+  factions:
+    enabled: true
+    faction_trust: 25
+    faction_min_size: 3
+  # Wave E / EM-184 — world-scale god miracles: timed world modifiers cast
+  # from the god console (POST /api/god/intervene with NO agent_id).
+  # send_rain buffs forage by rain_forage_bonus for rain_days in-world days;
+  # bountiful_harvest multiplies energy decay by harvest_decay_factor for
+  # harvest_days; calm_spirits is one-time (mood 'hopeful' + a trust nudge
+  # through the B1 reflex seam). Re-casting an active kind REFRESHES its
+  # until_tick (never stacks). MUST stay in sync with config/world.yaml.
+  # enabled:false = world kinds rejected; targeted bless/grant untouched
+  # (byte-identical pre-E behavior).
+  miracles:
+    enabled: true
+    rain_forage_bonus: 2
+    rain_days: 2
+    harvest_decay_factor: 0.5
+    harvest_days: 2
+    calm_trust_bonus: 3
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -404,6 +454,116 @@ class CapGovernorParams:
 
 
 @dataclass
+class RelationshipParams:
+    """Wave E / EM-113 — relationship-depth thresholds (config
+    `world.relationships`). The engine reads this block via its defensive
+    _rel_param accessor with IDENTICAL defaults, so an absent block behaves
+    exactly like these values. NO `enabled` flag by design: the thresholds
+    only fire on NEW trust mutations, so pre-E snapshots restore
+    byte-identical without one.
+
+      friend_trust            — neutral|ally flips to friend at trust >= this
+                                (AND interactions >= friend_interactions).
+      friend_interactions     — minimum interaction count for the friend flip.
+      feud_trust              — rival|enemy hardens into feud at trust <= this.
+      partner_trust_threshold — set_relationship `partner` requires the
+                                declarer's trust toward the target >= this;
+                                are_partners() requires BOTH directions >= it.
+    """
+    friend_trust: int = 30
+    friend_interactions: int = 5
+    feud_trust: int = -40
+    partner_trust_threshold: int = 40
+
+
+@dataclass
+class ChildrenParams:
+    """Wave E / EM-114 — lightweight children (config `world.children`).
+    Once per round boundary the world checks every mutual-partner pair
+    (B1 `are_partners`) co-located at a home for a birth. Children are NEW
+    agents and spawn at `background` tier, only into VACANCIES under
+    max_population AND total home-bed capacity — births never grow the LLM
+    call budget past today's (the free-scale law). The engine reads this
+    block via its defensive _chl_param accessor with IDENTICAL defaults.
+
+      enabled            — master toggle (default ON). `false` ⇒ no birth
+                           checks at all: byte-identical pre-E behavior.
+      max_population     — births only while living humans < this (default 25,
+                           the measured v4 free-tier budget).
+      birth_cost_credits — BOTH parents pay this (credits sink); both must
+                           also hold energy >= 30.
+      birth_chance       — seeded unit-float gate per eligible pair, derived
+                           from sha1(city_seed, tick, a_id, b_id) — never the
+                           `random` module (EM-155 determinism).
+      pair_cooldown_ticks — no second child of the SAME pair within this many
+                           ticks; derived from the youngest shared child's
+                           family-relationship since_tick (no new clock state).
+    """
+    enabled: bool = True
+    max_population: int = 25
+    birth_cost_credits: int = 6
+    birth_chance: float = 0.25
+    pair_cooldown_ticks: int = 600
+
+
+@dataclass
+class FactionParams:
+    """Wave E / EM-120 — factions, feuds & reputation (config `world.factions`).
+    At each ROUND boundary (after the EM-114 birth check — contract order:
+    births first, then factions) the world recomputes candidate clusters:
+    connected components over MUTUAL warm edges — both directions typed
+    ally|friend|partner|family AND both trusts >= faction_trust — among living
+    agents; components of size >= faction_min_size are factions. Pure derived
+    state, zero LLM calls (the wave's free-scale law); events fire on DIFFS
+    only, never on stable rounds. The engine reads this block via its
+    defensive _fct_param accessor with IDENTICAL defaults.
+
+      enabled          — master toggle (default ON). `false` ⇒ no recompute,
+                         no faction events, no `factions`/`reputation`
+                         snapshot keys: byte-identical pre-E behavior.
+      faction_trust    — a warm edge needs BOTH directions' trust >= this.
+      faction_min_size — components below this size never form (and an
+                         existing faction shrinking under it dissolves).
+    """
+    enabled: bool = True
+    faction_trust: int = 25
+    faction_min_size: int = 3
+
+
+@dataclass
+class MiracleParams:
+    """Wave E / EM-184 — world-scale god miracles (config `world.miracles`).
+    The god console's `POST /api/god/intervene` grows three WORLD kinds (no
+    agent_id): timed `send_rain` / `bountiful_harvest` buffs swept beside the
+    blackout expiry each tick, and one-time `calm_spirits`. Pure state
+    modifiers — zero LLM calls (the wave's free-scale law). The engine reads
+    this block via its defensive _mir_param accessor with IDENTICAL defaults.
+
+      enabled              — master toggle (default ON). `false` ⇒ world kinds
+                             are rejected (ValueError → API 422); the targeted
+                             bless_energy/grant_credits kinds are untouched:
+                             byte-identical pre-E behavior.
+      rain_forage_bonus    — send_rain: extra forage credits while active, on
+                             top of base + garden/farm bonuses.
+      rain_days            — send_rain duration in IN-WORLD days
+                             (days × turns_per_day ticks).
+      harvest_decay_factor — bountiful_harvest: energy decay is multiplied by
+                             this while active (0.5 = half decay).
+      harvest_days         — bountiful_harvest duration in in-world days.
+      calm_trust_bonus     — calm_spirits: one-time `_update_trust` delta for
+                             every living↔living relationship with
+                             interactions >= 1 (clamped as usual; B1 reflex
+                             transitions may fire — that's the point).
+    """
+    enabled: bool = True
+    rain_forage_bonus: int = 2
+    rain_days: int = 2
+    harvest_decay_factor: float = 0.5
+    harvest_days: int = 2
+    calm_trust_bonus: int = 3
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -522,6 +682,23 @@ class WorldParams:
     # defaults (default ON); `enabled: false` keeps usage alerts alert-only
     # (byte-identical pre-D3 behavior).
     cap_governor: CapGovernorParams = field(default_factory=CapGovernorParams)
+    # Wave E / EM-113 — relationship-depth thresholds. Additive with
+    # engine-matching defaults; thresholds only fire on NEW trust mutations,
+    # so a world.yaml without the block restores pre-E snapshots byte-identical.
+    relationships: RelationshipParams = field(default_factory=RelationshipParams)
+    # Wave E / EM-114 — lightweight children. Additive with engine-matching
+    # defaults (default ON); births require a mutual-partner pair, so a world
+    # without partners (every pre-E world) behaves byte-identically.
+    # `enabled: false` skips the birth check entirely.
+    children: ChildrenParams = field(default_factory=ChildrenParams)
+    # Wave E / EM-184 — world-scale god miracles. Additive with
+    # engine-matching defaults (default ON); `enabled: false` rejects the
+    # world kinds only — targeted bless/grant stay byte-identical.
+    miracles: MiracleParams = field(default_factory=MiracleParams)
+    # Wave E / EM-120 — factions, feuds & reputation. Additive with
+    # engine-matching defaults (default ON); `enabled: false` skips the
+    # round-boundary recompute entirely (byte-identical pre-E behavior).
+    factions: FactionParams = field(default_factory=FactionParams)
 
 
 @dataclass
@@ -829,6 +1006,120 @@ def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
     return CapGovernorParams(enabled=bool(raw.get("enabled", d.enabled)))
 
 
+def _parse_relationships(raw: dict | None) -> RelationshipParams:
+    """Parse the optional `world.relationships` block (Wave E / EM-113).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually (a malformed value never breaks the block)."""
+    if not isinstance(raw, dict):
+        return RelationshipParams()
+    d = RelationshipParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return RelationshipParams(
+        friend_trust=_int("friend_trust", d.friend_trust),
+        friend_interactions=_int("friend_interactions", d.friend_interactions),
+        feud_trust=_int("feud_trust", d.feud_trust),
+        partner_trust_threshold=_int(
+            "partner_trust_threshold", d.partner_trust_threshold),
+    )
+
+
+def _parse_children(raw: dict | None) -> ChildrenParams:
+    """Parse the optional `world.children` block (Wave E / EM-114).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually; counts/costs clamp to >= 0 and birth_chance
+    clamps to [0, 1] (a malformed value never breaks the block)."""
+    if not isinstance(raw, dict):
+        return ChildrenParams()
+    d = ChildrenParams()
+
+    def _nonneg_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _unit_float(key: str, default: float) -> float:
+        try:
+            return min(1.0, max(0.0, float(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return ChildrenParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_population=_nonneg_int("max_population", d.max_population),
+        birth_cost_credits=_nonneg_int("birth_cost_credits", d.birth_cost_credits),
+        birth_chance=_unit_float("birth_chance", d.birth_chance),
+        pair_cooldown_ticks=_nonneg_int("pair_cooldown_ticks", d.pair_cooldown_ticks),
+    )
+
+
+def _parse_factions(raw: dict | None) -> FactionParams:
+    """Parse the optional `world.factions` block (Wave E / EM-120).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually; faction_min_size clamps to >= 1 (a malformed
+    value never breaks the block)."""
+    if not isinstance(raw, dict):
+        return FactionParams()
+    d = FactionParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return FactionParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        faction_trust=_int("faction_trust", d.faction_trust),
+        faction_min_size=max(1, _int("faction_min_size", d.faction_min_size)),
+    )
+
+
+def _parse_miracles(raw: dict | None) -> MiracleParams:
+    """Parse the optional `world.miracles` block (Wave E / EM-184).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually; bonuses clamp to >= 0, durations to >= 1
+    day, and the decay factor to [0, 1] (a malformed value never breaks
+    the block)."""
+    if not isinstance(raw, dict):
+        return MiracleParams()
+    d = MiracleParams()
+
+    def _nonneg_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _days(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _unit_float(key: str, default: float) -> float:
+        try:
+            return min(1.0, max(0.0, float(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return MiracleParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        rain_forage_bonus=_nonneg_int("rain_forage_bonus", d.rain_forage_bonus),
+        rain_days=_days("rain_days", d.rain_days),
+        harvest_decay_factor=_unit_float(
+            "harvest_decay_factor", d.harvest_decay_factor),
+        harvest_days=_days("harvest_days", d.harvest_days),
+        calm_trust_bonus=_nonneg_int("calm_trust_bonus", d.calm_trust_bonus),
+    )
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -906,6 +1197,10 @@ def _parse_world(
         cadence=_parse_cadence(w.get("cadence")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
+        relationships=_parse_relationships(w.get("relationships")),
+        children=_parse_children(w.get("children")),
+        factions=_parse_factions(w.get("factions")),
+        miracles=_parse_miracles(w.get("miracles")),
     )
 
     places = [
