@@ -100,6 +100,20 @@ world:
     friend_interactions: 5
     feud_trust: -40
     partner_trust_threshold: 40
+  # Wave E / EM-114 — lightweight children: once per round boundary, mutual
+  # partners (are_partners) co-located at a home may have a child — a NEW
+  # agent at background tier, only into vacancies under max_population AND
+  # home-bed capacity (the free-scale law: births never grow the call
+  # budget). Both parents pay birth_cost_credits and need energy >= 30; the
+  # chance gate is seeded from (city_seed, tick, pair). MUST stay in sync
+  # with config/world.yaml. enabled:false = no birth checks (byte-identical
+  # pre-E behavior).
+  children:
+    enabled: true
+    max_population: 25
+    birth_cost_credits: 6
+    birth_chance: 0.25
+    pair_cooldown_ticks: 600
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -436,6 +450,36 @@ class RelationshipParams:
 
 
 @dataclass
+class ChildrenParams:
+    """Wave E / EM-114 — lightweight children (config `world.children`).
+    Once per round boundary the world checks every mutual-partner pair
+    (B1 `are_partners`) co-located at a home for a birth. Children are NEW
+    agents and spawn at `background` tier, only into VACANCIES under
+    max_population AND total home-bed capacity — births never grow the LLM
+    call budget past today's (the free-scale law). The engine reads this
+    block via its defensive _chl_param accessor with IDENTICAL defaults.
+
+      enabled            — master toggle (default ON). `false` ⇒ no birth
+                           checks at all: byte-identical pre-E behavior.
+      max_population     — births only while living humans < this (default 25,
+                           the measured v4 free-tier budget).
+      birth_cost_credits — BOTH parents pay this (credits sink); both must
+                           also hold energy >= 30.
+      birth_chance       — seeded unit-float gate per eligible pair, derived
+                           from sha1(city_seed, tick, a_id, b_id) — never the
+                           `random` module (EM-155 determinism).
+      pair_cooldown_ticks — no second child of the SAME pair within this many
+                           ticks; derived from the youngest shared child's
+                           family-relationship since_tick (no new clock state).
+    """
+    enabled: bool = True
+    max_population: int = 25
+    birth_cost_credits: int = 6
+    birth_chance: float = 0.25
+    pair_cooldown_ticks: int = 600
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -558,6 +602,11 @@ class WorldParams:
     # engine-matching defaults; thresholds only fire on NEW trust mutations,
     # so a world.yaml without the block restores pre-E snapshots byte-identical.
     relationships: RelationshipParams = field(default_factory=RelationshipParams)
+    # Wave E / EM-114 — lightweight children. Additive with engine-matching
+    # defaults (default ON); births require a mutual-partner pair, so a world
+    # without partners (every pre-E world) behaves byte-identically.
+    # `enabled: false` skips the birth check entirely.
+    children: ChildrenParams = field(default_factory=ChildrenParams)
 
 
 @dataclass
@@ -888,6 +937,36 @@ def _parse_relationships(raw: dict | None) -> RelationshipParams:
     )
 
 
+def _parse_children(raw: dict | None) -> ChildrenParams:
+    """Parse the optional `world.children` block (Wave E / EM-114).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually; counts/costs clamp to >= 0 and birth_chance
+    clamps to [0, 1] (a malformed value never breaks the block)."""
+    if not isinstance(raw, dict):
+        return ChildrenParams()
+    d = ChildrenParams()
+
+    def _nonneg_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _unit_float(key: str, default: float) -> float:
+        try:
+            return min(1.0, max(0.0, float(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return ChildrenParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_population=_nonneg_int("max_population", d.max_population),
+        birth_cost_credits=_nonneg_int("birth_cost_credits", d.birth_cost_credits),
+        birth_chance=_unit_float("birth_chance", d.birth_chance),
+        pair_cooldown_ticks=_nonneg_int("pair_cooldown_ticks", d.pair_cooldown_ticks),
+    )
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -966,6 +1045,7 @@ def _parse_world(
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
+        children=_parse_children(w.get("children")),
     )
 
     places = [

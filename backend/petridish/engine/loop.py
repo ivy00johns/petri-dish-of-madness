@@ -160,9 +160,36 @@ class TickLoop:
         self._narrator_task: asyncio.Task | None = None
         self._last_narrator_tick: int = -1
 
+        # Wave E / EM-114 — seed the world's birth casting pool (the persona
+        # library + the non-mock profile roster). The world has no view of
+        # config-side casting state, so the loop — which owns every per-round
+        # world hook — injects it once here; the birth check itself runs
+        # world-side at the round boundary and its events ride the existing
+        # _flush_spawn_events drain.
+        self._seed_birth_casting()
+
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
+
+    def _seed_birth_casting(self) -> None:
+        """Wave E / EM-114 — inject the birth casting pool into the world:
+        the EM-092 persona library (config/personas.yaml, fail-soft []) and
+        the router's non-mock profile names in STABLE config order (the
+        child-profile load-spread tiebreak). Defensive throughout: casting is
+        flavour, never a reason a loop fails to construct."""
+        setter = getattr(self._world, "set_birth_casting", None)
+        if not callable(setter):
+            return
+        try:
+            from ..config.loader import load_personas
+            roster = [
+                name for name in self._router.profile_names()
+                if getattr(self._router.get_profile(name), "adapter", "") != "mock"
+            ]
+            setter(load_personas(), roster)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("birth casting seed failed: %s", exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Control API

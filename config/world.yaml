@@ -102,6 +102,31 @@ world:
     feud_trust: -40              # rival|enemy → feud at trust <= this
     partner_trust_threshold: 40  # partner declarations / are_partners gate
 
+  # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
+  # ROUND boundary the world checks every mutual-partner pair (are_partners,
+  # the B1 consent mechanic) co-located at a home-kind place for a birth.
+  # A child is a NEW agent: it spawns at cadence_tier `background` and only
+  # into VACANCIES — living humans must stay under max_population AND under
+  # total home-bed capacity (cottages count 1 bed, the bunkhouse its
+  # `capacity`) — so births never grow the LLM call budget past today's (the
+  # wave's free-scale law). Both parents pay birth_cost_credits (a credits
+  # sink) and both need energy >= 30; at most ONE birth per round, and the
+  # same pair waits pair_cooldown_ticks between children (derived from the
+  # youngest shared child's family-tie since_tick — no extra clock state).
+  # The chance gate is a unit float seeded from sha1(city_seed, tick, pair) —
+  # deterministic and replay-safe, never the `random` module. The child takes
+  # the first UNUSED persona-library card (config/personas.yaml; Kit-N when
+  # exhausted) and the non-mock profile with the fewest living assigned
+  # agents. Set enabled:false for byte-identical pre-E behavior (no birth
+  # checks at all). MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  children:
+    enabled: true
+    max_population: 25           # living-humans ceiling (measured v4 budget)
+    birth_cost_credits: 6        # paid by BOTH parents (credits sink)
+    birth_chance: 0.25           # seeded per-pair unit-float gate per round
+    pair_cooldown_ticks: 600     # min ticks between children of the same pair
+
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
   # POST /api/agents/{id}/tier): protagonists act every round, supporting every

@@ -183,6 +183,18 @@ Wave E kinds (contracts/wave-e.md):
   `neutral|ally|friend|rival|enemy|partner|family|mentor|feud` and
   `since_tick` is the tick the type changed.
 
+- `child_spawned` (B2 / EM-114) — the birth narrative event, emitted at the
+  ROUND boundary when a mutual-partner pair co-located at a home passes every
+  birth gate (population/housing caps, credits/energy, pair + world cooldown,
+  the seeded chance gate). `actor_id` = the CHILD's agent id,
+  `actor_type` = system, `target_id` = null (agent-id-only endpoints, EM-141).
+  Text `"👶 {name} is born to {p1} and {p2}"`. Payload:
+  `{child_id, parents: [sorted parent agent ids], name, profile, place}`.
+  ALWAYS paired with a standard `agent_spawned{method: "birth", parents}` for
+  the frontend roster contract — both ride the `pending_spawn_events` outbox
+  (the EM-062/168 governance-spawn drain) as standalone system events
+  (`turn_id` null).
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:

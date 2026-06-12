@@ -130,6 +130,7 @@ relationships_json round-trip spec below), `config/world.yaml`,
 **Owner:** backend-agent-B2 (after B1 gate).
 **Files owned:** `backend/petridish/engine/world.py`,
 `backend/petridish/engine/loop.py` (hook only),
+`backend/petridish/persistence/repository.py` (added v1.1 — parents_json round-trip),
 `backend/petridish/config/loader.py`, `config/world.yaml`,
 `contracts/event-log.md`, `backend/tests/test_wave_e_children.py` (new).
 

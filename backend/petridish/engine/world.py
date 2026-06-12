@@ -3,6 +3,7 @@ World state: pure data model.  No I/O, no asyncio.  Testable in isolation.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 import re
@@ -103,6 +104,13 @@ class AgentState:
     # it (user intent overrides the governor). ADDITIVE: serialized only when
     # set, so pre-D3 snapshots and world_state agents are byte-identical.
     demoted_from: str | None = None
+    # Wave E / EM-114 — sorted agent ids of this agent's parents ([] for
+    # everyone but born children). ADDITIVE: serialized only when non-empty,
+    # so pre-E snapshots and birth-free worlds keep the exact pre-E dict
+    # shape (the enabled:false byte-identical guarantee). The pair birth
+    # cooldown is DERIVED from this field + the child's family-tie
+    # since_tick — no extra clock state (EM-126 generations hook).
+    parents: list[str] = field(default_factory=list)
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -134,6 +142,10 @@ class AgentState:
         # every pre-D3 world) keep the exact pre-D3 dict shape.
         if self.demoted_from is not None:
             d["demoted_from"] = self.demoted_from
+        # Wave E / EM-114 — only for born children, so birth-free worlds (and
+        # every pre-E world) keep the exact pre-E dict shape.
+        if self.parents:
+            d["parents"] = list(self.parents)
         return d
 
 
@@ -493,6 +505,15 @@ class World:
         # so they ride the SAME action `_multi` chain (same turn_id) as the
         # action that mutated trust. NOT serialized: drained within the turn.
         self.pending_relationship_events: list[dict] = []
+        # Wave E / EM-114 — the birth casting pool. The world has no view of
+        # the persona library or the router's profile roster (both are
+        # config-side), so the TickLoop seeds them at construction via
+        # set_birth_casting() (the documented seam — the loop already owns
+        # per-round world hooks). NOT serialized: like the router itself,
+        # casting is config state, not world state. Empty pools degrade
+        # gracefully (Kit-N names; profile derived from living agents).
+        self.birth_personas: list[dict] = []
+        self.birth_profile_roster: list[str] = []
         # W11b / EM-091 — the public billboard. List of {tick, actor_id,
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
@@ -691,6 +712,14 @@ class World:
         if ubi_rule:
             for agent in self.living_agents():
                 agent.credits += self.params.ubi_amount
+        # Wave E / EM-114 — the once-per-round birth check (contract: "hook
+        # beside the existing per-round effects"). At most ONE birth per
+        # round; events park in pending_spawn_events and are drained by the
+        # loop's existing _flush_spawn_events (EM-062/168 pattern). Spawning
+        # here is pointer-safe: _start_new_round overwrites _turn_order with
+        # the due set AFTER this returns, and a background-tier child only
+        # joins rounds where its tier is due (EM-158/172 invariant intact).
+        self.check_births()
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -2183,6 +2212,234 @@ class World:
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _chl_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.children` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _rel_param)."""
+        return _block_get(getattr(self.params, "children", None), name, default)
+
+    def set_birth_casting(
+        self, personas: list[dict], profile_roster: list[str]
+    ) -> None:
+        """Seed the birth casting pool (the EM-114 config seam, called by the
+        TickLoop at construction): `personas` = the EM-092 persona-library
+        cards; `profile_roster` = non-mock profile names in STABLE config
+        order (the load-spread tiebreak order for a child's profile)."""
+        self.birth_personas = [c for c in (personas or []) if isinstance(c, dict)]
+        self.birth_profile_roster = [str(p) for p in (profile_roster or []) if p]
+
+    def home_bed_capacity(self) -> int:
+        """Total beds across home-kind places: a cottage (no capacity field)
+        counts 1 bed; the bunkhouse counts its `capacity` (EM-098)."""
+        return sum(
+            (p.capacity if p.capacity is not None else 1)
+            for p in self.places.values()
+            if p.kind == "home"
+        )
+
+    def _birth_roll(self, a_id: str, b_id: str) -> float:
+        """Deterministic unit float in [0, 1) for the birth chance gate,
+        derived from a STABLE hash of (city_seed, tick, pair). sha1, not
+        Python hash() (salted per-process) and never the `random` module —
+        replay/fork reproduce the same rolls (EM-155 determinism)."""
+        lo, hi = sorted((a_id, b_id))
+        key = f"{self.city_seed}:{self.tick}:{lo}:{hi}".encode()
+        return int.from_bytes(hashlib.sha1(key).digest()[:8], "big") / float(1 << 64)
+
+    def _latest_pair_child_tick(self, a_id: str, b_id: str) -> int | None:
+        """The youngest shared child's birth tick for this pair, derived from
+        AgentState.parents + the child's family-tie since_tick (stamped at
+        birth). None when the pair has no child. NO new clock state — this
+        round-trips snapshots, so a restored world never re-births inside the
+        cooldown window. Dead children still count (kill keeps the record)."""
+        pair = sorted((a_id, b_id))
+        latest: int | None = None
+        for child in self.agents.values():
+            if sorted(child.parents) != pair:
+                continue
+            rel = child.relationships.get(pair[0]) or child.relationships.get(pair[1])
+            born = rel.since_tick if rel is not None else 0
+            if latest is None or born > latest:
+                latest = born
+        return latest
+
+    @staticmethod
+    def _first_clause(text: str) -> str:
+        """First clause of a personality string (up to the first ./;/,) —
+        the deterministic blend ingredient for a child's personality."""
+        return re.split(r"[.;,]", str(text or "").strip(), maxsplit=1)[0].strip()
+
+    def _pick_child_persona(self, personas: list[dict]) -> tuple[str, str]:
+        """(name, personality) from the first UNUSED persona-library card —
+        'unused' means not matching any LIVING OR DEAD agent name
+        case-insensitively (a dead agent's identity is never recycled).
+        Library exhausted ⇒ ("Kit-{n}", "") with the smallest free n."""
+        taken = {a.name.strip().lower() for a in self.agents.values()}
+        for card in personas:
+            name = str(card.get("name") or "").strip()
+            if name and name.lower() not in taken:
+                return name, str(card.get("personality") or "").strip()
+        n = 1
+        while f"kit-{n}" in taken:
+            n += 1
+        return f"Kit-{n}", ""
+
+    def _pick_child_profile(self) -> str:
+        """The non-mock profile with the FEWEST living assigned agents, ties
+        broken by stable roster order (load-spread, mirrors _pad_agents'
+        non-mock rule). The roster comes from set_birth_casting (config
+        order); when unseeded (direct construction / from_snapshot) it
+        degrades to the living agents' non-mock profiles in sorted-id
+        first-seen order, then to "mock" (an all-mock test world has nothing
+        else to assign — same fallback as _pad_agents)."""
+        roster = [p for p in self.birth_profile_roster if p != "mock"]
+        if not roster:
+            seen: list[str] = []
+            for a in sorted(self.living_agents(), key=lambda x: x.id):
+                if a.profile != "mock" and a.profile not in seen:
+                    seen.append(a.profile)
+            roster = seen or ["mock"]
+        counts = {name: 0 for name in roster}
+        for a in self.living_agents():
+            if a.profile in counts:
+                counts[a.profile] += 1
+        return min(roster, key=lambda name: (counts[name], roster.index(name)))
+
+    def _child_personality(
+        self, card_personality: str, p1: AgentState, p2: AgentState
+    ) -> str:
+        """"Child of {p1} and {p2}. " prefix + the persona card's personality
+        + a deterministic blend (first clause of each parent's personality)."""
+        parts = [f"Child of {p1.name} and {p2.name}."]
+        if card_personality:
+            parts.append(card_personality)
+        for parent in (p1, p2):
+            clause = self._first_clause(parent.personality)
+            if clause:
+                parts.append(clause if clause.endswith(".") else clause + ".")
+        return " ".join(parts)
+
+    def check_births(self, personas: list[dict] | None = None) -> list[dict]:
+        """The EM-114 birth check, run once per ROUND boundary
+        (_apply_round_start). Walks partner pairs in deterministic sorted-id
+        order; the FIRST pair meeting ALL conditions has a child (at most ONE
+        birth per round — the world cooldown). Conditions:
+
+          · mutual partners (B1 are_partners) co-located at a home-kind place;
+          · living humans < children.max_population AND < total home beds;
+          · both parents' credits >= birth_cost_credits AND energy >= 30;
+          · pair cooldown (youngest shared child's birth tick, derived);
+          · the seeded chance gate (_birth_roll < birth_chance).
+
+        The child spawns via the existing spawn_agent machinery at BACKGROUND
+        tier (free-scale law: never a new standing LLM call), energy 70,
+        credits 0, parents set, family ties both ways, a "born in {town}"
+        belief line. Both the `child_spawned` narrative event and the
+        standard `agent_spawned` roster event park in pending_spawn_events
+        (the proven EM-062/168 outbox, drained by the loop). Returns the
+        parked events ([] when no birth). `personas` defaults to the
+        loop-seeded casting pool (set_birth_casting); children.enabled false
+        ⇒ no checks at all, byte-identical pre-E behavior."""
+        cfg = getattr(self.params, "children", None)
+        if not bool(_block_get(cfg, "enabled", True)):
+            return []
+
+        living = sorted(self.living_agents(), key=lambda a: a.id)
+        max_population = int(self._chl_param("max_population", 25))
+        # Free-scale proof obligation: AT (or over) the cap, no birth — ever.
+        if len(living) >= max_population:
+            return []
+        if len(living) >= self.home_bed_capacity():
+            return []
+
+        cost = int(self._chl_param("birth_cost_credits", 6))
+        cooldown = int(self._chl_param("pair_cooldown_ticks", 600))
+        chance = float(self._chl_param("birth_chance", 0.25))
+        pool = personas if personas is not None else self.birth_personas
+
+        for i, a in enumerate(living):
+            for b in living[i + 1:]:
+                if not self.are_partners(a.id, b.id):
+                    continue
+                place = self.places.get(a.location)
+                if place is None or place.kind != "home" or b.location != a.location:
+                    continue
+                if a.credits < cost or b.credits < cost:
+                    continue
+                if a.energy < 30 or b.energy < 30:
+                    continue
+                last = self._latest_pair_child_tick(a.id, b.id)
+                if last is not None and self.tick - last < cooldown:
+                    continue
+                if self._birth_roll(a.id, b.id) >= chance:
+                    continue
+                events = self._spawn_child(a, b, pool, cost)
+                self.pending_spawn_events.extend(events)
+                return events  # world cooldown: at most ONE birth per round
+        return []
+
+    def _spawn_child(
+        self, p1: AgentState, p2: AgentState, personas: list[dict], cost: int
+    ) -> list[dict]:
+        """Create the child for a qualified pair (check_births gates). Returns
+        the ready-to-emit [child_spawned, agent_spawned] event dicts."""
+        name, card_personality = self._pick_child_persona(personas)
+        child = self.spawn_agent(
+            name=name,
+            personality=self._child_personality(card_personality, p1, p2),
+            profile=self._pick_child_profile(),
+            location=p1.location,           # the birth home
+            cadence_tier="background",      # free-scale law
+        )
+        child.energy = 70.0
+        child.credits = 0
+        child.parents = sorted((p1.id, p2.id))
+        # Both parents pay — a credits sink, not a transfer.
+        p1.credits -= cost
+        p2.credits -= cost
+        # Family ties both ways (engine-assigned `family`, the B1 rule),
+        # since_tick = birth tick — the derived pair-cooldown anchor.
+        for parent in (p1, p2):
+            child.relationships[parent.id] = RelationshipState(
+                type="family", trust=40, interactions=1, since_tick=self.tick)
+            parent.relationships[child.id] = RelationshipState(
+                type="family", trust=40, interactions=1, since_tick=self.tick)
+        # The contracted "memory line": beliefs is the world-side memory seam
+        # (it rides every prompt via the runtime's belief lines).
+        child.beliefs.append(f"Born in {self.town_name or 'the town'}.")
+        return [
+            {
+                "kind": "child_spawned",
+                "actor_id": child.id,
+                "actor_type": "system",
+                "text": f"👶 {child.name} is born to {p1.name} and {p2.name}",
+                "payload": {
+                    "child_id": child.id,
+                    "parents": list(child.parents),
+                    "name": child.name,
+                    "profile": child.profile,
+                    "place": child.location,
+                },
+            },
+            {
+                "kind": "agent_spawned",
+                "actor_id": child.id,
+                "actor_type": "system",
+                "text": f"{child.name} is born to {p1.name} and {p2.name}.",
+                "payload": {
+                    "method": "birth",
+                    "agent_id": child.id,
+                    "name": child.name,
+                    "profile": child.profile,
+                    "location": child.location,
+                    "parents": list(child.parents),
+                },
+            },
+        ]
+
     def spawn_agent(
         self,
         name: str,
@@ -2431,6 +2688,10 @@ class World:
                     if d.get("demoted_from") in cls.CADENCE_TIERS
                     else None
                 ),
+                # Wave E / EM-114 — additive: pre-E snapshots lack the key and
+                # restore [] (the pair birth cooldown derives from this field,
+                # so a restored world never re-births inside the window).
+                parents=[str(p) for p in (d.get("parents") or [])],
             )
             a.relationships = {
                 str(aid): RelationshipState(
