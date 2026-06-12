@@ -302,7 +302,13 @@ B4 must wire it (runtime.py ownership).
 **Files owned:** `backend/petridish/engine/world.py`,
 `backend/petridish/api/app.py`, `backend/petridish/config/loader.py`,
 `config/world.yaml`, `contracts/event-log.md`,
-`backend/tests/test_wave_e_miracles.py` (new).
+`backend/tests/test_wave_e_miracles.py` (new), plus ratified v1.1 (mandated
+by spec items 1/3 below): `backend/petridish/engine/loop.py` (expiry sweep
+beside expire_blackouts + reset-path clear) and
+`backend/petridish/agents/runtime.py` (exactly two additive constant
+entries: god_miracle importance weight 2.0 + global-witness kind).
+Erratum v1.1: spec item 5's "409/ValueError" resolved to ValueError→422
+(the seam every god_intervene ValueError already uses) — B6/QE expect 422.
 
 ### Behavior spec
 

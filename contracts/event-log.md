@@ -224,6 +224,28 @@ Wave E kinds (contracts/wave-e.md):
   no extra `llm_call` rows: the bond rides the existing single reflection
   call.
 
+- `god_miracle` (B5 / EM-184) — a WORLD-scale god intervention, cast via
+  `POST /api/god/intervene` with NO agent_id (the targeted
+  bless_energy/grant_credits keep emitting `god_intervention`).
+  `actor_id` = `'god'`, `actor_type` = `'god'`, `target_id` = null,
+  `turn_id` = null (god mutations happen outside any agent turn). Payload:
+  `{kind, until_tick?}` where `kind` ∈ `send_rain|bountiful_harvest|
+  calm_spirits` and `until_tick` is present for the two TIMED kinds only
+  (`tick + days × turns_per_day`; re-casting an active kind refreshes it —
+  never stacks, never re-adds). Globally witnessed (every living agent's
+  memory, like `random_event`) and importance-weighted 2.0 so the whole town
+  can react — this closes the petition→miracle belief loop. A `calm_spirits`
+  cast may be accompanied IN THE SAME emission batch by the
+  `relationship_changed` events its trust nudges triggered (B1 reflex
+  transitions, turn_id null — the god path drains the B1 outbox itself).
+
+- `miracle_expired` (B5 / EM-184) — a timed miracle's window elapsed
+  (`tick >= until_tick`), swept in the same per-tick loop path as blackout
+  expiry. Standalone system event: `actor_id` null, `actor_type` = system,
+  `target_id` null, `turn_id` null. Text e.g. `"☀ The rains pass — forage
+  returns to normal."`. Payload: `{kind, until_tick}`. Emitted exactly once
+  per expiry; the one-time `calm_spirits` never produces one.
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:

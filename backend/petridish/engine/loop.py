@@ -343,6 +343,10 @@ class TickLoop:
         # the fresh run's first round boundary. (No drain change — faction
         # events ride the existing pending_spawn_events outbox, cleared above.)
         self._world.factions = {}
+        # Wave E / EM-184 — clear active miracles: tick resets to 0 below, so
+        # a stale entry's until_tick would keep its buff alive deep into the
+        # fresh run (and its expiry would emit a spurious miracle_expired).
+        self._world.active_miracles = []
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0
@@ -502,6 +506,15 @@ class TickLoop:
                 self._emit_event(evt)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("blackout expiry failed: %s", exc)
+
+        # Wave E / EM-184 — expire timed god miracles in the SAME per-tick
+        # path (miracle_expired, standalone system events, turn_id null).
+        try:
+            for evt in self._world.expire_miracles():
+                evt.setdefault("turn_id", None)
+                self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("miracle expiry failed: %s", exc)
 
         # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
         # each living animal takes ONE animal turn (mostly zero-LLM reflex). It is

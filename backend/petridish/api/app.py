@@ -1123,7 +1123,11 @@ async def post_proclamation(body: ProclaimBody):
 
 class InterveneBody(BaseModel):
     kind: str
-    agent_id: str
+    # Wave E / EM-184 — agent_id is OPTIONAL: the targeted kinds
+    # (bless_energy/grant_credits) still require it; the world-scale miracle
+    # kinds (send_rain/bountiful_harvest/calm_spirits) REJECT it. Both
+    # mismatches surface as 422 via the engine seam's ValueError.
+    agent_id: str | None = None
     # ge/le make FastAPI 422 an out-of-range amount before the handler runs;
     # None falls through to the engine seam's per-kind default (25 / 10).
     amount: int | None = Field(default=None, ge=1, le=100)
@@ -1131,12 +1135,17 @@ class InterveneBody(BaseModel):
 
 @app.post("/api/god/intervene")
 async def god_intervene(body: InterveneBody):
-    """God targets ONE agent with a deterministic intervention (EM-136):
-    `bless_energy` (clamped at 100) or `grant_credits`. Calls the engine seam
-    `world.god_intervene(kind, agent_id, amount)` and emits `god_intervention`
-    (actor_type 'god', target_id the agent; payload carries before/after).
-    503 not initialized; 422 unknown kind, unknown/dead agent, or amount
-    outside 1..100 (the seam's ValueError)."""
+    """God intervention (EM-136 + Wave E / EM-184). Targeted kinds
+    (`bless_energy` clamped at 100 / `grant_credits`) require agent_id and
+    emit `god_intervention` (actor_type 'god', target_id the agent; payload
+    carries before/after) — byte-identical pre-E behavior. World-scale
+    miracle kinds (`send_rain`/`bountiful_harvest`/`calm_spirits`) require
+    agent_id ABSENT and emit the engine's whole event batch: `god_miracle`
+    plus, for calm_spirits, any relationship_changed events its trust nudges
+    produced (all turn_id null — no action turn ever drains god mutations).
+    The response carries `until_tick` for timed kinds. 503 not initialized;
+    422 unknown kind, unknown/dead agent, agent_id present/absent mismatch,
+    amount outside 1..100, or miracles disabled (the seam's ValueError)."""
     if _world is None or _loop is None:
         raise HTTPException(503, "Not initialized")
     intervene_fn = getattr(_world, "god_intervene", None)
@@ -1145,15 +1154,27 @@ async def god_intervene(body: InterveneBody):
             503, "engine intervention support (world.god_intervene) not available yet"
         )
     try:
-        evt = intervene_fn(body.kind, body.agent_id, body.amount)
+        result = intervene_fn(body.kind, body.agent_id, body.amount)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    if isinstance(evt, dict) and evt.get("kind") == "god_intervention":
+    events = result if isinstance(result, list) else [result]
+    until_tick = None
+    for evt in events:
+        if not isinstance(evt, dict):
+            continue  # pragma: no cover - defensive
         e = dict(evt)
-        e.setdefault("actor_type", "god")
+        # The whole batch is god-initiated, outside any agent turn.
+        e.setdefault("turn_id", None)
+        if e.get("kind") in ("god_intervention", "god_miracle"):
+            e.setdefault("actor_type", "god")
+        if e.get("kind") == "god_miracle":
+            until_tick = (e.get("payload") or {}).get("until_tick")
         _loop._emit_event(e)
     _loop._broadcast_world_state()
-    return {"status": "ok"}
+    resp: dict = {"status": "ok"}
+    if until_tick is not None:
+        resp["until_tick"] = until_tick
+    return resp
 
 
 class GodWhisperBody(BaseModel):

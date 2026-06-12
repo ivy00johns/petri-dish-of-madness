@@ -525,6 +525,14 @@ class World:
         # only when non-empty (the cap_demotions pattern), so pre-E snapshots
         # stay byte-identical.
         self.factions: dict[str, dict] = {}
+        # Wave E / EM-184 — active world-scale miracles: [{kind, until_tick}].
+        # Timed god miracles (send_rain / bountiful_harvest) live here while
+        # active; re-casting REFRESHES until_tick (never stacks); expiry is
+        # swept in the loop's per-tick path beside expire_blackouts(). The
+        # one-time calm_spirits never adds an entry. Serialized in
+        # to_snapshot() only when non-empty (the cap_demotions pattern), so
+        # pre-E snapshots stay byte-identical.
+        self.active_miracles: list[dict] = []
         # W11b / EM-091 — the public billboard. List of {tick, actor_id,
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
@@ -929,7 +937,15 @@ class World:
     # ──────────────────────────────────────────────────────────────────────────
 
     def apply_energy_decay(self, agent: AgentState) -> None:
-        agent.energy = max(0.0, agent.energy - self.params.energy_decay_per_turn)
+        decay = self.params.energy_decay_per_turn
+        # Wave E / EM-184 — while a bountiful_harvest miracle is active, decay
+        # is multiplied by harvest_decay_factor (default 0.5: half the hunger).
+        if self.miracle_active("bountiful_harvest"):
+            try:
+                decay *= float(self._mir_param("harvest_decay_factor", 0.5))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                pass
+        agent.energy = max(0.0, agent.energy - decay)
 
     def check_death(self, agent: AgentState) -> bool:
         """Increment zero_energy counter; return True if agent should die."""
@@ -969,6 +985,13 @@ class World:
             or self.operational_building_at(agent.location, "farm") is not None
         ):
             reward += self._bld_param("forage_bonus", 0)
+        # Wave E / EM-184 — while a send_rain miracle is active, every forage
+        # yields +rain_forage_bonus ON TOP of the base + garden/farm bonuses.
+        if self.miracle_active("send_rain"):
+            try:
+                reward += int(self._mir_param("rain_forage_bonus", 2))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                pass
         agent.credits += reward
         return True, "ok", reward
 
@@ -1972,6 +1995,12 @@ class World:
         "grant_credits": 10,
     }
 
+    # Wave E / EM-184 — the WORLD-scale miracle kinds. Cast through the same
+    # god_intervene seam but with NO agent_id (the targeted kinds above keep
+    # requiring one). send_rain / bountiful_harvest are timed (active_miracles
+    # entries swept beside expire_blackouts); calm_spirits is one-time.
+    GOD_MIRACLE_KINDS = ("send_rain", "bountiful_harvest", "calm_spirits")
+
     def _living_agent_or_raise(self, agent_id: str) -> AgentState:
         """Resolve a LIVING agent for a targeted god action. ValueError (the api
         maps it to 422) on unknown or dead targets — resurrection is explicitly
@@ -1983,15 +2012,35 @@ class World:
             raise ValueError(f"{agent.name} is dead — the god cannot reach them")
         return agent
 
-    def god_intervene(self, kind: str, agent_id: str, amount: Any = None) -> dict:
-        """God-mode targeted intervention (EM-136): bless ONE agent's energy
-        (clamped at 100) or grant them credits. amount defaults per kind
-        (GOD_INTERVENTION_DEFAULTS) and is validated 1..100; unknown kind and
-        unknown/dead agent raise ValueError (api → 422). Returns a ready-to-emit
-        `god_intervention` event dict (actor_type 'god', target_id the agent,
-        payload carries before/after so a clamp is visible)."""
+    def god_intervene(
+        self, kind: str, agent_id: str | None = None, amount: Any = None
+    ) -> dict | list[dict]:
+        """God-mode intervention. Two families behind one seam:
+
+        - TARGETED (EM-136, unchanged): bless ONE agent's energy (clamped at
+          100) or grant them credits. Requires agent_id; amount defaults per
+          kind (GOD_INTERVENTION_DEFAULTS) and is validated 1..100; unknown
+          kind and unknown/dead agent raise ValueError (api → 422). Returns
+          the ready-to-emit `god_intervention` event DICT (actor_type 'god',
+          target_id the agent, payload carries before/after so a clamp is
+          visible) — byte-identical to pre-E behavior.
+        - WORLD-scale miracles (Wave E / EM-184): send_rain /
+          bountiful_harvest / calm_spirits REJECT an agent_id (ValueError →
+          api 422) and return a LIST of ready-to-emit event dicts: the
+          `god_miracle` event first, plus — for calm_spirits — any
+          relationship_changed events its trust nudges parked (drained here
+          because no action turn ever drains a god-initiated mutation; all
+          turn_id null, same API emission batch).
+        """
+        if kind in self.GOD_MIRACLE_KINDS:
+            if agent_id is not None:
+                raise ValueError(
+                    f"{kind} is a world-scale miracle — it takes no agent_id")
+            return self.god_miracle(kind)
         if kind not in self.GOD_INTERVENTION_DEFAULTS:
             raise ValueError(f"Unknown intervention kind: {kind!r}")
+        if agent_id is None:
+            raise ValueError(f"{kind} targets one agent — agent_id is required")
         agent = self._living_agent_or_raise(agent_id)
         if amount is None:
             amount = self.GOD_INTERVENTION_DEFAULTS[kind]
@@ -2109,6 +2158,165 @@ class World:
                         "reason": "blackout_ended",
                     },
                 })
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-184 — world-scale god miracles (contracts/wave-e.md B5).
+    # Timed world modifiers (active_miracles entries) + the one-time
+    # calm_spirits. Pure state modifiers — zero LLM calls (the wave's
+    # free-scale law); expiry rides the same per-tick sweep as blackouts.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _mir_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.miracles` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _rel_param)."""
+        return _block_get(getattr(self.params, "miracles", None), name, default)
+
+    def _miracles_enabled(self) -> bool:
+        """Config gate `world.miracles.enabled` (default ON). Disabled ⇒ the
+        world kinds raise (api → 422) and no buff/sweep state ever exists —
+        byte-identical pre-E behavior; targeted bless/grant are untouched."""
+        return bool(self._mir_param("enabled", True))
+
+    def miracle_active(self, kind: str) -> bool:
+        """True while a timed miracle of `kind` is in effect (tick strictly
+        before until_tick — the place_blacked_out convention)."""
+        for m in self.active_miracles:
+            try:
+                until = int(m.get("until_tick", 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                continue
+            if m.get("kind") == kind and self.tick < until:
+                return True
+        return False
+
+    # Per-kind cast/expiry flavour text (the feed lines).
+    _MIRACLE_CAST_TEXTS = {
+        "send_rain": "🌧 Rain falls on the gardens — forage flourishes",
+        "bountiful_harvest":
+            "🌾 A bountiful harvest blesses the town — hunger bites slower",
+        "calm_spirits":
+            "🕊 A great calm settles over the town — every heart lifts",
+    }
+    _MIRACLE_EXPIRED_TEXTS = {
+        "send_rain": "☀ The rains pass — forage returns to normal.",
+        "bountiful_harvest":
+            "🍂 The bountiful season ends — hunger bites as before.",
+    }
+
+    def god_miracle(self, kind: str) -> list[dict]:
+        """Cast a WORLD-scale miracle (EM-184). Returns the ready-to-emit
+        event batch: the `god_miracle` event (actor 'god', target_id None,
+        turn_id null) first, plus — for calm_spirits — the
+        relationship_changed events its trust nudges parked in the B1 outbox
+        (drained HERE: god mutations happen outside any action turn, so no
+        runtime drain would ever pick them up). Timed kinds add/refresh an
+        active_miracles entry — re-casting an active kind REFRESHES
+        until_tick, never stacks. Disabled config raises ValueError."""
+        if kind not in self.GOD_MIRACLE_KINDS:
+            raise ValueError(f"Unknown miracle kind: {kind!r}")
+        if not self._miracles_enabled():
+            raise ValueError(
+                "miracles are disabled (world.miracles.enabled: false)")
+        if kind == "calm_spirits":
+            return self._cast_calm_spirits()
+        # Timed kinds: duration is days × turns_per_day ticks.
+        days_key = "rain_days" if kind == "send_rain" else "harvest_days"
+        try:
+            days = max(1, int(self._mir_param(days_key, 2)))
+        except (TypeError, ValueError):
+            days = 2
+        try:
+            turns_per_day = max(1, int(getattr(self.params, "turns_per_day", 20)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            turns_per_day = 20
+        until = self.tick + days * turns_per_day
+        existing = next(
+            (m for m in self.active_miracles if m.get("kind") == kind), None)
+        if existing is not None:
+            existing["until_tick"] = until  # refresh, never stack
+        else:
+            self.active_miracles.append({"kind": kind, "until_tick": until})
+        return [{
+            "kind": "god_miracle",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": None,
+            "turn_id": None,
+            "text": self._MIRACLE_CAST_TEXTS[kind],
+            "payload": {"kind": kind, "until_tick": until},
+        }]
+
+    def _cast_calm_spirits(self) -> list[dict]:
+        """ONE-TIME calm_spirits: every living agent's mood becomes 'hopeful',
+        and every living↔living relationship with interactions >= 1 gets
+        +calm_trust_bonus through _update_trust — the B1 reflex seam, so
+        clamps apply and friend/feud transitions may fire (that's the point).
+        Deterministic order (sorted agent ids both levels). No duration entry
+        is ever added. Returns [god_miracle, *relationship_changed]."""
+        living = sorted(self.living_agents(), key=lambda a: a.id)
+        living_ids = {a.id for a in living}
+        for agent in living:
+            agent.mood = "hopeful"
+        try:
+            bonus = int(self._mir_param("calm_trust_bonus", 3))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            bonus = 3
+        if bonus > 0:
+            for agent in living:
+                for other_id in sorted(agent.relationships):
+                    if other_id == agent.id or other_id not in living_ids:
+                        continue
+                    if agent.relationships[other_id].interactions >= 1:
+                        self._update_trust(agent, self.agents[other_id], bonus)
+        events: list[dict] = [{
+            "kind": "god_miracle",
+            "actor_id": "god",
+            "actor_type": "god",
+            "target_id": None,
+            "turn_id": None,
+            "text": self._MIRACLE_CAST_TEXTS["calm_spirits"],
+            "payload": {"kind": "calm_spirits"},
+        }]
+        # Drain the B1 outbox OURSELVES (QE carry-over): _update_trust parks
+        # relationship_changed events there, and the per-action drain in
+        # runtime._apply_action never runs for a god mutation — without this
+        # drain the events would sit parked forever. They ride the same API
+        # emission batch as the miracle, turn_id null.
+        for evt in self.drain_relationship_events():
+            evt.setdefault("turn_id", None)
+            events.append(evt)
+        return events
+
+    def expire_miracles(self) -> list[dict]:
+        """Sweep expired timed miracles (tick >= until_tick). Returns the
+        miracle_expired event dicts to emit (empty when nothing expired).
+        Called from the tick loop each turn beside expire_blackouts() —
+        cheap, no allocation when idle."""
+        if not self.active_miracles:
+            return []
+        events: list[dict] = []
+        remaining: list[dict] = []
+        for m in self.active_miracles:
+            kind = str(m.get("kind", ""))
+            try:
+                until = int(m.get("until_tick", 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                until = 0
+            if self.tick >= until:
+                events.append({
+                    "kind": "miracle_expired",
+                    "actor_id": None,
+                    "actor_type": "system",
+                    "target_id": None,
+                    "turn_id": None,
+                    "text": self._MIRACLE_EXPIRED_TEXTS.get(
+                        kind, f"The {kind} miracle fades."),
+                    "payload": {"kind": kind, "until_tick": until},
+                })
+            else:
+                remaining.append(m)
+        self.active_miracles = remaining
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -2872,6 +3080,16 @@ class World:
                 }
                 for fid, f in self.factions.items()
             }
+        # Wave E / EM-184 — active timed miracles [{kind, until_tick}].
+        # Serialized only when non-empty (the cap_demotions pattern), so a
+        # miracle-free world — and every pre-E snapshot — keeps the exact
+        # pre-E key set (absent ⇒ [] on restore).
+        if self.active_miracles:
+            snap["active_miracles"] = [
+                {"kind": str(m.get("kind", "")),
+                 "until_tick": int(m.get("until_tick", 0))}
+                for m in self.active_miracles
+            ]
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -3106,6 +3324,15 @@ class World:
             for fid, f in (state.get("factions") or {}).items()
             if fid
         }
+        # Wave E / EM-184 — restore active timed miracles (additive: pre-E
+        # snapshots lack the key and restore [] — a mid-rain snapshot keeps
+        # its buff on resume and still expires on schedule).
+        world.active_miracles = [
+            {"kind": str(m.get("kind", "")),
+             "until_tick": _int(m.get("until_tick", 0))}
+            for m in (state.get("active_miracles") or [])
+            if isinstance(m, dict) and m.get("kind")
+        ]
         # EM-145 — restore queued god whispers (only for agents that exist).
         world.pending_whispers = {
             str(aid): [str(t) for t in (lines or []) if str(t).strip()]

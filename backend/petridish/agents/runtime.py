@@ -274,6 +274,10 @@ _IMPORTANCE_WEIGHTS: dict[str, float] = {
     "agent_starving": 2.0,
     "structure_state_changed": 1.0,
     "building_operational": 2.0,
+    # Wave E / EM-184 — a god miracle is town-news (globally witnessed in
+    # push_event, like random_event) and salient enough to pull a background
+    # agent's next due turn (existing EM-159 machinery — no new calls).
+    "god_miracle": 2.0,
 }
 _IMPORTANCE_ECONOMY_SWING = 8      # |credits moved| at/above this scores...
 _IMPORTANCE_ECONOMY_WEIGHT = 2.0   # ...this much
@@ -1800,7 +1804,7 @@ class AgentRuntime:
                 agent.id == actor_id
                 or agent.id == target_id
                 or (evt_location and agent.location == evt_location)
-                or event.get("kind") in ("random_event", "rule_passed", "rule_rejected", "rule_proposed")
+                or event.get("kind") in ("random_event", "rule_passed", "rule_rejected", "rule_proposed", "god_miracle")
             ):
                 buf = self._memory.setdefault(agent.id, [])
                 buf.append(evt_payload)

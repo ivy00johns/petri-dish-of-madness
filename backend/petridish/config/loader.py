@@ -125,6 +125,22 @@ world:
     enabled: true
     faction_trust: 25
     faction_min_size: 3
+  # Wave E / EM-184 — world-scale god miracles: timed world modifiers cast
+  # from the god console (POST /api/god/intervene with NO agent_id).
+  # send_rain buffs forage by rain_forage_bonus for rain_days in-world days;
+  # bountiful_harvest multiplies energy decay by harvest_decay_factor for
+  # harvest_days; calm_spirits is one-time (mood 'hopeful' + a trust nudge
+  # through the B1 reflex seam). Re-casting an active kind REFRESHES its
+  # until_tick (never stacks). MUST stay in sync with config/world.yaml.
+  # enabled:false = world kinds rejected; targeted bless/grant untouched
+  # (byte-identical pre-E behavior).
+  miracles:
+    enabled: true
+    rain_forage_bonus: 2
+    rain_days: 2
+    harvest_decay_factor: 0.5
+    harvest_days: 2
+    calm_trust_bonus: 3
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -515,6 +531,39 @@ class FactionParams:
 
 
 @dataclass
+class MiracleParams:
+    """Wave E / EM-184 — world-scale god miracles (config `world.miracles`).
+    The god console's `POST /api/god/intervene` grows three WORLD kinds (no
+    agent_id): timed `send_rain` / `bountiful_harvest` buffs swept beside the
+    blackout expiry each tick, and one-time `calm_spirits`. Pure state
+    modifiers — zero LLM calls (the wave's free-scale law). The engine reads
+    this block via its defensive _mir_param accessor with IDENTICAL defaults.
+
+      enabled              — master toggle (default ON). `false` ⇒ world kinds
+                             are rejected (ValueError → API 422); the targeted
+                             bless_energy/grant_credits kinds are untouched:
+                             byte-identical pre-E behavior.
+      rain_forage_bonus    — send_rain: extra forage credits while active, on
+                             top of base + garden/farm bonuses.
+      rain_days            — send_rain duration in IN-WORLD days
+                             (days × turns_per_day ticks).
+      harvest_decay_factor — bountiful_harvest: energy decay is multiplied by
+                             this while active (0.5 = half decay).
+      harvest_days         — bountiful_harvest duration in in-world days.
+      calm_trust_bonus     — calm_spirits: one-time `_update_trust` delta for
+                             every living↔living relationship with
+                             interactions >= 1 (clamped as usual; B1 reflex
+                             transitions may fire — that's the point).
+    """
+    enabled: bool = True
+    rain_forage_bonus: int = 2
+    rain_days: int = 2
+    harvest_decay_factor: float = 0.5
+    harvest_days: int = 2
+    calm_trust_bonus: int = 3
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -642,6 +691,10 @@ class WorldParams:
     # without partners (every pre-E world) behaves byte-identically.
     # `enabled: false` skips the birth check entirely.
     children: ChildrenParams = field(default_factory=ChildrenParams)
+    # Wave E / EM-184 — world-scale god miracles. Additive with
+    # engine-matching defaults (default ON); `enabled: false` rejects the
+    # world kinds only — targeted bless/grant stay byte-identical.
+    miracles: MiracleParams = field(default_factory=MiracleParams)
     # Wave E / EM-120 — factions, feuds & reputation. Additive with
     # engine-matching defaults (default ON); `enabled: false` skips the
     # round-boundary recompute entirely (byte-identical pre-E behavior).
@@ -1028,6 +1081,45 @@ def _parse_factions(raw: dict | None) -> FactionParams:
     )
 
 
+def _parse_miracles(raw: dict | None) -> MiracleParams:
+    """Parse the optional `world.miracles` block (Wave E / EM-184).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually; bonuses clamp to >= 0, durations to >= 1
+    day, and the decay factor to [0, 1] (a malformed value never breaks
+    the block)."""
+    if not isinstance(raw, dict):
+        return MiracleParams()
+    d = MiracleParams()
+
+    def _nonneg_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _days(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _unit_float(key: str, default: float) -> float:
+        try:
+            return min(1.0, max(0.0, float(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return MiracleParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        rain_forage_bonus=_nonneg_int("rain_forage_bonus", d.rain_forage_bonus),
+        rain_days=_days("rain_days", d.rain_days),
+        harvest_decay_factor=_unit_float(
+            "harvest_decay_factor", d.harvest_decay_factor),
+        harvest_days=_days("harvest_days", d.harvest_days),
+        calm_trust_bonus=_nonneg_int("calm_trust_bonus", d.calm_trust_bonus),
+    )
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -1108,6 +1200,7 @@ def _parse_world(
         relationships=_parse_relationships(w.get("relationships")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
+        miracles=_parse_miracles(w.get("miracles")),
     )
 
     places = [
