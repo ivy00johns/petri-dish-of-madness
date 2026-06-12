@@ -114,6 +114,9 @@ export type GodActionResult =
 /** The two targeted-intervention kinds (wave-a2 EM-136). */
 export type GodInterveneKind = 'bless_energy' | 'grant_credits';
 
+/** The three world-scale miracle kinds (wave-e EM-184). */
+export type GodMiracleKind = 'send_rain' | 'bountiful_harvest' | 'calm_spirits';
+
 /** Query params accepted by GET /api/events (api.openapi.yaml v1.3.0). */
 export interface EventsQuery {
   /** EM-086: scope to a past run (serialized `run_id`); omitted = active run. */
@@ -430,6 +433,18 @@ export const inspectorApi = {
       { kind, agent_id: agentId, ...(amount !== undefined ? { amount } : {}) },
       'intervention',
     );
+  },
+
+  /**
+   * POST /api/god/intervene {kind} (wave-e EM-184/185) — cast a WORLD-scale
+   * miracle. The contract REQUIRES agent_id absent for world kinds (the
+   * backend 422s otherwise), so the body carries `kind` alone — never an
+   * agent_id key. Optimistic-free: the god_miracle event arrives via the WS;
+   * this returns only the labeled ok/failure (422 = unknown kind / miracles
+   * disabled / agent_id mismatch; 503 = world not initialized; never throws).
+   */
+  async godMiracle(kind: GodMiracleKind): Promise<GodActionResult> {
+    return postGodAction('/api/god/intervene', { kind }, 'miracle');
   },
 
   /**

@@ -286,6 +286,40 @@ const REL_KINDS = new Set<EventKind>(['relationship']);
 const GIVE_KINDS = new Set<EventKind>(['economy']);
 const CONFLICT_KINDS = new Set<EventKind>(['conflict']);
 
+// Wave E (EM-113/B6): typed-bond transitions. payload carries the ABSOLUTE
+// post-transition state {from_type, to_type, trust, since_tick} — the fold
+// SETS type/trust rather than bumping a delta.
+const REL_CHANGED_KINDS = new Set<EventKind>(['relationship_changed']);
+
+/** Wave E (EM-120/B6): faction membership at a tick, folded from faction_*
+ *  events (≤ atTick, oldest-first). Pure; tolerant of partial payloads.
+ *  Last-write-wins when an agent's faction changes (formed/joined override;
+ *  left/dissolved clear). */
+export function factionMembership(
+  events: WorldEvent[],
+  atTick: number,
+): Map<string, { id: string; name: string }> {
+  const byAgent = new Map<string, { id: string; name: string }>();
+  for (const e of upToTick(events, atTick)) {
+    const p = payload(e);
+    const fid = str(p['faction_id']);
+    if (!fid) continue;
+    const name = str(p['name']) ?? fid;
+    if (e.kind === 'faction_formed') {
+      for (const m of strArr(p['members']) ?? []) byAgent.set(m, { id: fid, name });
+    } else if (e.kind === 'faction_joined' && e.actor_id) {
+      byAgent.set(e.actor_id, { id: fid, name });
+    } else if (e.kind === 'faction_left' && e.actor_id) {
+      if (byAgent.get(e.actor_id)?.id === fid) byAgent.delete(e.actor_id);
+    } else if (e.kind === 'faction_dissolved') {
+      for (const [agentId, f] of [...byAgent.entries()]) {
+        if (f.id === fid) byAgent.delete(agentId);
+      }
+    }
+  }
+  return byAgent;
+}
+
 interface EdgeAccum {
   type: string;
   trust: number;
@@ -317,9 +351,14 @@ export function socialGraph(
     if (e.kind === 'agent_died' && e.actor_id) deadByTick.set(e.actor_id, e.tick);
   }
 
+  // Wave E (EM-120): faction membership at the scrub tick rides the nodes so
+  // the graph can ring/tint member nodes (faction_* events carry agent ids).
+  const factions = factionMembership(events, atTick);
+
   const nodes: SocialNode[] = agents.map((a) => {
     const diedAt = deadByTick.get(a.id);
     const alive = diedAt === undefined ? a.alive : atTick < diedAt;
+    const faction = factions.get(a.id) ?? null;
     return {
       id: a.id,
       label: a.name,
@@ -327,6 +366,8 @@ export function socialGraph(
       // the VIEW resolves the neutral token (data layer stays color-literal-free).
       color: a.profile_color ?? profileColor.get(a.profile) ?? '',
       alive,
+      factionId: faction?.id ?? null,
+      factionName: faction?.name ?? null,
     };
   });
 
@@ -356,6 +397,18 @@ export function socialGraph(
       const type = str(payload(e)['type']) ?? inferRelType(e.text);
       const trust = num(payload(e)['trust_delta']) ?? (type === 'rival' || type === 'enemy' ? -20 : 20);
       bump(a, b, type, trust);
+    } else if (REL_CHANGED_KINDS.has(e.kind)) {
+      // Wave E (EM-113): payload.to_type/trust are the ABSOLUTE post-transition
+      // state — SET them (never accumulate). EM-141 holds: the nodeIds guard
+      // above already dropped non-agent endpoints before this branch.
+      const p = payload(e);
+      const key = edgeKey(a, b);
+      const cur = edges.get(key) ?? { type: 'neutral', trust: 0, interactions: 0 };
+      cur.type = str(p['to_type']) ?? cur.type;
+      const trust = num(p['trust']);
+      if (trust !== null) cur.trust = Math.max(-100, Math.min(100, trust));
+      cur.interactions += 1;
+      edges.set(key, cur);
     } else if (GIVE_KINDS.has(e.kind) && isGift(e)) {
       bump(a, b, 'ally', 10);
     } else if (CONFLICT_KINDS.has(e.kind)) {

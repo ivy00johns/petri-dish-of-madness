@@ -155,12 +155,17 @@ export interface SocialNode {
   color: string;
   /** Whether the agent is alive at the scrub tick. */
   alive: boolean;
+  /** Wave E (EM-120): faction membership at the scrub tick, folded from the
+   *  faction_* events. Absent/null ⇒ unaffiliated (pre-E histories are normal). */
+  factionId?: string | null;
+  factionName?: string | null;
 }
 
 export interface SocialEdge {
   source: string;
   target: string;
-  /** ally | rival | friend | enemy | neutral (relationship type). */
+  /** Relationship type — ally | rival | friend | enemy | neutral, plus the
+   *  Wave-E partner | family | mentor | feud (open: unknown types tolerated). */
   type: string;
   /** -100..100 trust at the scrub tick. */
   trust: number;

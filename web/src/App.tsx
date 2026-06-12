@@ -242,7 +242,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
               collapsible so the feed keeps its vertical budget. */}
           <BillboardPanel world={world} history={sim.history} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
-            <EventFeed events={events} />
+            {/* Wave E (EM-185): the GRANT affordance replies through the SAME
+                optimistic-free billboard path the god console's VOICE uses. */}
+            <EventFeed events={events} onGrantReply={sim.postBillboard} />
           </div>
         </aside>
 
