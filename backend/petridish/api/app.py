@@ -120,9 +120,19 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     world = World(params=cfg.world, places=places, agents=agents)
     # Wave D3 / EM-177 — thread the `world.lane_failover` block to the router
     # (defensive getattr: pre-D3 configs lack the field and get the defaults).
+    # W7 / EM-068 — thread the `world.cache` block too: the decision cache is
+    # config-gated (OFF since 2026-06-12 per the EM-198 rescope), but the flag
+    # was never wired here, so the Router fell back to its default-ON cache and
+    # served verbatim hits — characters (esp. animals, whose brief prompts
+    # repeat) parroted the same line. Honor the config so `enabled: false`
+    # actually disables it. Defensive getattr keeps cache-less configs on the
+    # pre-W7 default-ON behavior.
+    cache_cfg = getattr(cfg.world, "cache", None)
     router = Router(
         cfg.profiles,
         lane_failover=getattr(cfg.world, "lane_failover", None),
+        cache_enabled=bool(getattr(cache_cfg, "enabled", True)),
+        cache_max=int(getattr(cache_cfg, "max_entries", 512)),
     )
 
     # Register each agent's profile with the router
