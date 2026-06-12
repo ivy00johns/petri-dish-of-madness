@@ -594,6 +594,55 @@ def test_api_loop_sweep_expires_miracles_beside_blackouts():
         assert world.active_miracles == []
 
 
+def test_api_send_rain_is_witnessed_by_runtime():
+    """Wave E QE gate regression (qa-report.json MAJOR): the PRODUCTION
+    /api/god/intervene path must feed the emitted batch to the agent runtime
+    (runtime.push_event, the loop._execute_turn stamping) so a cast miracle is
+    actually WITNESSED — memory entry, the ratified 2.0 importance weight, and
+    the EM-159 background-salience marking — not just persisted/broadcast."""
+    client, appmod = _client()
+    with client:
+        runtime = appmod._runtime
+        living = appmod._world.living_agents()
+        assert living, "fixture world must have living agents"
+
+        # Clean slate: nothing has been witnessed before the cast.
+        for ag in living:
+            assert runtime._importance.get(ag.id, 0.0) == 0.0
+
+        resp = client.post("/api/god/intervene", json={"kind": "send_rain"})
+        assert resp.status_code == 200
+
+        # EVERY living agent witnessed the miracle through the runtime —
+        # the exact QE probe shape (test_wave_e_qe.py runtime-seam pin).
+        for ag in living:
+            buf = runtime._memory.get(ag.id, [])
+            assert any(m["kind"] == "god_miracle" for m in buf), \
+                f"{ag.id} must hold a god_miracle memory entry after the cast"
+            assert runtime._importance.get(ag.id, 0.0) == 2.0
+            assert ag.id in runtime._witnessed_since_llm
+
+
+def test_api_targeted_bless_is_remembered_by_target():
+    """Same gap, targeted tier: a blessed agent must REMEMBER the blessing
+    (god_intervention rides push_event; target_id makes them the witness).
+    god_intervention carries no importance weight, so the accumulator and the
+    salience set stay untouched — only the memory entry lands."""
+    client, appmod = _client()
+    with client:
+        runtime = appmod._runtime
+        agent = appmod._world.living_agents()[0]
+        resp = client.post("/api/god/intervene",
+                           json={"kind": "bless_energy", "agent_id": agent.id,
+                                 "amount": 10})
+        assert resp.status_code == 200
+        buf = runtime._memory.get(agent.id, [])
+        assert any(m["kind"] == "god_intervention" for m in buf), \
+            "the blessed agent must remember being blessed"
+        assert runtime._importance.get(agent.id, 0.0) == 0.0
+        assert agent.id not in runtime._witnessed_since_llm
+
+
 def test_api_targeted_bless_regression_unchanged():
     """The pre-E god console request still works byte-identically through the
     widened InterveneBody (agent_id now optional in the MODEL, still required

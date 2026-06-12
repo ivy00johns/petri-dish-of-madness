@@ -1170,6 +1170,14 @@ async def god_intervene(body: InterveneBody):
         if e.get("kind") == "god_miracle":
             until_tick = (e.get("payload") or {}).get("until_tick")
         _loop._emit_event(e)
+        # Wave E QE fix — feed the batch to the agent runtime exactly like the
+        # turn path does (loop._execute_turn: push_event({**evt, "tick": tick})),
+        # so a god_miracle is globally witnessed (memory entry + the ratified 2.0
+        # importance weight + background salience) and a blessed/granted agent
+        # remembers its god_intervention (target_id witness). Without this, the
+        # mutation lands but no agent ever knows it happened.
+        if _runtime is not None:
+            _runtime.push_event({**e, "tick": _world.tick})
     _loop._broadcast_world_state()
     resp: dict = {"status": "ok"}
     if until_tick is not None:
