@@ -136,6 +136,12 @@ export interface EventsQuery {
   beforeSeq?: number;
   limit?: number;
   order?: 'asc' | 'desc';
+  /**
+   * EM-187/EM-101: include ancestor (pre-fork) events so a forked/resumed run's
+   * feed shows the full timeline, not just events written after the fork point.
+   * Omitted/false = the run's own events only (the EM-086 run-scoped default).
+   */
+  lineage?: boolean;
 }
 
 /**
@@ -270,6 +276,7 @@ function eventsPath(query: EventsQuery): string {
     before_seq: query.beforeSeq,
     limit: query.limit,
     order: query.order,
+    lineage: query.lineage ? 1 : undefined,
   })}`;
 }
 
@@ -315,8 +322,9 @@ export const inspectorApi = {
    * the run's event log. `null` on any failure (no backend / pre-F1 backend),
    * so callers degrade to "no progress figure" instead of a fake zero.
    */
-  async eventStats(runId?: number): Promise<EventStats | null> {
-    const data = await getJsonOrNull(`/api/events/stats${qs({ run_id: runId })}`);
+  async eventStats(runId?: number, lineage?: boolean): Promise<EventStats | null> {
+    const data = await getJsonOrNull(
+      `/api/events/stats${qs({ run_id: runId, lineage: lineage ? 1 : undefined })}`);
     if (!isObject(data)) return null;
     const total = data.total;
     const maxSeq = data.max_seq;

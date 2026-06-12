@@ -1438,6 +1438,8 @@ async def get_events(
                                    description="keyset for order=desc tail pages (seq < before_seq)"),
     limit: int | None = Query(default=None),
     order: str = Query(default="asc"),
+    lineage: bool = Query(default=False,
+                          description="EM-187/EM-101: include ancestor (pre-fork) events for a forked/resumed run"),
 ):
     run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
@@ -1454,19 +1456,22 @@ async def get_events(
         before_seq=before_seq,
         limit=limit,
         order=order,
+        lineage=lineage,
     )
 
 
 @app.get("/api/events/stats")
-async def get_event_stats(run_id: int | None = None):
+async def get_event_stats(run_id: int | None = None, lineage: bool = False):
     """Run-scoped event-log bounds (Wave F / EM-194): {total, max_seq,
     max_tick, min_seq} via a single cheap COUNT/MAX/MIN — sizes the client's
     tail-first backfill. Same ?run_id scoping as GET /api/events (omitted →
-    active run; unknown id → 404). Uninitialized → all-zeros, never 500."""
+    active run; unknown id → 404). `lineage=true` sizes the run plus its
+    ancestors' pre-fork slices, matching the lineage backfill. Uninitialized →
+    all-zeros, never 500."""
     run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return {"total": 0, "max_seq": 0, "max_tick": 0, "min_seq": 0}
-    return _repo.get_event_stats(run_id)
+    return _repo.get_event_stats(run_id, lineage=lineage)
 
 
 @app.get("/api/turns/{turn_id}")

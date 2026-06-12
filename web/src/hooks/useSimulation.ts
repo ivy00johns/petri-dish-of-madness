@@ -202,7 +202,9 @@ export function useSimulation(): SimulationState & SimulationControls {
     (async () => {
       try {
         // 1) Size the run first — honest progress needs the real total.
-        const stats = await inspectorApi.eventStats();
+        // lineage:true so a resumed/forked active run is sized to its FULL
+        // timeline (ancestors' pre-fork events included), matching the backfill.
+        const stats = await inspectorApi.eventStats(undefined, true);
         if (cancelled) return;
         if (stats) {
           setHistoryTotal(stats.total);
@@ -221,6 +223,11 @@ export function useSimulation(): SimulationState & SimulationControls {
               beforeSeq,
               order: 'desc',
               limit: BACKFILL_CHUNK,
+              // EM-187: walk lineage so a resumed/forked run's feed shows the
+              // pre-fork history (parent run's events), not just post-resume.
+              // seq is global, so the beforeSeq keyset still pages cleanly
+              // across the run boundary, newest→oldest.
+              lineage: true,
             });
           if (cancelled) return;
           if (rows.length === 0) break;

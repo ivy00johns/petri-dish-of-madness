@@ -94,6 +94,28 @@ describe('inspectorApi — run_id is included iff runId is provided', () => {
   });
 });
 
+describe('inspectorApi — lineage param (EM-187 forked/resumed-run feed)', () => {
+  it('events: lineage:true serializes lineage=1; omitted ⇒ no param', async () => {
+    await inspectorApi.events({ beforeSeq: 100, order: 'desc', lineage: true });
+    const on = new URLSearchParams(requestedPath(0).split('?')[1]);
+    expect(on.get('lineage')).toBe('1');
+    expect(on.get('before_seq')).toBe('100');
+
+    await inspectorApi.events({ limit: 5 });
+    const off = new URLSearchParams(requestedPath(1).split('?')[1] ?? '');
+    expect(off.get('lineage')).toBeNull();
+  });
+
+  it('eventStats: lineage flag threads as lineage=1, omitted otherwise', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
+    await inspectorApi.eventStats(undefined, true);
+    expect(new URLSearchParams(requestedPath(0).split('?')[1]).get('lineage')).toBe('1');
+
+    await inspectorApi.eventStats();
+    expect(new URLSearchParams(requestedPath(1).split('?')[1] ?? '').get('lineage')).toBeNull();
+  });
+});
+
 describe('inspectorApi.runs — /api/runs parsing', () => {
   const row = (id: number, extra: Record<string, unknown> = {}) => ({
     id,
