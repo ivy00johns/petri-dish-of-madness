@@ -270,7 +270,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-187 | P1 | W18 | backend | user 2026-06-11 | Resume-on-boot: every backend start (./dev, uvicorn hot-reload) calls `init_run` → fresh run, killing the live world — 398 runs on disk, ~12 today from build hot-reloads alone; never existed, but backend-heavy waves make the loss constant. On startup, restore the latest snapshot of the most recent non-empty run via the EM-101 fork machinery (`World.from_snapshot` + `start_run(forked_from=…)`, ≤25-tick loss at the snapshot grain), with an honest "resumed run N from tick T" feed line; the reset button stays the explicit fresh-start. `world.resume_on_boot: true` default; config-mismatch (changed agents/places) falls back to fresh with a logged reason. Deps EM-101 ✅ | done | wave-D3 2026-06-11 |
 
-_Next free ID: EM-188._
+| EM-188 | P2 | W18 | frontend | user 2026-06-11 | Street names + city-name labels: the CityGenerator's road network gets deterministic seeded street names (pure cityLayout data, EM-155 byte-identical invariant holds), rendered as zoom-gated in-world labels (EM-102/EM-178 label patterns); the town's name (`world.town_name`) surfaces as a city label in the world view; agent/building location surfaces can reference the named street. Pairs the Wave E social city — a city whose streets have names reads like EW | open | — |
+
+_Next free ID: EM-189._
 
 ## Notes
 

@@ -422,6 +422,33 @@ matching `*.test.ts(x)`), NOTHING outside `web/`.
 
 ---
 
+## B7 — EM-188: street names + city-name labels (P2, added v1.2 on user request 2026-06-11)
+
+**Owner:** frontend-agent-B7 (after B6 gate; runs beside the wave QE pass —
+disjoint files; gets its OWN full frontend gate).
+**Files owned:** `web/src/components/world3d/**` (incl. `cityLayout.ts` and
+its tests), plus a new tokens entry if a label color is needed. NOTHING else.
+
+### Behavior spec
+
+1. **Street names (pure data):** the deterministic CityGenerator
+   (`cityLayout.ts`) assigns each road/lane segment a name from a seeded
+   name bank (two-part names: tree/trade/founder stems × Lane/Row/Way/Street),
+   seeded from the EXISTING city seed via the `hashUnit` pattern — the
+   EM-155 byte-identical invariant test MUST keep passing, with names simply
+   becoming part of the deterministic output (extend the invariant test to
+   cover names). Stable across re-generation; no `Math.random()`.
+2. **Street labels (render):** small in-world street-name labels at road
+   midpoints, zoom/distance-gated exactly like the EM-102/EM-178 label
+   patterns (no overlap with building labels at default zoom; fade in when
+   the camera is close). Sparse: label main lanes, not every alley stub.
+3. **City-name label:** `world.town_name` (already in the world payload)
+   rendered once as the city's title — in-world signage or a HUD chip beside
+   the existing world-view chrome, B7's call, documented. Absent-safe.
+4. Tests: name determinism (same seed ⇒ same names; different seed ⇒
+   different), invariant test extension, label gating logic (pure parts),
+   city-name render + absent-safe. Full vitest suite + build green.
+
 ## Gates
 
 After each batch: full backend pytest (B6: vitest + tsc/build) run by the
