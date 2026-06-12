@@ -36,20 +36,36 @@ import { VirtualList } from './VirtualList';
 import './inspector-tokens.css';
 
 // Wave F (EM-194): the stream is VIRTUALIZED — only the visible window mounts
-// as DOM rows (a 10k-event chaos stream used to mount 10k nodes). Fixed-height
-// rows are the windowing contract — but the dialogue still reads INLINE (the
-// user-requested behavior, commit 99f3822): the thought gets up to TWO clamped
-// lines, the consequence one. Full text still rides the title attributes.
+// as DOM rows (a 10k-event chaos stream used to mount 10k nodes).
 //
-// Measured from the row's composition (uniform-height contract):
-//   py-2 padding            16px  (8 top + 8 bottom)
-//   gap-1 × 2               8px
-//   name/action row        ~18px  (text-xs glyph line-height 16 + badge chrome)
-//   thought, 2 lines       ~36px  (11px × leading-relaxed 1.625 × 2 = 35.75)
-//   consequence, 1 line    ~17px  (10px × 1.625 = 16.25)
-//   ───────────────────────────
-//                          ~95px  → 96 (a hair of slack for emoji glyph height)
+// Wave G (EM-197): rows take PER-KIND heights (the VirtualList prefix-sum
+// path) so no-dialogue rows stop reserving dialogue space:
+//
+//  • DIALOGUE rows (an animal_thought present) KEEP the inline two-line
+//    treatment — the user-requested behavior, commit 99f3822. Measured from
+//    the row's composition:
+//      py-2 padding            16px  (8 top + 8 bottom)
+//      gap-1 × 2               8px
+//      name/action row        ~18px  (text-xs glyph line-height 16 + badges)
+//      thought, 2 lines       ~36px  (11px × leading-relaxed 1.625 × 2)
+//      consequence, 1 line    ~17px  (10px × 1.625 = 16.25)
+//      ───────────────────────────
+//                             ~95px  → 96 (slack for emoji glyph height)
+//
+//  • COMPACT rows (LLM-call / no-dialogue entries) read as ONE line —
+//    species + action + badges + the consequence inline, ~40px. Full text
+//    still rides the title attributes (hover tooltip for truncation).
 export const ROW_HEIGHT = 96;
+export const COMPACT_ROW_HEIGHT = 40;
+
+/**
+ * Deterministic per-item-kind row height (the VirtualList contract: a pure
+ * function of the event data, never measurement). Exported for the
+ * variable-height bounded-rows test.
+ */
+export function chaosRowHeight(e: WorldEvent): number {
+  return thoughtOf(e) ? ROW_HEIGHT : COMPACT_ROW_HEIGHT;
+}
 
 // The magenta chaos register, pulled from the shared marker token so it stays in
 // lockstep with the replay timeline + main-feed critter border. Dynamic var() in
@@ -72,8 +88,10 @@ const ACTION_ICON: Record<string, string> = {
   arson: '🔥',
 };
 
-/** True when an event belongs to the animal channel (the chaos-feed filter). */
-function isAnimalEvent(e: WorldEvent): boolean {
+/** True when an event belongs to the animal channel (the chaos-feed filter).
+ *  Exported (wave G): InspectorLayout uses the SAME predicate to decide when
+ *  the chaos panel collapses to its empty strip. */
+export function isAnimalEvent(e: WorldEvent): boolean {
   return (
     e.actor_type === 'animal' ||
     e.kind === 'animal_action' ||
@@ -120,6 +138,60 @@ function ChaosEntry({ event, llmDecided = false }: ChaosEntryProps) {
   const icon = ACTION_ICON[action] ?? '🐾';
   const thought = thoughtOf(event);
   const chaotic = event.is_chaotic === true;
+  // Wave G (EM-197): no-dialogue entries render the COMPACT one-line variant
+  // (~40px); dialogue entries keep the two-line inline treatment (96px).
+  const compact = thought === null;
+
+  if (compact) {
+    return (
+      <div
+        className="flex items-center gap-2 px-2 h-full border-b border-lab-border/40 overflow-hidden"
+        style={{
+          borderLeft: `3px solid ${chaotic ? CHAOS_CHAOTIC : CHAOS_ACCENT}`,
+          background: chaotic ? 'var(--chaos-surface)' : undefined,
+        }}
+      >
+        <span className="font-mono text-xs shrink-0" aria-hidden="true">
+          {speciesIcon(event)}
+        </span>
+        <span
+          className="font-mono text-[10px] font-bold uppercase tracking-wide shrink-0"
+          style={{ color: CHAOS_ACCENT }}
+          title={action}
+        >
+          <span aria-hidden="true">{icon}</span> {action.replace(/_/g, ' ')}
+        </span>
+        {chaotic && (
+          <span
+            className="font-mono text-[9px] font-bold uppercase px-1 py-px rounded-sm shrink-0"
+            style={{ color: CHAOS_CHAOTIC, border: `1px solid ${CHAOS_CHAOTIC}` }}
+            title="A crime / structure-targeting / low-prior escalation — the headline chaos."
+          >
+            chaos
+          </span>
+        )}
+        {llmDecided && (
+          <span
+            className="font-mono text-[10px] shrink-0 cursor-default"
+            title="LLM decision — the animal's model chose this action (reflex actions carry no marker)"
+            aria-label="LLM decision"
+          >
+            🧠
+          </span>
+        )}
+        {/* Consequence inline — full text on hover (truncation tooltip). */}
+        <span
+          className="font-mono text-[10px] text-lab-muted truncate min-w-0"
+          title={event.text ?? `[${event.kind}]`}
+        >
+          {event.text ?? `[${event.kind}]`}
+        </span>
+        <span className="ml-auto font-mono text-[10px] text-lab-muted tabular-nums shrink-0">
+          T{event.tick}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -211,33 +283,32 @@ export default function AnimalChaosFeed(props: PanelProps) {
 
   return (
     <section
-      className="lab-panel flex flex-col h-full min-h-[9rem]"
+      className="lab-panel flex flex-col h-full min-h-0 overflow-hidden"
       aria-label="Animal Chaos Feed (EM-065)"
     >
-      <div className="lab-header flex items-center justify-between gap-2">
+      {/* Slim panel header: title + live counts + EM-tag right-aligned. */}
+      <div className="lab-header flex items-center gap-2 !py-1 shrink-0">
         <span style={{ color: CHAOS_ACCENT }}>Animal Chaos Feed</span>
-        <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">
-          EM-065
-        </span>
-      </div>
-
-      {/* Summary strip */}
-      <div className="flex items-center gap-3 px-3 py-1.5 border-b border-lab-border/40 bg-lab-chrome/20">
-        <span className="font-mono text-[10px] text-lab-muted">
+        <span className="font-mono text-[10px] text-lab-muted normal-case tracking-normal tabular-nums">
           {chaos.length} animal event{chaos.length === 1 ? '' : 's'}
         </span>
         {chaoticCount > 0 && (
           <span
-            className="font-mono text-[10px] font-bold uppercase tracking-wide"
+            className="font-mono text-[10px] font-bold uppercase tracking-wide tabular-nums"
             style={{ color: CHAOS_CHAOTIC }}
           >
             {chaoticCount} chaotic
           </span>
         )}
+        <span className="ml-auto font-mono text-[10px] text-lab-dim normal-case tracking-normal">
+          EM-065
+        </span>
       </div>
 
       {/* The magenta stream — VIRTUALIZED (wave F): only the visible window
-          mounts; the spacer keeps scrollbar geometry honest at 10k+ events. */}
+          mounts; the spacer keeps scrollbar geometry honest at 10k+ events.
+          Wave G: per-kind row heights + EM-093 anchoring (scrolled-away
+          reading position survives live arrivals; "↑ N new" pin). */}
       {chaos.length === 0 ? (
         <div className="flex-1 min-h-0 overflow-y-auto">
           <div className="flex items-center justify-center h-24 px-4 text-center">
@@ -251,10 +322,12 @@ export default function AnimalChaosFeed(props: PanelProps) {
       ) : (
         <VirtualList
           items={chaos}
-          rowHeight={ROW_HEIGHT}
+          rowHeight={COMPACT_ROW_HEIGHT}
+          itemHeight={chaosRowHeight}
           itemKey={(e) => e.seq}
           ariaLabel="Animal chaos events"
           className="flex-1 min-h-0"
+          anchorNewest
           renderRow={(e) => (
             <ChaosEntry event={e} llmDecided={isLlmDecidedAction(e, llmAnimalTurns)} />
           )}

@@ -81,7 +81,10 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-lab-bg text-lab-text overflow-hidden">
+    // Wave G (EM-197): h-dvh (not h-screen/100vh) so the frame tracks the
+    // DYNAMIC viewport — the inspector annex is viewport-fit and must never
+    // gain a page scrollbar from browser-chrome height changes.
+    <div className="flex flex-col h-dvh bg-lab-bg text-lab-text overflow-hidden">
       {/* ── Header (persistent across routes) ───────────────────── */}
       <Header
         tick={world?.tick ?? 0}

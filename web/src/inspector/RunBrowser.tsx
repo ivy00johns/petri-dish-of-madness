@@ -96,8 +96,8 @@ export default function RunBrowser({ mockMode, selectedRunId, onSelectRun }: Run
   );
 
   return (
-    <section className="lab-panel flex flex-col" aria-label="Run browser (EM-086)">
-      <div className="lab-header flex items-center justify-between gap-2">
+    <section className="lab-panel flex flex-col h-full min-h-0 overflow-hidden" aria-label="Run browser (EM-086)">
+      <div className="lab-header flex items-center justify-between gap-2 !py-1 shrink-0">
         <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">Run Browser</h2>
         <span className="flex items-center gap-2 font-mono text-[10px] text-lab-dim normal-case tracking-normal">
           <span>EM-086 · archive &amp; compare</span>
@@ -164,7 +164,9 @@ export default function RunBrowser({ mockMode, selectedRunId, onSelectRun }: Run
           body="Runs appear here as the backend persists them — start the loop and this list fills in, newest first."
         />
       ) : (
-        <ul className="flex flex-col divide-y divide-lab-border overflow-y-auto max-h-[24rem]">
+        // Wave G: the list scrolls INTERNALLY inside the panel's grid cell
+        // (the old free-height max-h-[24rem] block could push the page).
+        <ul className="flex flex-col divide-y divide-lab-border overflow-y-auto flex-1 min-h-0 max-h-[24rem]">
           {runs.map((run) => (
             <RunListRow
               key={run.id}

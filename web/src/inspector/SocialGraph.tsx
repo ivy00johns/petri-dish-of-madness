@@ -302,14 +302,15 @@ export default function SocialGraph(props: PanelProps) {
   }, []);
 
   return (
-    <section className="lab-panel flex flex-col h-full min-h-[16rem]" aria-label="Social graph (EM-058)">
-      <div className="lab-header flex items-center justify-between gap-2">
+    <section className="lab-panel flex flex-col h-full min-h-0 overflow-hidden" aria-label="Social graph (EM-058)">
+      {/* Slim panel header (wave G): title + EM-tag right-aligned. */}
+      <div className="lab-header flex items-center justify-between gap-2 !py-1 shrink-0">
         <span>Social Graph</span>
         <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">EM-058</span>
       </div>
 
       {/* Readout strip: population + the relationship-type legend. */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 border-b border-lab-border">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1 border-b border-lab-border shrink-0">
         <span className="font-mono text-[10px] text-lab-muted tabular-nums">
           <span className="text-lab-text">{aliveCount}</span>
           <span className="text-lab-dim">/{nodeCount}</span> agents ·{' '}
@@ -331,7 +332,7 @@ export default function SocialGraph(props: PanelProps) {
       </div>
 
       {/* The graph surface (or an empty-but-labeled state). */}
-      <div ref={containerRef} className="relative flex-1 min-h-[12rem] bg-lab-bg overflow-hidden">
+      <div ref={containerRef} className="relative flex-1 min-h-[6rem] bg-lab-bg overflow-hidden">
         {ready ? (
           <ForceGraph2D<SocialNode, SocialEdge>
             // EM-196: force a CLEAN kapsule mount on every ready transition.

@@ -44,6 +44,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { WorldState, WorldEvent } from '../types';
 import type { PanelProps } from './types';
 import {
@@ -64,12 +65,12 @@ import { useReplayMaterials } from './useReplayMaterials';
 import { useArchiveHistory } from './useArchiveHistory';
 import type { RunRow } from './api';
 import type { RoutingHealth } from '../hooks/useRoutingHealth';
-import { ReplayScrubber } from './ReplayScrubber';
+import { ReplayScrubber, ReplayMapPanel } from './ReplayScrubber';
 import DecisionTrace from './DecisionTrace';
 import GovernanceHistory from './GovernanceHistory';
 import SocialGraph from './SocialGraph';
 import AWIDashboard from './AWIDashboard';
-import AnimalChaosFeed from './AnimalChaosFeed';
+import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
 
 interface InspectorLayoutProps {
@@ -353,10 +354,28 @@ export function InspectorLayout({
   const archiveNoSnapshots =
     archived && !replayFetching && !archive.loading && replaySnapshots.length === 0;
 
+  // ── Wave G (EM-197): empty-panel collapse signals ──────────────────────────
+  // A zero-data panel renders as a slim strip and its column siblings reclaim
+  // the space. Computed from the SAME scoped pool the panels project from.
+  const govEventCount = useMemo(
+    () => panelEvents.filter((e) => GOV_KINDS.has(e.kind)).length,
+    [panelEvents],
+  );
+  const chaosEventCount = useMemo(
+    () => panelEvents.filter((e) => isAnimalEvent(e) && e.tick <= currentTick).length,
+    [panelEvents, currentTick],
+  );
+
   return (
     // EM-082 a11y: the annex is the route's main landmark (the live route's
     // <main> is the world view inside LiveLayout).
-    <main className="flex flex-col h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
+    //
+    // Wave G (EM-197) layout law: the annex is VIEWPORT-FIT — h-dvh clamped by
+    // the app frame (max-h-full), overflow-hidden so the PAGE never scrolls at
+    // ≥1024px. Header / archive banner / status strip / scrub strip are fixed
+    // chrome; the panel grid below absorbs the remaining viewport and every
+    // panel scrolls internally.
+    <main className="flex flex-col h-dvh max-h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
       {/* Annex header */}
       <div className="lab-header flex items-center justify-between gap-2 shrink-0">
         <span>INSPECTOR · ANALYSIS ANNEX</span>
@@ -488,64 +507,196 @@ export function InspectorLayout({
         )}
       </div>
 
-      {/* Scrollable analysis body */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
-        {/* Replay scrubber drives the shared currentTick (full-width). It reads
-            the UNSCOPED merged pool: the marker rail spans the whole run, and
-            replayStateAt folds snapshot + delta internally up to currentTick. */}
-        <ErrorBoundary name="Replay Scrubber">
-          <ReplayScrubber
-            events={mergedEvents}
-            agents={effAgents}
-            profiles={profiles}
-            places={effPlaces}
-            buildings={scrubberBuildings}
-            animals={effAnimals}
-            currentTick={currentTick}
-            maxTick={maxTick}
-            snapshots={replaySnapshots}
-            onSeek={handleSeek}
-          />
-        </ErrorBoundary>
+      {/* Scrub strip — FIXED chrome (wave G): drives the shared currentTick.
+          It reads the UNSCOPED merged pool so the marker rail spans the run. */}
+      <ErrorBoundary name="Replay Scrubber">
+        <ReplayScrubber
+          events={mergedEvents}
+          currentTick={currentTick}
+          maxTick={maxTick}
+          onSeek={handleSeek}
+        />
+      </ErrorBoundary>
 
-        {/* Data panels — each re-projects AT currentTick. The 6th panel (W8) is
-            the Animal Chaos Feed: the magenta critter-mischief stream. Each
-            panel mounts inside its own ErrorBoundary (wave F, EM-151): one
-            panel crashing on hostile run data renders a labeled dead-panel
-            fallback instead of blanking the whole annex. */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 auto-rows-fr">
-          <ErrorBoundary name="Decision Trace">
-            <DecisionTrace {...panelProps} />
-          </ErrorBoundary>
-          <ErrorBoundary name="Governance History">
-            <GovernanceHistory {...panelProps} />
-          </ErrorBoundary>
-          <ErrorBoundary name="Social Graph">
-            <SocialGraph {...panelProps} />
-          </ErrorBoundary>
-          <ErrorBoundary name="AWI Dashboard">
-            <AWIDashboard {...panelProps} />
-          </ErrorBoundary>
-          <ErrorBoundary name="Animal Chaos Feed">
-            <AnimalChaosFeed {...panelProps} />
-          </ErrorBoundary>
+      {/* ── The panel grid (wave G, EM-197) ──────────────────────────────────
+          Sized to the REMAINING viewport. ≥1280px: three balanced columns —
+          [map+social+runs | trace+chaos | governance+AWI]; 1024–1279px: two
+          columns with the governance/AWI pair as a bottom band; <1024px:
+          panels stack and ONLY here may the area scroll (the small-screen
+          fallback — the app's MinWidthGate already gates this range).
+          Every panel is a cell with INTERNAL overflow; each mounts inside its
+          own ErrorBoundary (wave F, EM-151) so one crash never blanks the
+          annex. Each column is a flex stack so a collapsed empty panel's
+          space is reclaimed by its siblings. */}
+      <div
+        data-testid="inspector-grid"
+        className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3
+                   lg:grid-rows-[minmax(0,3fr)_minmax(0,2fr)] xl:grid-rows-[minmax(0,1fr)]
+                   gap-2 p-2 overflow-y-auto lg:overflow-hidden"
+      >
+        {/* Column A — replay map + social graph + run browser. */}
+        <div className="flex flex-col gap-2 min-h-0 min-w-0">
+          <PanelCell weight="lg:flex-[3]">
+            <ErrorBoundary name="Replay Map">
+              <ReplayMapPanel
+                events={mergedEvents}
+                agents={effAgents}
+                profiles={profiles}
+                places={effPlaces}
+                buildings={scrubberBuildings}
+                animals={effAnimals}
+                currentTick={currentTick}
+                maxTick={maxTick}
+                snapshots={replaySnapshots}
+              />
+            </ErrorBoundary>
+          </PanelCell>
+          <PanelCell weight="lg:flex-[4]">
+            <ErrorBoundary name="Social Graph">
+              <SocialGraph {...panelProps} />
+            </ErrorBoundary>
+          </PanelCell>
+          <PanelCell weight="lg:flex-[3]">
+            {/* W11a (EM-086): past runs, archive mode entry, cross-run AWI. */}
+            <ErrorBoundary name="Run Browser">
+              <RunBrowser
+                mockMode={mockMode}
+                selectedRunId={selectedRunId}
+                onSelectRun={setArchivedRun}
+              />
+            </ErrorBoundary>
+          </PanelCell>
         </div>
 
-        {/* W11a (EM-086): the run browser — past runs, archive mode entry, and
-            the cross-run AWI comparison. */}
-        <RunBrowser
-          mockMode={mockMode}
-          selectedRunId={selectedRunId}
-          onSelectRun={setArchivedRun}
-        />
+        {/* Column B — decision trace + the chaos feed. */}
+        <div className="flex flex-col gap-2 min-h-0 min-w-0">
+          <PanelCell weight="lg:flex-[3]">
+            <ErrorBoundary name="Decision Trace">
+              <DecisionTrace {...panelProps} />
+            </ErrorBoundary>
+          </PanelCell>
+          <CollapsibleCell
+            title="Animal Chaos Feed"
+            count={chaosEventCount}
+            empty={chaosEventCount === 0}
+            zeroNote="no critter mischief yet — the cat & dog's antics stream here"
+            weight="lg:flex-[2]"
+          >
+            <ErrorBoundary name="Animal Chaos Feed">
+              <AnimalChaosFeed {...panelProps} />
+            </ErrorBoundary>
+          </CollapsibleCell>
+        </div>
 
-        <p className="font-mono text-[10px] text-lab-dim leading-relaxed">
-          Panels compute from the backfilled event history (mock-safe; deep ticks
-          load via /api/replay). Scrub above; every panel follows the shared tick.
-          Pick a past run in the Run Browser to replay it in archive mode.
-        </p>
+        {/* Column C — governance + AWI. At the 2-column breakpoint this column
+            becomes the bottom band (spanning both columns); at ≥1280px it is
+            the third column. Stacked in BOTH cases so a collapsed governance
+            strip stays slim and AWI reclaims the full band. */}
+        <div className="flex flex-col gap-2 min-h-0 min-w-0 lg:col-span-2 xl:col-span-1">
+          <CollapsibleCell
+            title="Governance · Laws"
+            count={govEventCount}
+            empty={govEventCount === 0}
+            zeroNote="no laws yet — proposals from Town Hall appear here"
+            weight="lg:flex-[2]"
+          >
+            <ErrorBoundary name="Governance History">
+              <GovernanceHistory {...panelProps} />
+            </ErrorBoundary>
+          </CollapsibleCell>
+          <PanelCell weight="lg:flex-[3]">
+            <ErrorBoundary name="AWI Dashboard">
+              <AWIDashboard {...panelProps} />
+            </ErrorBoundary>
+          </PanelCell>
+        </div>
       </div>
     </main>
+  );
+}
+
+// ── Wave G (EM-197) layout cells ─────────────────────────────────────────────
+
+// Stacked-fallback sizing (<1024px, behind the MinWidthGate): cells take real
+// heights and the grid area page-scrolls. At ≥1024px cells are pure flex
+// shares of the viewport-bounded column (min-h-0 so internals scroll).
+const CELL_BASE =
+  'min-h-[16rem] max-h-[70vh] lg:min-h-0 lg:max-h-none min-w-0 flex flex-col';
+
+/** A fixed grid/flex cell: the panel inside scrolls internally. */
+function PanelCell({ weight, children }: { weight: string; children: ReactNode }) {
+  return <div className={`${CELL_BASE} ${weight}`}>{children}</div>;
+}
+
+// Governance lifecycle kinds — drives the empty-collapse signal.
+const GOV_KINDS = new Set<string>(['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected']);
+
+/**
+ * A cell that COLLAPSES to a slim strip while its panel has zero data
+ * (contract §G2.2): title + zero-state counts + what-would-fill-it text + an
+ * expand affordance. Collapsed, it is `shrink-0`, so flex siblings in the
+ * column reclaim its space. Data arriving auto-expands it.
+ */
+function CollapsibleCell({
+  title,
+  count,
+  empty,
+  zeroNote,
+  weight,
+  children,
+}: {
+  title: string;
+  count: number;
+  empty: boolean;
+  zeroNote: string;
+  weight: string;
+  children: ReactNode;
+}) {
+  const [forcedOpen, setForcedOpen] = useState(false);
+  const collapsed = empty && !forcedOpen;
+
+  if (collapsed) {
+    return (
+      <div
+        role="region"
+        aria-label={`${title} (empty, collapsed)`}
+        className="shrink-0 min-w-0 flex items-center gap-2 px-2 py-1 lab-panel"
+      >
+        <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-lab-muted whitespace-nowrap">
+          {title}
+        </span>
+        <span className="font-mono text-[10px] text-lab-dim tabular-nums shrink-0">{count}</span>
+        <span className="font-mono text-[10px] text-lab-dim truncate min-w-0" title={zeroNote}>
+          {zeroNote}
+        </span>
+        <button
+          type="button"
+          onClick={() => setForcedOpen(true)}
+          aria-expanded={false}
+          aria-label={`Expand the empty ${title} panel`}
+          className="ml-auto shrink-0 font-mono text-[9px] font-bold uppercase tracking-wider px-1.5 py-px border border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid transition-colors cursor-pointer"
+        >
+          ▸ expand
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${CELL_BASE} ${weight}`}>
+      {empty && forcedOpen && (
+        <button
+          type="button"
+          onClick={() => setForcedOpen(false)}
+          aria-expanded={true}
+          aria-label={`Collapse the empty ${title} panel`}
+          className="shrink-0 font-mono text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 border border-lab-border bg-lab-surface text-lab-muted hover:border-lab-acid hover:text-lab-acid transition-colors cursor-pointer text-left"
+        >
+          ▾ collapse empty panel — {title}
+        </button>
+      )}
+      <div className="flex-1 min-h-0 min-w-0 flex flex-col">{children}</div>
+    </div>
   );
 }
 

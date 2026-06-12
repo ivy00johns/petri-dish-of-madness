@@ -108,10 +108,14 @@ export default function DecisionTrace({ events, agents, profiles, currentTick, h
   );
 
   return (
-    <section className="lab-panel flex flex-col h-full min-h-[24rem]" aria-label="Decision trace (EM-056)">
-      <div className="lab-header flex items-center justify-between gap-2">
+    <section className="lab-panel flex flex-col h-full min-h-0 overflow-hidden" aria-label="Decision trace (EM-056)">
+      {/* Slim panel header (wave G): title + live count + EM-tag right-aligned. */}
+      <div className="lab-header flex items-center gap-2 !py-1 shrink-0">
         <span>Decision Trace</span>
-        <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">EM-056</span>
+        <span className="font-mono text-[10px] text-lab-muted normal-case tracking-normal tabular-nums">
+          {turns.length} turn{turns.length === 1 ? '' : 's'}
+        </span>
+        <span className="ml-auto font-mono text-[10px] text-lab-dim normal-case tracking-normal">EM-056</span>
       </div>
 
       {turns.length === 0 ? (
@@ -128,12 +132,14 @@ export default function DecisionTrace({ events, agents, profiles, currentTick, h
         )
       ) : (
         <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,11rem)_minmax(0,1fr)]">
-          {/* ── LEFT: recent-turn list (virtualized, wave F) ───────────────── */}
+          {/* ── LEFT: recent-turn list (virtualized wave F; wave G adds the
+              EM-093 anchoring so live turns never shift a scrolled rail) ──── */}
           <VirtualList
             items={turns}
             rowHeight={TURN_ROW_HEIGHT}
             itemKey={(t) => t.turnId}
             ariaLabel="Recent turns"
+            anchorNewest
             className="min-h-0 md:max-h-none max-h-40 border-b md:border-b-0 md:border-r border-lab-border"
             renderRow={(t) => {
               const color =
