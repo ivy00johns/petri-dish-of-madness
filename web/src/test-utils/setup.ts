@@ -20,6 +20,23 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
   globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 }
 
+// matchMedia — uPlot (AWIDashboard's chart lib) calls it at MODULE LOAD to
+// track devicePixelRatio; jsdom doesn't implement it. A static no-op MQL is
+// enough (wave F: the InspectorLayout render tests import the full panel
+// grid, which pulls uPlot in).
+if (typeof globalThis.matchMedia === 'undefined') {
+  globalThis.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof globalThis.matchMedia;
+}
+
 // jsdom raises "Not implemented" for canvas 2D contexts; the components under
 // test all null-guard, so return null quietly.
 HTMLCanvasElement.prototype.getContext = vi.fn(

@@ -126,6 +126,7 @@ export default function App() {
                 history={sim.history}
                 historyLoading={sim.historyLoading}
                 historyTruncated={sim.historyTruncated}
+                historyTotal={sim.historyTotal}
                 mockMode={sim.mockMode}
                 onSeekTick={sim.seekTick}
                 routingHealth={routingHealth}

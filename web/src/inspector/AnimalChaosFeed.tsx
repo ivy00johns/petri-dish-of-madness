@@ -32,7 +32,24 @@ import { useMemo } from 'react';
 import type { PanelProps } from './types';
 import type { WorldEvent } from '../types';
 import { llmDecidedAnimalTurns, isLlmDecidedAction } from '../lib/animalIdentity';
+import { VirtualList } from './VirtualList';
 import './inspector-tokens.css';
+
+// Wave F (EM-194): the stream is VIRTUALIZED — only the visible window mounts
+// as DOM rows (a 10k-event chaos stream used to mount 10k nodes). Fixed-height
+// rows are the windowing contract — but the dialogue still reads INLINE (the
+// user-requested behavior, commit 99f3822): the thought gets up to TWO clamped
+// lines, the consequence one. Full text still rides the title attributes.
+//
+// Measured from the row's composition (uniform-height contract):
+//   py-2 padding            16px  (8 top + 8 bottom)
+//   gap-1 × 2               8px
+//   name/action row        ~18px  (text-xs glyph line-height 16 + badge chrome)
+//   thought, 2 lines       ~36px  (11px × leading-relaxed 1.625 × 2 = 35.75)
+//   consequence, 1 line    ~17px  (10px × 1.625 = 16.25)
+//   ───────────────────────────
+//                          ~95px  → 96 (a hair of slack for emoji glyph height)
+export const ROW_HEIGHT = 96;
 
 // The magenta chaos register, pulled from the shared marker token so it stays in
 // lockstep with the replay timeline + main-feed critter border. Dynamic var() in
@@ -105,8 +122,8 @@ function ChaosEntry({ event, llmDecided = false }: ChaosEntryProps) {
   const chaotic = event.is_chaotic === true;
 
   return (
-    <li
-      className="flex flex-col gap-1 px-3 py-2 border-b border-lab-border/40"
+    <div
+      className="flex flex-col gap-1 px-3 py-2 h-full border-b border-lab-border/40 overflow-hidden"
       style={{
         borderLeft: `3px solid ${chaotic ? CHAOS_CHAOTIC : CHAOS_ACCENT}`,
         background: chaotic ? 'var(--chaos-surface)' : undefined,
@@ -148,18 +165,26 @@ function ChaosEntry({ event, llmDecided = false }: ChaosEntryProps) {
         </span>
       </div>
 
-      {/* Beat 1 — the in-character thought (the joke's setup). */}
+      {/* Beat 1 — the in-character thought (the joke's setup). Up to TWO
+          clamped lines so the dialogue reads inline (fixed-row windowing);
+          the full thought still rides the title for overflow. */}
       {thought && (
-        <p className="font-mono text-[11px] italic text-lab-text leading-relaxed">
+        <p
+          className="font-mono text-[11px] italic text-lab-text leading-relaxed line-clamp-2"
+          title={thought}
+        >
           “{thought}”
         </p>
       )}
 
       {/* Beat 3 — the consequence (the feed line; the funny payoff). */}
-      <p className="font-mono text-[10px] text-lab-muted leading-relaxed break-words">
+      <p
+        className="font-mono text-[10px] text-lab-muted leading-relaxed truncate"
+        title={event.text ?? `[${event.kind}]`}
+      >
         {event.text ?? `[${event.kind}]`}
       </p>
-    </li>
+    </div>
   );
 }
 
@@ -211,9 +236,10 @@ export default function AnimalChaosFeed(props: PanelProps) {
         )}
       </div>
 
-      {/* The magenta stream */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {chaos.length === 0 ? (
+      {/* The magenta stream — VIRTUALIZED (wave F): only the visible window
+          mounts; the spacer keeps scrollbar geometry honest at 10k+ events. */}
+      {chaos.length === 0 ? (
+        <div className="flex-1 min-h-0 overflow-y-auto">
           <div className="flex items-center justify-center h-24 px-4 text-center">
             <span className="font-mono text-[10px] text-lab-muted leading-relaxed">
               {historyLoading === true && events.length === 0
@@ -221,14 +247,19 @@ export default function AnimalChaosFeed(props: PanelProps) {
                 : 'No critter mischief at this tick — the cat and dog haven’t acted yet.'}
             </span>
           </div>
-        ) : (
-          <ul className="flex flex-col">
-            {chaos.map((e) => (
-              <ChaosEntry key={e.seq} event={e} llmDecided={isLlmDecidedAction(e, llmAnimalTurns)} />
-            ))}
-          </ul>
-        )}
-      </div>
+        </div>
+      ) : (
+        <VirtualList
+          items={chaos}
+          rowHeight={ROW_HEIGHT}
+          itemKey={(e) => e.seq}
+          ariaLabel="Animal chaos events"
+          className="flex-1 min-h-0"
+          renderRow={(e) => (
+            <ChaosEntry event={e} llmDecided={isLlmDecidedAction(e, llmAnimalTurns)} />
+          )}
+        />
+      )}
     </section>
   );
 }

@@ -129,8 +129,24 @@ export interface EventsQuery {
   turnId?: string;
   /** Keyset pagination: rows with seq > afterSeq. */
   afterSeq?: number;
+  /**
+   * Wave F (EM-194): TAIL keyset pagination — rows with seq < beforeSeq,
+   * paired with order:'desc' (rows newest-first). Mirror of afterSeq/asc.
+   */
+  beforeSeq?: number;
   limit?: number;
   order?: 'asc' | 'desc';
+}
+
+/**
+ * Wave F (EM-194): GET /api/events/stats — the run's event-log shape, so the
+ * client can size the backfill and show honest progress ("12,000 / 99,140").
+ */
+export interface EventStats {
+  total: number;
+  max_seq: number;
+  max_tick: number;
+  min_seq: number;
 }
 
 /** Query params accepted by GET /api/relationships. */
@@ -251,6 +267,7 @@ function eventsPath(query: EventsQuery): string {
     actor_id: query.actorId,
     turn_id: query.turnId,
     after_seq: query.afterSeq,
+    before_seq: query.beforeSeq,
     limit: query.limit,
     order: query.order,
   })}`;
@@ -291,6 +308,29 @@ export const inspectorApi = {
   /** GET /api/events — query the append-only log (keyset-paginatable). */
   async events(query: EventsQuery = {}): Promise<EventRow[]> {
     return asArray<EventRow>(await getJson<unknown>(eventsPath(query), []));
+  },
+
+  /**
+   * Wave F (EM-194): GET /api/events/stats [?run_id] — cheap COUNT/MAX over
+   * the run's event log. `null` on any failure (no backend / pre-F1 backend),
+   * so callers degrade to "no progress figure" instead of a fake zero.
+   */
+  async eventStats(runId?: number): Promise<EventStats | null> {
+    const data = await getJsonOrNull(`/api/events/stats${qs({ run_id: runId })}`);
+    if (!isObject(data)) return null;
+    const total = data.total;
+    const maxSeq = data.max_seq;
+    const maxTick = data.max_tick;
+    const minSeq = data.min_seq;
+    if (
+      typeof total !== 'number' ||
+      typeof maxSeq !== 'number' ||
+      typeof maxTick !== 'number' ||
+      typeof minSeq !== 'number'
+    ) {
+      return null;
+    }
+    return { total, max_seq: maxSeq, max_tick: maxTick, min_seq: minSeq };
   },
 
   /**

@@ -59,6 +59,11 @@ overlap-free and exhaustive; asc path unchanged; suite green.
 useReplayMaterials, panels), `web/src/types/index.ts` (additive),
 api client, new `web/src/inspector/ErrorBoundary.tsx`, matching tests.
 NOT world3d/, NOT the live-page EventFeed (its 200-cap is fine).
+Ratified v1.1: one-line `App.tsx` wiring (historyTotal → InspectorLayout) and
+an additive guarded matchMedia stub in `test-utils/setup.ts`.
+GovernanceHistory exempted from virtualization (bounded by rule count, not
+event volume). Chaos-feed rows fixed at 96px so critter dialogue stays
+inline at two lines (preserves the 99f3822 behavior).
 
 1. **Tail-first boot:** load the newest chunk FIRST (F1 desc tail) and render
    immediately; backfill older chunks in the background with visible progress

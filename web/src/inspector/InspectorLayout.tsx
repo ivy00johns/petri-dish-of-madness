@@ -48,13 +48,18 @@ import type { WorldState, WorldEvent } from '../types';
 import type { PanelProps } from './types';
 import {
   maxTick as selectMaxTick,
-  replayStateAt,
   activeRuleCount,
   dayAt,
-  agentEconomyAt,
   archiveAgents,
 } from './selectors';
 import type { ReplaySnapshot } from './selectors';
+import {
+  createEconomyProjector,
+  createReplayProjector,
+  shouldEngageReplayMaterials,
+} from './projections';
+import type { EconomyProjector, ReplayProjector } from './projections';
+import { ErrorBoundary } from './ErrorBoundary';
 import { useReplayMaterials } from './useReplayMaterials';
 import { useArchiveHistory } from './useArchiveHistory';
 import type { RunRow } from './api';
@@ -76,6 +81,12 @@ interface InspectorLayoutProps {
   historyLoading?: boolean;
   /** True when older events were dropped at the memory cap (EM-069). */
   historyTruncated?: boolean;
+  /**
+   * Wave F (EM-194): the run's TOTAL event count (GET /api/events/stats) —
+   * drives the backfill progress label and the cap-honesty notice
+   * ("showing the newest 50,000 of 99,140"). null/absent = unknown.
+   */
+  historyTotal?: number | null;
   mockMode: boolean;
   /**
    * Live seek into the deep-replay window (frontend-inspector.md v1.1.0 §3):
@@ -92,10 +103,20 @@ export function InspectorLayout({
   history,
   historyLoading = false,
   historyTruncated = false,
+  historyTotal = null,
   mockMode,
   onSeekTick,
   routingHealth,
 }: InspectorLayoutProps) {
+  // Wave F (EM-194): incremental scrub projectors — persistent fold cursors
+  // (created once per mount) so a scrub step folds only the events BETWEEN the
+  // two ticks instead of re-running the full O(n) selectors. Results are equal
+  // to the full folds by construction (they share the selector fold steps).
+  const projectorsRef = useRef<{ economy: EconomyProjector; replay: ReplayProjector } | null>(null);
+  if (projectorsRef.current === null) {
+    projectorsRef.current = { economy: createEconomyProjector(), replay: createReplayProjector() };
+  }
+  const projectors = projectorsRef.current;
   const agents = useMemo(() => world?.agents ?? [], [world]);
   const profiles = useMemo(() => world?.profiles ?? [], [world]);
   const places = useMemo(
@@ -186,12 +207,18 @@ export function InspectorLayout({
   const projecting = scrubbed || archived;
 
   // ── Deep replay (v1.1.0 §2): /api/replay when history can't project ────────
-  // Live: only when the client history is unfaithful (loading / truncated).
-  // Archived: always — the run's snapshots are the ONLY geometry source
-  // (EM-086 note 2: past-run places come from snapshot state_json).
-  const needsReplayMaterials = archived
-    ? !mockMode
-    : !mockMode && scrubbed && (historyLoading || historyTruncated);
+  // Live: only when the client history is unfaithful (loading / truncated —
+  // wave F cap-honesty: a pre-cap scrub range must engage snapshot+delta,
+  // never project from a hole). Archived: always — the run's snapshots are
+  // the ONLY geometry source (EM-086 note 2: past-run places come from
+  // snapshot state_json). Extracted pure (projections.ts) and unit-tested.
+  const needsReplayMaterials = shouldEngageReplayMaterials({
+    mockMode,
+    archived,
+    scrubbed,
+    historyLoading,
+    historyTruncated,
+  });
   const { materials: replay, fetching: replayFetching } = useReplayMaterials(
     needsReplayMaterials,
     currentTick,
@@ -226,10 +253,12 @@ export function InspectorLayout({
   // state folded from snapshot + construction events at tick T (replayStateAt
   // owns the fold; the live roster contributes display metadata only). In
   // archive mode the frame is ALWAYS computed (snapshot-sourced geometry).
+  // Wave F: computed via the INCREMENTAL projector — a scrub step folds only
+  // the events between the two ticks (equal to the full replayStateAt fold).
   const scrubFrame = useMemo(
     () =>
       projecting
-        ? replayStateAt(
+        ? projectors.replay.at(
             mergedEvents,
             replaySnapshots,
             currentTick,
@@ -239,6 +268,7 @@ export function InspectorLayout({
             effAnimals,
           )
         : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [projecting, mergedEvents, replaySnapshots, currentTick, effAgents, effPlaces, effBuildings, effAnimals],
   );
   const scrubberBuildings = scrubFrame ? scrubFrame.buildings : effBuildings;
@@ -251,20 +281,29 @@ export function InspectorLayout({
   // target-side economy transfers are not per-agent evented, so agents WITHOUT
   // a turn_start in the scoped window keep their live values and the panels
   // mark the economy figures approximate ("~", with an explanatory title).
+  // Wave F: incremental projector — equal to agentEconomyAt(panelEvents)
+  // (the scoped fold), but a scrub step folds only the tick delta.
   const economyAtTick = useMemo(
-    () => (projecting ? agentEconomyAt(panelEvents) : null),
-    [projecting, panelEvents],
+    () => (projecting ? projectors.economy.at(mergedEvents, currentTick) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projecting, mergedEvents, currentTick],
   );
+
+  // Death ticks depend only on the merged pool — computed once per history
+  // change, NOT per scrub step (wave F: keep the scrub hot path O(delta)).
+  const deathTick = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of mergedEvents) {
+      if (e.kind === 'agent_died' && e.actor_id) m.set(e.actor_id, e.tick);
+    }
+    return m;
+  }, [mergedEvents]);
 
   // C8: agents re-projected at the scrub tick (alive recomputed from deaths,
   // energy/credits from turn samples) so live-edge state doesn't read back
   // into the past.
   const panelAgents = useMemo(() => {
     if (!projecting) return effAgents;
-    const deathTick = new Map<string, number>();
-    for (const e of mergedEvents) {
-      if (e.kind === 'agent_died' && e.actor_id) deathTick.set(e.actor_id, e.tick);
-    }
     return effAgents.map((a) => {
       const died = deathTick.get(a.id);
       const alive = died === undefined ? a.alive : currentTick < died;
@@ -277,7 +316,7 @@ export function InspectorLayout({
         credits: eco ? eco.credits : a.credits,
       };
     });
-  }, [effAgents, mergedEvents, projecting, currentTick, economyAtTick]);
+  }, [effAgents, deathTick, projecting, currentTick, economyAtTick]);
 
   // True when ≥1 agent's scrubbed energy/credits fell back to live values.
   const agentsApproximate =
@@ -337,7 +376,20 @@ export function InspectorLayout({
             live feed disabled — panels show only this run
           </span>
           {archive.loading && (
-            <span className="font-mono text-[10px] text-lab-acid">loading run history…</span>
+            <span className="font-mono text-[10px] text-lab-acid">
+              loading run history…
+              {archive.total !== null &&
+                ` ${archive.events.length.toLocaleString()} / ${archive.total.toLocaleString()} events`}
+            </span>
+          )}
+          {archive.truncated && !archive.loading && archive.total !== null && (
+            <span
+              className="font-mono text-[10px] font-bold text-lab-warn"
+              title="The run is larger than the in-memory page cap; the newest events are shown. Scrubbed ticks beyond the window load via /api/replay."
+            >
+              showing the newest {archive.events.length.toLocaleString()} of{' '}
+              {archive.total.toLocaleString()} events
+            </span>
           )}
           {archive.failed && (
             <span className="font-mono text-[10px] font-bold text-lab-warn">
@@ -399,7 +451,11 @@ export function InspectorLayout({
         )}
         {effHistoryLoading && (
           <span className="font-mono text-[10px] font-bold px-2 py-0.5 border border-lab-border-bright text-lab-muted">
-            HISTORY LOADING…
+            {/* Wave F (EM-194): honest tail-first progress — newest events
+                render first; the figure tracks the background backfill. */}
+            {!archived && historyTotal !== null
+              ? `BACKFILLING ${history.length.toLocaleString()} / ${historyTotal.toLocaleString()} EVENTS…`
+              : 'HISTORY LOADING…'}
           </span>
         )}
         {!archived && historyTruncated && (
@@ -407,7 +463,9 @@ export function InspectorLayout({
             className="font-mono text-[10px] font-bold px-2 py-0.5 border border-lab-warn text-lab-warn"
             title="Older events were dropped at the in-memory history cap; scrubbed ticks beyond the window load via /api/replay."
           >
-            HISTORY TRUNCATED — OLDEST EVENTS VIA REPLAY
+            {historyTotal !== null && historyTotal > history.length
+              ? `SHOWING THE NEWEST ${history.length.toLocaleString()} OF ${historyTotal.toLocaleString()} — OLDER TICKS VIA REPLAY`
+              : 'HISTORY TRUNCATED — OLDEST EVENTS VIA REPLAY'}
           </span>
         )}
         {replayFetching && (
@@ -435,27 +493,42 @@ export function InspectorLayout({
         {/* Replay scrubber drives the shared currentTick (full-width). It reads
             the UNSCOPED merged pool: the marker rail spans the whole run, and
             replayStateAt folds snapshot + delta internally up to currentTick. */}
-        <ReplayScrubber
-          events={mergedEvents}
-          agents={effAgents}
-          profiles={profiles}
-          places={effPlaces}
-          buildings={scrubberBuildings}
-          animals={effAnimals}
-          currentTick={currentTick}
-          maxTick={maxTick}
-          snapshots={replaySnapshots}
-          onSeek={handleSeek}
-        />
+        <ErrorBoundary name="Replay Scrubber">
+          <ReplayScrubber
+            events={mergedEvents}
+            agents={effAgents}
+            profiles={profiles}
+            places={effPlaces}
+            buildings={scrubberBuildings}
+            animals={effAnimals}
+            currentTick={currentTick}
+            maxTick={maxTick}
+            snapshots={replaySnapshots}
+            onSeek={handleSeek}
+          />
+        </ErrorBoundary>
 
         {/* Data panels — each re-projects AT currentTick. The 6th panel (W8) is
-            the Animal Chaos Feed: the magenta critter-mischief stream. */}
+            the Animal Chaos Feed: the magenta critter-mischief stream. Each
+            panel mounts inside its own ErrorBoundary (wave F, EM-151): one
+            panel crashing on hostile run data renders a labeled dead-panel
+            fallback instead of blanking the whole annex. */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 auto-rows-fr">
-          <DecisionTrace {...panelProps} />
-          <GovernanceHistory {...panelProps} />
-          <SocialGraph {...panelProps} />
-          <AWIDashboard {...panelProps} />
-          <AnimalChaosFeed {...panelProps} />
+          <ErrorBoundary name="Decision Trace">
+            <DecisionTrace {...panelProps} />
+          </ErrorBoundary>
+          <ErrorBoundary name="Governance History">
+            <GovernanceHistory {...panelProps} />
+          </ErrorBoundary>
+          <ErrorBoundary name="Social Graph">
+            <SocialGraph {...panelProps} />
+          </ErrorBoundary>
+          <ErrorBoundary name="AWI Dashboard">
+            <AWIDashboard {...panelProps} />
+          </ErrorBoundary>
+          <ErrorBoundary name="Animal Chaos Feed">
+            <AnimalChaosFeed {...panelProps} />
+          </ErrorBoundary>
         </div>
 
         {/* W11a (EM-086): the run browser — past runs, archive mode entry, and

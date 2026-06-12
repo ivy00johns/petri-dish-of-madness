@@ -42,6 +42,13 @@ export interface SimulationState {
    * stopped early) — older events exist on the backend but not in memory.
    */
   historyTruncated: boolean;
+  /**
+   * Wave F (EM-194): the run's TOTAL event count from GET /api/events/stats,
+   * fetched before the backfill starts. Drives the honest backfill progress
+   * ("12,000 / 99,140 events") and the cap-honesty notice ("showing the
+   * newest 50,000 of 99,140"). `null` = unknown (mock mode / no backend).
+   */
+  historyTotal: number | null;
   /** Latest tick observed (the inspector scrubber's right edge). */
   maxTick: number;
   connected: boolean;
@@ -96,6 +103,7 @@ export function useSimulation(): SimulationState & SimulationControls {
   const [mockMode, setMockMode] = useState(MOCK_MODE);
   const [historyLoading, setHistoryLoading] = useState(!MOCK_MODE);
   const [historyTruncated, setHistoryTruncated] = useState(false);
+  const [historyTotal, setHistoryTotal] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const mockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mockSpeedRef = useRef<number>(2000);
@@ -133,6 +141,23 @@ export function useSimulation(): SimulationState & SimulationControls {
     });
   }, []);
 
+  // Wave F (EM-194): APPEND older events (the tail-first backfill's background
+  // pages arrive newest→oldest, each page itself newest-first). De-duped on
+  // seq against WS arrivals; same cap + truncation semantics as pushHistory.
+  const appendHistory = useCallback((incoming: WorldEvent[]) => {
+    if (incoming.length === 0) return;
+    setHistory(prev => {
+      const seen = new Set(prev.map(e => e.seq));
+      const fresh = incoming.filter(e => !seen.has(e.seq));
+      if (fresh.length === 0) return prev;
+      const merged = [...prev, ...fresh];
+      if (merged.length <= MAX_HISTORY) return merged;
+      setHistoryTruncated(true);
+      merged.sort((a, b) => b.seq - a.seq);
+      return merged.slice(0, MAX_HISTORY);
+    });
+  }, []);
+
   // ── Live-feed seeding (EM-088) ─────────────────────────────────────────────
   // A page refresh mid-run used to start the `/` feed empty (it only
   // accumulated from WS connect). The backfill below now ALSO seeds the feed:
@@ -157,31 +182,65 @@ export function useSimulation(): SimulationState & SimulationControls {
     });
   }, []);
 
-  // ── Backfill on mount (EM-069 / frontend-inspector.md v1.1.0 §1) ───────────
-  // Live mode seeds the history from GET /api/events, keyset-paginated via
-  // after_seq ascending until exhausted (or the memory cap), merged with the WS
-  // rolling history deduped by seq. Degrades silently when there is no backend
-  // (inspectorApi resolves to []), so mock-fallback runs are unaffected.
+  // ── Backfill on mount (EM-069 → wave F EM-194: TAIL-FIRST) ─────────────────
+  // Live mode seeds the history from GET /api/events. Wave F inverts the page
+  // order so a long run renders immediately instead of paging ~50 chunks to
+  // exhaustion first:
+  //   1. GET /api/events/stats sizes the run (total drives the progress label
+  //      and the cap-honesty notice; null-tolerant for pre-F1 backends).
+  //   2. The NEWEST chunk loads first (order=desc) and renders — the annex is
+  //      interactive after chunk one.
+  //   3. Older chunks backfill in the BACKGROUND (before_seq keyset, newest→
+  //      oldest), appended behind the newest page, until exhausted or the
+  //      MAX_HISTORY memory cap (newest events win; truncation labeled).
+  // Merged with the WS rolling history deduped by seq throughout. Degrades
+  // silently when there is no backend (inspectorApi resolves to []), so
+  // mock-fallback runs are unaffected.
   useEffect(() => {
     if (MOCK_MODE) return;
     let cancelled = false;
     (async () => {
       try {
-        let afterSeq = 0;
+        // 1) Size the run first — honest progress needs the real total.
+        const stats = await inspectorApi.eventStats();
+        if (cancelled) return;
+        if (stats) {
+          setHistoryTotal(stats.total);
+          // More events exist than the memory cap can hold: say so up front
+          // (the backfill below will stop at the cap regardless).
+          if (stats.total > MAX_HISTORY) setHistoryTruncated(true);
+        }
+
+        // 2) Newest chunk first → first render before any older page lands.
+        let beforeSeq: number | undefined = undefined;
         let fetched = 0;
+        let firstPage = true;
         for (;;) {
-          const rows = await inspectorApi.events({
-            afterSeq,
-            order: 'asc',
-            limit: BACKFILL_CHUNK,
-          });
+          const rows: Awaited<ReturnType<typeof inspectorApi.events>> =
+            await inspectorApi.events({
+              beforeSeq,
+              order: 'desc',
+              limit: BACKFILL_CHUNK,
+            });
           if (cancelled) return;
           if (rows.length === 0) break;
+          const oldestSeq = rows[rows.length - 1].seq;
+          // Keyset-progress guard: a backend that ignored before_seq/desc
+          // would resend the same page forever — stop instead of spinning.
+          if (beforeSeq !== undefined && oldestSeq >= beforeSeq) break;
           const mapped = rows.map(eventRowToWorldEvent);
-          pushHistory(mapped);
-          // EM-088: the same pages seed the live feed (newest 200 by seq win).
-          pushFeed(mapped);
-          afterSeq = rows[rows.length - 1].seq;
+          if (firstPage) {
+            // Newest page: prepend (it is newer than nothing yet; WS arrivals
+            // dedupe by seq) and seed the live feed (newest 200 by seq win,
+            // EM-088 — one ≥200-row newest page fully covers the feed cap).
+            pushHistory(mapped);
+            pushFeed(mapped);
+            firstPage = false;
+          } else {
+            // 3) Older background pages: append behind what is already shown.
+            appendHistory(mapped);
+          }
+          beforeSeq = oldestSeq;
           fetched += rows.length;
           if (fetched >= MAX_HISTORY) {
             // More may exist beyond the memory cap; stop and label it.
@@ -197,7 +256,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     return () => {
       cancelled = true;
     };
-  }, [pushHistory, pushFeed]);
+  }, [pushHistory, appendHistory, pushFeed]);
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
 
@@ -414,6 +473,8 @@ export function useSimulation(): SimulationState & SimulationControls {
     setEvents([]);
     setHistory([]);
     setHistoryTruncated(false);
+    // The stats total described the OLD run; the fresh run starts unknown.
+    setHistoryTotal(null);
     if (mockMode) {
       stopMockLoop();
       const fresh = mockControls.reset();
@@ -563,6 +624,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     history,
     historyLoading,
     historyTruncated,
+    historyTotal,
     maxTick,
     connected,
     mockMode,
