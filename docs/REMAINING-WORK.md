@@ -282,7 +282,10 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-195 | P3 | — | frontend | qe wave-F | Inspector scrub residuals: panelEvents gets a fresh identity per scrub tick so the non-projector panel selectors (turnIds/turnTrace, governance, socialGraph) still re-sort+re-fold the scoped slice each tick (the WeakMap ascending cache misses); also a WS event older than the history head arriving mid-backfill sits positionally misplaced until the cap trim (fold correctness unaffected — selectors sort). Extend the wave-F projector pattern to the remaining panels + insert-sorted WS merge | open | — |
 
-_Next free ID: EM-196._
+| EM-196 | P1 | W18 | frontend | user 2026-06-12 | Social graph renders as a broken white box (regression, B6 bd780e8): useResolvedTokens reads CSS vars in a useState initializer — '' resolution makes force-graph skip the canvas background (transparent over OS white) and a react-kapsule StrictMode stale-canvas adds the broken-image artifact + dead paint loop. Fix: literal hex fallbacks on every canvas token read + key-based remount on ready transition | open | — |
+| EM-197 | P1 | W18 | frontend | user 2026-06-12 + ui-ux-pro-max | Inspector layout redesign — viewport-fit data-dense dashboard: the annex is one infinite vertical page (empty governance owns a full tall column, 26-row structures list, oversized fixed chaos rows, unbalanced two-column stacks leaving screenfuls of blank space) and live events push content out from under the reader. Target: h-dvh grid, panels scroll INTERNALLY, empty panels collapse to slim strips, variable-height windowing kills dead row space, scroll anchoring so new entries never move the reading position (EM-093 pattern) | open | — |
+
+_Next free ID: EM-198._
 
 ## Notes
 
