@@ -171,6 +171,18 @@ add, e.g., `usage_sampled`, `structure_state_changed`, `project_proposed`,
 The registry of kind→payload lives here and grows per wave; consumers default-render
 unknown kinds with the generic feed line.
 
+Wave E kinds (contracts/wave-e.md):
+
+- `relationship_changed` (B1 / EM-113) — emitted ONLY on relationship TYPE
+  transitions (reflex friend/feud shifts after a trust mutation, or an accepted
+  `set_relationship` type change), riding the triggering action's `_multi`
+  chain (same turn_id). `actor_id` = the relationship's owner, `target_id` =
+  the other agent — both AGENT ids only (EM-141: the social-graph selector
+  drops non-agent endpoints). Payload:
+  `{from_type, to_type, trust, since_tick}` where `to_type` ∈
+  `neutral|ally|friend|rival|enemy|partner|family|mentor|feud` and
+  `since_tick` is the tick the type changed.
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:

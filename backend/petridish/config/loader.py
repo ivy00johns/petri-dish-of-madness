@@ -91,6 +91,15 @@ world:
   # alert-only (byte-identical pre-D3 behavior).
   cap_governor:
     enabled: true
+  # Wave E / EM-113 — relationship-depth thresholds (reflex friend/feud
+  # transitions + the partner declaration gate). MUST stay in sync with
+  # config/world.yaml. No `enabled` flag by design: thresholds only fire on
+  # NEW trust mutations, so pre-E snapshots restore byte-identical.
+  relationships:
+    friend_trust: 30
+    friend_interactions: 5
+    feud_trust: -40
+    partner_trust_threshold: 40
   # Wave D2 / EM-159+160 — background-tier salience gating + spontaneity floor.
   # MUST stay in sync with config/world.yaml. Agent entries may also carry an
   # optional `cadence_tier: protagonist|supporting|background` (EM-158).
@@ -404,6 +413,29 @@ class CapGovernorParams:
 
 
 @dataclass
+class RelationshipParams:
+    """Wave E / EM-113 — relationship-depth thresholds (config
+    `world.relationships`). The engine reads this block via its defensive
+    _rel_param accessor with IDENTICAL defaults, so an absent block behaves
+    exactly like these values. NO `enabled` flag by design: the thresholds
+    only fire on NEW trust mutations, so pre-E snapshots restore
+    byte-identical without one.
+
+      friend_trust            — neutral|ally flips to friend at trust >= this
+                                (AND interactions >= friend_interactions).
+      friend_interactions     — minimum interaction count for the friend flip.
+      feud_trust              — rival|enemy hardens into feud at trust <= this.
+      partner_trust_threshold — set_relationship `partner` requires the
+                                declarer's trust toward the target >= this;
+                                are_partners() requires BOTH directions >= it.
+    """
+    friend_trust: int = 30
+    friend_interactions: int = 5
+    feud_trust: int = -40
+    partner_trust_threshold: int = 40
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -522,6 +554,10 @@ class WorldParams:
     # defaults (default ON); `enabled: false` keeps usage alerts alert-only
     # (byte-identical pre-D3 behavior).
     cap_governor: CapGovernorParams = field(default_factory=CapGovernorParams)
+    # Wave E / EM-113 — relationship-depth thresholds. Additive with
+    # engine-matching defaults; thresholds only fire on NEW trust mutations,
+    # so a world.yaml without the block restores pre-E snapshots byte-identical.
+    relationships: RelationshipParams = field(default_factory=RelationshipParams)
 
 
 @dataclass
@@ -829,6 +865,29 @@ def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
     return CapGovernorParams(enabled=bool(raw.get("enabled", d.enabled)))
 
 
+def _parse_relationships(raw: dict | None) -> RelationshipParams:
+    """Parse the optional `world.relationships` block (Wave E / EM-113).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back
+    to its default individually (a malformed value never breaks the block)."""
+    if not isinstance(raw, dict):
+        return RelationshipParams()
+    d = RelationshipParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return RelationshipParams(
+        friend_trust=_int("friend_trust", d.friend_trust),
+        friend_interactions=_int("friend_interactions", d.friend_interactions),
+        feud_trust=_int("feud_trust", d.feud_trust),
+        partner_trust_threshold=_int(
+            "partner_trust_threshold", d.partner_trust_threshold),
+    )
+
+
 # Wave D2 / EM-158 — valid agent cadence tiers (mirrors World.CADENCE_TIERS;
 # kept literal here so the loader stays engine-import-free).
 _VALID_CADENCE_TIERS = ("protagonist", "supporting", "background")
@@ -906,6 +965,7 @@ def _parse_world(
         cadence=_parse_cadence(w.get("cadence")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
+        relationships=_parse_relationships(w.get("relationships")),
     )
 
     places = [

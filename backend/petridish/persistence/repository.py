@@ -215,7 +215,9 @@ class SQLiteRepository:
                 a.energy, a.credits, a.mood, int(a.alive), a.zero_energy_turns,
                 json.dumps(a.beliefs),
                 json.dumps({
-                    aid: {"type": r.type, "trust": r.trust, "interactions": r.interactions}
+                    # Wave E / EM-113 — since_tick is additive (absent ⇒ 0).
+                    aid: {"type": r.type, "trust": r.trust,
+                          "interactions": r.interactions, "since_tick": r.since_tick}
                     for aid, r in a.relationships.items()
                 }),
                 tick,

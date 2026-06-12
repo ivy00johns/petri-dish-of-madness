@@ -83,6 +83,25 @@ world:
   cap_governor:
     enabled: true        # default ON
 
+  # Wave E / EM-113 — relationship depth (contracts/wave-e.md B1). Trust stays
+  # the single scalar (strength = |trust|, valence = sign); these thresholds
+  # drive the zero-LLM reflex type transitions evaluated after every trust
+  # mutation: neutral|ally → friend at trust >= friend_trust with
+  # interactions >= friend_interactions; rival|enemy → feud at trust <=
+  # feud_trust. Types never auto-downgrade (explicit set_relationship can
+  # still overwrite, subject to guards). `partner` declarations require the
+  # declarer's trust toward the target >= partner_trust_threshold, and
+  # World.are_partners() (the EM-114 consent mechanic) needs BOTH directions
+  # typed partner at/above it. No `enabled` flag by design: thresholds only
+  # fire on NEW trust mutations, so pre-E snapshots restore byte-identical.
+  # MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  relationships:
+    friend_trust: 30             # neutral|ally → friend at trust >= this …
+    friend_interactions: 5       # … AND interactions >= this
+    feud_trust: -40              # rival|enemy → feud at trust <= this
+    partner_trust_threshold: 40  # partner declarations / are_partners gate
+
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
   # POST /api/agents/{id}/tier): protagonists act every round, supporting every

@@ -61,8 +61,9 @@ All relationship/faction events carry ONLY agent ids in actor_id/target_id
 **Owner:** backend-agent-B1.
 **Files owned:** `backend/petridish/engine/world.py`,
 `backend/petridish/agents/runtime.py`, `backend/petridish/config/loader.py`,
-`config/world.yaml`, `contracts/event-log.md`,
-`backend/tests/test_wave_e_relationships.py` (new).
+`backend/petridish/persistence/repository.py` (added v1.1 — required by the
+relationships_json round-trip spec below), `config/world.yaml`,
+`contracts/event-log.md`, `backend/tests/test_wave_e_relationships.py` (new).
 
 ### Behavior spec
 

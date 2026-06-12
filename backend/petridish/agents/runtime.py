@@ -2762,7 +2762,35 @@ class AgentRuntime:
         profile_name: str,
         profile_color: str,
     ) -> dict:
-        """Apply the validated action to world state. Return event dict."""
+        """Apply the validated action to world state. Return event dict.
+
+        Wave E / EM-113 — after the action resolves, drain the world's
+        relationship_changed outbox (reflex type transitions triggered by this
+        action's trust mutations, plus accepted set_relationship changes) and
+        append them to the action's `_multi` chain so they share its turn_id.
+        Both turn paths (LLM and reflex) come through here, so every
+        action-triggered transition rides its triggering turn."""
+        result = self._apply_action_inner(
+            agent, action_dict, profile_name, profile_color
+        )
+        shifts = self.world.drain_relationship_events()
+        if shifts:
+            tick = self.world.tick
+            decorated = [{"tick": tick, **evt} for evt in shifts]
+            if "_multi" in result:
+                result["_multi"].extend(decorated)
+            else:
+                result = {"_multi": [result] + decorated}
+        return result
+
+    def _apply_action_inner(
+        self,
+        agent: AgentState,
+        action_dict: dict,
+        profile_name: str,
+        profile_color: str,
+    ) -> dict:
+        """The action dispatch table (see _apply_action for the EM-113 drain)."""
         action = action_dict["action"]
         args = action_dict.get("args") or {}
         thought = action_dict.get("thought", "")

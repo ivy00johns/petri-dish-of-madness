@@ -48,11 +48,30 @@ def _humanize_project_name(raw: str) -> str:
     return text[:60]
 
 
+# Wave E / EM-113 — the full relationship-type vocabulary (contracts/wave-e.md
+# shared vocabulary). The first five predate Wave E and must never break in
+# snapshots or prompts; the last four are additive.
+RELATIONSHIP_TYPES = (
+    "neutral", "ally", "friend", "rival", "enemy",
+    "partner", "family", "mentor", "feud",
+)
+
+# Wave E / EM-113 — agent-declarable subset of RELATIONSHIP_TYPES. `family` is
+# engine-assigned only (births, EM-114): agent declarations are rejected with
+# guidance. `partner` is declarable but trust-gated (see action_set_relationship).
+DECLARABLE_RELATIONSHIP_TYPES = (
+    "neutral", "ally", "friend", "rival", "enemy", "partner", "mentor", "feud",
+)
+
+
 @dataclass
 class RelationshipState:
-    type: str = "neutral"  # ally|rival|neutral|friend|enemy
-    trust: int = 0          # -100..100
+    type: str = "neutral"  # one of RELATIONSHIP_TYPES
+    trust: int = 0          # -100..100 (strength = |trust|, valence = sign)
     interactions: int = 0
+    # Wave E / EM-113 — tick of the last TYPE change. ADDITIVE: pre-E snapshots
+    # lack the key and restore 0, so serialization stays backward-compatible.
+    since_tick: int = 0
 
 
 @dataclass
@@ -105,7 +124,9 @@ class AgentState:
             "reflex_streak": self.reflex_streak,
             "beliefs_count": len(self.beliefs),
             "relationships": {
-                aid: {"type": r.type, "trust": r.trust, "interactions": r.interactions}
+                # Wave E / EM-113 — since_tick is additive (absent ⇒ 0 on restore).
+                aid: {"type": r.type, "trust": r.trust,
+                      "interactions": r.interactions, "since_tick": r.since_tick}
                 for aid, r in self.relationships.items()
             },
         }
@@ -466,6 +487,12 @@ class World:
         # emits it through the normal event pipeline. Keeps action_vote's signature
         # intact while letting the spawn happen world-side (single source of truth).
         self.pending_spawn_events: list[dict] = []
+        # Wave E / EM-113 — relationship_changed outbox. Reflex type transitions
+        # (and accepted set_relationship type changes) park their ready-to-emit
+        # event dicts here; the runtime drains them at the end of _apply_action
+        # so they ride the SAME action `_multi` chain (same turn_id) as the
+        # action that mutated trust. NOT serialized: drained within the turn.
+        self.pending_relationship_events: list[dict] = []
         # W11b / EM-091 — the public billboard. List of {tick, actor_id,
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
@@ -943,9 +970,11 @@ class World:
         # Trust damage
         self._update_trust(agent, target, -15)
         self._update_trust(target, agent, -10)
-        # Relationship escalation for target
+        # Relationship escalation for target. Wave E / EM-113: an existing feud
+        # is the deeper state — never downgraded back to rival/enemy (the -40
+        # reflex in _update_trust may have just hardened it).
         rel = target.relationships.get(agent.id)
-        if rel is None or rel.type not in ("rival", "enemy"):
+        if rel is None or rel.type not in ("rival", "enemy", "feud"):
             if rel is None:
                 rel = RelationshipState()
                 target.relationships[agent.id] = rel
@@ -953,6 +982,7 @@ class World:
                 rel.type = "enemy"
             else:
                 rel.type = "rival"
+            rel.since_tick = self.tick  # EM-113 — type changed here
         return True, "ok", amount
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -979,12 +1009,33 @@ class World:
     def action_set_relationship(
         self, agent: AgentState, target: AgentState, rel_type: str
     ) -> tuple[bool, str]:
-        valid = {"ally", "rival", "neutral", "friend", "enemy"}
-        if rel_type not in valid:
+        # Wave E / EM-113 — full vocabulary with guards. `family` is
+        # engine-assigned only (births, EM-114); `partner` is trust-gated.
+        if rel_type == "family":
+            return False, ("family ties are made by birth, not declaration — "
+                           "you cannot declare someone family")
+        if rel_type not in DECLARABLE_RELATIONSHIP_TYPES:
             return False, f"invalid relationship type: {rel_type!r}"
-        if agent.id not in agent.relationships:
-            agent.relationships[target.id] = RelationshipState()
-        agent.relationships[target.id].type = rel_type
+        rel = agent.relationships.get(target.id)
+        if rel_type == "partner":
+            threshold = int(self._rel_param("partner_trust_threshold", 40))
+            trust = rel.trust if rel is not None else 0
+            if trust < threshold:
+                return False, (f"you barely know them — build trust to "
+                               f"{threshold} (now {trust}) before declaring "
+                               f"{target.name} your partner")
+        if rel is None:
+            rel = RelationshipState()
+            agent.relationships[target.id] = rel
+        if rel.type != rel_type:
+            from_type = rel.type
+            rel.type = rel_type
+            rel.since_tick = self.tick
+            # EM-113 — accepted type change emits relationship_changed via the
+            # outbox (rides the declaring action's turn chain).
+            self.pending_relationship_events.append(
+                self._relationship_changed_event(agent, target, from_type, rel)
+            )
         return True, "ok"
 
     def action_remember(self, agent: AgentState, fact: str) -> tuple[bool, str]:
@@ -2026,6 +2077,108 @@ class World:
             from_agent.relationships[to_agent.id] = rel
         rel.trust = max(-100, min(100, rel.trust + delta))
         rel.interactions += 1
+        # Wave E / EM-113 — the SINGLE reflex-transition seam: every trust
+        # mutation (give/steal/insult/attack/arson-witness, and future callers)
+        # is evaluated for a type transition right after the clamp.
+        self._maybe_shift_relationship(from_agent, to_agent)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave E / EM-113 — relationship depth (contracts/wave-e.md B1)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _rel_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.relationships` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _bld_param)."""
+        return _block_get(getattr(self.params, "relationships", None), name, default)
+
+    def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
+        """Reflex type transitions, evaluated after every trust clamp:
+
+          neutral|ally -> friend  when trust >= friend_trust AND
+                                  interactions >= friend_interactions
+          rival|enemy  -> feud    when trust <= feud_trust
+
+        Types never auto-downgrade this wave (drama persists; an explicit
+        set_relationship can still overwrite, subject to its guards). On a
+        transition the relationship_changed event is parked in the outbox so
+        the runtime can ride it on the triggering action's `_multi` chain."""
+        rel = from_agent.relationships.get(to_agent.id)
+        if rel is None:
+            return
+        new_type: str | None = None
+        if rel.type in ("neutral", "ally"):
+            friend_trust = int(self._rel_param("friend_trust", 30))
+            friend_interactions = int(self._rel_param("friend_interactions", 5))
+            if rel.trust >= friend_trust and rel.interactions >= friend_interactions:
+                new_type = "friend"
+        elif rel.type in ("rival", "enemy"):
+            feud_trust = int(self._rel_param("feud_trust", -40))
+            if rel.trust <= feud_trust:
+                new_type = "feud"
+        if new_type is None or new_type == rel.type:
+            return
+        from_type = rel.type
+        rel.type = new_type
+        rel.since_tick = self.tick
+        self.pending_relationship_events.append(
+            self._relationship_changed_event(from_agent, to_agent, from_type, rel)
+        )
+
+    def _relationship_changed_event(
+        self, from_agent: AgentState, to_agent: AgentState,
+        from_type: str, rel: RelationshipState,
+    ) -> dict:
+        """Build a ready-to-emit relationship_changed event. EM-141: both
+        endpoints are AGENT ids only (the social-graph selector drops events
+        with non-agent endpoints)."""
+        a, b = from_agent.name, to_agent.name
+        texts = {
+            "friend": f"{a} and {b} are now friends",
+            "feud": f"the rivalry between {a} and {b} has hardened into a feud",
+            "partner": f"{a} and {b} are now partners",
+            "family": f"{a} and {b} are family",
+            "mentor": f"{a} now looks to {b} as a mentor",
+            "ally": f"{a} now counts {b} as an ally",
+            "rival": f"{a} now sees {b} as a rival",
+            "enemy": f"{a} now sees {b} as an enemy",
+            "neutral": f"{a} lets things cool with {b}",
+        }
+        return {
+            "kind": "relationship_changed",
+            "actor_id": from_agent.id,
+            "target_id": to_agent.id,
+            "text": texts.get(rel.type, f"{a} now sees {b} as {rel.type}"),
+            "payload": {
+                "from_type": from_type,
+                "to_type": rel.type,
+                "trust": rel.trust,
+                "since_tick": rel.since_tick,
+            },
+        }
+
+    def drain_relationship_events(self) -> list[dict]:
+        """Pop the parked relationship_changed events (runtime calls this at
+        the end of _apply_action so transitions ride the action's turn chain)."""
+        out = self.pending_relationship_events
+        self.pending_relationship_events = []
+        return out
+
+    def are_partners(self, a_id: str, b_id: str) -> bool:
+        """Mutual-partner predicate (EM-113 item 4; EM-114 consumes it as the
+        consent mechanic): BOTH directions typed `partner` AND both trusts >=
+        partner_trust_threshold."""
+        a = self.agents.get(a_id)
+        b = self.agents.get(b_id)
+        if a is None or b is None:
+            return False
+        threshold = int(self._rel_param("partner_trust_threshold", 40))
+        rel_ab = a.relationships.get(b_id)
+        rel_ba = b.relationships.get(a_id)
+        return (
+            rel_ab is not None and rel_ba is not None
+            and rel_ab.type == "partner" and rel_ba.type == "partner"
+            and rel_ab.trust >= threshold and rel_ba.trust >= threshold
+        )
 
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
@@ -2284,6 +2437,8 @@ class World:
                     type=str(_block_get(r, "type", "neutral")),
                     trust=_int(_block_get(r, "trust", 0)),
                     interactions=_int(_block_get(r, "interactions", 0)),
+                    # Wave E / EM-113 — additive; pre-E snapshots restore 0.
+                    since_tick=_int(_block_get(r, "since_tick", 0)),
                 )
                 for aid, r in (d.get("relationships") or {}).items()
             }
