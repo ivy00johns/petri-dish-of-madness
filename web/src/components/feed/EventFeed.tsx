@@ -20,7 +20,7 @@
 
 import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import type { WorldEvent, EventKind } from '../../types';
-import { llmDecidedAnimalTurns, isLlmDecidedAction } from '../../lib/animalIdentity';
+import { llmDecidedAnimalTurns, isLlmDecidedAction, animalModelByTurn } from '../../lib/animalIdentity';
 import { inspectorApi } from '../../inspector/api';
 import type { GodInterveneKind, GodMiracleKind } from '../../inspector/api';
 
@@ -382,11 +382,17 @@ interface FeedEntryProps {
    * llm_call fell out of the window — get no marker (graceful degradation).
    */
   llmDecided?: boolean;
+  /**
+   * EM-089: the model profile that decided this animal turn (from the sibling
+   * llm_call). Present only for LLM-decided animal_action rows — drives the
+   * inline model chip so the feed names WHICH model the critter is running.
+   */
+  animalModel?: string;
   /** Wave E (EM-185): the GRANT reply channel; absent ⇒ no GRANT affordance. */
   onGrantReply?: (text: string, inReplyTo?: string) => void;
 }
 
-function FeedEntry({ event, isNew, llmDecided = false, onGrantReply }: FeedEntryProps) {
+function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply }: FeedEntryProps) {
   // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
   // no model profile_color, and we want them to pop out of the human-agent feed).
   const animal = isAnimalEvent(event);
@@ -556,6 +562,20 @@ function FeedEntry({ event, isNew, llmDecided = false, onGrantReply }: FeedEntry
           </span>
         )}
 
+        {/* EM-089: name WHICH model decided this animal turn — the critter
+            counterpart to the human speech chip, in the animal magenta register
+            (the animal_action itself carries no profile by design, so the model
+            is sourced from the sibling llm_call via animalModelByTurn). */}
+        {animalModel && (
+          <span
+            className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
+            style={{ color: ANIMAL_MAGENTA, borderColor: ANIMAL_MAGENTA }}
+            title={`decided by ${animalModel}`}
+          >
+            {animalModel}
+          </span>
+        )}
+
         {/* An animal's in-character line reads INLINE (the chaos dialogue is the
             point) rather than being buried in a hover tooltip. */}
         {animal && hasTip && (
@@ -622,6 +642,10 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
   // (the llm_call rows themselves are trace-category and default-muted, but
   // they still inform the 🧠 marker on the visible animal_action lines).
   const llmAnimalTurns = useMemo(() => llmDecidedAnimalTurns(events), [events]);
+  // EM-089: turn_id → model profile for animal LLM decisions, so a visible
+  // animal_action line can name WHICH model decided it (the llm_call rows are
+  // trace-category/default-muted but still carry the attribution).
+  const animalModels = useMemo(() => animalModelByTurn(events), [events]);
 
   // Inclusion filter: with categories focused, show ONLY those; with none
   // focused, show everything except the default-muted trace chain.
@@ -788,6 +812,11 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
                 event={event}
                 isNew={newEventIdsRef.current.has(event.seq)}
                 llmDecided={isLlmDecidedAction(event, llmAnimalTurns)}
+                animalModel={
+                  event.kind === 'animal_action' && event.turn_id
+                    ? animalModels.get(event.turn_id)
+                    : undefined
+                }
                 onGrantReply={onGrantReply}
               />
             ))
