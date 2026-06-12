@@ -46,10 +46,15 @@ import {
   CITY_ZONES,
   DEFAULT_CITY_SEED,
   MAX_CITY_INSTANCES,
+  STREET_NAME_BANK_SIZE,
+  STREET_NAME_STEMS,
+  STREET_NAME_SUFFIXES,
   assignBuildingLots,
   computeCityPlan,
   computeLandmarks,
+  computeStreets,
   snapToBlockCenter,
+  streetNameAt,
   type CityInstance,
   type CityPlan,
   type CityBlock,
@@ -251,6 +256,16 @@ function expectCityLaws(places: Place[], seed: number) {
 
   // instance budget
   expect(countInstances(plan), label).toBeLessThanOrEqual(MAX_CITY_INSTANCES);
+
+  // EM-188: 12 named streets (6 per axis), unique names, anchors in bounds
+  expect(plan.streets.length, label).toBe(12);
+  expect(new Set(plan.streets.map((s) => s.name)).size, label).toBe(12);
+  for (const s of plan.streets) {
+    for (const a of s.labels) {
+      expect(Math.abs(a.x), label).toBeLessThanOrEqual(plan.extent);
+      expect(Math.abs(a.z), label).toBeLessThanOrEqual(plan.extent);
+    }
+  }
 }
 
 describe('EM-155 — city plan determinism invariant', () => {
@@ -292,6 +307,20 @@ describe('EM-155 — city plan determinism invariant', () => {
     expect(JSON.stringify(computeCityPlan({ places: shuffled, city_seed: 1337 }))).toBe(
       JSON.stringify(computeCityPlan({ places: TOWN, city_seed: 1337 })),
     );
+  });
+
+  it('EM-188: street names are part of the pinned byte-identical output', () => {
+    // Names ride the plan itself, so the stringify invariants above already
+    // pin them — this makes the law explicit: same seed ⇒ identical names…
+    expect(computeStreets(1337)).toEqual(computeStreets(1337));
+    const plan = computeCityPlan({ places: TOWN, city_seed: 1337 });
+    expect(plan.streets).toEqual(computeStreets(1337));
+    const json = JSON.stringify(plan);
+    for (const s of plan.streets) expect(json).toContain(s.name);
+    // …and different seed ⇒ different names (seed sensitivity).
+    const names = (seed: number) => computeStreets(seed).map((s) => s.name).join('|');
+    expect(names(1)).not.toBe(names(2));
+    expect(names(1337)).not.toBe(names(9001));
   });
 
   it('is keyed on (places, city_seed) ONLY — buildings/day never shape the plan (EM-174)', () => {
@@ -609,6 +638,86 @@ describe('EM-174 — real buildings claim real lots', () => {
     expect(spots.get('a')).toEqual({ x: aLot.x, z: aLot.z });
     const bLot = plan.blockLots[nearestTo({ x: 0, z: 0 })].lots[0];
     expect(spots.get('b')).toEqual({ x: bLot.x, z: bLot.z });
+  });
+});
+
+// ── EM-188: street names ─────────────────────────────────────────────────────
+
+describe('EM-188 — seeded street names on the frozen grid', () => {
+  /** The 6 frozen road centerlines per axis (between blocks + outer ring). */
+  const LINES = [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5].map((k) => k * BLOCK_PITCH);
+  const RING = 2.5 * BLOCK_PITCH; // ±32.5: the outer ring road
+
+  it('names exactly 12 streets — 6 ns + 6 ew, one per frozen road line', () => {
+    const streets = computeStreets(1337);
+    expect(streets).toHaveLength(12);
+    for (const axis of ['ns', 'ew'] as const) {
+      const ats = streets.filter((s) => s.axis === axis).map((s) => s.at);
+      expect(ats, axis).toEqual(LINES);
+    }
+  });
+
+  it('is deterministic in the seed and independent of places (pure seed data)', () => {
+    for (const seed of SEEDS) {
+      const fromTown = computeCityPlan({ places: TOWN, city_seed: seed }).streets;
+      const fromLegacy = computeCityPlan({ places: LEGACY, city_seed: seed }).streets;
+      const fromEmpty = computeCityPlan({ places: [], city_seed: seed }).streets;
+      expect(fromTown, `seed ${seed}`).toEqual(computeStreets(seed));
+      expect(fromLegacy, `seed ${seed}`).toEqual(fromTown);
+      expect(fromEmpty, `seed ${seed}`).toEqual(fromTown);
+    }
+  });
+
+  it('never duplicates a name within a city, across seeds (dedupe proof)', () => {
+    // The bank (24 stems × 4 suffixes = 96) dwarfs the 12 streets, so the
+    // deterministic walk-forward dedupe always finds a free name…
+    expect(STREET_NAME_BANK_SIZE).toBe(
+      STREET_NAME_STEMS.length * STREET_NAME_SUFFIXES.length,
+    );
+    expect(STREET_NAME_BANK_SIZE).toBeGreaterThanOrEqual(12 * 2);
+    // …and every generated city carries 12 DISTINCT names.
+    for (const seed of [...SEEDS, 3, 11, 99, 256, 4096]) {
+      const names = computeStreets(seed).map((s) => s.name);
+      expect(new Set(names).size, `seed ${seed}`).toBe(names.length);
+    }
+  });
+
+  it('draws every name from the two-part bank (stem × Lane/Row/Way/Street)', () => {
+    const stems = new Set<string>(STREET_NAME_STEMS);
+    const suffixes = new Set<string>(STREET_NAME_SUFFIXES);
+    for (const seed of SEEDS) {
+      for (const s of computeStreets(seed)) {
+        const parts = s.name.split(' ');
+        expect(parts, `${s.name} (seed ${seed})`).toHaveLength(2);
+        expect(stems.has(parts[0]), `${s.name}: unknown stem`).toBe(true);
+        expect(suffixes.has(parts[1]), `${s.name}: unknown suffix`).toBe(true);
+      }
+    }
+    // the bank indexer covers all 96 combos without repeats
+    const all = Array.from({ length: STREET_NAME_BANK_SIZE }, (_, k) => streetNameAt(k));
+    expect(new Set(all).size).toBe(STREET_NAME_BANK_SIZE);
+  });
+
+  it('labels are SPARSE: only interior avenues, mid-block, never intersections', () => {
+    for (const s of computeStreets(1337)) {
+      if (Math.abs(s.at) === RING) {
+        // the outer ring road is not a main lane and stays unlabeled
+        expect(s.main, s.id).toBe(false);
+        expect(s.labels, s.id).toEqual([]);
+        continue;
+      }
+      expect(s.main, s.id).toBe(true);
+      expect(s.labels.length, s.id).toBe(3);
+      for (const a of s.labels) {
+        // ON the road centerline…
+        expect(s.axis === 'ns' ? a.x : a.z, s.id).toBe(s.at);
+        // …at a block-center row on the cross axis (mid-block — road lines
+        // sit at half-pitch offsets, so this can never be an intersection)
+        const cross = s.axis === 'ns' ? a.z : a.x;
+        expect([-2 * BLOCK_PITCH, 0, 2 * BLOCK_PITCH], s.id).toContain(cross);
+        expect(LINES, `${s.id}: anchor on an intersection`).not.toContain(cross);
+      }
+    }
   });
 });
 

@@ -46,6 +46,16 @@ export const GOLDEN_HOUR = {
   glow: '#ffe08a',
 } as const;
 
+/**
+ * Shared in-canvas label inks (EM-188): the warm cream text + dark outline
+ * the village's Billboard labels already use (Building/Structure literals),
+ * centralized here so new label surfaces (street names) import them instead
+ * of sprinkling hex into TSX. WebGL colors — outside the CSS token system
+ * by the established village convention (see the module header).
+ */
+export const LABEL_INK = '#fff3e0';
+export const LABEL_OUTLINE = '#241b14';
+
 // ── Gradient ramp ────────────────────────────────────────────────────────────
 
 /** Default band count for the cel ramp (3–4 reads best on chunky low-poly). */
