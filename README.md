@@ -185,6 +185,10 @@ cp .env.example .env
 #   FREELLMAPI_KEY=freellmapi-...        # the proxy's unified key (dashboard → Keys)
 ```
 
+Frontend flags live in the **same `.env`** — Vite reads it via `envDir`, and only
+`VITE_*`-prefixed vars ever reach the browser (backend keys stay server-side). For
+example, `VITE_COFFEE_BUTTON=false` hides the header's "Buy me a coffee" button.
+
 The default profiles (`config/profiles.yaml`) request three distinct models:
 
 - `gemini-flash` → `gemini-3.5-flash`
