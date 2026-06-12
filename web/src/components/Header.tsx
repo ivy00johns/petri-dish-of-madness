@@ -5,6 +5,19 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 
+/**
+ * VITE_COFFEE_BUTTON — set to "0", "false", or "off" (case-insensitive) to
+ * hide the "Buy me a coffee" link. Unset (or any other value) keeps it visible.
+ * Useful for self-hosted deployments that want a clean header.
+ *
+ * Evaluated at call-time (not module-init) so vi.stubEnv works in tests.
+ */
+function isCoffeeButtonEnabled(): boolean {
+  const v = import.meta.env.VITE_COFFEE_BUTTON;
+  if (v === undefined || v === null) return true;
+  return !['0', 'false', 'off'].includes(String(v).toLowerCase());
+}
+
 interface HeaderProps {
   tick: number;
   day: number;
@@ -85,21 +98,24 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
       {/* Right — support link + status badges */}
       <div className="flex items-center gap-2">
         {/* Buy-me-a-coffee — opens in a new tab so it never leaves the live
-            world; height-capped to sit in the compact header row. */}
-        <a
-          href="https://www.buymeacoffee.com/john00ivyz"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="shrink-0 leading-none"
-          title="Buy me a coffee"
-          aria-label="Buy me a coffee"
-        >
-          <img
-            src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=&slug=john00ivyz&button_colour=5F7FFF&font_colour=ffffff&font_family=Cookie&outline_colour=000000&coffee_colour=FFDD00"
-            alt="Buy me a coffee"
-            className="h-6 w-auto block"
-          />
-        </a>
+            world; height-capped to sit in the compact header row.
+            Disable by setting VITE_COFFEE_BUTTON=0 in .env. */}
+        {isCoffeeButtonEnabled() && (
+          <a
+            href="https://www.buymeacoffee.com/john00ivyz"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 leading-none"
+            title="Buy me a coffee"
+            aria-label="Buy me a coffee"
+          >
+            <img
+              src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=&slug=john00ivyz&button_colour=5F7FFF&font_colour=ffffff&font_family=Cookie&outline_colour=000000&coffee_colour=FFDD00"
+              alt="Buy me a coffee"
+              className="h-6 w-auto block"
+            />
+          </a>
+        )}
         {mockMode && (
           <span className="font-mono text-[10px] font-bold px-2 py-1 border border-lab-acid text-lab-acid bg-lab-acid/10">
             MOCK
