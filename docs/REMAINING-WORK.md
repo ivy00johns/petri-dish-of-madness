@@ -287,7 +287,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-198 | P0 | — | backend | user 2026-06-12 | Error-bounce routing — gut the budget-era throttling: a provider error (429/5xx/transport/malformed completion) now BOUNCES the same call to the healthiest other lane inside Router.chat() (home + 2 substitutes, mock never a target, EM-173 idle = last resort only); adapter errors record `error` demerits that count toward lane_sick (chronic 429ers pre-emptively detour, EM-177 probes recover them). Cap-governor default flipped OFF everywhere (dataclass, embedded mirror, engine gate, both shipped yamls) — cap pressure must route, never mute the cast. Decision cache OFF in shipped configs (cache hits made characters repeat verbatim — run 544 Mochi); animal llm_chance 0.6→0.9. Root cause of the "quiet town": cap demotions muted 3/5 agents and disabling the turn budget killed failover's only sickness signal, pinning agents to 429ing lanes | done | 2026-06-12 |
 
-_Next free ID: EM-199._
+| EM-199 | P0 | — | backend | user 2026-06-12 | Multi-action turns — one LLM call resolves an ordered `actions` sequence (move + fund + say) applied IN ORDER into one `_multi` chain sharing the turn_id → three feed lines from one call, restoring the session-189 feed flood (do MORE per call, never fewer; roster is already all-protagonist so call-rate is unthrottled — richer turns are the lever). Action protocol **v1.2.0**: `actions[]` additive, single `action` byte-identical (legacy/Mock/reflex unchanged). Each step runs the SAME per-step `_normalize_args` (arg-alias + agent-name resolution, EM-140) + `_validate_world` gate at APPLY time (work-after-move validates at the destination; tier gate fires per-step; name-targeting works); continue-on-failed-step; thought surfaced once; trace records the full sequence; EM-081 overheard + EM-079 commitments multi-aware. Cap `world.params.max_actions_per_turn` (default 4). Contract: `contracts/multi-action-turns.md` | done | 2026-06-12 |
+
+_Next free ID: EM-200._
 
 ## Notes
 
