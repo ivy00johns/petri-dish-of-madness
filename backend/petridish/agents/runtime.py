@@ -102,6 +102,12 @@ ACTION_SCHEMA = {
         # failure), so items only check the action enum + args-is-object here.
         # maxItems is a generous schema ceiling; the runtime enforces the
         # configurable max_actions_per_turn (default 4) and truncates+logs above.
+        # additionalProperties is TRUE (EM-066 ethos): free models routinely
+        # scatter per-action cognition (thought/perceived_summary/memories_used/
+        # reasoning) INTO each step — the runtime reads only action+args and
+        # ignores the rest, so a misplaced cosmetic field must NEVER fail the
+        # turn (the kimi idle-fallback regression). Stray cognition on the first
+        # step is hoisted to top-level by _hoist_step_cognition before validation.
         "actions": {
             "type": "array",
             "minItems": 1,
@@ -109,7 +115,7 @@ ACTION_SCHEMA = {
             "items": {
                 "type": "object",
                 "required": ["action"],
-                "additionalProperties": False,
+                "additionalProperties": True,
                 "properties": {
                     "action": {
                         "type": "string",
@@ -827,6 +833,34 @@ def _resolve_agent_target(raw: str, agent: AgentState, world: World) -> str | No
         or candidates
     )
     return min(best, key=lambda a: a.id).id
+
+
+# EM-199 — turn-level cognition the model may scatter into the first step.
+_HOISTABLE_COGNITION = (
+    "thought", "mood", "perceived_summary", "memories_used",
+    "reasoning", "commitment", "reflection", "bond",
+)
+
+
+def _hoist_step_cognition(action_dict: dict) -> None:
+    """Free models told to return an `actions` sequence routinely put
+    turn-level cognition (thought / mood / perceived_summary / memories_used /
+    reasoning / commitment / reflection / bond) INSIDE the first step instead of
+    at the top level. Lift any such field from `actions[0]` up to the top level
+    when it is absent there — so the 💭 thought still surfaces on the feed and
+    the decision trace keeps its reasoning. The step's own copy is harmless
+    (items tolerate extras; the runtime reads only action+args per step).
+    Mutates in place; never raises. Runs BEFORE sanitize/validate so the hoisted
+    values are truncated and validated like any top-level field."""
+    actions = action_dict.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return
+    first = actions[0]
+    if not isinstance(first, dict):
+        return
+    for key in _HOISTABLE_COGNITION:
+        if key in first and not action_dict.get(key):
+            action_dict[key] = first[key]
 
 
 def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
@@ -2934,6 +2968,11 @@ class AgentRuntime:
             self._forget_response(profile_name, messages)
             return None, _no_json_error(text, finish_reason), meta
 
+        # EM-199 — lift turn-level cognition the model scattered into actions[0]
+        # up to the top level (before sanitize/validate), so a 💭 thought / trace
+        # nested in a step still counts. The step keeps its copy (items tolerate
+        # extras); the runtime reads only action+args per step.
+        _hoist_step_cognition(action_dict)
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
         _sanitize_optional_trace_fields(action_dict)
         # EM-125 — a malformed/disallowed bond is popped HERE (before schema

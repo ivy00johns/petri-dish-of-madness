@@ -29,7 +29,8 @@
       "items": {
         "type": "object",
         "required": ["action"],
-        "additionalProperties": false,
+        "additionalProperties": true,
+        "comment": "additionalProperties TRUE: the runtime reads only action+args; models often nest per-action cognition (thought/perceived_summary/memories_used/reasoning) into a step, and a misplaced cosmetic field must never fail the turn (EM-066). Stray cognition on the first step is hoisted to top-level before validation.",
         "properties": {
           "action": {
             "type": "string",

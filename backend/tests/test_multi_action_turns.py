@@ -151,6 +151,58 @@ async def test_long_say_truncated_to_cap_not_rejected_in_multi_action():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Free-model tolerance — nested per-step cognition must NEVER fail the turn
+# (EM-066 ethos). Live repro: kimi/Mox idled with "Additional properties are not
+# allowed ('memories_used', 'perceived_summary', 'reasoning')".
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_schema_tolerates_trace_fields_nested_inside_a_step():
+    """A step carrying per-action cognition (the model scattering top-level
+    fields into actions[]) must VALIDATE — additionalProperties on items, not a
+    hard reject."""
+    jsonschema.validate({
+        "thought": "expose the cabal",
+        "actions": [{
+            "action": "say", "args": {"text": "The cabal controls the Hub!"},
+            "perceived_summary": "Vesper is pitching again",
+            "memories_used": ["Vesper schemed last turn"],
+            "reasoning": "warn the town", "thought": "expose them", "mood": "wary",
+        }],
+    }, ACTION_SCHEMA)
+
+
+async def test_step_with_nested_trace_fields_resolves_not_idles():
+    """The full run_turn path: a kimi-shaped response with trace fields nested
+    in the step resolves the say instead of idling (the live bug)."""
+    runtime, world, ada, _bram = _make_world_runtime(
+        [{"actions": [
+            {"action": "say", "args": {"text": "the cabal!"},
+             "perceived_summary": "p", "memories_used": ["m"], "reasoning": "r"},
+        ]}],
+        start="market",
+    )
+    result = await runtime.run_turn(ada)
+    assert any(e["kind"] == "agent_speech" for e in _domain_events(result)), \
+        "nested-trace step idled instead of speaking"
+
+
+async def test_thought_nested_in_first_step_is_hoisted_and_surfaced():
+    """If `thought` rides the first step (not top-level), it is hoisted so the
+    💭 still reaches the feed line — the inner-thought surfacing must survive the
+    model scattering cognition into actions[]."""
+    runtime, world, ada, _bram = _make_world_runtime(
+        [{"actions": [
+            {"action": "say", "args": {"text": "hi"}, "thought": "nested musing"},
+            {"action": "work", "args": {}},
+        ]}],
+        start="market",
+    )
+    result = await runtime.run_turn(ada)
+    evts = _domain_events(result)
+    assert "💭 nested musing" in evts[0]["text"], "nested thought was not hoisted/surfaced"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Resolution — ordered chain, one turn, shared turn_id.
 # ══════════════════════════════════════════════════════════════════════════════
 
