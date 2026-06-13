@@ -21,7 +21,9 @@
  * Token-only: the canvas needs real color strings (a `<canvas>` can't take a
  * Tailwind class), so — exactly like ReplayScrubber — colors are read off the
  * declared `--lab-*` / `--inspector-*` CSS custom properties via getComputedStyle.
- * Node colors come from the data (the agent's model color). No hardcoded hex.
+ * Node colors come from the data (the agent's model color). EM-196: every read
+ * carries a literal fallback mirroring the declared token value, because the
+ * canvas can't trust an unresolved var (see `resolveTokens`).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -300,14 +302,15 @@ export default function SocialGraph(props: PanelProps) {
   }, []);
 
   return (
-    <section className="lab-panel flex flex-col h-full min-h-[16rem]" aria-label="Social graph (EM-058)">
-      <div className="lab-header flex items-center justify-between gap-2">
+    <section className="lab-panel flex flex-col h-full min-h-0 overflow-hidden" aria-label="Social graph (EM-058)">
+      {/* Slim panel header (wave G): title + EM-tag right-aligned. */}
+      <div className="lab-header flex items-center justify-between gap-2 !py-1 shrink-0">
         <span>Social Graph</span>
         <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">EM-058</span>
       </div>
 
       {/* Readout strip: population + the relationship-type legend. */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 border-b border-lab-border">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1 border-b border-lab-border shrink-0">
         <span className="font-mono text-[10px] text-lab-muted tabular-nums">
           <span className="text-lab-text">{aliveCount}</span>
           <span className="text-lab-dim">/{nodeCount}</span> agents ·{' '}
@@ -329,9 +332,15 @@ export default function SocialGraph(props: PanelProps) {
       </div>
 
       {/* The graph surface (or an empty-but-labeled state). */}
-      <div ref={containerRef} className="relative flex-1 min-h-[12rem] bg-lab-bg overflow-hidden">
+      <div ref={containerRef} className="relative flex-1 min-h-[6rem] bg-lab-bg overflow-hidden">
         {ready ? (
           <ForceGraph2D<SocialNode, SocialEdge>
+            // EM-196: force a CLEAN kapsule mount on every ready transition.
+            // react-kapsule's useEffectOnce skips re-init on StrictMode's
+            // double-mount, which can leave a stale DETACHED canvas (broken
+            // -image artifact + dead rAF loop). Keying on `ready` makes React
+            // discard the old fiber + DOM and mount fresh.
+            key={String(ready)}
             ref={fgRef}
             width={size.w}
             height={size.h}
@@ -453,22 +462,41 @@ interface ResolvedTokens {
   faction: string;
 }
 
-/** Resolve the lab tokens the canvas paints with (re-reads on mount). */
+/**
+ * Resolve the lab tokens the canvas paints with.
+ *
+ * EM-196 — canvas never trusts an unresolved var: getComputedStyle can return
+ * '' on a timing/route edge (stylesheet not applied yet), and a falsy
+ * `backgroundColor` never passes force-graph's init guard, leaving a
+ * transparent canvas over the OS-white page (the "white box"). So EVERY
+ * canvas-bound read carries a literal hex fallback. The literals MIRROR the
+ * declared token values EXACTLY — inspector-tokens.css (--lab-*,
+ * --marker-crime, --inspector-node-neutral, --faction-tint) and
+ * roster-tokens.css (--rel-*) — for canvas safety only; they must be kept in
+ * lockstep with those token sheets.
+ *
+ * Exported (not just the hook) so the fallback table is unit-testable with a
+ * stubbed getComputedStyle.
+ */
+export function resolveTokens(): ResolvedTokens {
+  return {
+    bg: cssVar('--lab-bg') || '#0a0a0b',
+    text: cssVar('--lab-text') || cssVar('--inspector-node-neutral') || '#e8e8f0',
+    dim: cssVar('--lab-dim') || '#3a3a50',
+    acid: cssVar('--lab-acid') || '#c8ff00',
+    danger: cssVar('--marker-crime') || '#ff3333',
+    edgeFlat: cssVar('--lab-muted') || '#5a5a72',
+    nodeNeutral: cssVar('--inspector-node-neutral') || '#5a5a72',
+    relPartner: cssVar('--rel-partner') || '#ff6fa5',
+    relFamily: cssVar('--rel-family') || '#ffb347',
+    relMentor: cssVar('--rel-mentor') || '#4cc9f0',
+    relFeud: cssVar('--rel-feud') || '#a31621',
+    faction: cssVar('--faction-tint') || '#2ee6a8',
+  };
+}
+
 function useResolvedTokens(): ResolvedTokens {
-  const [tokens] = useState<ResolvedTokens>(() => ({
-    bg: cssVar('--lab-bg'),
-    text: cssVar('--lab-text') || cssVar('--inspector-node-neutral'),
-    dim: cssVar('--lab-dim'),
-    acid: cssVar('--lab-acid'),
-    danger: cssVar('--marker-crime'),
-    edgeFlat: cssVar('--lab-muted'),
-    nodeNeutral: cssVar('--inspector-node-neutral'),
-    relPartner: cssVar('--rel-partner'),
-    relFamily: cssVar('--rel-family'),
-    relMentor: cssVar('--rel-mentor'),
-    relFeud: cssVar('--rel-feud'),
-    faction: cssVar('--faction-tint'),
-  }));
+  const [tokens] = useState<ResolvedTokens>(resolveTokens);
   return tokens;
 }
 

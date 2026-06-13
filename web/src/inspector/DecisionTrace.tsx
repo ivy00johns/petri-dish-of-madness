@@ -32,7 +32,13 @@ import { useMemo, useState } from 'react';
 import type { Agent } from '../types';
 import type { PanelProps, TurnTrace, TraceSpan, TraceUsage } from './types';
 import { turnIds, turnTrace } from './selectors';
+import { VirtualList } from './VirtualList';
 import './inspector-tokens.css';
+
+// Wave F (EM-194): the turn rail is VIRTUALIZED — the full run's turns are
+// reachable (the old hard slice(0, 80) is gone) while only the visible window
+// mounts as DOM rows. Fixed row height is the windowing contract.
+const TURN_ROW_HEIGHT = 44;
 
 // The seven canonical chain kinds (event-log.md §3) — everything else in a
 // turn's span list is a "domain event" the action caused.
@@ -102,10 +108,14 @@ export default function DecisionTrace({ events, agents, profiles, currentTick, h
   );
 
   return (
-    <section className="lab-panel flex flex-col h-full min-h-[24rem]" aria-label="Decision trace (EM-056)">
-      <div className="lab-header flex items-center justify-between gap-2">
+    <section className="lab-panel flex flex-col h-full min-h-0 overflow-hidden" aria-label="Decision trace (EM-056)">
+      {/* Slim panel header (wave G): title + live count + EM-tag right-aligned. */}
+      <div className="lab-header flex items-center gap-2 !py-1 shrink-0">
         <span>Decision Trace</span>
-        <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">EM-056</span>
+        <span className="font-mono text-[10px] text-lab-muted normal-case tracking-normal tabular-nums">
+          {turns.length} turn{turns.length === 1 ? '' : 's'}
+        </span>
+        <span className="ml-auto font-mono text-[10px] text-lab-dim normal-case tracking-normal">EM-056</span>
       </div>
 
       {turns.length === 0 ? (
@@ -122,27 +132,29 @@ export default function DecisionTrace({ events, agents, profiles, currentTick, h
         )
       ) : (
         <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,11rem)_minmax(0,1fr)]">
-          {/* ── LEFT: recent-turn list ─────────────────────────────────────── */}
-          <ul
-            className="min-h-0 md:max-h-none max-h-40 overflow-y-auto border-b md:border-b-0 md:border-r border-lab-border divide-y divide-lab-border"
-            aria-label="Recent turns"
-          >
-            {turns.slice(0, 80).map((t) => {
+          {/* ── LEFT: recent-turn list (virtualized wave F; wave G adds the
+              EM-093 anchoring so live turns never shift a scrolled rail) ──── */}
+          <VirtualList
+            items={turns}
+            rowHeight={TURN_ROW_HEIGHT}
+            itemKey={(t) => t.turnId}
+            ariaLabel="Recent turns"
+            anchorNewest
+            className="min-h-0 md:max-h-none max-h-40 border-b md:border-b-0 md:border-r border-lab-border"
+            renderRow={(t) => {
               const color =
                 (t.agentId && profileColorForAgent(agents, t.agentId, profileColor)) || '';
               return (
-                <li key={t.turnId}>
-                  <TurnRow
-                    active={t.turnId === activeId}
-                    tick={t.tick}
-                    name={(t.agentId && agentName.get(t.agentId)) || t.agentId || 'unknown'}
-                    color={color}
-                    onSelect={() => setSelectedId(t.turnId)}
-                  />
-                </li>
+                <TurnRow
+                  active={t.turnId === activeId}
+                  tick={t.tick}
+                  name={(t.agentId && agentName.get(t.agentId)) || t.agentId || 'unknown'}
+                  color={color}
+                  onSelect={() => setSelectedId(t.turnId)}
+                />
               );
-            })}
-          </ul>
+            }}
+          />
 
           {/* ── RIGHT: the unfolded trace for the selected turn ─────────────── */}
           <div className="min-h-0 overflow-y-auto p-3">
@@ -200,7 +212,7 @@ function TurnRow({
       onClick={onSelect}
       aria-pressed={active}
       className={
-        'w-full text-left px-2.5 py-2 flex items-center gap-2 transition-colors ' +
+        'w-full h-full text-left px-2.5 py-2 flex items-center gap-2 transition-colors border-b border-lab-border ' +
         (active ? 'bg-lab-acid/10' : 'hover:bg-lab-chrome')
       }
     >

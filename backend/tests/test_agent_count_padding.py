@@ -81,23 +81,18 @@ def test_shipped_world_yaml_boots_five_agents(monkeypatch):
     assert cfg.world.agent_count == 5
     assert len(cfg.agents) == 5
 
-    # The hand-listed cast survives byte-identical, in order, at its tier.
-    listed = cfg.agents[:3]
-    assert [a.name for a in listed] == ["Ada", "Bram", "Cleo"]
-    assert all(a.cadence_tier == "protagonist" for a in listed)
-
-    # The two padded seats come from the persona library, in card order,
-    # at supporting tier, on their suggested (registered) profiles, in plaza.
-    cards = load_personas()
+    # Direction B (loud world): the shipped world lists its FULL cast explicitly,
+    # so agent_count == len(agents) and NOTHING pads in at "supporting" — every
+    # agent is protagonist (acts every round). The padding mechanism itself stays
+    # covered by the synthetic-fixture tests below; this pins that the shipped
+    # default no longer mutes anyone.
+    assert [a.name for a in cfg.agents] == ["Ada", "Bram", "Cleo", "Vesper", "Mox"]
+    assert all(a.cadence_tier == "protagonist" for a in cfg.agents)
+    assert all(a.location == "plaza" for a in cfg.agents)
+    # Each on a distinct, registered lane (the model-vs-model bake-off on display).
     profile_names = {p.name for p in cfg.profiles}
-    padded = cfg.agents[3:]
-    assert [a.name for a in padded] == [c["name"] for c in cards[:2]]
-    for agent, card in zip(padded, cards[:2]):
-        assert agent.cadence_tier == "supporting"
-        assert agent.location == "plaza"
-        assert agent.personality == card["personality"]
-        assert card["suggested_profile"] in profile_names
-        assert agent.profile == card["suggested_profile"]
+    assert all(a.profile in profile_names for a in cfg.agents)
+    assert len({a.profile for a in cfg.agents}) == 5
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -120,9 +120,19 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     world = World(params=cfg.world, places=places, agents=agents)
     # Wave D3 / EM-177 — thread the `world.lane_failover` block to the router
     # (defensive getattr: pre-D3 configs lack the field and get the defaults).
+    # W7 / EM-068 — thread the `world.cache` block too: the decision cache is
+    # config-gated (OFF since 2026-06-12 per the EM-198 rescope), but the flag
+    # was never wired here, so the Router fell back to its default-ON cache and
+    # served verbatim hits — characters (esp. animals, whose brief prompts
+    # repeat) parroted the same line. Honor the config so `enabled: false`
+    # actually disables it. Defensive getattr keeps cache-less configs on the
+    # pre-W7 default-ON behavior.
+    cache_cfg = getattr(cfg.world, "cache", None)
     router = Router(
         cfg.profiles,
         lane_failover=getattr(cfg.world, "lane_failover", None),
+        cache_enabled=bool(getattr(cache_cfg, "enabled", True)),
+        cache_max=int(getattr(cache_cfg, "max_entries", 512)),
     )
 
     # Register each agent's profile with the router
@@ -1424,8 +1434,12 @@ async def get_events(
     actor_id: str | None = Query(default=None),
     turn_id: str | None = Query(default=None),
     after_seq: int | None = Query(default=None),
+    before_seq: int | None = Query(default=None,
+                                   description="keyset for order=desc tail pages (seq < before_seq)"),
     limit: int | None = Query(default=None),
     order: str = Query(default="asc"),
+    lineage: bool = Query(default=False,
+                          description="EM-187/EM-101: include ancestor (pre-fork) events for a forked/resumed run"),
 ):
     run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
@@ -1439,9 +1453,25 @@ async def get_events(
         actor_id=actor_id,
         turn_id=turn_id,
         after_seq=after_seq,
+        before_seq=before_seq,
         limit=limit,
         order=order,
+        lineage=lineage,
     )
+
+
+@app.get("/api/events/stats")
+async def get_event_stats(run_id: int | None = None, lineage: bool = False):
+    """Run-scoped event-log bounds (Wave F / EM-194): {total, max_seq,
+    max_tick, min_seq} via a single cheap COUNT/MAX/MIN — sizes the client's
+    tail-first backfill. Same ?run_id scoping as GET /api/events (omitted →
+    active run; unknown id → 404). `lineage=true` sizes the run plus its
+    ancestors' pre-fork slices, matching the lineage backfill. Uninitialized →
+    all-zeros, never 500."""
+    run_id = _resolve_run_id(run_id)
+    if _repo is None or run_id is None:
+        return {"total": 0, "max_seq": 0, "max_tick": 0, "min_seq": 0}
+    return _repo.get_event_stats(run_id, lineage=lineage)
 
 
 @app.get("/api/turns/{turn_id}")

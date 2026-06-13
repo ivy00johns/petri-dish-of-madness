@@ -79,6 +79,23 @@ export function llmDecidedAnimalTurns(events: WorldEvent[]): Set<string> {
   return out;
 }
 
+/**
+ * turn_id → the model profile name that decided that animal turn (from the
+ * sibling animal `llm_call`'s `profile`). Pairs with isLlmDecidedAction so the
+ * feed can label WHICH model spoke an animal_action — answering "what model is
+ * this critter running?" inline, the animal counterpart to the human speech
+ * chip. A turn with no resolvable profile is absent (caller omits the chip).
+ */
+export function animalModelByTurn(events: WorldEvent[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const e of events) {
+    if (!isAnimalLlmCall(e) || !e.turn_id || out.has(e.turn_id)) continue;
+    const profile = profileOfLlmCall(e);
+    if (profile) out.set(e.turn_id, profile);
+  }
+  return out;
+}
+
 /** True when this animal_action was an LLM decision (shares an animal
  *  llm_call's turn_id). Reflex actions (and missing data) return false. */
 export function isLlmDecidedAction(e: WorldEvent, llmTurns: Set<string>): boolean {

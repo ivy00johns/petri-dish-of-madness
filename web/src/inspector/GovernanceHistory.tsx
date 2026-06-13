@@ -172,10 +172,10 @@ export default function GovernanceHistory(props: PanelProps) {
 
   return (
     <section
-      className="lab-panel flex flex-col h-full min-h-[9rem]"
+      className="lab-panel flex flex-col h-full min-h-0 overflow-hidden"
       aria-label="Governance & laws history (EM-057)"
     >
-      <div className="lab-header flex items-center justify-between gap-2">
+      <div className="lab-header flex items-center justify-between gap-2 !py-1 shrink-0">
         <h2 className="m-0 flex items-center gap-2 font-mono text-xs font-semibold tracking-widest uppercase">
           <i
             className="inline-block w-2 h-2 rounded-sm"
@@ -190,7 +190,7 @@ export default function GovernanceHistory(props: PanelProps) {
       </div>
 
       {/* Assembly summary strip */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 border-b border-lab-border bg-lab-bg shrink-0">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1 border-b border-lab-border bg-lab-bg shrink-0">
         <Stat label="PROPOSED" value={stats.proposed} />
         <Stat label="ACTIVE" value={stats.active} accent={GOV_ACCENT} />
         <Stat label="REJECTED" value={stats.rejected} />

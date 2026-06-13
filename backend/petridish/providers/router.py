@@ -40,6 +40,15 @@ _LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_F
 _LANE_SICK_THRESHOLD_DEFAULT = 3  # timed_out entries in the 6-window ⇒ SICK
 _LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home lane
 
+# ── EM-198 — error-bounce routing ─────────────────────────────────────────────
+# 2026-06-12 user mandate: a provider error (429 / 5xx / transport failure /
+# malformed completion) BOUNCES the same call to the healthiest other lane
+# instead of idling the turn. The pre-existing EM-173 "provider errors idle on
+# purpose" rule was a budget-era decision that does not apply at this scale —
+# with ~16 free provider lanes the right response to a rate limit is to use a
+# different model. Total adapter attempts per chat(): home + 2 substitutes.
+_ERROR_BOUNCE_ATTEMPTS = 3
+
 
 def _cache_key(profile_name: str, messages: list[dict]) -> str:
     """sha1(profile_name + json(messages, sort_keys=True)).
@@ -285,22 +294,102 @@ class Router:
         # pending HIT snapshot so the adapter's real last_routed_via/last_usage
         # surface unchanged for this profile.
         self._pending_cached.pop(profile_name, None)
-        text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
+        served_by = profile_name
+        try:
+            text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
+        except ProviderError as exc:
+            # EM-198 — bounce the SAME call to the healthiest other lane(s)
+            # instead of letting the turn idle. Raises the last ProviderError
+            # only when every candidate also fails (EM-173 idle = last resort).
+            text, served_by = await self._bounce_on_error(
+                profile_name, exc, messages,
+                max_tokens=max_tokens, temperature=temperature,
+            )
 
         # W11b / EM-083 — one REAL provider call completed: feed the day-window
-        # usage-alert tracker (no-op unless this profile has rpd/tpd caps).
-        self._note_usage_for_alerts(profile_name)
+        # usage-alert tracker for the lane that ACTUALLY served (no-op unless
+        # that profile has rpd/tpd caps).
+        self._note_usage_for_alerts(served_by)
+
+        served_adapter = self._adapters.get(served_by, adapter)
+        served_usage = getattr(served_adapter, "last_usage", None)
+        served_routed = getattr(served_adapter, "last_routed_via", None)
+        if served_by != profile_name:
+            # EM-198 — a bounced call's truth must surface on the REQUESTED
+            # profile: stage a pending snapshot (the same mechanism cache HITs
+            # use) so the runtime's immediate last_usage(profile)/
+            # last_routed_via(profile) reads report the substitute's real
+            # numbers, with additive bounced_from/bounced_to keys.
+            if isinstance(served_usage, dict):
+                served_usage = {
+                    **served_usage,
+                    "bounced_from": profile_name,
+                    "bounced_to": served_by,
+                }
+            self._pending_cached[profile_name] = {
+                "routed_via": served_routed,
+                "usage": served_usage,
+            }
 
         if cacheable and key is not None:
             self._cache[key] = {
                 "text": text,
-                "routed_via": getattr(adapter, "last_routed_via", None),
-                "usage": getattr(adapter, "last_usage", None),
+                "routed_via": served_routed,
+                "usage": served_usage,
             }
             self._cache.move_to_end(key)
             while len(self._cache) > self._cache_max:
                 self._cache.popitem(last=False)  # evict least-recently-used
         return text
+
+    async def _bounce_on_error(
+        self,
+        home: str,
+        first_exc: ProviderError,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> tuple[str, str]:
+        """EM-198 — error-bounce: retry one failed call on other lanes.
+
+        The home lane's failure is recorded as an `error` demerit in its
+        EM-135 window (counts toward lane_sick, so chronic 429ers get
+        pre-emptively detoured by effective_profile on FUTURE calls). Then up
+        to _ERROR_BOUNCE_ATTEMPTS-1 substitute lanes are tried in EM-177
+        health order (never mock, never an already-tried lane); each failure
+        records its own demerit. Returns (text, served_by). Re-raises the
+        LAST ProviderError when no candidate succeeds — the runtime's EM-173
+        idle fallback stays the true last resort. Failover disabled
+        (`world.lane_failover.enabled: false`) ⇒ no bounce, the original
+        error propagates exactly as pre-EM-198."""
+        self.note_lane_error(home)
+        if not self._failover_enabled():
+            raise first_exc
+        last_exc: ProviderError = first_exc
+        tried = {home}
+        for _ in range(_ERROR_BOUNCE_ATTEMPTS - 1):
+            candidate = self._pick_detour_candidate(home, exclude=tried)
+            if candidate is None:
+                break
+            tried.add(candidate)
+            cand_adapter = self._adapters.get(candidate)
+            if cand_adapter is None:
+                continue
+            try:
+                text = await cand_adapter.chat(
+                    messages, max_tokens=max_tokens, temperature=temperature
+                )
+            except ProviderError as exc:
+                self.note_lane_error(candidate)
+                last_exc = exc
+                continue
+            log.info(
+                "EM-198 error-bounce: %s failed (%s), %s served the call",
+                home, first_exc.detail[:120], candidate,
+            )
+            return text, candidate
+        raise last_exc
 
     def forget(self, profile_name: str, messages: list[dict]) -> None:
         """Evict the decision-cache entry for this exact (profile, messages),
@@ -377,6 +466,21 @@ class Router:
         # routed_via at the time of the outcome — introspection only.
         self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
 
+    def note_lane_error(self, profile_name: str) -> None:
+        """EM-198 — record one adapter-level provider error (429 / 5xx /
+        transport failure / malformed completion) as an `error` demerit in
+        the EM-135 window. Counted by lane_sick() alongside timeouts since
+        the 2026-06-12 error-bounce mandate, so a lane that keeps erroring
+        gets pre-emptively detoured and recovers via the EM-177 probe path.
+        Parse-shaped failures (parsed=False without timeout/error) still do
+        NOT count toward sickness — those are content problems, not lane
+        problems."""
+        window = self._lane_outcomes.setdefault(
+            profile_name, deque(maxlen=_LANE_WINDOW)
+        )
+        window.append({"parsed": False, "truncated": False, "error": True})
+        self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
+
     def _lane_boosted(self, profile_name: str) -> bool:
         """True when this profile's outcome window shows enough truncations to
         flag the lane as known-bad (≥ _LANE_TRUNCATION_TRIGGER)."""
@@ -409,6 +513,7 @@ class Router:
                 "window": [dict(o) for o in window],
                 "boosted": self._lane_boosted(profile),
                 "timeouts": sum(1 for o in window if o.get("timed_out")),
+                "errors": sum(1 for o in window if o.get("error")),
                 "last_routed_via": self._lane_routed_via.get(profile),
                 "sick": self.lane_sick(profile),
                 "detours_routed_here": self._lane_detours_routed.get(profile, 0),
@@ -457,28 +562,36 @@ class Router:
             return _LANE_PROBE_EVERY_DEFAULT
 
     def lane_sick(self, profile_name: str) -> bool:
-        """EM-177 sickness predicate: ≥ sick_threshold (default 3) timed_out
-        entries in the existing EM-135 6-window. Mock lanes are never sick.
-        provider_error turns never enter the window as timed_out (EM-173
-        keeps those idle on purpose), so they do not count."""
+        """EM-177 sickness predicate: ≥ sick_threshold (default 3) demerits in
+        the existing EM-135 6-window. Mock lanes are never sick. A demerit is
+        a turn-budget timeout (EM-170) or — since the EM-198 error-bounce
+        mandate — an adapter-level provider error (note_lane_error). Plain
+        parse failures (parsed=False with neither flag) still do not count."""
         if self._is_mock_profile(profile_name):
             return False
         window = self._lane_outcomes.get(profile_name)
         if not window:
             return False
-        timeouts = sum(1 for o in window if o.get("timed_out"))
-        return timeouts >= self._sick_threshold()
+        demerits = sum(
+            1 for o in window if o.get("timed_out") or o.get("error")
+        )
+        return demerits >= self._sick_threshold()
 
-    def _pick_detour_candidate(self, home: str) -> str | None:
-        """Healthiest substitute for a sick home lane: non-mock, available(),
-        not sick. Ranked by (fewest timed_out in window, fewest detours
-        already routed there this run, stable profile order). None ⇒ no
-        healthy candidate (caller keeps the home lane — never detour to mock,
-        never give up the turn)."""
+    def _pick_detour_candidate(
+        self, home: str, exclude: set[str] | None = None
+    ) -> str | None:
+        """Healthiest substitute for a sick/erroring home lane: non-mock,
+        available(), not sick, not in `exclude` (EM-198 — lanes already tried
+        this bounce). Ranked by (fewest timeout+error demerits in window,
+        fewest detours already routed there this run, stable profile order).
+        None ⇒ no healthy candidate (caller keeps the home lane — never
+        detour to mock, never give up the turn)."""
         best: str | None = None
         best_key: tuple | None = None
         for idx, (name, profile) in enumerate(self._profiles.items()):
             if name == home or profile.adapter == "mock":
+                continue
+            if exclude is not None and name in exclude:
                 continue
             try:
                 if not profile.available():
@@ -488,8 +601,10 @@ class Router:
             if self.lane_sick(name):
                 continue
             window = self._lane_outcomes.get(name) or ()
-            timeouts = sum(1 for o in window if o.get("timed_out"))
-            key = (timeouts, self._lane_detours_routed.get(name, 0), idx)
+            demerits = sum(
+                1 for o in window if o.get("timed_out") or o.get("error")
+            )
+            key = (demerits, self._lane_detours_routed.get(name, 0), idx)
             if best_key is None or key < best_key:
                 best, best_key = name, key
         return best

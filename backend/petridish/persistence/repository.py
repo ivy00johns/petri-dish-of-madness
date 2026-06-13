@@ -482,6 +482,51 @@ class SQLiteRepository:
             "snapshot": {"tick": tick, "state": json.loads(snap[0] or "{}")},
         }
 
+    def get_run_lineage(self, run_id: int) -> list[tuple[int, int | None]]:
+        """The run's ancestry as [(run_id, tick_ceiling), ...], the run itself
+        first. The head ceiling is None — the run contributes ALL its events;
+        each ancestor contributes only events with `tick < tick_ceiling`, the
+        fork tick at which OUR branch (the child) left it (EM-187 resume + EM-101
+        fork both stamp runs.forked_from / forked_at_tick). events.seq is global
+        and monotonic, so a query over this set keyset-pages seamlessly across
+        run boundaries. Walks up to the root; cycle-guarded so a corrupt
+        forked_from chain can never hang the walk."""
+        chain: list[tuple[int, int | None]] = [(run_id, None)]
+        seen = {run_id}
+        cur = run_id
+        while True:
+            row = self._conn.execute(
+                "SELECT forked_from, forked_at_tick FROM runs WHERE id = ?",
+                (cur,),
+            ).fetchone()
+            if row is None or row[0] is None:
+                break
+            parent = int(row[0])
+            if parent in seen:  # defensive: never loop on corrupt lineage
+                break
+            chain.append((parent, row[1]))
+            seen.add(parent)
+            cur = parent
+        return chain
+
+    def _run_scope_where(self, run_id: int, lineage: bool) -> tuple[str, list]:
+        """The run-scope SQL predicate + bind params for an event query.
+        Single-run (lineage=False): `run_id = ?`, byte-identical to the pre-
+        lineage path. Lineage (True): the run plus each ancestor's pre-fork
+        slice, OR'd — `((run_id=?) OR (run_id=? AND tick<?) ...)`."""
+        if not lineage:
+            return "run_id = ?", [run_id]
+        ors: list[str] = []
+        params: list = []
+        for rid, ceiling in self.get_run_lineage(run_id):
+            if ceiling is None:
+                ors.append("run_id = ?")
+                params.append(rid)
+            else:
+                ors.append("(run_id = ? AND tick < ?)")
+                params.extend([rid, ceiling])
+        return "(" + " OR ".join(ors) + ")", params
+
     def get_events(
         self,
         run_id: int,
@@ -492,11 +537,13 @@ class SQLiteRepository:
         actor_id: str | None = None,
         turn_id: str | None = None,
         after_seq: int | None = None,
+        before_seq: int | None = None,
         limit: int | None = None,
         order: str = "asc",
+        lineage: bool = False,
     ) -> list[dict]:
-        clauses = ["run_id = ?"]
-        params: list = [run_id]
+        scope_sql, params = self._run_scope_where(run_id, lineage)
+        clauses = [scope_sql]
         if from_tick is not None:
             clauses.append("tick >= ?")
             params.append(from_tick)
@@ -515,6 +562,11 @@ class SQLiteRepository:
         if after_seq is not None:
             clauses.append("seq > ?")
             params.append(after_seq)
+        if before_seq is not None:
+            # Wave F (EM-194) tail keyset: strict mirror of after_seq. With
+            # order=desc this pages newest-first, overlap-free, to exhaustion.
+            clauses.append("seq < ?")
+            params.append(before_seq)
         direction = "DESC" if str(order).lower() == "desc" else "ASC"
         sql = (
             f"SELECT {self._EVENT_COLS} FROM events WHERE "
@@ -526,6 +578,29 @@ class SQLiteRepository:
             params.append(limit)
         cur = self._conn.execute(sql, params)
         return [self._row_to_eventrow(r) for r in cur.fetchall()]
+
+    def get_event_stats(self, run_id: int, *, lineage: bool = False) -> dict:
+        """Cheap run-scoped event-log bounds (Wave F / EM-194).
+
+        {total, max_seq, max_tick, min_seq} from a single COUNT/MAX/MIN pass
+        (seq is the PK; tick rides the run_id index) — lets the client size a
+        backfill and show honest progress without paging to exhaustion.
+        Empty run → all zeros (total == 0 is the discriminator). `lineage=True`
+        sizes the run PLUS its ancestors' pre-fork slices, matching the lineage
+        backfill so the progress total is honest for a resumed/forked run.
+        """
+        scope_sql, scope_params = self._run_scope_where(run_id, lineage)
+        total, max_seq, max_tick, min_seq = self._conn.execute(
+            "SELECT COUNT(*), MAX(seq), MAX(tick), MIN(seq) "
+            f"FROM events WHERE {scope_sql}",
+            scope_params,
+        ).fetchone()
+        return {
+            "total": total or 0,
+            "max_seq": max_seq if max_seq is not None else 0,
+            "max_tick": max_tick if max_tick is not None else 0,
+            "min_seq": min_seq if min_seq is not None else 0,
+        }
 
     def get_turn_trace(self, run_id: int, turn_id: str) -> list[dict]:
         """The full ordered chain for one turn (seq asc)."""

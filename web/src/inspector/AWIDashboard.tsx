@@ -136,8 +136,8 @@ export default function AWIDashboard(props: PanelProps) {
   }, [summary.byModel]);
 
   return (
-    <section className="lab-panel flex flex-col min-h-0" aria-label="AWI dashboard (EM-059)">
-      <div className="lab-header flex items-center justify-between gap-2">
+    <section className="lab-panel flex flex-col h-full min-h-0 overflow-hidden" aria-label="AWI dashboard (EM-059)">
+      <div className="lab-header flex items-center justify-between gap-2 !py-1 shrink-0">
         <span>AWI · Model vs Model</span>
         <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">
           EM-059 · no composite score
@@ -147,7 +147,9 @@ export default function AWIDashboard(props: PanelProps) {
       {!hasData ? (
         <EmptyState loading={props.historyLoading === true} />
       ) : (
-        <div className="flex flex-col gap-4 p-3 min-h-0">
+        // Wave G: the panel is a fixed grid cell — the indicator grid +
+        // model-vs-model act scroll INTERNALLY.
+        <div className="flex flex-col gap-4 p-3 flex-1 min-h-0 overflow-y-auto">
           {/* ACT 1 — the nine indicators, side by side. */}
           <div>
             <SectionLabel

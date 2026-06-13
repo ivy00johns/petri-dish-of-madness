@@ -4,7 +4,7 @@
  * pure turn_id correlation between an animal_action and an animal llm_call.
  */
 import { describe, expect, it, beforeEach } from 'vitest';
-import { animalModelMap, llmDecidedAnimalTurns, isLlmDecidedAction } from './animalIdentity';
+import { animalModelMap, llmDecidedAnimalTurns, isLlmDecidedAction, animalModelByTurn } from './animalIdentity';
 import { animal, ev, profile, resetSeq } from '../test-utils/fixtures';
 
 beforeEach(resetSeq);
@@ -78,5 +78,42 @@ describe('llmDecidedAnimalTurns + isLlmDecidedAction', () => {
   it('agent llm_calls contribute no turns', () => {
     const events = [ev({ kind: 'llm_call', actor_id: 'a1', turn_id: 'ht-1' })];
     expect(llmDecidedAnimalTurns(events).size).toBe(0);
+  });
+});
+
+describe('animalModelByTurn', () => {
+  it('maps an animal turn_id to the model from its sibling animal llm_call', () => {
+    const events = [
+      ev({ kind: 'llm_call', actor_id: 'cat-1', actor_type: 'animal',
+           turn_id: 'at-1', profile: 'gemini-flash' }),
+      ev({ kind: 'animal_action', actor_id: 'cat-1', actor_type: 'animal', turn_id: 'at-1' }),
+    ];
+    expect(animalModelByTurn(events).get('at-1')).toBe('gemini-flash');
+  });
+
+  it('excludes agent llm_calls and turnless animal calls', () => {
+    const events = [
+      ev({ kind: 'llm_call', actor_id: 'a1', turn_id: 'ht-1', profile: 'model-a' }), // human
+      ev({ kind: 'llm_call', actor_id: 'cat-1', actor_type: 'animal', profile: 'gemini-flash' }), // no turn_id
+    ];
+    expect(animalModelByTurn(events).size).toBe(0);
+  });
+
+  it('falls back to payload gen_ai.request.model when top-level profile is missing', () => {
+    const events = [
+      ev({ kind: 'llm_call', actor_id: 'cat-1', actor_type: 'animal', turn_id: 'at-1',
+           payload: { 'gen_ai.request.model': 'gemini-flash' } }),
+    ];
+    expect(animalModelByTurn(events).get('at-1')).toBe('gemini-flash');
+  });
+
+  it('keeps the FIRST (newest) call per turn (events arrive newest-first)', () => {
+    const events = [
+      ev({ kind: 'llm_call', actor_id: 'cat-1', actor_type: 'animal',
+           turn_id: 'at-1', profile: 'gemini-flash' }),
+      ev({ kind: 'llm_call', actor_id: 'cat-1', actor_type: 'animal',
+           turn_id: 'at-1', profile: 'old-model' }),
+    ];
+    expect(animalModelByTurn(events).get('at-1')).toBe('gemini-flash');
   });
 });

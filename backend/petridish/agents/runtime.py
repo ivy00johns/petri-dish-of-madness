@@ -255,6 +255,7 @@ _ENERGY_DISPLAY_BUCKET = 10
 #   one of these marks the OLDEST commitment kept (dropped silently — only true
 #   phantoms emit commitment_lapsed).
 _TALK_ACTIONS = frozenset({"say", "whisper", "idle"})
+
 _COMMIT_RESOLUTION_ACTIONS = frozenset({
     "propose_project", "contribute_funds", "build_step", "repair",
     "work", "forage", "give", "recharge",
@@ -2430,6 +2431,10 @@ class AgentRuntime:
                     reflex_event["_multi"][0] if "_multi" in reflex_event
                     else reflex_event
                 )
+                # The reflex resolved a forage/recharge/move, so tag the feed
+                # line — instinct took over after the LLM call timed out. The
+                # timeout stays forensically honest via payload.reflex + the
+                # absent model chip + the timed_out llm_call span on the trace.
                 primary["text"] += " ⏱ (LLM call timed out — instinct took over)"
                 # EM-145 — the god's voice rode the timed-out prompt: the
                 # delivery still happened, so it stays legible (same as the
@@ -2925,6 +2930,11 @@ class AgentRuntime:
             # them (the state change itself stands; only its feed echo is
             # lost — strictly better than mis-attributing it to a stranger).
             shifts = self.world.drain_relationship_events()
+        # Surface the agent's inner thought onto the feed line so the world's
+        # reasoning is legible at a glance instead of buried in payload.thought.
+        # Appended once to the primary action event (never the drained
+        # relationship shifts); an empty/absent thought leaves the line untouched.
+        self._surface_thought(result, action_dict.get("thought", ""))
         if shifts:
             tick = self.world.tick
             decorated = [{"tick": tick, **evt} for evt in shifts]
@@ -2933,6 +2943,20 @@ class AgentRuntime:
             else:
                 result = {"_multi": [result] + decorated}
         return result
+
+    @staticmethod
+    def _surface_thought(result: dict, thought: str) -> None:
+        """Append the agent's one-sentence inner thought to the primary action
+        event's feed text (💭), so the reasoning rides the stream instead of
+        living only in payload.thought. No-op on an empty thought or a textless
+        event; targets _multi[0] so a thought never duplicates across the chain."""
+        thought = (thought or "").strip()
+        if not thought:
+            return
+        primary = result["_multi"][0] if "_multi" in result else result
+        text = primary.get("text")
+        if text:
+            primary["text"] = f"{text}  💭 {thought}"
 
     def _apply_action_inner(
         self,
@@ -3031,9 +3055,14 @@ class AgentRuntime:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to whisper but target not found",
                         "payload": {"error": "target_not_found"}}
+            whisper_text = args.get("text", "")
             return {**base, "kind": "agent_speech", "target_id": target.id,
-                    "text": f"{agent.name} whispers to {target.name}.",
-                    "payload": {"action": "whisper", "said": args.get("text", ""),
+                    # The watcher (you) sees the whisper content — it stays
+                    # `private: True` so OTHER agents don't get it in their
+                    # context, but hiding it from the omniscient observer just
+                    # turned the feed into opaque "X whispers to Y" filler.
+                    "text": f'{agent.name} whispers to {target.name}: "{whisper_text}"',
+                    "payload": {"action": "whisper", "said": whisper_text,
                                 "place": agent.location, "private": True, "thought": thought}}
 
         elif action == "insult":

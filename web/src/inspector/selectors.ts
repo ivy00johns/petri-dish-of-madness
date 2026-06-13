@@ -61,9 +61,26 @@ function numRecord(v: unknown): Record<string, number> {
   return out;
 }
 
+// Wave F (EM-194): the ascending sort used to run PER SELECTOR CALL — at a
+// 50k-event history a single scrub step paid 4–6 O(n log n) sorts. The sorted
+// copy is now cached per events-array reference (WeakMap: a dropped history
+// ref frees its cache entry). The cached array is shared READ-ONLY by every
+// selector — none mutates it (filters/maps produce fresh arrays) — and the
+// comparator is unchanged, so results stay byte-identical.
+const ascendingCache = new WeakMap<WorldEvent[], WorldEvent[]>();
+
+/** Sorted copy of events oldest-first by seq (cached per array reference). */
+export function sortedBySeqAsc(events: WorldEvent[]): WorldEvent[] {
+  const cached = ascendingCache.get(events);
+  if (cached) return cached;
+  const sorted = [...events].sort((a, b) => a.seq - b.seq);
+  ascendingCache.set(events, sorted);
+  return sorted;
+}
+
 /** Sort a copy of events oldest-first (the history ref is newest-first). */
 function ascending(events: WorldEvent[]): WorldEvent[] {
-  return [...events].sort((a, b) => a.seq - b.seq);
+  return sortedBySeqAsc(events);
 }
 
 /** Events at or before tick T (a scrub projection), oldest-first. */
@@ -770,16 +787,96 @@ export function replayStateAt(
   liveBuildings: Building[] = [],
   liveAnimals: Animal[] = [],
 ): ReplayFrame {
-  const placeXY = new Map<string, { x: number; y: number }>();
-  for (const p of places) placeXY.set(p.id, { x: p.x, y: p.y });
-
+  const inputs: ReplayFoldInputs = { agents, places, liveBuildings, liveAnimals };
   // Base: nearest snapshot at tick <= T, else the live roster's start.
   const base = nearestSnapshot(snapshots, tick);
+  const state = replayFoldSeed(base, inputs);
+  // Fold boundary (audit C4; event-log.md v1.1.0 §3 / api.openapi v1.2.0): a
+  // snapshot at tick S is the state AFTER all tick-S events, so the fold is
+  // STRICT-LEFT — keep events with base.tick < e.tick <= tick. With no snapshot
+  // the fold starts before tick 0 (so tick-0 events apply).
+  for (const e of ascending(events)) {
+    if (e.tick > state.fromTick && e.tick <= tick) replayFoldStep(state, e);
+  }
+  const post: ReplayFoldPostWindow = {
+    earliestLaterBuildingEvent: (buildingId) => {
+      let earliest: WorldEvent | null = null;
+      for (const e of events) {
+        if (e.tick <= tick) continue;
+        const bid = str(payload(e)['building_id']) ?? e.target_id;
+        if (bid !== buildingId) continue;
+        if (earliest === null || e.seq < earliest.seq) earliest = e;
+      }
+      return earliest;
+    },
+    spawnsAfterTick: ascending(events).filter(
+      (e) => e.tick > tick && e.kind === 'animal_spawned' && !!e.actor_id,
+    ),
+    eventsAtTick: ascending(events).filter((e) => e.tick === tick),
+  };
+  return replayFoldFinalize(state, tick, inputs, post);
+}
+
+// ── Wave F (EM-194) — the replay fold decomposed into seed / step / finalize ──
+//
+// replayStateAt above ≡ finalize(advance(seed(base, inputs), window), …): seed
+// the fold state from the nearest snapshot, advance it one event at a time
+// through the strict-left window (fromTick < e.tick <= T), then finalize into a
+// ReplayFrame. The incremental scrub projector (projections.ts) reuses these
+// SAME pieces with a persistent cursor + checkpoint LRU, so a frame computed
+// incrementally is equal to the full fold by construction.
+
+/** Animal accumulator inside the replay fold (best-effort positions, D4). */
+export interface ReplayAnimalAcc {
+  name: string;
+  species: string;
+  location: string;
+  alive: boolean;
+  approximate: boolean;
+}
+
+/** The non-event inputs the replay fold seeds/finalizes from. */
+export interface ReplayFoldInputs {
+  agents: Agent[];
+  places: Array<{ id: string; x: number; y: number }>;
+  liveBuildings: Building[];
+  liveAnimals: Animal[];
+}
+
+/** Mutable replay fold state — the event-driven half of a ReplayFrame. */
+export interface ReplayFoldState {
+  /** Strict-left fold boundary (audit C4): events with tick > fromTick apply. */
+  fromTick: number;
+  /** Place coords (static after seeding — events never move places). */
+  placeXY: Map<string, { x: number; y: number }>;
+  location: Map<string, string>;
+  profileOf: Map<string, string | null>;
+  aliveOf: Map<string, boolean>;
+  bld: Map<string, ReplayBuildingState>;
+  ani: Map<string, ReplayAnimalAcc>;
+}
+
+function ensureBld(bld: Map<string, ReplayBuildingState>, id: string): ReplayBuildingState {
+  let b = bld.get(id);
+  if (!b) {
+    b = { id, name: id, kind: '', location: '', status: 'planned', progress: 0 };
+    bld.set(id, b);
+  }
+  return b;
+}
+
+/** Seed the fold state from the base snapshot (or the live rosters). */
+export function replayFoldSeed(
+  base: ReplaySnapshot | null,
+  inputs: ReplayFoldInputs,
+): ReplayFoldState {
+  const placeXY = new Map<string, { x: number; y: number }>();
+  for (const p of inputs.places) placeXY.set(p.id, { x: p.x, y: p.y });
+
   const location = new Map<string, string>();
   const profileOf = new Map<string, string | null>();
   const aliveOf = new Map<string, boolean>();
-
-  for (const a of agents) {
+  for (const a of inputs.agents) {
     location.set(a.id, a.location);
     profileOf.set(a.id, a.profile ?? null);
     aliveOf.set(a.id, true);
@@ -793,71 +890,14 @@ export function replayStateAt(
     for (const p of base.places ?? []) placeXY.set(p.id, { x: p.x, y: p.y });
   }
 
-  // Fold boundary (audit C4; event-log.md v1.1.0 §3 / api.openapi v1.2.0): a
-  // snapshot at tick S is the state AFTER all tick-S events, so the fold is
-  // STRICT-LEFT — keep events with base.tick < e.tick <= tick. With no snapshot
-  // the fold starts before tick 0 (so tick-0 events apply).
-  const fromTick = base ? base.tick : -1;
-  for (const e of ascending(events)) {
-    if (!(e.tick > fromTick && e.tick <= tick)) continue;
-    if (e.kind === 'agent_moved' && e.actor_id) {
-      // W9-QA-1: the backend's agent_moved destination is payload.place
-      // (runtime.py emits {place: <place_id>}); without it the replay delta
-      // never moved anyone and scrubbed positions went stale between
-      // snapshots. `to`/`location`/`target_id` remain as fallbacks (mock /
-      // older shapes).
-      const to =
-        str(payload(e)['place']) ??
-        str(payload(e)['to']) ??
-        str(payload(e)['location']) ??
-        e.target_id;
-      if (to && placeXY.has(to)) location.set(e.actor_id, to);
-    } else if (e.kind === 'agent_died' && e.actor_id) {
-      aliveOf.set(e.actor_id, false);
-    }
-  }
-
-  const profileColor = new Map<string, string>();
-  for (const a of agents) if (a.profile && a.profile_color) profileColor.set(a.profile, a.profile_color);
-
-  const agentPositions: ReplayAgentPos[] = [];
-  for (const a of agents) {
-    const loc = location.get(a.id) ?? a.location;
-    const xy = placeXY.get(loc) ?? { x: 500, y: 500 };
-    const prof = profileOf.get(a.id) ?? a.profile ?? null;
-    agentPositions.push({
-      id: a.id,
-      x: xy.x,
-      y: xy.y,
-      profile: prof,
-      // Data-driven model color; empty when unknown — the VIEW resolves the
-      // neutral token (keeps the data layer free of color literals).
-      color: a.profile_color ?? (prof ? profileColor.get(prof) ?? '' : ''),
-      alive: aliveOf.get(a.id) ?? a.alive,
-    });
-  }
-
-  // ── W10 / audit C7 — time-projected building state ─────────────────────────
-  // The C7 bug: the replay mini-map drew live building status while scrubbed.
-  // Fix: building state at T is a pure event fold. Base = snapshot.buildings
-  // (state AFTER all tick-base.tick events) when present; otherwise the fold
-  // starts EMPTY and `project_proposed` / `structure_state_changed` events
-  // CREATE entries — the live roster is never used as a status source, only to
-  // fill display metadata (name/kind/location) for buildings whose creating
-  // event predates the available window. Tolerant of missing payload fields:
-  // every read is null-checked and an unknown status keeps the previous one.
+  // W10 / audit C7 — building base: snapshot.buildings (state AFTER all
+  // tick-base.tick events) when present; otherwise the fold starts EMPTY and
+  // project_proposed / structure_state_changed events CREATE entries — the
+  // live roster is never a status source (finalize fills display metadata).
   const bld = new Map<string, ReplayBuildingState>();
-  const ensureBld = (id: string): ReplayBuildingState => {
-    let b = bld.get(id);
-    if (!b) {
-      b = { id, name: id, kind: '', location: '', status: 'planned', progress: 0 };
-      bld.set(id, b);
-    }
-    return b;
-  };
   for (const s of base?.buildings ?? []) {
     if (!s.id) continue;
-    const b = ensureBld(s.id);
+    const b = ensureBld(bld, s.id);
     if (s.name) b.name = s.name;
     if (s.kind) b.kind = s.kind;
     if (s.location) b.location = s.location;
@@ -865,14 +905,69 @@ export function replayStateAt(
     if (status) b.status = status;
     if (typeof s.progress === 'number' && Number.isFinite(s.progress)) b.progress = s.progress;
   }
-  for (const e of ascending(events)) {
-    if (!(e.tick > fromTick && e.tick <= tick)) continue;
-    const p = payload(e);
-    const buildingId = str(p['building_id']) ?? (e.kind.startsWith('project_') || e.kind.startsWith('building_') || e.kind === 'structure_state_changed' ? e.target_id ?? null : null);
-    if (!buildingId) continue;
+
+  // W10 / audit D4 — animal base: snapshot.animals (true roster at base.tick
+  // ≤ T) when present, else the live roster flagged `approximate`.
+  const ani = new Map<string, ReplayAnimalAcc>();
+  if (base?.animals) {
+    for (const a of base.animals) {
+      if (!a.id || !a.location) continue;
+      ani.set(a.id, {
+        name: a.name ?? a.id,
+        species: a.species ?? '',
+        location: a.location,
+        alive: a.alive ?? true,
+        approximate: false,
+      });
+    }
+  } else {
+    for (const a of inputs.liveAnimals) {
+      ani.set(a.id, {
+        name: a.name,
+        species: a.species,
+        location: a.location,
+        alive: a.alive,
+        approximate: true,
+      });
+    }
+  }
+
+  return { fromTick: base ? base.tick : -1, placeXY, location, profileOf, aliveOf, bld, ani };
+}
+
+/**
+ * ONE replay fold step. The caller enforces the strict-left window
+ * (state.fromTick < e.tick <= T) and seq-ascending order. The agent, building
+ * and animal branches touch disjoint state, so folding them in a single pass
+ * is equivalent to the historical three-loop fold.
+ */
+export function replayFoldStep(state: ReplayFoldState, e: WorldEvent): void {
+  const p = payload(e);
+
+  // Agents.
+  if (e.kind === 'agent_moved' && e.actor_id) {
+    // W9-QA-1: the backend's agent_moved destination is payload.place
+    // (runtime.py emits {place: <place_id>}); `to`/`location`/`target_id`
+    // remain as fallbacks (mock / older shapes).
+    const to = str(p['place']) ?? str(p['to']) ?? str(p['location']) ?? e.target_id;
+    if (to && state.placeXY.has(to)) state.location.set(e.actor_id, to);
+  } else if (e.kind === 'agent_died' && e.actor_id) {
+    state.aliveOf.set(e.actor_id, false);
+  }
+
+  // Buildings (audit C7). Tolerant of missing payload fields: every read is
+  // null-checked and an unknown status keeps the previous one.
+  const buildingId =
+    str(p['building_id']) ??
+    (e.kind.startsWith('project_') ||
+    e.kind.startsWith('building_') ||
+    e.kind === 'structure_state_changed'
+      ? e.target_id ?? null
+      : null);
+  if (buildingId) {
     if (e.kind === 'project_proposed') {
       // payload: {building_id, name, kind, location, funds_required, function}
-      const b = ensureBld(buildingId);
+      const b = ensureBld(state.bld, buildingId);
       b.name = str(p['name']) ?? b.name;
       b.kind = str(p['kind']) ?? b.kind;
       b.location = str(p['location']) ?? b.location;
@@ -880,17 +975,17 @@ export function replayStateAt(
       b.progress = 0;
     } else if (e.kind === 'structure_state_changed') {
       // payload: {building_id, from, to, reason} — `to` drives the status.
-      const b = ensureBld(buildingId);
+      const b = ensureBld(state.bld, buildingId);
       const to = asBuildingStatus(p['to']);
       if (to) b.status = to;
     } else if (e.kind === 'project_built' || e.kind === 'project_completed') {
       // payload: {building_id, progress, step}
-      const b = ensureBld(buildingId);
+      const b = ensureBld(state.bld, buildingId);
       const progress = num(p['progress']);
       if (progress !== null) b.progress = Math.max(0, Math.min(100, progress));
     } else if (e.kind === 'building_operational') {
       // payload: {building_id, kind, function, location}
-      const b = ensureBld(buildingId);
+      const b = ensureBld(state.bld, buildingId);
       b.status = 'operational';
       b.progress = 100;
       b.kind = str(p['kind']) ?? b.kind;
@@ -899,7 +994,77 @@ export function replayStateAt(
     // project_funded / project_contributed carry funds only — nothing the
     // replay frame renders changes, so they are intentionally not folded.
   }
-  // Display-metadata fill ONLY (never status/progress) from the live roster.
+
+  // Animals (audit D4): fold animal_spawned (payload carries location) and
+  // animal_died for liveness. Positions stay best-effort (see replayFoldSeed).
+  if (e.kind === 'animal_spawned' && e.actor_id) {
+    const cur = state.ani.get(e.actor_id);
+    state.ani.set(e.actor_id, {
+      name: str(p['name']) ?? cur?.name ?? e.actor_id,
+      species: str(p['species']) ?? cur?.species ?? '',
+      location: str(p['location']) ?? cur?.location ?? '',
+      alive: true,
+      approximate: false,
+    });
+  } else if (e.kind === 'animal_died' && e.actor_id) {
+    const cur = state.ani.get(e.actor_id);
+    if (cur) cur.alive = false;
+  }
+}
+
+/**
+ * Post-window context finalize needs — events AFTER the scrub tick (the
+ * building back-fill + the "spawned after T" pruning) and AT it. The full fold
+ * computes these by scanning; the incremental projector serves them from
+ * binary-searched per-events indexes. Same answers either way.
+ */
+export interface ReplayFoldPostWindow {
+  /** Min-seq event with tick > T whose building id matches, or null. */
+  earliestLaterBuildingEvent: (buildingId: string) => WorldEvent | null;
+  /** animal_spawned events (with an actor_id) at tick > T. */
+  spawnsAfterTick: WorldEvent[];
+  /** Events at EXACTLY tick T, seq-ascending. */
+  eventsAtTick: WorldEvent[];
+}
+
+/**
+ * Materialize a ReplayFrame from a fold state advanced to `tick`. Pure with
+ * respect to `state`: the building metadata fill / back-fill and the
+ * spawned-after-T pruning operate on CLONES, so a persistent cursor state is
+ * never corrupted by per-call display concerns.
+ */
+export function replayFoldFinalize(
+  state: ReplayFoldState,
+  tick: number,
+  inputs: ReplayFoldInputs,
+  post: ReplayFoldPostWindow,
+): ReplayFrame {
+  const { agents, liveBuildings } = inputs;
+
+  const profileColor = new Map<string, string>();
+  for (const a of agents) if (a.profile && a.profile_color) profileColor.set(a.profile, a.profile_color);
+
+  const agentPositions: ReplayAgentPos[] = [];
+  for (const a of agents) {
+    const loc = state.location.get(a.id) ?? a.location;
+    const xy = state.placeXY.get(loc) ?? { x: 500, y: 500 };
+    const prof = state.profileOf.get(a.id) ?? a.profile ?? null;
+    agentPositions.push({
+      id: a.id,
+      x: xy.x,
+      y: xy.y,
+      profile: prof,
+      // Data-driven model color; empty when unknown — the VIEW resolves the
+      // neutral token (keeps the data layer free of color literals).
+      color: a.profile_color ?? (prof ? profileColor.get(prof) ?? '' : ''),
+      alive: state.aliveOf.get(a.id) ?? a.alive,
+    });
+  }
+
+  // Buildings: clone, then display-metadata fill ONLY (never status/progress)
+  // from the live roster.
+  const bld = new Map<string, ReplayBuildingState>();
+  for (const [id, b] of state.bld) bld.set(id, { ...b });
   for (const lb of liveBuildings) {
     const b = bld.get(lb.id);
     if (!b) continue;
@@ -916,14 +1081,7 @@ export function replayStateAt(
   //     otherwise fall back to the live state (better than vanishing).
   for (const lb of liveBuildings) {
     if (bld.has(lb.id)) continue;
-    let earliestLater: WorldEvent | null = null;
-    for (const e of events) {
-      if (e.tick <= tick) continue;
-      const p = payload(e);
-      const bid = str(p['building_id']) ?? e.target_id;
-      if (bid !== lb.id) continue;
-      if (earliestLater === null || e.seq < earliestLater.seq) earliestLater = e;
-    }
+    const earliestLater = post.earliestLaterBuildingEvent(lb.id);
     if (earliestLater?.kind === 'project_proposed') continue; // born after T
     let status: BuildingStatus = lb.status;
     if (earliestLater?.kind === 'structure_state_changed') {
@@ -939,70 +1097,19 @@ export function replayStateAt(
     });
   }
 
-  // ── W10 / audit D4 — animals at `tick` (best-effort) ───────────────────────
-  // Animal positions are NOT faithfully replayable from events: a wander's
-  // `animal_action` payload carries no destination place id (only prose). So:
-  //   base = snapshot.animals (true roster at base.tick ≤ T) when present,
-  //   else the live roster, flagged `approximate`;
-  //   then fold animal_spawned (payload carries location — drop animals whose
-  //   spawn is AFTER T) and animal_died ≤ T for liveness.
-  interface AnimalAcc {
-    name: string;
-    species: string;
-    location: string;
-    alive: boolean;
-    approximate: boolean;
-  }
-  const ani = new Map<string, AnimalAcc>();
-  if (base?.animals) {
-    for (const a of base.animals) {
-      if (!a.id || !a.location) continue;
-      ani.set(a.id, {
-        name: a.name ?? a.id,
-        species: a.species ?? '',
-        location: a.location,
-        alive: a.alive ?? true,
-        approximate: false,
-      });
-    }
-  } else {
-    for (const a of liveAnimals) {
-      ani.set(a.id, {
-        name: a.name,
-        species: a.species,
-        location: a.location,
-        alive: a.alive,
-        approximate: true,
-      });
-    }
-  }
-  for (const e of ascending(events)) {
-    if (e.tick > fromTick && e.tick <= tick) {
-      if (e.kind === 'animal_spawned' && e.actor_id) {
-        const p = payload(e);
-        const cur = ani.get(e.actor_id);
-        ani.set(e.actor_id, {
-          name: str(p['name']) ?? cur?.name ?? e.actor_id,
-          species: str(p['species']) ?? cur?.species ?? '',
-          location: str(p['location']) ?? cur?.location ?? '',
-          alive: true,
-          approximate: false,
-        });
-      } else if (e.kind === 'animal_died' && e.actor_id) {
-        const cur = ani.get(e.actor_id);
-        if (cur) cur.alive = false;
-      }
-    } else if (e.tick > tick && e.kind === 'animal_spawned' && e.actor_id) {
-      // Spawned AFTER the scrub tick — it does not exist at T. Only the
-      // live-roster fallback is overruled; a snapshot ≤ T already attested
-      // the animal existed (snapshots are authoritative, events tolerated).
-      const cur = ani.get(e.actor_id);
-      if (cur === undefined || cur.approximate) ani.delete(e.actor_id);
-    }
+  // Animals: clone the map, then drop entries whose spawn is AFTER the scrub
+  // tick — they don't exist at T. Only the live-roster fallback is overruled;
+  // a snapshot ≤ T already attested the animal existed (snapshots are
+  // authoritative, events tolerated).
+  const ani = new Map(state.ani);
+  for (const e of post.spawnsAfterTick) {
+    if (!e.actor_id) continue;
+    const cur = ani.get(e.actor_id);
+    if (cur === undefined || cur.approximate) ani.delete(e.actor_id);
   }
   const animalPositions: ReplayAnimalPos[] = [];
   for (const [id, a] of ani) {
-    const xy = placeXY.get(a.location);
+    const xy = state.placeXY.get(a.location);
     if (!xy) continue;
     animalPositions.push({
       id,
@@ -1015,14 +1122,12 @@ export function replayStateAt(
     });
   }
 
-  const eventsAtTick = ascending(events).filter((e) => e.tick === tick);
-
   return {
     tick,
     agents: agentPositions,
     buildings: [...bld.values()],
     animals: animalPositions,
-    eventsAtTick,
+    eventsAtTick: post.eventsAtTick,
   };
 }
 
@@ -1093,32 +1198,39 @@ export interface AgentEconomySample {
  */
 export function agentEconomyAt(events: WorldEvent[]): Map<string, AgentEconomySample> {
   const out = new Map<string, AgentEconomySample>();
-  for (const e of ascending(events)) {
-    if (!e.actor_id) continue;
-    const p = payload(e);
-    if (e.kind === 'turn_start') {
-      const energy = num(p['energy']);
-      const credits = num(p['credits']);
-      if (energy === null && credits === null) continue;
-      const prev = out.get(e.actor_id);
-      out.set(e.actor_id, {
-        energy: energy ?? prev?.energy ?? 0,
-        credits: credits ?? prev?.credits ?? 0,
-        sampled: true,
-      });
-    } else if (e.kind === 'action_resolved') {
-      const cur = out.get(e.actor_id);
-      if (!cur) continue;
-      const deltas = numRecord(p['state_deltas']);
-      if (deltas['energy'] !== undefined) {
-        cur.energy = Math.max(0, Math.min(100, cur.energy + deltas['energy']));
-      }
-      if (deltas['credits'] !== undefined) {
-        cur.credits = cur.credits + deltas['credits'];
-      }
+  for (const e of ascending(events)) economyFoldStep(out, e);
+  return out;
+}
+
+/**
+ * Wave F (EM-194): ONE economy fold step — extracted so the incremental scrub
+ * projector (projections.ts) folds the SAME transition agentEconomyAt does,
+ * making the two paths equal by construction. Mutates `state` in place.
+ */
+export function economyFoldStep(state: Map<string, AgentEconomySample>, e: WorldEvent): void {
+  if (!e.actor_id) return;
+  const p = payload(e);
+  if (e.kind === 'turn_start') {
+    const energy = num(p['energy']);
+    const credits = num(p['credits']);
+    if (energy === null && credits === null) return;
+    const prev = state.get(e.actor_id);
+    state.set(e.actor_id, {
+      energy: energy ?? prev?.energy ?? 0,
+      credits: credits ?? prev?.credits ?? 0,
+      sampled: true,
+    });
+  } else if (e.kind === 'action_resolved') {
+    const cur = state.get(e.actor_id);
+    if (!cur) return;
+    const deltas = numRecord(p['state_deltas']);
+    if (deltas['energy'] !== undefined) {
+      cur.energy = Math.max(0, Math.min(100, cur.energy + deltas['energy']));
+    }
+    if (deltas['credits'] !== undefined) {
+      cur.credits = cur.credits + deltas['credits'];
     }
   }
-  return out;
 }
 
 // ── W11a (EM-086) — archive-mode agent roster, reconstructed from events ─────

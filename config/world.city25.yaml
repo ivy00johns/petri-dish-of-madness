@@ -55,12 +55,12 @@ world:
   agent_count: 25
   tick_interval_seconds: 3
   turns_per_day: 20
-  energy_decay_per_turn: 4
+  energy_decay_per_turn: 2     # 2026-06-12: eased from 4 (kept in sync with config/world.yaml)
   death_after_zero_turns: 5
   starting_energy: 100
   starting_credits: 10
-  recharge_cost: 2
-  recharge_amount: 30
+  recharge_cost: 0             # 2026-06-12: FREE (was 2) — survival no longer credit-gated
+  recharge_amount: 45          # 2026-06-12: up from 30 — a recharge lasts ~22 turns, not ~7
   work_reward: 4
   forage_reward: 1
   steal_max: 8
@@ -74,7 +74,7 @@ world:
   # idle fallback (reason `llm_timeout`) so a single slow lane can never freeze
   # the world (run 248 measured 14-32s single-call stalls). Set 0 (or remove)
   # to disable the guard entirely — exactly the pre-EM-170 behavior.
-  turn_llm_budget_seconds: 12
+  turn_llm_budget_seconds: 0
 
   # Wave D2 / EM-158-160 — population-scaling cadence. Agents carry a
   # `cadence_tier` (set per agent entry below, via the spawn body, or
@@ -156,7 +156,7 @@ world:
   # W7 / EM-068 — router decision cache (free-scale). Keyed on profile + messages
   # (which embed persona + memory + world state); a hit reuses the prior completion.
   cache:
-    enabled: true
+    enabled: false           # OFF 2026-06-12 — cache hits made characters repeat verbatim
     max_entries: 512
 
   # W8 / EM-064 — LLM-driven chaos animals (actor_type:"animal"). Free-scale is the
@@ -165,8 +165,10 @@ world:
   # decision routes to the cheapest profile and is intentionally under-constrained.
   animals:
     enabled: true
-    act_every_n_ticks: 3      # an animal gets a turn every Nth tick (slower than agents)
-    llm_chance: 0.6           # P(LLM decision) on an acted tick; else a reflex micro-behavior
+    act_every_n_ticks: 6      # 2026-06-12: 3→6 (kept in sync with config/world.yaml) — pets
+                              # were out-ticking people after the roster grew past 3
+    llm_chance: 0.9           # P(LLM decision) on an acted tick; else a reflex micro-behavior
+                              # (raised from 0.6 on 2026-06-12 — the reflex pool repeats fast)
     model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
 
   # W11b / EM-083 — real blackout: the `blackout` random event disables recharge

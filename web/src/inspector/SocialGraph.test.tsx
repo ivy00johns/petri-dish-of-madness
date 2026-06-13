@@ -24,20 +24,32 @@ import { forwardRef, useImperativeHandle } from 'react';
 import { render, screen } from '@testing-library/react';
 import { agent, profile } from '../test-utils/fixtures';
 
-const { pauseSpy } = vi.hoisted(() => ({ pauseSpy: vi.fn() }));
+const { pauseSpy, lastGraphProps } = vi.hoisted(() => ({
+  pauseSpy: vi.fn(),
+  lastGraphProps: { current: null as Record<string, unknown> | null },
+}));
 
 // Stub the heavy canvas/d3 graph lib with a ref-compatible shell that mirrors
 // the real ref lifecycle (react-kapsule also uses useImperativeHandle, so the
 // handle is detached at the same commit-phase moment as the real lib's).
+// EM-196: the stub also mirrors the real lib's DOM — a <canvas> inside the
+// wrapper — and records the props it was handed, so the mount test can assert
+// the ready branch actually puts a canvas in the container and that the
+// canvas-bound colors arrived resolved (never '').
 vi.mock('react-force-graph-2d', () => ({
-  default: forwardRef(function ForceGraphStub(_props: object, ref) {
+  default: forwardRef(function ForceGraphStub(props: Record<string, unknown>, ref) {
+    lastGraphProps.current = props;
     useImperativeHandle(ref, () => ({
       pauseAnimation: pauseSpy,
       resumeAnimation: vi.fn(),
       d3ReheatSimulation: vi.fn(),
       zoomToFit: vi.fn(),
     }));
-    return <div data-testid="force-graph-stub" />;
+    return (
+      <div data-testid="force-graph-stub">
+        <canvas data-testid="force-graph-canvas" />
+      </div>
+    );
   }),
 }));
 
@@ -54,9 +66,12 @@ beforeAll(() => {
   };
 });
 afterAll(() => restoreSize?.());
-beforeEach(() => pauseSpy.mockClear());
+beforeEach(() => {
+  pauseSpy.mockClear();
+  lastGraphProps.current = null;
+});
 
-import SocialGraph from './SocialGraph';
+import SocialGraph, { resolveTokens } from './SocialGraph';
 
 const PROPS = {
   events: [],
@@ -81,5 +96,65 @@ describe('SocialGraph — pause-on-unmount (audit C5)', () => {
     expect(screen.getByTestId('force-graph-stub')).toBeInTheDocument();
     unmount();
     expect(pauseSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── EM-196: the white-box fix ─────────────────────────────────────────────────
+// Root cause: `useResolvedTokens` read CSS vars via getComputedStyle; when a
+// read returned '' (timing/route edge), backgroundColor='' was falsy, so
+// force-graph's init guard (`if (state.backgroundColor)`) never painted the
+// canvas background → transparent canvas over the OS-white page. The fix is a
+// literal hex fallback on EVERY canvas-bound token read, mirroring the
+// declared values in inspector-tokens.css / roster-tokens.css exactly.
+
+describe('SocialGraph — canvas token fallbacks (EM-196)', () => {
+  it('resolves to the literal token mirrors when getComputedStyle yields "" for every var', () => {
+    const spy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockReturnValue({ getPropertyValue: () => '' } as unknown as CSSStyleDeclaration);
+    try {
+      expect(resolveTokens()).toEqual({
+        bg: '#0a0a0b', //          --lab-bg                 (inspector-tokens.css)
+        text: '#e8e8f0', //        --lab-text               (inspector-tokens.css)
+        dim: '#3a3a50', //         --lab-dim                (inspector-tokens.css)
+        acid: '#c8ff00', //        --lab-acid               (inspector-tokens.css)
+        danger: '#ff3333', //      --marker-crime           (inspector-tokens.css)
+        edgeFlat: '#5a5a72', //    --lab-muted              (inspector-tokens.css)
+        nodeNeutral: '#5a5a72', // --inspector-node-neutral (inspector-tokens.css)
+        relPartner: '#ff6fa5', //  --rel-partner            (roster-tokens.css)
+        relFamily: '#ffb347', //   --rel-family             (roster-tokens.css)
+        relMentor: '#4cc9f0', //   --rel-mentor             (roster-tokens.css)
+        relFeud: '#a31621', //     --rel-feud               (roster-tokens.css)
+        faction: '#2ee6a8', //     --faction-tint           (inspector-tokens.css)
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('prefers the declared var when it DOES resolve (fallback is a backstop, not an override)', () => {
+    const spy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockReturnValue({
+        getPropertyValue: (name: string) => (name === '--lab-bg' ? ' #123456 ' : ''),
+      } as unknown as CSSStyleDeclaration);
+    try {
+      const tokens = resolveTokens();
+      expect(tokens.bg).toBe('#123456'); // trimmed, from the var
+      expect(tokens.acid).toBe('#c8ff00'); // unresolved → literal mirror
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('mounts a canvas in the graph container after the ready transition, with a non-empty backgroundColor', () => {
+    const { container } = render(<SocialGraph {...PROPS} />);
+    // ready (size measured + ≥2 nodes) → the graph branch renders, and its
+    // surface holds an actual <canvas> element.
+    expect(screen.getByTestId('force-graph-stub')).toBeInTheDocument();
+    expect(container.querySelector('canvas')).not.toBeNull();
+    // The canvas-bound background prop must NEVER be '' (the white-box bug):
+    // jsdom resolves no declared vars, so this also proves the fallback path.
+    expect(lastGraphProps.current?.backgroundColor).toBe('#0a0a0b');
   });
 });

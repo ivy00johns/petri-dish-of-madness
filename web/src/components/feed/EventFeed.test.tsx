@@ -43,3 +43,32 @@ describe('EventFeed — agent_starving warning treatment', () => {
     expect(screen.getByText('the last villager has died')).toHaveClass('text-lab-danger');
   });
 });
+
+describe('EventFeed — inline model chip on every model-decided line', () => {
+  it('shows the model chip inline on a NON-speech action (no hover needed)', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'economy', actor_id: 'a1', profile: 'cerebras-glm', profile_color: '#e74c3c',
+           text: 'Cleo works and earns 4 credits.' }),
+    ]} />);
+    const chip = screen.getByText('cerebras-glm');
+    expect(chip).toBeInTheDocument();
+    expect(chip).not.toHaveClass('hidden'); // the always-visible inline chip, not a hover badge
+  });
+
+  it('does not double-chip a speech line (the hover badge is gone)', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'agent_speech', actor_id: 'a1', profile: 'cerebras-glm', profile_color: '#e74c3c',
+           text: 'Cleo says: "hello plaza"' }),
+    ]} />);
+    expect(screen.getAllByText('cerebras-glm')).toHaveLength(1);
+  });
+
+  it('shows ⟳ (not a model chip) on a zero-LLM reflex turn', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'economy', actor_id: 'a1', profile: 'cerebras-glm', profile_color: '#e74c3c',
+           text: 'Cy forages and finds 1 credits.', payload: { reflex: true, cadence_tier: 'background' } }),
+    ]} />);
+    expect(screen.queryByText('cerebras-glm')).not.toBeInTheDocument();
+    expect(screen.getByText('⟳ reflex')).toBeInTheDocument();
+  });
+});

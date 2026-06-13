@@ -44,27 +44,33 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { WorldState, WorldEvent } from '../types';
 import type { PanelProps } from './types';
 import {
   maxTick as selectMaxTick,
-  replayStateAt,
   activeRuleCount,
   dayAt,
-  agentEconomyAt,
   archiveAgents,
 } from './selectors';
 import type { ReplaySnapshot } from './selectors';
+import {
+  createEconomyProjector,
+  createReplayProjector,
+  shouldEngageReplayMaterials,
+} from './projections';
+import type { EconomyProjector, ReplayProjector } from './projections';
+import { ErrorBoundary } from './ErrorBoundary';
 import { useReplayMaterials } from './useReplayMaterials';
 import { useArchiveHistory } from './useArchiveHistory';
 import type { RunRow } from './api';
 import type { RoutingHealth } from '../hooks/useRoutingHealth';
-import { ReplayScrubber } from './ReplayScrubber';
+import { ReplayScrubber, ReplayMapPanel } from './ReplayScrubber';
 import DecisionTrace from './DecisionTrace';
 import GovernanceHistory from './GovernanceHistory';
 import SocialGraph from './SocialGraph';
 import AWIDashboard from './AWIDashboard';
-import AnimalChaosFeed from './AnimalChaosFeed';
+import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
 
 interface InspectorLayoutProps {
@@ -76,6 +82,12 @@ interface InspectorLayoutProps {
   historyLoading?: boolean;
   /** True when older events were dropped at the memory cap (EM-069). */
   historyTruncated?: boolean;
+  /**
+   * Wave F (EM-194): the run's TOTAL event count (GET /api/events/stats) —
+   * drives the backfill progress label and the cap-honesty notice
+   * ("showing the newest 50,000 of 99,140"). null/absent = unknown.
+   */
+  historyTotal?: number | null;
   mockMode: boolean;
   /**
    * Live seek into the deep-replay window (frontend-inspector.md v1.1.0 §3):
@@ -92,10 +104,20 @@ export function InspectorLayout({
   history,
   historyLoading = false,
   historyTruncated = false,
+  historyTotal = null,
   mockMode,
   onSeekTick,
   routingHealth,
 }: InspectorLayoutProps) {
+  // Wave F (EM-194): incremental scrub projectors — persistent fold cursors
+  // (created once per mount) so a scrub step folds only the events BETWEEN the
+  // two ticks instead of re-running the full O(n) selectors. Results are equal
+  // to the full folds by construction (they share the selector fold steps).
+  const projectorsRef = useRef<{ economy: EconomyProjector; replay: ReplayProjector } | null>(null);
+  if (projectorsRef.current === null) {
+    projectorsRef.current = { economy: createEconomyProjector(), replay: createReplayProjector() };
+  }
+  const projectors = projectorsRef.current;
   const agents = useMemo(() => world?.agents ?? [], [world]);
   const profiles = useMemo(() => world?.profiles ?? [], [world]);
   const places = useMemo(
@@ -186,12 +208,18 @@ export function InspectorLayout({
   const projecting = scrubbed || archived;
 
   // ── Deep replay (v1.1.0 §2): /api/replay when history can't project ────────
-  // Live: only when the client history is unfaithful (loading / truncated).
-  // Archived: always — the run's snapshots are the ONLY geometry source
-  // (EM-086 note 2: past-run places come from snapshot state_json).
-  const needsReplayMaterials = archived
-    ? !mockMode
-    : !mockMode && scrubbed && (historyLoading || historyTruncated);
+  // Live: only when the client history is unfaithful (loading / truncated —
+  // wave F cap-honesty: a pre-cap scrub range must engage snapshot+delta,
+  // never project from a hole). Archived: always — the run's snapshots are
+  // the ONLY geometry source (EM-086 note 2: past-run places come from
+  // snapshot state_json). Extracted pure (projections.ts) and unit-tested.
+  const needsReplayMaterials = shouldEngageReplayMaterials({
+    mockMode,
+    archived,
+    scrubbed,
+    historyLoading,
+    historyTruncated,
+  });
   const { materials: replay, fetching: replayFetching } = useReplayMaterials(
     needsReplayMaterials,
     currentTick,
@@ -226,10 +254,12 @@ export function InspectorLayout({
   // state folded from snapshot + construction events at tick T (replayStateAt
   // owns the fold; the live roster contributes display metadata only). In
   // archive mode the frame is ALWAYS computed (snapshot-sourced geometry).
+  // Wave F: computed via the INCREMENTAL projector — a scrub step folds only
+  // the events between the two ticks (equal to the full replayStateAt fold).
   const scrubFrame = useMemo(
     () =>
       projecting
-        ? replayStateAt(
+        ? projectors.replay.at(
             mergedEvents,
             replaySnapshots,
             currentTick,
@@ -239,6 +269,7 @@ export function InspectorLayout({
             effAnimals,
           )
         : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [projecting, mergedEvents, replaySnapshots, currentTick, effAgents, effPlaces, effBuildings, effAnimals],
   );
   const scrubberBuildings = scrubFrame ? scrubFrame.buildings : effBuildings;
@@ -251,20 +282,29 @@ export function InspectorLayout({
   // target-side economy transfers are not per-agent evented, so agents WITHOUT
   // a turn_start in the scoped window keep their live values and the panels
   // mark the economy figures approximate ("~", with an explanatory title).
+  // Wave F: incremental projector — equal to agentEconomyAt(panelEvents)
+  // (the scoped fold), but a scrub step folds only the tick delta.
   const economyAtTick = useMemo(
-    () => (projecting ? agentEconomyAt(panelEvents) : null),
-    [projecting, panelEvents],
+    () => (projecting ? projectors.economy.at(mergedEvents, currentTick) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projecting, mergedEvents, currentTick],
   );
+
+  // Death ticks depend only on the merged pool — computed once per history
+  // change, NOT per scrub step (wave F: keep the scrub hot path O(delta)).
+  const deathTick = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of mergedEvents) {
+      if (e.kind === 'agent_died' && e.actor_id) m.set(e.actor_id, e.tick);
+    }
+    return m;
+  }, [mergedEvents]);
 
   // C8: agents re-projected at the scrub tick (alive recomputed from deaths,
   // energy/credits from turn samples) so live-edge state doesn't read back
   // into the past.
   const panelAgents = useMemo(() => {
     if (!projecting) return effAgents;
-    const deathTick = new Map<string, number>();
-    for (const e of mergedEvents) {
-      if (e.kind === 'agent_died' && e.actor_id) deathTick.set(e.actor_id, e.tick);
-    }
     return effAgents.map((a) => {
       const died = deathTick.get(a.id);
       const alive = died === undefined ? a.alive : currentTick < died;
@@ -277,7 +317,7 @@ export function InspectorLayout({
         credits: eco ? eco.credits : a.credits,
       };
     });
-  }, [effAgents, mergedEvents, projecting, currentTick, economyAtTick]);
+  }, [effAgents, deathTick, projecting, currentTick, economyAtTick]);
 
   // True when ≥1 agent's scrubbed energy/credits fell back to live values.
   const agentsApproximate =
@@ -314,10 +354,28 @@ export function InspectorLayout({
   const archiveNoSnapshots =
     archived && !replayFetching && !archive.loading && replaySnapshots.length === 0;
 
+  // ── Wave G (EM-197): empty-panel collapse signals ──────────────────────────
+  // A zero-data panel renders as a slim strip and its column siblings reclaim
+  // the space. Computed from the SAME scoped pool the panels project from.
+  const govEventCount = useMemo(
+    () => panelEvents.filter((e) => GOV_KINDS.has(e.kind)).length,
+    [panelEvents],
+  );
+  const chaosEventCount = useMemo(
+    () => panelEvents.filter((e) => isAnimalEvent(e) && e.tick <= currentTick).length,
+    [panelEvents, currentTick],
+  );
+
   return (
     // EM-082 a11y: the annex is the route's main landmark (the live route's
     // <main> is the world view inside LiveLayout).
-    <main className="flex flex-col h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
+    //
+    // Wave G (EM-197) layout law: the annex is VIEWPORT-FIT — h-dvh clamped by
+    // the app frame (max-h-full), overflow-hidden so the PAGE never scrolls at
+    // ≥1024px. Header / archive banner / status strip / scrub strip are fixed
+    // chrome; the panel grid below absorbs the remaining viewport and every
+    // panel scrolls internally.
+    <main className="flex flex-col h-dvh max-h-full min-h-0 overflow-hidden bg-lab-bg text-lab-text">
       {/* Annex header */}
       <div className="lab-header flex items-center justify-between gap-2 shrink-0">
         <span>INSPECTOR · ANALYSIS ANNEX</span>
@@ -337,7 +395,20 @@ export function InspectorLayout({
             live feed disabled — panels show only this run
           </span>
           {archive.loading && (
-            <span className="font-mono text-[10px] text-lab-acid">loading run history…</span>
+            <span className="font-mono text-[10px] text-lab-acid">
+              loading run history…
+              {archive.total !== null &&
+                ` ${archive.events.length.toLocaleString()} / ${archive.total.toLocaleString()} events`}
+            </span>
+          )}
+          {archive.truncated && !archive.loading && archive.total !== null && (
+            <span
+              className="font-mono text-[10px] font-bold text-lab-warn"
+              title="The run is larger than the in-memory page cap; the newest events are shown. Scrubbed ticks beyond the window load via /api/replay."
+            >
+              showing the newest {archive.events.length.toLocaleString()} of{' '}
+              {archive.total.toLocaleString()} events
+            </span>
           )}
           {archive.failed && (
             <span className="font-mono text-[10px] font-bold text-lab-warn">
@@ -399,7 +470,11 @@ export function InspectorLayout({
         )}
         {effHistoryLoading && (
           <span className="font-mono text-[10px] font-bold px-2 py-0.5 border border-lab-border-bright text-lab-muted">
-            HISTORY LOADING…
+            {/* Wave F (EM-194): honest tail-first progress — newest events
+                render first; the figure tracks the background backfill. */}
+            {!archived && historyTotal !== null
+              ? `BACKFILLING ${history.length.toLocaleString()} / ${historyTotal.toLocaleString()} EVENTS…`
+              : 'HISTORY LOADING…'}
           </span>
         )}
         {!archived && historyTruncated && (
@@ -407,7 +482,9 @@ export function InspectorLayout({
             className="font-mono text-[10px] font-bold px-2 py-0.5 border border-lab-warn text-lab-warn"
             title="Older events were dropped at the in-memory history cap; scrubbed ticks beyond the window load via /api/replay."
           >
-            HISTORY TRUNCATED — OLDEST EVENTS VIA REPLAY
+            {historyTotal !== null && historyTotal > history.length
+              ? `SHOWING THE NEWEST ${history.length.toLocaleString()} OF ${historyTotal.toLocaleString()} — OLDER TICKS VIA REPLAY`
+              : 'HISTORY TRUNCATED — OLDEST EVENTS VIA REPLAY'}
           </span>
         )}
         {replayFetching && (
@@ -430,49 +507,196 @@ export function InspectorLayout({
         )}
       </div>
 
-      {/* Scrollable analysis body */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
-        {/* Replay scrubber drives the shared currentTick (full-width). It reads
-            the UNSCOPED merged pool: the marker rail spans the whole run, and
-            replayStateAt folds snapshot + delta internally up to currentTick. */}
+      {/* Scrub strip — FIXED chrome (wave G): drives the shared currentTick.
+          It reads the UNSCOPED merged pool so the marker rail spans the run. */}
+      <ErrorBoundary name="Replay Scrubber">
         <ReplayScrubber
           events={mergedEvents}
-          agents={effAgents}
-          profiles={profiles}
-          places={effPlaces}
-          buildings={scrubberBuildings}
-          animals={effAnimals}
           currentTick={currentTick}
           maxTick={maxTick}
-          snapshots={replaySnapshots}
           onSeek={handleSeek}
         />
+      </ErrorBoundary>
 
-        {/* Data panels — each re-projects AT currentTick. The 6th panel (W8) is
-            the Animal Chaos Feed: the magenta critter-mischief stream. */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 auto-rows-fr">
-          <DecisionTrace {...panelProps} />
-          <GovernanceHistory {...panelProps} />
-          <SocialGraph {...panelProps} />
-          <AWIDashboard {...panelProps} />
-          <AnimalChaosFeed {...panelProps} />
+      {/* ── The panel grid (wave G, EM-197) ──────────────────────────────────
+          Sized to the REMAINING viewport. ≥1280px: three balanced columns —
+          [map+social+runs | trace+chaos | governance+AWI]; 1024–1279px: two
+          columns with the governance/AWI pair as a bottom band; <1024px:
+          panels stack and ONLY here may the area scroll (the small-screen
+          fallback — the app's MinWidthGate already gates this range).
+          Every panel is a cell with INTERNAL overflow; each mounts inside its
+          own ErrorBoundary (wave F, EM-151) so one crash never blanks the
+          annex. Each column is a flex stack so a collapsed empty panel's
+          space is reclaimed by its siblings. */}
+      <div
+        data-testid="inspector-grid"
+        className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3
+                   lg:grid-rows-[minmax(0,3fr)_minmax(0,2fr)] xl:grid-rows-[minmax(0,1fr)]
+                   gap-2 p-2 overflow-y-auto lg:overflow-hidden"
+      >
+        {/* Column A — replay map + social graph + run browser. */}
+        <div className="flex flex-col gap-2 min-h-0 min-w-0">
+          <PanelCell weight="lg:flex-[3]">
+            <ErrorBoundary name="Replay Map">
+              <ReplayMapPanel
+                events={mergedEvents}
+                agents={effAgents}
+                profiles={profiles}
+                places={effPlaces}
+                buildings={scrubberBuildings}
+                animals={effAnimals}
+                currentTick={currentTick}
+                maxTick={maxTick}
+                snapshots={replaySnapshots}
+              />
+            </ErrorBoundary>
+          </PanelCell>
+          <PanelCell weight="lg:flex-[4]">
+            <ErrorBoundary name="Social Graph">
+              <SocialGraph {...panelProps} />
+            </ErrorBoundary>
+          </PanelCell>
+          <PanelCell weight="lg:flex-[3]">
+            {/* W11a (EM-086): past runs, archive mode entry, cross-run AWI. */}
+            <ErrorBoundary name="Run Browser">
+              <RunBrowser
+                mockMode={mockMode}
+                selectedRunId={selectedRunId}
+                onSelectRun={setArchivedRun}
+              />
+            </ErrorBoundary>
+          </PanelCell>
         </div>
 
-        {/* W11a (EM-086): the run browser — past runs, archive mode entry, and
-            the cross-run AWI comparison. */}
-        <RunBrowser
-          mockMode={mockMode}
-          selectedRunId={selectedRunId}
-          onSelectRun={setArchivedRun}
-        />
+        {/* Column B — decision trace + the chaos feed. */}
+        <div className="flex flex-col gap-2 min-h-0 min-w-0">
+          <PanelCell weight="lg:flex-[3]">
+            <ErrorBoundary name="Decision Trace">
+              <DecisionTrace {...panelProps} />
+            </ErrorBoundary>
+          </PanelCell>
+          <CollapsibleCell
+            title="Animal Chaos Feed"
+            count={chaosEventCount}
+            empty={chaosEventCount === 0}
+            zeroNote="no critter mischief yet — the cat & dog's antics stream here"
+            weight="lg:flex-[2]"
+          >
+            <ErrorBoundary name="Animal Chaos Feed">
+              <AnimalChaosFeed {...panelProps} />
+            </ErrorBoundary>
+          </CollapsibleCell>
+        </div>
 
-        <p className="font-mono text-[10px] text-lab-dim leading-relaxed">
-          Panels compute from the backfilled event history (mock-safe; deep ticks
-          load via /api/replay). Scrub above; every panel follows the shared tick.
-          Pick a past run in the Run Browser to replay it in archive mode.
-        </p>
+        {/* Column C — governance + AWI. At the 2-column breakpoint this column
+            becomes the bottom band (spanning both columns); at ≥1280px it is
+            the third column. Stacked in BOTH cases so a collapsed governance
+            strip stays slim and AWI reclaims the full band. */}
+        <div className="flex flex-col gap-2 min-h-0 min-w-0 lg:col-span-2 xl:col-span-1">
+          <CollapsibleCell
+            title="Governance · Laws"
+            count={govEventCount}
+            empty={govEventCount === 0}
+            zeroNote="no laws yet — proposals from Town Hall appear here"
+            weight="lg:flex-[2]"
+          >
+            <ErrorBoundary name="Governance History">
+              <GovernanceHistory {...panelProps} />
+            </ErrorBoundary>
+          </CollapsibleCell>
+          <PanelCell weight="lg:flex-[3]">
+            <ErrorBoundary name="AWI Dashboard">
+              <AWIDashboard {...panelProps} />
+            </ErrorBoundary>
+          </PanelCell>
+        </div>
       </div>
     </main>
+  );
+}
+
+// ── Wave G (EM-197) layout cells ─────────────────────────────────────────────
+
+// Stacked-fallback sizing (<1024px, behind the MinWidthGate): cells take real
+// heights and the grid area page-scrolls. At ≥1024px cells are pure flex
+// shares of the viewport-bounded column (min-h-0 so internals scroll).
+const CELL_BASE =
+  'min-h-[16rem] max-h-[70vh] lg:min-h-0 lg:max-h-none min-w-0 flex flex-col';
+
+/** A fixed grid/flex cell: the panel inside scrolls internally. */
+function PanelCell({ weight, children }: { weight: string; children: ReactNode }) {
+  return <div className={`${CELL_BASE} ${weight}`}>{children}</div>;
+}
+
+// Governance lifecycle kinds — drives the empty-collapse signal.
+const GOV_KINDS = new Set<string>(['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected']);
+
+/**
+ * A cell that COLLAPSES to a slim strip while its panel has zero data
+ * (contract §G2.2): title + zero-state counts + what-would-fill-it text + an
+ * expand affordance. Collapsed, it is `shrink-0`, so flex siblings in the
+ * column reclaim its space. Data arriving auto-expands it.
+ */
+function CollapsibleCell({
+  title,
+  count,
+  empty,
+  zeroNote,
+  weight,
+  children,
+}: {
+  title: string;
+  count: number;
+  empty: boolean;
+  zeroNote: string;
+  weight: string;
+  children: ReactNode;
+}) {
+  const [forcedOpen, setForcedOpen] = useState(false);
+  const collapsed = empty && !forcedOpen;
+
+  if (collapsed) {
+    return (
+      <div
+        role="region"
+        aria-label={`${title} (empty, collapsed)`}
+        className="shrink-0 min-w-0 flex items-center gap-2 px-2 py-1 lab-panel"
+      >
+        <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-lab-muted whitespace-nowrap">
+          {title}
+        </span>
+        <span className="font-mono text-[10px] text-lab-dim tabular-nums shrink-0">{count}</span>
+        <span className="font-mono text-[10px] text-lab-dim truncate min-w-0" title={zeroNote}>
+          {zeroNote}
+        </span>
+        <button
+          type="button"
+          onClick={() => setForcedOpen(true)}
+          aria-expanded={false}
+          aria-label={`Expand the empty ${title} panel`}
+          className="ml-auto shrink-0 font-mono text-[9px] font-bold uppercase tracking-wider px-1.5 py-px border border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid transition-colors cursor-pointer"
+        >
+          ▸ expand
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${CELL_BASE} ${weight}`}>
+      {empty && forcedOpen && (
+        <button
+          type="button"
+          onClick={() => setForcedOpen(false)}
+          aria-expanded={true}
+          aria-label={`Collapse the empty ${title} panel`}
+          className="shrink-0 font-mono text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 border border-lab-border bg-lab-surface text-lab-muted hover:border-lab-acid hover:text-lab-acid transition-colors cursor-pointer text-left"
+        >
+          ▾ collapse empty panel — {title}
+        </button>
+      )}
+      <div className="flex-1 min-h-0 min-w-0 flex flex-col">{children}</div>
+    </div>
   );
 }
 
