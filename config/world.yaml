@@ -12,12 +12,14 @@ world:
   agent_count: 5
   tick_interval_seconds: 3
   turns_per_day: 20
-  energy_decay_per_turn: 4
+  energy_decay_per_turn: 2     # 2026-06-12: eased from 4 — fast hunger crowded out personality
   death_after_zero_turns: 5
   starting_energy: 100
   starting_credits: 10
-  recharge_cost: 2
-  recharge_amount: 30
+  recharge_cost: 0             # 2026-06-12: FREE (was 2) — credit-gated recharge caused a
+                               # beg-to-recharge death spiral; survival no longer drains the
+                               # credit economy, so credits fund ambition (pitches/projects/gifts)
+  recharge_amount: 45          # 2026-06-12: up from 30 — a recharge now lasts ~22 turns, not ~7
   work_reward: 4
   forage_reward: 1
   steal_max: 8
@@ -31,7 +33,7 @@ world:
   # idle fallback (reason `llm_timeout`) so a single slow lane can never freeze
   # the world (run 248 measured 14-32s single-call stalls). Set 0 (or remove)
   # to disable the guard entirely — exactly the pre-EM-170 behavior.
-  turn_llm_budget_seconds: 12
+  turn_llm_budget_seconds: 0
 
   # Wave D3 / EM-187 — resume-on-boot. On startup the backend resumes the most
   # recent persisted run from its latest snapshot (tick > 0) as a NEW run row
@@ -81,7 +83,7 @@ world:
   # alert-only — byte-identical pre-D3 behavior. MUST stay in sync with the
   # default-config mirror in backend/petridish/config/loader.py.
   cap_governor:
-    enabled: true        # default ON
+    enabled: false        # default OFF (EM-198: cap pressure bounces lanes, never mutes)
 
   # Wave E / EM-113 — relationship depth (contracts/wave-e.md B1). Trust stays
   # the single scalar (strength = |trust|, valence = sign); these thresholds
@@ -254,8 +256,11 @@ world:
 
   # W7 / EM-068 — router decision cache (free-scale). Keyed on profile + messages
   # (which embed persona + memory + world state); a hit reuses the prior completion.
+  # OFF since 2026-06-12: with 1.7B free tokens/month the cache buys nothing and
+  # makes characters REPEAT themselves verbatim whenever context repeats (run 544:
+  # Mochi pounced with the identical thought four times — all cache hits).
   cache:
-    enabled: true
+    enabled: false
     max_entries: 512
 
   # W8 / EM-064 — LLM-driven chaos animals (actor_type:"animal"). Free-scale is the
@@ -264,8 +269,12 @@ world:
   # decision routes to the cheapest profile and is intentionally under-constrained.
   animals:
     enabled: true
-    act_every_n_ticks: 3      # an animal gets a turn every Nth tick (slower than agents)
-    llm_chance: 0.6           # P(LLM decision) on an acted tick; else a reflex micro-behavior
+    act_every_n_ticks: 6      # 2026-06-12: 3→6 — `3` matched the OLD 3-agent heartbeat;
+                              # with 5 agents (each acts every 5 ticks) `3` made pets out-tick
+                              # every person and flooded the feed with nap/chase filler
+
+    llm_chance: 0.9           # P(LLM decision) on an acted tick; else a reflex micro-behavior
+                              # (raised from 0.6 on 2026-06-12 — the reflex pool repeats fast)
     model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
 
   # W11b / EM-083 — real blackout: the `blackout` random event disables recharge
@@ -357,11 +366,16 @@ places:
   - { id: farmstead,       name: Sunfall Depot,       x: 894, y: 697, kind: work,       district: farm,        description: "Loading docks and pallet rows; honest work from dawn to dusk." }
 
 agents:                          # seed agents; profile must match a profiles[].name
-  # All three start together in the plaza so they meet, greet, and converse from
-  # the first round (chatter is the whole point), then wander off to work/govern.
-  # Wave D2 / EM-158: each entry may carry an optional
-  # `cadence_tier: protagonist|supporting|background` (absent = protagonist —
-  # the named cast stays protagonist; the 25-agent roster lands in B4/EM-165).
-  - { name: Ada,  personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash, location: plaza }
-  - { name: Bram, personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: qwen-next, location: plaza }
-  - { name: Cleo, personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: deepseek-pro, location: plaza }
+  # The cast is listed EXPLICITLY (agent_count: 5 == this list) so NOTHING pads
+  # in at "supporting" tier — every agent here is protagonist (no cadence_tier),
+  # i.e. acts EVERY round. Loud by design: with 1.7B free tokens and a
+  # model-vs-model bake-off as the whole point, there is no reason to throttle
+  # turns. Each agent is on a DISTINCT fast, high-quota lane (no reasoning "pro"
+  # lanes, no tiny-cap lanes) so the proxy answers in 1-4s and the world never
+  # stalls behind one slow turn — the budget guard is off (turn_llm_budget_seconds: 0).
+  # All start in the plaza so they meet, greet, and converse from round one.
+  - { name: Ada,    personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash,  location: plaza }
+  - { name: Bram,   personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: groq-llama,    location: plaza }
+  - { name: Cleo,   personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: cerebras-glm,  location: plaza }
+  - { name: Vesper, personality: "Serial entrepreneur who has founded eleven ventures and abandoned ten; pitches a new scheme to anyone within earshot, considers bankruptcy a branding exercise, and treats the Market as her personal stage.", profile: mistral-small, location: plaza }
+  - { name: Mox,    personality: "Conspiracy theorist convinced the town's laws are drafted by an unseen cabal and reads hidden messages in billboard typos; trusts no one near Town Hall yet attends every vote 'to monitor them'.", profile: kimi,          location: plaza }
