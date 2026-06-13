@@ -26,6 +26,7 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+  max_actions_per_turn: 4      # EM-199: one turn = move + fund + say (up to 4) → richer feed, same call rate
 
   # Wave D2 / EM-170 — turn-latency guard. Hard wall-clock budget (seconds) for
   # one agent-turn LLM consult (router.chat, including the adapter's internal

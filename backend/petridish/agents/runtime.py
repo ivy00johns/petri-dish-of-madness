@@ -37,7 +37,10 @@ log = logging.getLogger(__name__)
 ACTION_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
-    "required": ["action"],
+    # EM-199 — a turn carries EITHER a single `action` (legacy/minimal) OR an
+    # ordered `actions` sequence. anyOf keeps both forms valid; if both are
+    # present, the runtime prefers `actions` (see _normalize_steps).
+    "anyOf": [{"required": ["action"]}, {"required": ["actions"]}],
     "additionalProperties": False,
     "properties": {
         "thought": {"type": "string", "maxLength": 500},
@@ -93,45 +96,75 @@ ACTION_SCHEMA = {
             ],
         },
         "args": {"type": "object", "default": {}},
+        # EM-199 — multi-action turns: an ORDERED sequence applied in order, all
+        # from this single response, emitted as one _multi chain sharing one
+        # turn_id. Per-step args are validated at RESOLUTION (continue-on-
+        # failure), so items only check the action enum + args-is-object here.
+        # maxItems is a generous schema ceiling; the runtime enforces the
+        # configurable max_actions_per_turn (default 4) and truncates+logs above.
+        "actions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+                "type": "object",
+                "required": ["action"],
+                "additionalProperties": False,
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "move_to", "say", "whisper", "work", "forage", "recharge",
+                            "give", "steal", "insult", "attack", "set_relationship",
+                            "remember", "propose_rule", "vote", "idle",
+                            "propose_project", "contribute_funds", "build_step",
+                            "repair", "arson", "take_offline",
+                            "post_billboard", "read_billboard", "answer_proclamation",
+                        ],
+                    },
+                    "args": {"type": "object", "default": {}},
+                },
+            },
+        },
     },
     # Per-action arg requirements mirrored from action-protocol.schema.json so the
     # inline schema validates the 6 new construction actions structurally (the
     # canonical contract is contracts/action-protocol.schema.json). Only the
     # behavioral args are validated strictly here; cosmetic/optional args are open.
     "allOf": [
-        {"if": {"properties": {"action": {"const": "propose_project"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "propose_project"}}},
          "then": {"properties": {"args": {"required": ["name", "kind"], "properties": {
              "name": {"type": "string", "maxLength": 60},
              "kind": {"type": "string", "maxLength": 30},
              "funds_required": {"type": "integer", "minimum": 1},
              "function": {"type": "string", "maxLength": 40},
          }}}}},
-        {"if": {"properties": {"action": {"const": "contribute_funds"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "contribute_funds"}}},
          "then": {"properties": {"args": {"required": ["building_id", "amount"], "properties": {
              "building_id": {"type": "string"},
              "amount": {"type": "integer", "minimum": 1},
          }}}}},
-        {"if": {"properties": {"action": {"const": "build_step"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "build_step"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "repair"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "repair"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "arson"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "arson"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "take_offline"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "take_offline"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "post_billboard"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "post_billboard"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
          }}}}},
-        {"if": {"properties": {"action": {"const": "answer_proclamation"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
          }}}}},
@@ -1567,6 +1600,23 @@ def _assemble_context(
             "strongly preferred — they are recorded into the decision trace."
         )
 
+    # EM-199 — multi-action turns: tell the model it may do SEVERAL things in
+    # ONE turn (move + fund + say), the lever for "do more per call". Suppressed
+    # when the cap is 1 (legacy single-action behavior).
+    max_actions = int(getattr(params, "max_actions_per_turn", 4) or 1)
+    if max_actions > 1:
+        multi_action_line = (
+            f'\nDO SEVERAL THINGS THIS TURN: instead of a single "action", you '
+            f'may return "actions" — an ordered list of up to {max_actions} '
+            f'steps, each {{"action": "<verb>", "args": {{...}}}}, done in '
+            f'order. e.g. move somewhere, act there, THEN say something about '
+            f'it. Pairing a move/work/give/fund WITH a "say" makes the world '
+            f'livelier — prefer it. A single "action" is still fine for one '
+            f'thing.'
+        )
+    else:
+        multi_action_line = ""
+
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
 {clock_header}Personality: {agent.personality}
@@ -1608,8 +1658,8 @@ Mood: {agent.mood}{faction_line}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
 {format_template}
-
-The "action" field is required and must come first. "args" must match the action.{trace_instructions}
+{multi_action_line}
+Provide EITHER a single "action" OR an "actions" list. "args" must match each action.{trace_instructions}
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
@@ -2518,8 +2568,25 @@ class AgentRuntime:
         memories_used = action_dict.get("memories_used")
         reasoning = action_dict.get("reasoning")
 
-        # Apply the action
-        result_event = self._apply_action(agent, action_dict, profile_name, profile_color)
+        # EM-199 — apply the turn's action SEQUENCE in order (move + fund + say
+        # → one _multi chain sharing this turn_id → three feed lines). The
+        # single-action form normalizes to a one-step list, so legacy turns are
+        # byte-identical. Steps resolve independently (continue-on-failure).
+        max_steps = int(getattr(self.world.params, "max_actions_per_turn", 4) or 1)
+        steps, dropped_steps = self._normalize_steps(action_dict, max_steps)
+        if dropped_steps:
+            log.warning(
+                "agent %s returned %d actions; capped to max_actions_per_turn="
+                "%d (dropped %d)",
+                agent.name, len(steps) + dropped_steps, max_steps, dropped_steps,
+            )
+        action_chain, step_results = self._apply_steps(
+            agent, steps, profile_name, profile_color,
+            action_dict.get("thought", ""),
+        )
+        result_event = (
+            {"_multi": action_chain} if len(action_chain) != 1 else action_chain[0]
+        )
 
         # Surface the model the proxy actually routed this turn to as an
         # ADDITIVE, OPTIONAL field inside each emitted event's payload.
@@ -2543,18 +2610,36 @@ class AgentRuntime:
                 result_event.setdefault("payload", {}).update(cadence_meta)
         self._note_llm_turn(agent)
 
-        # Assemble the decision-trace chain for loop._execute_turn to emit. The
-        # `resolved` outcome reads the applied event(s): a parse_failure kind from
-        # _apply_action means the action was gated/failed at resolution time.
-        resolved_evt = (
-            result_event["_multi"][0] if "_multi" in result_event else result_event
+        # Assemble the decision-trace chain for loop._execute_turn to emit.
+        # EM-199 — the turn resolved a SEQUENCE: `outcome` is ok if ANY step
+        # resolved (continue-on-failure), and `state_deltas` aggregate across
+        # the whole chain. A one-step (legacy) turn reads byte-identically.
+        outcome = "ok" if any(r["ok"] for r in step_results) else "failed"
+        state_deltas: dict = {}
+        chain_events = (
+            result_event["_multi"] if "_multi" in result_event else [result_event]
         )
-        outcome = "failed" if resolved_evt.get("kind") == "parse_failure" else "ok"
-        state_deltas = {}
-        rpayload = resolved_evt.get("payload", {})
-        for k in ("credits_delta", "energy_delta", "amount"):
-            if k in rpayload:
-                state_deltas[k] = rpayload[k]
+        for evt in chain_events:
+            ep = evt.get("payload", {})
+            for k in ("credits_delta", "energy_delta", "amount"):
+                if k in ep:
+                    state_deltas[k] = state_deltas.get(k, 0) + ep[k]
+
+        first_step = step_results[0]
+        action_chosen = {
+            "chosen_tool": first_step["action"],
+            "args": first_step["args"],
+            "tier": _action_tier(first_step["action"]),
+        }
+        # EM-199 — the full ordered sequence, additive ONLY on a genuine
+        # multi-action turn so single-action / reflex traces keep their exact
+        # pre-EM-199 key set (preserves exact-equality assertions).
+        if len(step_results) > 1:
+            action_chosen["actions"] = [
+                {"action": r["action"], "args": r["args"],
+                 "tier": _action_tier(r["action"])}
+                for r in step_results
+            ]
 
         trace = {
             "perceived": {**perceived, "perceived_summary": perceived_summary},
@@ -2565,22 +2650,24 @@ class AgentRuntime:
                 "perceived_summary": perceived_summary,
                 "memories_used": memories_used,
             },
-            "action_chosen": {
-                "chosen_tool": action_dict.get("action"),
-                "args": action_dict.get("args") or {},
-                "tier": _action_tier(action_dict.get("action")),
-            },
+            "action_chosen": action_chosen,
             "resolved": {"outcome": outcome, "state_deltas": state_deltas},
         }
 
         # ── W11b cognition, all parsed from the SAME single response ──────────
-        chosen_action = action_dict.get("action")
         outcome_ok = outcome == "ok"
         extra_events: list[dict] = []
 
-        # EM-079 — commitments: record/keep/lapse.
+        # EM-079/EM-199 — commitment accounting is multi-aware: a successful
+        # resolution call (project/build/economy) anywhere in the sequence
+        # credits follow-through; any successful non-talk step resets the
+        # staleness clock; an all-talk/idle/failed turn ages every commitment.
+        # _commitment_step distills the sequence to the single (action, ok)
+        # that best represents it, so _advance_commitments keeps its
+        # single-action contract (and tests) unchanged.
+        commit_action, commit_ok = self._commitment_step(step_results)
         extra_events.extend(self._advance_commitments(
-            agent, chosen_action, outcome_ok, action_dict.get("commitment"),
+            agent, commit_action, commit_ok, action_dict.get("commitment"),
             profile_name, profile_color,
         ))
 
@@ -2653,11 +2740,12 @@ class AgentRuntime:
                 "payload": reflection_payload,
             })
 
-        # EM-081 — distribute this turn's speech to co-located overhearers.
-        if outcome_ok:
-            self._distribute_overheard(
-                agent, chosen_action, action_dict.get("args") or {}
-            )
+        # EM-081/EM-199 — distribute EACH successful speech step to co-located
+        # overhearers (not just the first action), so a `say` that rode along
+        # with a move/work still reaches the room.
+        for r in step_results:
+            if r["ok"] and r["action"] in ("say", "whisper"):
+                self._distribute_overheard(agent, r["action"], r["args"])
 
         # EM-145 — god-voice delivery events (built before the LLM call).
         extra_events.extend(delivery_events)
@@ -2902,6 +2990,113 @@ class AgentRuntime:
             note(profile_name, parsed=False, truncated=False, timed_out=True)
         except TypeError:
             note(profile_name, parsed=False, truncated=False)
+
+    @staticmethod
+    def _normalize_steps(action_dict: dict, max_steps: int) -> tuple[list[dict], int]:
+        """EM-199 — flatten a parsed turn into an ORDERED list of {action, args}
+        steps. Prefers the `actions` sequence; falls back to the single `action`
+        (so legacy turns become a one-step list). Truncates to max_steps.
+        Returns (steps, dropped_count); dropped>0 means the model over-asked and
+        the tail was cut (the caller logs it — never a silent cap)."""
+        raw = action_dict.get("actions")
+        steps: list[dict] = []
+        if isinstance(raw, list) and raw:
+            steps = [
+                {"action": s.get("action"), "args": (s.get("args") or {})}
+                for s in raw
+                if isinstance(s, dict) and s.get("action")
+            ]
+        if not steps:  # no (valid) actions[] → the single-action form
+            steps = [{
+                "action": action_dict.get("action"),
+                "args": action_dict.get("args") or {},
+            }]
+        dropped = len(steps) - max_steps if max_steps > 0 and len(steps) > max_steps else 0
+        if dropped:
+            steps = steps[:max_steps]
+        return steps, dropped
+
+    def _apply_steps(
+        self,
+        agent: AgentState,
+        steps: list[dict],
+        profile_name: str,
+        profile_color: str,
+        thought: str,
+    ) -> tuple[list[dict], list[dict]]:
+        """EM-199 — apply each step in order through the SAME _apply_action_inner
+        dispatch + _validate_world gates as a single action, concatenating all
+        events (and each step's drained EM-113 relationship shifts) into ONE
+        chain that loop._execute_turn tags with this turn's turn_id.
+
+        Continue-on-failed-step: a gated / arg-missing / raising step emits its
+        own parse_failure event and NEVER aborts its siblings — the `say` still
+        happens even if the `contribute_funds` was rejected. The turn `thought`
+        (💭) is surfaced ONCE on the first event of the whole chain.
+
+        Returns (chain, step_results) where step_results aligns 1:1 with `steps`
+        and carries {action, args, ok} for trace / commitment / overheard
+        accounting."""
+        chain: list[dict] = []
+        step_results: list[dict] = []
+        for step in steps:
+            action = step.get("action")
+            args = step.get("args") or {}
+            step_dict = {"action": action, "args": args, "thought": thought}
+            raised = False
+            try:
+                ev = self._apply_action_inner(
+                    agent, step_dict, profile_name, profile_color
+                )
+                step_events = ev["_multi"] if "_multi" in ev else [ev]
+            except Exception as exc:  # a bad step never aborts its siblings
+                raised = True
+                step_events = [{
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "tick": self.world.tick,
+                    "kind": "parse_failure",
+                    "text": f"{agent.name}'s {action} could not resolve: {exc}",
+                    "payload": {"action": action, "error": str(exc)},
+                }]
+            finally:
+                # EM-113 — drain parked relationship shifts even on the
+                # exception path so a parked event never leaks onto the next
+                # agent's chain (dropped with the failed step, like _apply_action).
+                shifts = self.world.drain_relationship_events()
+            chain.extend(step_events)
+            if shifts and not raised:
+                tick = self.world.tick
+                chain.extend({"tick": tick, **s} for s in shifts)
+            primary = step_events[0] if step_events else None
+            ok = bool(primary) and primary.get("kind") != "parse_failure"
+            step_results.append({"action": action, "args": args, "ok": ok})
+        # EM-199 — the turn's thought rides the FIRST event of the chain only.
+        if chain:
+            self._surface_thought(chain[0], thought)
+        return chain, step_results
+
+    @staticmethod
+    def _commitment_step(step_results: list[dict]) -> tuple[str | None, bool]:
+        """EM-199 — distill a turn's SEQUENCE to the single (action, ok) that
+        best represents it for EM-079 commitment accounting: a successful
+        resolution call (project/build/economy) wins (credits follow-through),
+        else any successful non-talk call (resets the staleness clock), else the
+        first step (ages — pure talk / idle / failure). Keeps
+        _advance_commitments on its unchanged single-action contract."""
+        resolution = next(
+            (r for r in step_results
+             if r["ok"] and r["action"] in _COMMIT_RESOLUTION_ACTIONS), None)
+        if resolution:
+            return resolution["action"], True
+        nontalk = next(
+            (r for r in step_results
+             if r["ok"] and r["action"] not in _TALK_ACTIONS), None)
+        if nontalk:
+            return nontalk["action"], True
+        first = step_results[0]
+        return first["action"], first["ok"]
 
     def _apply_action(
         self,

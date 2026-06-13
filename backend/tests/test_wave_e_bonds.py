@@ -405,7 +405,9 @@ def test_schema_bond_is_additive_and_excludes_family():
     assert bond_schema["properties"]["type"]["enum"] == [
         "friend", "partner", "mentor", "feud"]
     assert "family" not in bond_schema["properties"]["type"]["enum"]
-    assert "bond" not in ACTION_SCHEMA["required"]
+    # EM-199 — top-level `required` became `anyOf` (a turn needs `action` OR
+    # `actions`); bond stays additive (in neither required branch).
+    assert all("bond" not in b.get("required", []) for b in ACTION_SCHEMA["anyOf"])
     assert _validate_schema({"action": "idle", "args": {}}) is None
     assert _validate_schema({
         "action": "idle", "args": {},

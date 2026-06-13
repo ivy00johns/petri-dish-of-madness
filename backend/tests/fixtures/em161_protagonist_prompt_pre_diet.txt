@@ -98,7 +98,8 @@ Mood: neutral
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
 {"action": "<verb>", "args": {...}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}
 
-The "action" field is required and must come first. "args" must match the action.
+DO SEVERAL THINGS THIS TURN: instead of a single "action", you may return "actions" — an ordered list of up to 4 steps, each {"action": "<verb>", "args": {...}}, done in order. e.g. move somewhere, act there, THEN say something about it. Pairing a move/work/give/fund WITH a "say" makes the world livelier — prefer it. A single "action" is still fine for one thing.
+Provide EITHER a single "action" OR an "actions" list. "args" must match each action.
 ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.
 If nothing makes sense, use: {"action": "idle", "args": {}}
