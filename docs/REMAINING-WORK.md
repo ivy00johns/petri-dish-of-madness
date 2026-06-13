@@ -285,7 +285,9 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-196 | P1 | W18 | frontend | user 2026-06-12 | Social graph renders as a broken white box (regression, B6 bd780e8): useResolvedTokens reads CSS vars in a useState initializer — '' resolution makes force-graph skip the canvas background (transparent over OS white) and a react-kapsule StrictMode stale-canvas adds the broken-image artifact + dead paint loop. Fix: literal hex fallbacks on every canvas token read + key-based remount on ready transition | done | wave-G 2026-06-12 |
 | EM-197 | P1 | W18 | frontend | user 2026-06-12 + ui-ux-pro-max | Inspector layout redesign — viewport-fit data-dense dashboard: the annex is one infinite vertical page (empty governance owns a full tall column, 26-row structures list, oversized fixed chaos rows, unbalanced two-column stacks leaving screenfuls of blank space) and live events push content out from under the reader. Target: h-dvh grid, panels scroll INTERNALLY, empty panels collapse to slim strips, variable-height windowing kills dead row space, scroll anchoring so new entries never move the reading position (EM-093 pattern) | done | wave-G 2026-06-12 |
 
-_Next free ID: EM-198._
+| EM-198 | P0 | — | backend | user 2026-06-12 | Error-bounce routing — gut the budget-era throttling: a provider error (429/5xx/transport/malformed completion) now BOUNCES the same call to the healthiest other lane inside Router.chat() (home + 2 substitutes, mock never a target, EM-173 idle = last resort only); adapter errors record `error` demerits that count toward lane_sick (chronic 429ers pre-emptively detour, EM-177 probes recover them). Cap-governor default flipped OFF everywhere (dataclass, embedded mirror, engine gate, both shipped yamls) — cap pressure must route, never mute the cast. Decision cache OFF in shipped configs (cache hits made characters repeat verbatim — run 544 Mochi); animal llm_chance 0.6→0.9. Root cause of the "quiet town": cap demotions muted 3/5 agents and disabling the turn budget killed failover's only sickness signal, pinning agents to 429ing lanes | done | 2026-06-12 |
+
+_Next free ID: EM-199._
 
 ## Notes
 
