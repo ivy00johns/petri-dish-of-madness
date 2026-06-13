@@ -769,10 +769,12 @@ class World:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _cap_governor_enabled(self) -> bool:
-        """Config gate `world.cap_governor.enabled` (default ON). Disabled ⇒
-        usage alerts stay alert-only — byte-identical pre-D3 behavior."""
+        """Config gate `world.cap_governor.enabled` (default OFF since the
+        2026-06-12 EM-198 error-bounce mandate — cap pressure routes to other
+        lanes instead of muting the cast). Disabled ⇒ usage alerts stay
+        alert-only — byte-identical pre-D3 behavior."""
         return bool(_block_get(
-            getattr(self.params, "cap_governor", None), "enabled", True))
+            getattr(self.params, "cap_governor", None), "enabled", False))
 
     def set_usage_window_probe(self, probe: Any) -> None:
         """Register a zero-argument callable returning the UsageAlertTracker's

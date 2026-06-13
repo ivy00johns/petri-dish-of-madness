@@ -71,7 +71,7 @@ world:
   attack_energy_cost: 6
   # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
   # config/world.yaml. 0/absent disables the guard entirely.
-  turn_llm_budget_seconds: 12
+  turn_llm_budget_seconds: 0
   # Wave D3 / EM-187 — resume-on-boot: at startup, resume the most recent run
   # whose latest snapshot tick is > 0 as a NEW run row with fork lineage,
   # provided the world-defining config (roster/places/city_seed) still
@@ -87,10 +87,11 @@ world:
     probe_every: 4
   # Wave D3 / EM-168 — cap-pressure governor: a lane's usage_alert demotes its
   # agents one cadence tier until the alert tracker's UTC-day rollover. MUST
-  # stay in sync with config/world.yaml. enabled:false = alerts stay
-  # alert-only (byte-identical pre-D3 behavior).
+  # stay in sync with config/world.yaml. OFF since the 2026-06-12 EM-198
+  # error-bounce mandate — cap pressure bounces calls to other lanes instead
+  # of muting the cast; alerts stay alert-only.
   cap_governor:
-    enabled: true
+    enabled: false
   # Wave E / EM-113 — relationship-depth thresholds (reflex friend/feud
   # transitions + the partner declaration gate). MUST stay in sync with
   # config/world.yaml. No `enabled` flag by design: thresholds only fire on
@@ -446,11 +447,13 @@ class CapGovernorParams:
     _block_get accessor with an IDENTICAL default, so an absent block behaves
     exactly like these values.
 
-      enabled — master toggle (default ON). `false` ⇒ usage alerts stay
+      enabled — master toggle (default OFF since the 2026-06-12 EM-198
+                error-bounce mandate: cap pressure routes to other lanes
+                instead of muting the cast). `false` ⇒ usage alerts stay
                 alert-only: byte-identical pre-D3 behavior (no demotions, no
                 cap_pressure events, no new snapshot keys).
     """
-    enabled: bool = True
+    enabled: bool = False
 
 
 @dataclass

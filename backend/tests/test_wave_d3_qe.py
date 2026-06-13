@@ -32,7 +32,7 @@ import json
 
 import pytest
 
-from petridish.config.loader import ModelProfile, WorldParams
+from petridish.config.loader import CapGovernorParams, ModelProfile, WorldParams
 from petridish.engine.world import World, AgentState, PlaceState
 from petridish.agents.runtime import AgentRuntime
 from petridish.providers.router import Router
@@ -216,7 +216,10 @@ async def test_incident_shape_probe_outcomes_age_a_home_lane_back_home():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _scheduler_world() -> World:
-    params = WorldParams(energy_decay_per_turn=0.0)
+    # These tests exercise the demotion machinery itself; the governor is
+    # explicitly enabled (shipped default went OFF with EM-198, 2026-06-12).
+    params = WorldParams(energy_decay_per_turn=0.0,
+                         cap_governor=CapGovernorParams(enabled=True))
     places = [PlaceState(id="plaza", name="Central Plaza", x=0, y=0,
                          kind="social")]
     agents = [

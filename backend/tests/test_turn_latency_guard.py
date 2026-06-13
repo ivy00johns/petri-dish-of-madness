@@ -408,15 +408,19 @@ async def test_background_salient_timeout_gets_reflex_and_stays_salient():
 # (E) Config plumbing — both yamls ship 12; absent parses to disabled
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_embedded_world_yaml_ships_budget_of_12():
+def test_embedded_world_yaml_ships_budget_disabled():
+    # The turn-latency guard is OFF by default: on free-tier accounts with a
+    # large token budget, throttling turns to "save cost" only starves the
+    # model-vs-model bake-off and mutes the world. The guard stays AVAILABLE
+    # (set a positive value to re-enable), it is just not the shipped default.
     params, _, _ = _parse_world(yaml.safe_load(EMBEDDED_WORLD_YAML))
-    assert params.turn_llm_budget_seconds == 12.0
+    assert params.turn_llm_budget_seconds == 0.0
 
 
-def test_shipped_world_yaml_ships_budget_of_12():
+def test_shipped_world_yaml_ships_budget_disabled():
     cfg_path = Path(__file__).resolve().parents[2] / "config" / "world.yaml"
     raw = yaml.safe_load(cfg_path.read_text())
-    assert raw["world"]["turn_llm_budget_seconds"] == 12
+    assert raw["world"]["turn_llm_budget_seconds"] == 0
 
 
 def test_absent_key_parses_to_disabled():

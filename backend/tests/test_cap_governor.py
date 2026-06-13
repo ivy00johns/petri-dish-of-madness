@@ -331,14 +331,15 @@ def test_disabled_governor_is_inert_and_byte_identical():
     assert before == after  # byte-identical pre-D3 state
 
 
-def test_governor_defaults_on_when_the_params_block_is_absent():
+def test_governor_defaults_off_when_the_params_block_is_absent():
     # Engine reads the block via the defensive accessor: a bare/dict/None
-    # params object without `cap_governor` behaves like the shipped default.
+    # params object without `cap_governor` behaves like the shipped default —
+    # OFF since the 2026-06-12 EM-198 error-bounce mandate.
     w = _make_world([("Ada", "alpha", "protagonist")])
-    w.params = WorldParams()  # default block, enabled=True
-    assert w._cap_governor_enabled() is True
+    w.params = WorldParams()  # default block, enabled=False
+    assert w._cap_governor_enabled() is False
     object.__setattr__(w.params, "cap_governor", None)
-    assert w._cap_governor_enabled() is True
+    assert w._cap_governor_enabled() is False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -424,8 +425,9 @@ async def test_demoted_agent_on_a_sick_lane_still_detours():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_cap_governor_param_defaults():
+    # Default OFF since the 2026-06-12 EM-198 error-bounce mandate.
     p = CapGovernorParams()
-    assert p.enabled is True
+    assert p.enabled is False
     assert WorldParams().cap_governor == p
 
 
@@ -450,16 +452,18 @@ def test_config_round_trips_through_runs_config_json():
 
 
 def test_embedded_world_yaml_mirror_carries_the_block():
+    # OFF since the 2026-06-12 EM-198 error-bounce mandate: cap pressure
+    # bounces calls to other lanes instead of muting the cast.
     raw = yaml.safe_load(EMBEDDED_WORLD_YAML)
     params, _, _ = _parse_world(raw)
-    assert params.cap_governor == CapGovernorParams(enabled=True)
+    assert params.cap_governor == CapGovernorParams(enabled=False)
 
 
 def test_shipped_world_yaml_carries_the_block_in_sync_with_the_mirror():
     path = Path(__file__).resolve().parents[2] / "config" / "world.yaml"
     raw = yaml.safe_load(path.read_text())
     params, _, _ = _parse_world(raw)
-    assert params.cap_governor == CapGovernorParams(enabled=True)
+    assert params.cap_governor == CapGovernorParams(enabled=False)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -491,6 +495,9 @@ def test_usage_alert_sink_drives_the_governor_and_manual_set_overrides(client):
     world = _appmod._world
     agent = next(a for a in world.agents.values() if a.alive)
     # Normalize: this test owns the world's governor state from here on.
+    # Shipped default is now OFF (EM-198) — enable it here so the demotion
+    # machinery itself stays gated.
+    world.params.cap_governor = CapGovernorParams(enabled=True)
     world.restore_cap_demotions("test-cleanup")
     world.cap_demotions.clear()
     agent.cadence_tier = "protagonist"
@@ -522,9 +529,11 @@ def test_usage_alert_sink_drives_the_governor_and_manual_set_overrides(client):
     assert resp.status_code == 200
     assert (agent.cadence_tier, agent.demoted_from) == ("protagonist", None)
 
-    # Cleanup: lift any other demotions this lane's alert applied.
+    # Cleanup: lift any other demotions this lane's alert applied, and put
+    # the shipped-default (disabled) governor back for the module's siblings.
     world.restore_cap_demotions("test-cleanup-2")
     world.cap_demotions.clear()
+    world.params.cap_governor = CapGovernorParams(enabled=False)
 
 
 def test_app_wired_the_usage_window_probe_onto_the_world(client):
