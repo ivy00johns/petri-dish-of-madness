@@ -58,11 +58,11 @@ world:
   energy_decay_per_turn: 2     # 2026-06-12: eased from 4 (kept in sync with config/world.yaml)
   death_after_zero_turns: 5
   starting_energy: 100
-  starting_credits: 10
+  starting_credits: 30         # EM-199: 10→30 — buffer so agents fund AND act/talk, never broke-stuck
   recharge_cost: 0             # 2026-06-12: FREE (was 2) — survival no longer credit-gated
   recharge_amount: 45          # 2026-06-12: up from 30 — a recharge lasts ~22 turns, not ~7
-  work_reward: 4
-  forage_reward: 1
+  work_reward: 8               # EM-199: 4→8 — one work meaningfully refills; income keeps pace with funding
+  forage_reward: 2             # EM-199: 1→2
   steal_max: 8
   ubi_amount: 2
   memory_window: 12

@@ -93,12 +93,13 @@ Mood: neutral
   build_step (building_id=b6) - add construction progress here
   arson (building_id=b6) - burn this building (a crime; witnesses lose trust)
 
-⚠ SAYING you will build/fund/work on something does NOT do it — words change nothing. Use propose_project / contribute_funds / build_step (or work / forage / give) to actually act. Your action THIS TURN is the only thing that happens.
+⚠ SAYING you will do something does NOT do it — words alone change nothing; back your talk with a real action. You have a FULL range: gossip and scheme, trade and give, forage and work, befriend and feud, propose and vote on rules — and, when it genuinely matters, propose or fund a building. Chase what YOUR character wants; not every turn is about projects.
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {"action": "<verb>", "args": {...}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}
 
 DO SEVERAL THINGS THIS TURN: instead of a single "action", you may return "actions" — an ordered list of up to 4 steps, each {"action": "<verb>", "args": {...}}, done in order. e.g. move somewhere, act there, THEN say something about it. Pairing a move/work/give/fund WITH a "say" makes the world livelier — prefer it. A single "action" is still fine for one thing.
+When you say/whisper, write a REAL line of dialogue in YOUR voice — gossip, banter, argue, flirt, scheme, react to what just happened — a sentence or three with personality, NOT a terse status. The talk is the heart of this world; make it worth reading.
 Provide EITHER a single "action" OR an "actions" list. "args" must match each action.
 ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.

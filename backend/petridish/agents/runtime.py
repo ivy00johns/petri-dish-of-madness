@@ -788,6 +788,13 @@ _ARG_STRING_CAPS: dict[str, dict[str, int]] = {
     "propose_project": {"name": 60, "kind": 30, "function": 40},
     "post_billboard": {"text": 280},
     "answer_proclamation": {"text": 280},
+    # EM-199 follow-up — chat length: a GENEROUS safety bound on spoken text
+    # (session 189 averaged ~500 chars/line, max ~1900). 800 graceful-truncates
+    # only runaway monologues so one giant say can't blow the token budget and
+    # fail the turn; normal rich dialogue (the 189 feel) sails through. NOT a
+    # throttle — it is ~4× the recent terse average. Truncated, never rejected.
+    "say": {"text": 800},
+    "whisper": {"text": 800},
 }
 
 
@@ -1579,10 +1586,12 @@ def _assemble_context(
         trace_instructions = ""
     else:
         action_warning = (
-            "⚠ SAYING you will build/fund/work on something does NOT do it — "
-            "words change nothing. Use propose_project / contribute_funds / "
-            "build_step (or work / forage / give) to actually act. Your action "
-            "THIS TURN is the only thing that happens."
+            "⚠ SAYING you will do something does NOT do it — words alone change "
+            "nothing; back your talk with a real action. You have a FULL range: "
+            "gossip and scheme, trade and give, forage and work, befriend and "
+            "feud, propose and vote on rules — and, when it genuinely matters, "
+            "propose or fund a building. Chase what YOUR character wants; not "
+            "every turn is about projects."
         )
         format_template = (
             '{"action": "<verb>", "args": {...}, "mood": "optional mood update", '
@@ -1616,6 +1625,15 @@ def _assemble_context(
         )
     else:
         multi_action_line = ""
+    # EM-199 follow-up — restore the session-189 chatter: spoken lines had
+    # collapsed into terse one-liners. Push for rich, in-character dialogue
+    # (the runtime caps it generously at 800 chars, so length is free).
+    speech_line = (
+        '\nWhen you say/whisper, write a REAL line of dialogue in YOUR voice — '
+        'gossip, banter, argue, flirt, scheme, react to what just happened — a '
+        'sentence or three with personality, NOT a terse status. The talk is '
+        'the heart of this world; make it worth reading.'
+    )
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
@@ -1658,7 +1676,7 @@ Mood: {agent.mood}{faction_line}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {format_template}
-{multi_action_line}
+{multi_action_line}{speech_line}
 Provide EITHER a single "action" OR an "actions" list. "args" must match each action.{trace_instructions}
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""

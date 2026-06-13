@@ -15,13 +15,15 @@ world:
   energy_decay_per_turn: 2     # 2026-06-12: eased from 4 — fast hunger crowded out personality
   death_after_zero_turns: 5
   starting_energy: 100
-  starting_credits: 10
+  starting_credits: 30         # EM-199: 10→30 — a buffer so agents fund AND act/talk without
+                               # draining to 0 (run 632: 22% of turns were "have 0" rejections)
   recharge_cost: 0             # 2026-06-12: FREE (was 2) — credit-gated recharge caused a
                                # beg-to-recharge death spiral; survival no longer drains the
                                # credit economy, so credits fund ambition (pitches/projects/gifts)
   recharge_amount: 45          # 2026-06-12: up from 30 — a recharge now lasts ~22 turns, not ~7
-  work_reward: 4
-  forage_reward: 1
+  work_reward: 8               # EM-199: 4→8 — one work meaningfully refills, so the cast never
+                               # gets stuck broke-and-idle; income keeps pace with project funding
+  forage_reward: 2             # EM-199: 1→2
   steal_max: 8
   ubi_amount: 2
   memory_window: 12

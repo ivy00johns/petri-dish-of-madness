@@ -124,6 +124,32 @@ def test_schema_actions_only_does_not_force_single_action_args():
     )
 
 
+def test_schema_accepts_long_say_restoring_189_chatter():
+    """EM-199 follow-up — the say/whisper cap was 280 (a tweet); session 189
+    averaged ~500 chars (max 1901). A 600-char say must now validate."""
+    jsonschema.validate({"action": "say", "args": {"text": "y" * 600}}, ACTION_SCHEMA)
+    jsonschema.validate(
+        {"action": "whisper", "args": {"target": "agent_bram", "text": "z" * 600}},
+        ACTION_SCHEMA,
+    )
+
+
+async def test_long_say_truncated_to_cap_not_rejected_in_multi_action():
+    """A multi-action say longer than the cap is TRUNCATED by _normalize_args
+    (graceful), not dropped — the agent still speaks, just bounded."""
+    runtime, world, ada, _bram = _make_world_runtime(
+        [{"actions": [
+            {"action": "say", "args": {"text": "w" * 1200}},
+            {"action": "work", "args": {}},
+        ]}],
+        start="market",
+    )
+    result = await runtime.run_turn(ada)
+    speech = next(e for e in _domain_events(result) if e["kind"] == "agent_speech")
+    said = speech["payload"]["said"]
+    assert 280 < len(said) <= 800, f"say not truncated to the raised cap: {len(said)}"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Resolution — ordered chain, one turn, shared turn_id.
 # ══════════════════════════════════════════════════════════════════════════════
