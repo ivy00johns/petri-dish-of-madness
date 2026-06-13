@@ -3055,9 +3055,14 @@ class AgentRuntime:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to whisper but target not found",
                         "payload": {"error": "target_not_found"}}
+            whisper_text = args.get("text", "")
             return {**base, "kind": "agent_speech", "target_id": target.id,
-                    "text": f"{agent.name} whispers to {target.name}.",
-                    "payload": {"action": "whisper", "said": args.get("text", ""),
+                    # The watcher (you) sees the whisper content — it stays
+                    # `private: True` so OTHER agents don't get it in their
+                    # context, but hiding it from the omniscient observer just
+                    # turned the feed into opaque "X whispers to Y" filler.
+                    "text": f'{agent.name} whispers to {target.name}: "{whisper_text}"',
+                    "payload": {"action": "whisper", "said": whisper_text,
                                 "place": agent.location, "private": True, "thought": thought}}
 
         elif action == "insult":
