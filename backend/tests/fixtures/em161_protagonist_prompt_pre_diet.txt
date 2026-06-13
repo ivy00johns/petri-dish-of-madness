@@ -76,6 +76,9 @@ Mood: neutral
 === ACTIVE RULES ===
   [ubi] Daily bread for all
 
+=== OPEN PROPOSALS — vote NOW (from anywhere; 13 yes-votes passes it) ===
+  id=rule_prop_1 [ban_stealing] 'No taking what is not yours' — vote with rule_id=rule_prop_1, choice=true (back it) or false (block it)
+
 === VALID ACTIONS ===
   idle, forage, recharge, remember
   move_to (place) - go to one of: plaza, well, market, forge, workshop, townhall, archive, home, rosehip_cottage, mossy_row, lantern_loft, commons, willow_pond, orchard, farmstead
@@ -87,18 +90,19 @@ Mood: neutral
   set_relationship (target, type) - ally|rival|neutral|friend|enemy
   steal (target) - steal from: Supporter, Bystander, Filler02, Filler17
   work - earn credits (you are at a work place)
+  vote (rule_id, choice) - vote on: id=rule_prop_1 effect=ban_stealing text='No taking what is not yours'
   propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place
   contribute_funds (building_id, amount) - fund an active project below to push it toward construction
   arson (building_id=b1) - burn this building (a crime; witnesses lose trust)
   build_step (building_id=b6) - add construction progress here
   arson (building_id=b6) - burn this building (a crime; witnesses lose trust)
 
-⚠ SAYING you will do something does NOT do it — words alone change nothing; back your talk with a real action. You have a FULL range: gossip and scheme, trade and give, forage and work, befriend and feud, propose and vote on rules — and, when it genuinely matters, propose or fund a building. Chase what YOUR character wants; not every turn is about projects.
+⚠ SAYING you will do something does NOT do it — words alone change nothing; back your talk with a real action. You have a FULL range: gossip and scheme, trade and give, forage and work, befriend and feud, propose and vote on rules, and propose / fund / BUILD projects that grow the town. Chase what YOUR character wants — and remember the city only rises if someone actually builds and governs it, so turn your ambitions into proposals, funding, build_steps, and votes.
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {"action": "<verb>", "args": {...}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}
 
-DO SEVERAL THINGS THIS TURN: instead of a single "action", you may return "actions" — an ordered list of up to 4 steps, each {"action": "<verb>", "args": {...}}, done in order. e.g. move somewhere, act there, THEN say something about it. Pairing a move/work/give/fund WITH a "say" makes the world livelier — prefer it. A single "action" is still fine for one thing.
+DO SEVERAL MEANINGFUL THINGS THIS TURN: return "actions" — an ordered list of up to 4 steps, done in order — that actually MOVE THE WORLD. Good turns chain real progress, e.g.: move→work/forage→say; propose_project→contribute_funds→build_step (push a project toward completion in ONE turn); move to Town Hall→propose_rule→say; react→give/vote→say. Make every step COUNT toward the story or the city — do NOT pad your turn with billboard posts or filler. A single "action" is fine when one thing is all that matters.
 When you say/whisper, write a REAL line of dialogue in YOUR voice — gossip, banter, argue, flirt, scheme, react to what just happened — a sentence or three with personality, NOT a terse status. The talk is the heart of this world; make it worth reading.
 Provide EITHER a single "action" OR an "actions" list. "args" must match each action.
 ALSO include (in the SAME json object — do NOT make a second call): "perceived_summary" (one sentence on what you perceived this turn), "memories_used" (the recent-event/memory snippets you actually relied on), and "reasoning" (your fuller reasoning, distinct from the short "thought"). These three are optional but strongly preferred — they are recorded into the decision trace.

@@ -14,6 +14,7 @@ Per-turn flow:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -211,7 +212,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "attack":           {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "set_relationship": {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "propose_rule":     {"tier": "llm",    "location_gate": "governance",    "agreement_gate": None},
-    "vote":             {"tier": "llm",    "location_gate": "governance",    "agreement_gate": None},
+    # EM-199 — voting is un-gated (location_gate None): governance was dead
+    # because only the proposer, at Town Hall, ever voted (run 648 — Mox alone),
+    # so no rule reached a majority. Civic participation now works from anywhere;
+    # PROPOSING still requires Town Hall (a deliberate civic act).
+    "vote":             {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     # W7 construction actions.
     "propose_project":  {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "contribute_funds": {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
@@ -863,6 +868,30 @@ def _hoist_step_cognition(action_dict: dict) -> None:
             action_dict[key] = first[key]
 
 
+def _resolve_place_fuzzy(raw: str, world: World) -> str | None:
+    """EM-199 — resolve a loose/hallucinated place name to the closest KNOWN
+    place id, or None when nothing is a SAFE match (so gibberish stays and is
+    cleanly rejected, never mis-teleported). Order: exact id → case-insensitive
+    id → a known id appearing as a token of the input (plaza_bloom → plaza) →
+    a conservative difflib closest match (catches typos like town_hall →
+    townhall). Never raises."""
+    if raw in world.places:
+        return raw
+    low = raw.strip().lower()
+    by_lower = {pid.lower(): pid for pid in world.places}
+    if low in by_lower:
+        return by_lower[low]
+    # A known place id appearing as a whole token of the input. Token-membership
+    # (not prefix) avoids "homestead" → "home" style false hits.
+    tokens = {t for t in re.split(r"[^a-z0-9]+", low) if t}
+    for pid in world.places:
+        if pid.lower() in tokens:
+            return pid
+    # Last resort: a single close fuzzy match above a conservative cutoff.
+    match = difflib.get_close_matches(low, list(by_lower), n=1, cutoff=0.8)
+    return by_lower[match[0]] if match else None
+
+
 def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
     """Rewrite behavioral args in place so well-intentioned-but-misshapen
     responses validate instead of dying. Never raises; never invents a value
@@ -877,8 +906,11 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
         if isinstance(place, str):
             place = place.strip()
             if place not in world.places:
-                by_lower = {pid.lower(): pid for pid in world.places}
-                place = by_lower.get(place.lower(), place)
+                # EM-199 — case-insensitive, then fuzzy: a hallucinated name
+                # (plaza_bloom→plaza) resolves to the closest KNOWN place
+                # instead of wasting the move; gibberish stays (→ cleanly
+                # rejected by _validate_world, never mis-teleported).
+                place = _resolve_place_fuzzy(place, world) or place
             args["place"] = place
         elif _noneish(args.get("place")):
             # A null/None-string place reads better as MISSING than as the
@@ -1623,9 +1655,10 @@ def _assemble_context(
             "⚠ SAYING you will do something does NOT do it — words alone change "
             "nothing; back your talk with a real action. You have a FULL range: "
             "gossip and scheme, trade and give, forage and work, befriend and "
-            "feud, propose and vote on rules — and, when it genuinely matters, "
-            "propose or fund a building. Chase what YOUR character wants; not "
-            "every turn is about projects."
+            "feud, propose and vote on rules, and propose / fund / BUILD projects "
+            "that grow the town. Chase what YOUR character wants — and remember "
+            "the city only rises if someone actually builds and governs it, so "
+            "turn your ambitions into proposals, funding, build_steps, and votes."
         )
         format_template = (
             '{"action": "<verb>", "args": {...}, "mood": "optional mood update", '
@@ -1648,14 +1681,27 @@ def _assemble_context(
     # when the cap is 1 (legacy single-action behavior).
     max_actions = int(getattr(params, "max_actions_per_turn", 4) or 1)
     if max_actions > 1:
+        # EM-163 — the building/proposing tools are tier-gated off the
+        # background menu, so the combo EXAMPLE must not name them for
+        # background agents (the prompt must never suggest a rejected action).
+        if background:
+            combo_examples = (
+                "move→work/forage→say; react to a neighbour→give→say; "
+                "move→vote→say"
+            )
+        else:
+            combo_examples = (
+                "move→work/forage→say; propose_project→contribute_funds→"
+                "build_step (push a project toward completion in ONE turn); "
+                "move to Town Hall→propose_rule→say; react→give/vote→say"
+            )
         multi_action_line = (
-            f'\nDO SEVERAL THINGS THIS TURN: instead of a single "action", you '
-            f'may return "actions" — an ordered list of up to {max_actions} '
-            f'steps, each {{"action": "<verb>", "args": {{...}}}}, done in '
-            f'order. e.g. move somewhere, act there, THEN say something about '
-            f'it. Pairing a move/work/give/fund WITH a "say" makes the world '
-            f'livelier — prefer it. A single "action" is still fine for one '
-            f'thing.'
+            f'\nDO SEVERAL MEANINGFUL THINGS THIS TURN: return "actions" — an '
+            f'ordered list of up to {max_actions} steps, done in order — that '
+            f'actually MOVE THE WORLD. Good turns chain real progress, e.g.: '
+            f'{combo_examples}. Make every step COUNT toward the story or the '
+            f'city — do NOT pad your turn with billboard posts or filler. A '
+            f'single "action" is fine when one thing is all that matters.'
         )
     else:
         multi_action_line = ""
@@ -1702,6 +1748,9 @@ Mood: {agent.mood}{faction_line}
 
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
+
+=== OPEN PROPOSALS — vote NOW (from anywhere; {len(world.living_agents()) // 2 + 1} yes-votes passes it) ===
+{chr(10).join(f"  id={r.id} [{r.effect}] {r.text!r} — vote with rule_id={r.id}, choice=true (back it) or false (block it)" for r in proposed_rules) or "  (none — propose one at Town Hall if the town needs a law)"}
 
 === VALID ACTIONS ===
 {chr(10).join(f"  {v}" for v in valid_actions)}

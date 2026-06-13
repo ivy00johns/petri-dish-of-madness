@@ -1186,9 +1186,11 @@ class World:
         self, agent: AgentState, rule_id: str, choice: bool
     ) -> tuple[bool, str, str | None]:
         """Returns (success, reason, new_status_if_changed)."""
-        # EM-108 — same resolution-time location gate as action_propose_rule.
-        if not self.governance_here(agent.location):
-            return False, self.GOVERNANCE_GATE_MESSAGE, None
+        # EM-199 — voting is NO LONGER location-gated. EM-108 required Town Hall
+        # presence, but agents cluster elsewhere and never travel, so proposals
+        # never reached a majority (run 648: only the proposer voted). Civic
+        # participation now works from anywhere; PROPOSING a rule still requires
+        # Town Hall (action_propose_rule keeps its gate).
         rule = self.rules.get(rule_id)
         if rule is None:
             return False, f"unknown rule {rule_id!r}", None

@@ -17,7 +17,7 @@ from __future__ import annotations
 import jsonschema
 import pytest
 
-from petridish.engine.world import AgentState, PlaceState, World
+from petridish.engine.world import AgentState, PlaceState, RuleState, World
 from petridish.config.loader import ModelProfile, WorldConfig, WorldParams
 from petridish.agents.runtime import ACTION_SCHEMA, AgentRuntime
 from petridish.engine.loop import TickLoop
@@ -54,6 +54,9 @@ def _make_world_runtime(script: list, *, start: str = "market", params=None):
         PlaceState(id="market", name="Market", x=10, y=0, kind="work"),
         PlaceState(id="home", name="Hearth", x=20, y=0, kind="home"),
         PlaceState(id="commons", name="Commons", x=30, y=0, kind="wild"),
+        # A governance place exists (like production), so governance_here() is
+        # NOT permissive — vote/propose_rule are gated unless un-gated (Fix 1).
+        PlaceState(id="townhall", name="Town Hall", x=40, y=0, kind="governance"),
     ]
     agents = [
         AgentState(id=f"agent_{n.lower()}", name=n, personality="Test agent.",
@@ -200,6 +203,65 @@ async def test_thought_nested_in_first_step_is_hoisted_and_surfaced():
     result = await runtime.run_turn(ada)
     evts = _domain_events(result)
     assert "💭 nested musing" in evts[0]["text"], "nested thought was not hoisted/surfaced"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Growth fixes — governance from anywhere + fuzzy place resolution.
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def test_vote_resolves_from_non_governance_location():
+    """Governance revival — voting is un-gated: an agent at the plaza (NOT Town
+    Hall) can vote on an open proposal, so rules can reach a majority instead of
+    only the proposer-at-Town-Hall voting into the void (run 648: only Mox)."""
+    runtime, world, ada, bram = _make_world_runtime(
+        [{"action": "vote", "args": {"rule_id": "test_rule", "choice": True}}],
+        start="plaza",
+    )
+    world.rules["test_rule"] = RuleState(
+        id="test_rule", effect="ubi", text="UBI for all.",
+        proposer_id=bram.id, created_tick=world.tick,
+    )
+    result = await runtime.run_turn(ada)
+    all_evts = result["_multi"] if "_multi" in result else [result]
+    # The vote was RECORDED (resolved from the plaza) ...
+    assert world.rules["test_rule"].votes.get(ada.id) is True, "vote not recorded off-governance"
+    # ... and not bounced by the governance location gate.
+    assert not any(
+        e.get("kind") == "parse_failure" and "governance" in (e.get("text") or "").lower()
+        for e in all_evts
+    ), "vote was blocked by the governance gate"
+
+
+async def test_rule_passes_from_votes_cast_outside_town_hall():
+    """The end-to-end governance fix: both living agents vote YES from the PLAZA
+    and the rule reaches a majority and takes effect — laws can actually pass
+    now (run 648: 200 ticks, 0 laws, because only the proposer could vote)."""
+    runtime, world, ada, bram = _make_world_runtime(
+        [{"action": "vote", "args": {"rule_id": "test_rule", "choice": True}}],
+        start="plaza",
+    )
+    world.rules["test_rule"] = RuleState(
+        id="test_rule", effect="ubi", text="UBI for all.",
+        proposer_id="seed", created_tick=world.tick,
+    )
+    await runtime.run_turn(ada)   # 1 yes
+    await runtime.run_turn(bram)  # 2 yes → majority of 2 living → passes
+    assert world.has_active_rule("ubi"), \
+        f"rule did not take effect (status={world.rules['test_rule'].status})"
+
+
+def test_normalize_resolves_hallucinated_place_by_fuzzy_match():
+    """Fuzzy place-matching — a hallucinated place name (plaza_bloom) resolves to
+    the closest known place instead of wasting the move; gibberish stays put (so
+    it is still cleanly rejected, never mis-teleported)."""
+    from petridish.agents.runtime import _normalize_args
+    _, world, ada, _b = _make_world_runtime([{"action": "idle", "args": {}}], start="plaza")
+    a = {"action": "move_to", "args": {"place": "plaza_bloom"}}
+    _normalize_args(a, ada, world)
+    assert a["args"]["place"] == "plaza", a["args"]["place"]
+    b = {"action": "move_to", "args": {"place": "zzzqqx"}}
+    _normalize_args(b, ada, world)
+    assert b["args"]["place"] == "zzzqqx", "gibberish must NOT be mis-resolved"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
