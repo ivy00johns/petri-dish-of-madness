@@ -22,8 +22,6 @@ import type { SimulationState, SimulationControls } from './hooks/useSimulation'
 import { useRoutingHealth } from './hooks/useRoutingHealth';
 import type { FocusTarget } from './types';
 import { Header } from './components/Header';
-import { RoutingDegradedBanner } from './components/RoutingDegradedBanner';
-import { UsageAlertBanner } from './components/UsageAlertBanner';
 import { ExtinctionBanner } from './components/ExtinctionBanner';
 import { MinWidthGate, useViewportWide } from './components/MinWidthGate';
 import { TopBannerLayer } from './components/BannerFade';
@@ -65,15 +63,17 @@ function loadFeedWidth(): number {
 export default function App() {
   const sim = useSimulation();
   const { world, connected, mockMode } = sim;
-  // EM-072: detect a silently-collapsed model A/B from live data (assigned
-  // profiles vs the routed_via models actually answering).
+  // EM-072: routing health for the inspector's quiet status chip. (The noisy
+  // top banner that used to surface this was removed — see below.)
   const routingHealth = useRoutingHealth(world, sim.history);
   // EM-082: below 1024px both routes render the labeled full-screen gate
   // instead of a broken layout. The simulation hook stays mounted, so the
   // run keeps streaming and nothing is lost while the user resizes.
   const wide = useViewportWide();
-  // EM-107: the routing + extinction banners stay live-route-only (the
-  // inspector has its own compact routing chip in the status strip).
+  // EM-107: the extinction banner stays live-route-only. (The routing-degraded
+  // and usage-alert top banners were removed — too noisy, and under the
+  // bounce-don't-throttle direction cap pressure self-heals; the inspector
+  // still shows routing health in its compact status chip.)
   const onLive = useLocation().pathname === '/';
 
   if (!wide) {
@@ -102,10 +102,6 @@ export default function App() {
           stack vertically; each stays individually dismissible. */}
       <div className="relative flex flex-col flex-1 min-h-0">
         <TopBannerLayer>
-          {/* EM-083: usage alerts surface on BOTH routes. */}
-          <UsageAlertBanner history={sim.history} />
-          {/* EM-072: model-A/B collapse warning + recovery transient. */}
-          {onLive && <RoutingDegradedBanner health={routingHealth} />}
           {/* EM-071/084: extinction headline + end-of-run summary + NEW RUN.
               Computed from the deeper history so deaths/rules/crimes survive
               the 200-cap feed; its CTA restarts via /api/control/reset. */}
