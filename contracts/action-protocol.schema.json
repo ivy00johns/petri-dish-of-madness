@@ -23,9 +23,9 @@
     "args": { "type": "object", "default": {}, "description": "Args for the single `action`." },
     "actions": {
       "type": "array",
-      "description": "EM-199 multi-action turn: an ORDERED sequence of steps applied in order, all from this single LLM call, sharing one turn_id. PREFERRED over a single `action` when doing several things (e.g. move somewhere, act there, then say something about it). Steps resolve independently — a gated/failed step does NOT abort the rest. Capped at max_actions_per_turn (config; default 4); extra steps are dropped (logged). Per-step args are validated at resolution.",
+      "description": "EM-199 multi-action turn: an ORDERED sequence of steps applied in order, all from this single LLM call, sharing one turn_id. PREFERRED over a single `action` when doing several things (e.g. move somewhere, act there, then say something about it). Steps resolve independently — each goes through the SAME per-step _normalize_args (arg-alias + name resolution) and _validate_world gate as a single action, and a gated/failed step does NOT abort the rest. The REAL cap is the runtime `max_actions_per_turn` config (default 4); extra steps are dropped (logged). maxItems here is a generous schema ceiling, not the operative limit.",
       "minItems": 1,
-      "maxItems": 4,
+      "maxItems": 16,
       "items": {
         "type": "object",
         "required": ["action"],

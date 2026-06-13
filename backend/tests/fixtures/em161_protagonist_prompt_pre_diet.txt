@@ -95,7 +95,7 @@ Mood: neutral
 
 ⚠ SAYING you will build/fund/work on something does NOT do it — words change nothing. Use propose_project / contribute_funds / build_step (or work / forage / give) to actually act. Your action THIS TURN is the only thing that happens.
 
-RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
+RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {"action": "<verb>", "args": {...}, "mood": "optional mood update", "thought": "one short sentence", "perceived_summary": "one sentence on who/what was nearby or overheard", "memories_used": ["the memory snippets you leaned on"], "reasoning": "a brief why, kept inside this JSON"}
 
 DO SEVERAL THINGS THIS TURN: instead of a single "action", you may return "actions" — an ordered list of up to 4 steps, each {"action": "<verb>", "args": {...}}, done in order. e.g. move somewhere, act there, THEN say something about it. Pairing a move/work/give/fund WITH a "say" makes the world livelier — prefer it. A single "action" is still fine for one thing.

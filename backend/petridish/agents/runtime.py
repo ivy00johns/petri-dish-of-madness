@@ -1656,7 +1656,7 @@ Mood: {agent.mood}{faction_line}
 
 {action_warning}
 
-RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
+RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {format_template}
 {multi_action_line}
 Provide EITHER a single "action" OR an "actions" list. "args" must match each action.{trace_instructions}
@@ -3024,25 +3024,54 @@ class AgentRuntime:
         profile_color: str,
         thought: str,
     ) -> tuple[list[dict], list[dict]]:
-        """EM-199 — apply each step in order through the SAME _apply_action_inner
-        dispatch + _validate_world gates as a single action, concatenating all
-        events (and each step's drained EM-113 relationship shifts) into ONE
-        chain that loop._execute_turn tags with this turn's turn_id.
+        """EM-199 — apply each step in order through the SAME pipeline a single
+        action takes: per-step _normalize_args (collapse arg aliases like
+        destination→place, resolve agent NAMES to ids — EM-140) → _validate_world
+        gate (tier rule, target reachable, place known, funds, blackout, …) →
+        _apply_action_inner dispatch. All resulting events (and each step's
+        drained EM-113 relationship shifts) concatenate into ONE chain that
+        loop._execute_turn tags with this turn's turn_id.
 
-        Continue-on-failed-step: a gated / arg-missing / raising step emits its
-        own parse_failure event and NEVER aborts its siblings — the `say` still
-        happens even if the `contribute_funds` was rejected. The turn `thought`
-        (💭) is surfaced ONCE on the first event of the whole chain.
+        Gating is per-step at APPLY time, so a step is checked against the state
+        the PRIOR steps just produced — `work` after a `move_to` is validated at
+        the destination, not the origin. Continue-on-failed-step: a gated /
+        arg-missing / raising step emits its own parse_failure (carrying the
+        world's reason) and NEVER aborts its siblings — the `say` still happens
+        even if the `contribute_funds` was rejected. The turn `thought` (💭)
+        rides ONLY the first event of the chain (and only the first step's
+        payload), never duplicated.
 
         Returns (chain, step_results) where step_results aligns 1:1 with `steps`
         and carries {action, args, ok} for trace / commitment / overheard
         accounting."""
         chain: list[dict] = []
         step_results: list[dict] = []
-        for step in steps:
+        for idx, step in enumerate(steps):
+            # EM-140/EM-199 — normalize THEN gate, the single-action order
+            # (_validate_target assumes names already resolved to ids).
+            _normalize_args(step, agent, self.world)
             action = step.get("action")
             args = step.get("args") or {}
-            step_dict = {"action": action, "args": args, "thought": thought}
+            gate_error = _validate_world(step, agent, self.world)
+            if gate_error:
+                # A world-rejected step: surface the reason and move on. No
+                # inner dispatch, so nothing was parked to drain.
+                chain.append({
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "tick": self.world.tick,
+                    "kind": "parse_failure",
+                    "text": f"{agent.name}'s {action} was rejected: {gate_error}",
+                    "payload": {"action": action, "error": gate_error,
+                                "rejected": True},
+                })
+                step_results.append({"action": action, "args": args, "ok": False})
+                continue
+            # The turn thought rides the first step only (payload + 💭); later
+            # steps carry no thought so payload.thought never duplicates.
+            step_dict = {"action": action, "args": args,
+                         "thought": thought if idx == 0 else ""}
             raised = False
             try:
                 ev = self._apply_action_inner(
