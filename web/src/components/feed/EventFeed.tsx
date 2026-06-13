@@ -431,9 +431,9 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
         : extinct
           ? 'var(--lab-danger)'
           : event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? 'var(--marker-trace)';
-  // The hover profile badge alpha-appends hex digits, so it only renders with a
+  // The inline model chip alpha-appends hex digits, so it only renders with a
   // hex source (the agent's data-driven profile color / a kind fallback) — the
-  // var()-register warning kinds keep the agent's own color on the badge.
+  // var()-register warning kinds (starving/extinct/god) never reach it.
   const badgeColor = event.profile_color ?? KIND_FALLBACK_COLOR[event.kind] ?? null;
   const icon = animal
     ? '🐾'
@@ -489,13 +489,16 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
           {event.text ?? `[${event.kind}]`}
         </span>
 
-        {/* Inline model attribution on dialogue (hex-only alpha-append path,
-            same idiom as the hover profile badge below). */}
-        {speech && event.profile && badgeColor && badgeColor.startsWith('#') && (
+        {/* Inline model attribution on EVERY model-decided line (not just
+            speech) so the feed always names the model with no hover. Excluded:
+            reflex turns (zero-LLM → the ⟳ chip instead), god posts (their own
+            ink), and animals (profile is null by design → the magenta animal
+            chip above). Hex-only, alpha-appended border. */}
+        {event.profile && badgeColor && badgeColor.startsWith('#') && !godPost && !reflexTurn && (
           <span
             className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
             style={{ color: badgeColor, borderColor: badgeColor + '50' }}
-            title={`spoken by a ${event.profile} villager`}
+            title={speech ? `spoken by a ${event.profile} villager` : `decided by ${event.profile}`}
           >
             {event.profile}
           </span>
@@ -601,19 +604,6 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
         )}
       </div>
 
-      {/* Profile badge (hex-only path: badgeColor is alpha-appended) */}
-      {event.profile && badgeColor && badgeColor.startsWith('#') && (
-        <span
-          className="absolute top-1 right-1 font-mono text-[8px] px-1 py-px rounded-sm hidden group-hover:block"
-          style={{
-            backgroundColor: badgeColor + '30',
-            color: badgeColor,
-            border: `1px solid ${badgeColor}40`,
-          }}
-        >
-          {event.profile}
-        </span>
-      )}
     </div>
   );
 }
