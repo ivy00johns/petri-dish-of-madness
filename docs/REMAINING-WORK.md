@@ -303,7 +303,23 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-206 | P3 | — | backend | user 2026-06-16 | **Settled-naming perception signal** — the town re-litigates a name it already holds. Live obs (post-restart, tick ~5160): **41 of 60** recent speech lines are agents campaigning to "lock in"/"rename to" Ledger's Folly — the name it's had since tick 5004. NOT the EM-200 governance rename-loop (zero actual renames; the rename resolves to a no-op the agents never perceive as SETTLED). Ada: *"banging the same drum about 'Ledger's Folly' and the system keeps telling me…"*; Vesper: *"done and dusted! …can we talk about [anything else]"*. Fix: give agents a "the name is settled" signal — surface `world.town_name` as decided in their context, and make a no-op rename return "already named X (settled)" so they stop burning turns campaigning and move to fresh chaos. Cousin to EM-203 renewal cooldown (same class: no settled-signal ⇒ re-doing decided things); fold into that cooldown work. Keep the charm, lose the loop. | open | — |
 
-_Next free ID: EM-207._
+### Wave H — The Menagerie (planned 2026-06-16, from brainstorm)
+
+> Killer-feature arc: **add-a-pet → expanded species → menagerie chaos → a civic zoo → pet bonds.**
+> Built breadth-first (each slice a demo-able PR), **reflex-first** (zero critical-path LLM calls,
+> population-capped — more animals = more activity + chronicle texture, the do-more north star, NOT
+> cost). **H1 = the existing EM-143** (the add-a-pet enabler — re-prioritised to ship FIRST, it's the
+> "I can't add pets" unblock). Dynamics trimmed to **texture, not a management sim**: KEPT = per-species
+> chaos (crows steal shiny things, goats graze crops, raccoons ransack, foxes raid), the zoo **ESCAPE**
+> breakout, pet **adoption + following + grief**, a "rewild" god burst; DEFERRED = zoo upkeep/zookeeper
+> economy, heavy pet-needs/feeding sim, rare-animal status. Order H1→H2→H3→H4; H4 (pet bonds) may swap
+> ahead of H3 (zoo) — it's lighter and higher emotional ROI.
+
+| EM-207 | P2 | W19 | backend+frontend | Wave H · H2 | **The Menagerie — chaos at population**: multiple species roaming, light ambient spawning, a richer Animal Chaos Feed (EM-065), a "rewild" god button that seeds a burst. New texture: emergent animal-vs-city friction; the chronicle gets new flavor ("the year of the crows"). Reuses H1 species + EM-065 + reflex cadence. Deps EM-143. | open | — |
+| EM-208 | P2 | W19 | backend+frontend | Wave H · H3 | **The Living Zoo — a civic institution**: a Zoo place-kind agents fund→build via the collective-project pipeline (EM-062) as a zoned district (EM-123), housing animals; the marquee dynamic is the **ESCAPE** (a breakout chaos event — animals loose in the city during a festival → mayhem, chronicle gold). Light visiting → chat/mood material. Upkeep/zookeeper economy DEFERRED (texture, not a management sim). Reuses EM-062 pipeline, EM-122 buildings-per-kind, EM-123 zoning. Deps EM-143, EM-207. | open | — |
+| EM-209 | P2 | W19 | backend+frontend | Wave H · H4 | **Pets & Bonds — companionship**: an agent ADOPTS an animal that follows them in 3D; the pet factors into relationships (EM-113) + reflections (EM-125); LIGHT decline if ignored; pet loss → a grief diary entry (the "Vesper adopts a cat, it trails her across the plaza, and when it dies she writes about it" beat). Reuses EM-113/125 + reflex following + H1 species. Heavy pet-needs/feeding economy DEFERRED. Deps EM-143. May ship BEFORE the zoo. | open | — |
+
+_Next free ID: EM-210._
 
 ## Notes
 
