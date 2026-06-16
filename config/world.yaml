@@ -68,7 +68,10 @@ world:
   # MUST stay in sync with the default-config mirror in
   # backend/petridish/config/loader.py.
   lane_failover:
-    enabled: true        # default ON
+    enabled: false       # EM-205: OFF — the proxy's `auto` lane (profiles.yaml)
+                         # is now the universal backup, so client-side
+                         # pre-emptive detours are redundant. The auto-backup in
+                         # router.chat() is independent of this flag.
     sick_threshold: 3    # timed_out entries in the 6-window that mark a lane sick
     probe_every: 4       # every Nth would-be-detour probes the home lane
 
@@ -332,7 +335,7 @@ world:
   narrator:
     enabled: true                # EM-201: the Chronicle — narrated chapters of the emergent saga
     every_n_ticks: 100           # EM-201: bigger window → meatier chapters (was 50)
-    model_profile: qwen-next     # EM-201: strong FREE 80B *instruct* lane — powerful prose WITHOUT reasoning leakage (deepseek-pro leaked its chain-of-thought)
+    model_profile: auto          # EM-205: the proxy router lane — never hammers a single rpd-capped free tier (qwen-next = 50/day; the backfill exhausted it). The reasoning-leak guard (loop._looks_like_leaked_reasoning) still rejects any rerouted CoT.
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }

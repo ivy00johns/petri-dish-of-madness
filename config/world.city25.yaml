@@ -55,6 +55,10 @@ world:
   agent_count: 25
   tick_interval_seconds: 3
   turns_per_day: 20
+  # EM-205 — client-side pre-emptive detours OFF; the proxy's `auto` lane
+  # (profiles.yaml) is the universal backup via router.chat() auto-backup.
+  lane_failover:
+    enabled: false
   energy_decay_per_turn: 2     # 2026-06-12: eased from 4 (kept in sync with config/world.yaml)
   death_after_zero_turns: 5
   starting_energy: 100
@@ -224,7 +228,7 @@ world:
   narrator:
     enabled: true                # EM-201: the Chronicle — narrated chapters of the emergent saga
     every_n_ticks: 100           # EM-201: bigger window → meatier chapters (was 50)
-    model_profile: qwen-next     # EM-201: strong FREE 80B *instruct* lane — powerful prose WITHOUT reasoning leakage (deepseek-pro leaked its chain-of-thought)
+    model_profile: auto          # EM-205: the proxy router lane — never hammers a single rpd-capped free tier. Reasoning-leak guard still rejects rerouted CoT.
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }

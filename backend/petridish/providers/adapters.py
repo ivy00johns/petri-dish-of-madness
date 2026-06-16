@@ -8,7 +8,6 @@ All: 30s timeout, 1 network retry on 5xx/429, then ProviderError.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -20,7 +19,6 @@ from .base import Provider, ProviderError
 log = logging.getLogger(__name__)
 
 _TIMEOUT = 30.0
-_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
 def _coerce_int(value: object) -> int | None:
@@ -49,33 +47,29 @@ async def _post_with_retry(
     payload: dict,
     profile: str,
 ) -> tuple[dict, str | None]:
-    """POST with one retry on 5xx/429. Returns (parsed_json, routed_via).
+    """Single POST. Returns (parsed_json, routed_via) or raises ProviderError.
+
+    EM-205 — NO same-model retry. A 429 / 5xx / timeout is raised straight to
+    the Router, which retries the call ONCE on the proxy's `auto` router lane
+    instead of re-hitting the same (often throttled) model. Re-hitting the same
+    rate-limited upstream was pure amplification during a storm. (Name kept for
+    the test_w10 monkeypatch; the per-adapter JSON-mode negotiation in chat()
+    still calls this twice when a provider rejects `response_format`.)
 
     `routed_via` is the value of the 'X-Routed-Via' response header (the model
     the proxy actually routed to), or None if the header is absent. httpx
     headers are case-insensitive, so the lookup matches any header casing.
     """
-    for attempt in range(2):
-        try:
-            resp = await client.post(url, headers=headers, json=payload, timeout=_TIMEOUT)
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
-            if attempt == 0:
-                await asyncio.sleep(1.0)
-                continue
-            raise ProviderError(profile, None, str(exc)) from exc
+    try:
+        resp = await client.post(url, headers=headers, json=payload, timeout=_TIMEOUT)
+    except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        raise ProviderError(profile, None, str(exc)) from exc
 
-        if resp.status_code in _RETRY_STATUSES and attempt == 0:
-            log.warning("[%s] HTTP %d, retrying…", profile, resp.status_code)
-            await asyncio.sleep(1.5)
-            continue
+    if not resp.is_success:
+        raise ProviderError(profile, resp.status_code, resp.text[:300])
 
-        if not resp.is_success:
-            raise ProviderError(profile, resp.status_code, resp.text[:300])
-
-        routed_via = resp.headers.get("X-Routed-Via")
-        return resp.json(), routed_via
-
-    raise ProviderError(profile, None, "exhausted retries")
+    routed_via = resp.headers.get("X-Routed-Via")
+    return resp.json(), routed_via
 
 
 # ──────────────────────────────────────────────────────────────────────────────

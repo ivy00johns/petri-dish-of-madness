@@ -580,12 +580,18 @@ def test_embedded_world_yaml_mirror_carries_the_block():
     )
 
 
-def test_shipped_world_yaml_carries_the_block_in_sync_with_the_mirror():
+def test_shipped_world_yaml_ships_failover_off_per_em205():
+    """EM-205 — the shipped config deliberately turns the EM-177 pre-emptive
+    detours OFF: the proxy's `auto` lane is now the universal backup (handled in
+    router.chat() auto-backup, independent of this flag), so client-side detours
+    are redundant. The library DEFAULT stays ON (embedded mirror test above);
+    only the shipped deployment overrides it. Thresholds are preserved so
+    re-enabling is a one-line flip."""
     path = Path(__file__).resolve().parents[2] / "config" / "world.yaml"
     raw = yaml.safe_load(path.read_text())
     params, _, _ = _parse_world(raw)
     assert params.lane_failover == LaneFailoverParams(
-        enabled=True, sick_threshold=3, probe_every=4,
+        enabled=False, sick_threshold=3, probe_every=4,
     )
 
 

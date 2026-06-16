@@ -40,14 +40,20 @@ _LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_F
 _LANE_SICK_THRESHOLD_DEFAULT = 3  # timed_out entries in the 6-window ⇒ SICK
 _LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home lane
 
-# ── EM-198 — error-bounce routing ─────────────────────────────────────────────
-# 2026-06-12 user mandate: a provider error (429 / 5xx / transport failure /
-# malformed completion) BOUNCES the same call to the healthiest other lane
-# instead of idling the turn. The pre-existing EM-173 "provider errors idle on
-# purpose" rule was a budget-era decision that does not apply at this scale —
-# with ~16 free provider lanes the right response to a rate limit is to use a
-# different model. Total adapter attempts per chat(): home + 2 substitutes.
-_ERROR_BOUNCE_ATTEMPTS = 3
+# ── EM-205 — auto-backup routing ──────────────────────────────────────────────
+# 2026-06-15 decision (supersedes the EM-198 fan-out): a provider error (429 /
+# 5xx / transport failure / malformed completion) on a PINNED lane retries the
+# SAME call exactly ONCE on the proxy's `auto` router model. FreeLLMAPI then
+# health-routes that single request across its whole upstream pool — it knows
+# which providers are throttled in real time, we don't. This replaces the
+# EM-198 multi-lane bounce, which AMPLIFIED rate-limit storms: one failure
+# fanned out to up to ~6 POSTs across pinned lanes (home ×2 retries × 3 lanes),
+# each itself possibly rate-limited, feeding the storm. The agent keeps its
+# pinned model (model-vs-model identity intact); only the backup is delegated
+# to the proxy. The backup is the profile literally named `auto` when present;
+# absent ⇒ the original error propagates (the runtime's EM-173 idle fallback
+# stays the true last resort). Total adapter calls per chat(): home + 1 backup.
+_AUTO_BACKUP_PROFILE = "auto"
 
 
 def _cache_key(profile_name: str, messages: list[dict]) -> str:
@@ -191,6 +197,16 @@ class Router:
         # the event log, same pattern as set_usage_alert_sink). No sink ⇒ drop.
         self._lane_event_sink: Callable[[dict], None] | None = None
 
+        # ── EM-205 — auto-backup routing ───────────────────────────────────────
+        # The universal backup lane: the profile literally named `auto` (the
+        # FreeLLMAPI proxy's own health-aware router model). When present, a
+        # pinned lane's failure retries ONCE here instead of fanning out across
+        # other pinned lanes. None ⇒ no proxy router configured, errors
+        # propagate (opt-out / test default). Resolved once; immutable per run.
+        self._auto_backup: str | None = (
+            _AUTO_BACKUP_PROFILE if _AUTO_BACKUP_PROFILE in self._adapters else None
+        )
+
     def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
         """Register the callback that receives `usage_alert` payloads
         ({provider, metric, pct, limit}) when a real adapter call crosses 70%
@@ -298,10 +314,11 @@ class Router:
         try:
             text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
         except ProviderError as exc:
-            # EM-198 — bounce the SAME call to the healthiest other lane(s)
-            # instead of letting the turn idle. Raises the last ProviderError
-            # only when every candidate also fails (EM-173 idle = last resort).
-            text, served_by = await self._bounce_on_error(
+            # EM-205 — retry the SAME call ONCE on the proxy's `auto` router
+            # instead of fanning out across pinned lanes. Re-raises when no
+            # `auto` lane is configured or it also fails (EM-173 idle = last
+            # resort).
+            text, served_by = await self._auto_backup_call(
                 profile_name, exc, messages,
                 max_tokens=max_tokens, temperature=temperature,
             )
@@ -342,7 +359,7 @@ class Router:
                 self._cache.popitem(last=False)  # evict least-recently-used
         return text
 
-    async def _bounce_on_error(
+    async def _auto_backup_call(
         self,
         home: str,
         first_exc: ProviderError,
@@ -351,45 +368,38 @@ class Router:
         max_tokens: int,
         temperature: float,
     ) -> tuple[str, str]:
-        """EM-198 — error-bounce: retry one failed call on other lanes.
+        """EM-205 — auto-backup: retry one failed call ONCE on the proxy `auto`.
 
-        The home lane's failure is recorded as an `error` demerit in its
-        EM-135 window (counts toward lane_sick, so chronic 429ers get
-        pre-emptively detoured by effective_profile on FUTURE calls). Then up
-        to _ERROR_BOUNCE_ATTEMPTS-1 substitute lanes are tried in EM-177
-        health order (never mock, never an already-tried lane); each failure
-        records its own demerit. Returns (text, served_by). Re-raises the
-        LAST ProviderError when no candidate succeeds — the runtime's EM-173
-        idle fallback stays the true last resort. Failover disabled
-        (`world.lane_failover.enabled: false`) ⇒ no bounce, the original
-        error propagates exactly as pre-EM-198."""
+        The home lane's failure is recorded as an `error` demerit in its EM-135
+        window (observability; chronic lanes surface in lane_health()). Then the
+        SAME call is retried exactly once on the `auto` backup lane — the
+        FreeLLMAPI router model, which health-routes across the whole upstream
+        pool in a single request. Returns (text, served_by="auto").
+
+        Re-raises the ORIGINAL error when no `auto` lane is configured (opt-out)
+        or the home lane IS `auto` (no self-recursion — a failing narrator-on-
+        auto call must not bounce to itself). Re-raises the AUTO error when the
+        backup also fails — the runtime's EM-173 idle fallback stays the true
+        last resort. Never targets mock (the backup is `auto` or nothing)."""
         self.note_lane_error(home)
-        if not self._failover_enabled():
+        backup = self._auto_backup
+        if backup is None or backup == home:
             raise first_exc
-        last_exc: ProviderError = first_exc
-        tried = {home}
-        for _ in range(_ERROR_BOUNCE_ATTEMPTS - 1):
-            candidate = self._pick_detour_candidate(home, exclude=tried)
-            if candidate is None:
-                break
-            tried.add(candidate)
-            cand_adapter = self._adapters.get(candidate)
-            if cand_adapter is None:
-                continue
-            try:
-                text = await cand_adapter.chat(
-                    messages, max_tokens=max_tokens, temperature=temperature
-                )
-            except ProviderError as exc:
-                self.note_lane_error(candidate)
-                last_exc = exc
-                continue
-            log.info(
-                "EM-198 error-bounce: %s failed (%s), %s served the call",
-                home, first_exc.detail[:120], candidate,
+        adapter = self._adapters.get(backup)
+        if adapter is None:  # pragma: no cover - defensive
+            raise first_exc
+        try:
+            text = await adapter.chat(
+                messages, max_tokens=max_tokens, temperature=temperature
             )
-            return text, candidate
-        raise last_exc
+        except ProviderError as exc:
+            self.note_lane_error(backup)
+            raise exc
+        log.info(
+            "EM-205 auto-backup: %s failed (%s), proxy `auto` served the call",
+            home, (first_exc.detail or "")[:120],
+        )
+        return text, backup
 
     def forget(self, profile_name: str, messages: list[dict]) -> None:
         """Evict the decision-cache entry for this exact (profile, messages),
@@ -591,6 +601,8 @@ class Router:
         for idx, (name, profile) in enumerate(self._profiles.items()):
             if name == home or profile.adapter == "mock":
                 continue
+            if name == self._auto_backup:
+                continue  # EM-205 — the universal backup is never a pinned detour
             if exclude is not None and name in exclude:
                 continue
             try:
