@@ -1158,6 +1158,11 @@ class World:
             name = str(name or "").strip()[:60]
             if not name:
                 return False, "name_town requires a name", None
+            # run-663 — reject a no-op rename to the name the town already has,
+            # so the SAME naming can't re-pass forever (the live run renamed the
+            # town "Ledger's Folly" 119 times — 53% of all "laws" were no-ops).
+            if name.lower() == str(self.town_name or "").strip().lower():
+                return False, f"the town is already named {self.town_name!r}", None
             payload = {"name": name}
         # Duplicate guard: only one OPEN proposal per effect at a time.
         for rule in self.rules.values():
@@ -1171,7 +1176,7 @@ class World:
         # naming is fresh (a new name supersedes the old), never a renewal.
         active = self._active_rule(effect) if effect != "name_town" else None
         rule = RuleState(
-            id=str(uuid.uuid4())[:8],
+            id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
             effect=effect,
             text=text,
             proposer_id=agent.id,
@@ -1302,7 +1307,7 @@ class World:
         vote passes threshold (handled in _on_rule_activated). Used by the
         POST /api/agents governance path (runtime-api-agent)."""
         rule = RuleState(
-            id=str(uuid.uuid4())[:8],
+            id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
             effect="admit_agent",
             text=text or f"Admit {name} to the village.",
             proposer_id=proposer_id,

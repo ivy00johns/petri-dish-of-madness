@@ -929,6 +929,15 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
         elif _noneish(args.get("target")):
             args.pop("target", None)
 
+    elif action == "vote":
+        # run-663 — the model JSON-encodes an all-numeric rule_id as a NUMBER
+        # (e.g. 36219503), which misses the string-keyed rule → "unknown rule".
+        # Coerce to str so the vote lands (covers historical all-numeric ids;
+        # new ids are now `r_`-prefixed and can't be numberified).
+        rid = args.get("rule_id")
+        if rid is not None and not isinstance(rid, str):
+            args["rule_id"] = str(rid)
+
     caps = _ARG_STRING_CAPS.get(action)
     if caps:
         for key, cap in caps.items():
