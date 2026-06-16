@@ -31,6 +31,20 @@ def _truncate(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _roman(n: int) -> str:
+    """run-663 — roman numeral for disambiguating duplicate agent names
+    (Vesper II, Vesper III). Small n in practice; full converter for safety."""
+    table = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"),
+             (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
+             (5, "V"), (4, "IV"), (1, "I")]
+    out = []
+    for value, sym in table:
+        while n >= value:
+            out.append(sym)
+            n -= value
+    return "".join(out) or "I"
+
+
 def _humanize_project_name(raw: str) -> str:
     """EM-129 — derive a display name from a model-authored project name.
     Models often emit snake_case identifiers ("prepare_beds", "village_fair"):
@@ -2906,6 +2920,24 @@ class World:
             self.pending_spawn_events.extend(events)
         return events
 
+    def _unique_agent_name(self, name: str) -> str:
+        """run-663 — never reuse a name another agent already holds. Many agents
+        MAY share a MODEL (intended), but a shared NAME blends two identities
+        into one — the god-admit path spawned a 2nd 'Vesper' that contradicted
+        the first and showed up twice in every roster. A free name returns
+        unchanged; a collision gets a roman-numeral suffix (Vesper → Vesper II →
+        Vesper III…). Matches the child-spawn rule (a dead agent's identity is
+        never recycled either). An already-distinct A/B label (Vesper·groq) is
+        untouched."""
+        base = str(name or "").strip() or "Agent"
+        taken = {a.name.strip().lower() for a in self.agents.values()}
+        if base.lower() not in taken:
+            return base
+        n = 2
+        while f"{base} {_roman(n)}".lower() in taken:
+            n += 1
+        return f"{base} {_roman(n)}"
+
     def spawn_agent(
         self,
         name: str,
@@ -2914,7 +2946,8 @@ class World:
         location: str,
         cadence_tier: str = "protagonist",
     ) -> AgentState:
-        agent_id = f"agent_{name.lower()}_{str(uuid.uuid4())[:6]}"
+        name = self._unique_agent_name(name)
+        agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
         agent = AgentState(
             id=agent_id,
             name=name,

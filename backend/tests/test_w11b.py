@@ -1141,7 +1141,9 @@ def test_spawn_with_persona_prefills_from_the_card():
         assert resp.status_code == 201
         agent_id = resp.json()["agent_id"]
         agent = appmod._world.agents[agent_id]
-        assert agent.name == "Mox"
+        # run-663 — the default roster already holds a "Mox", so a 2nd one is
+        # auto-disambiguated (Mox → Mox II); persona prefill is unaffected.
+        assert agent.name == "Mox II"
         assert agent.personality == card["personality"]
         assert agent.profile == card["suggested_profile"]
 

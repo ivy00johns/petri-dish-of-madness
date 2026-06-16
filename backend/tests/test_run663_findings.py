@@ -90,3 +90,33 @@ def test_name_town_allows_a_genuinely_new_name():
     ok, _, rule = world.action_propose_rule(
         ada, "name_town", "Rebrand", name="Ledger's Fortune")
     assert ok and rule is not None, "a real rename must still be allowed"
+
+
+# ── Bug 3: duplicate-name spawn (the two-Vespers identity collision) ───────────
+
+def test_spawn_disambiguates_a_colliding_name():
+    """run-663 — a 2nd agent admitted with a LIVING agent's name is auto-renamed
+    (Vesper → Vesper II → Vesper III), so two agents never blend into one
+    identity (the god-admit path spawned a 2nd 'Vesper' that contradicted the
+    first). Centralized in spawn_agent → covers god-direct, governance, child."""
+    world = _world()
+    v1 = world.spawn_agent("Vesper", "schemer", "mistral-small", "plaza")
+    assert v1.name == "Vesper"
+    v2 = world.spawn_agent("Vesper", "schemer", "groq-llama", "plaza")
+    assert v2.name == "Vesper II", v2.name
+    assert v2.id != v1.id
+    v3 = world.spawn_agent("Vesper", "x", "kimi", "plaza")
+    assert v3.name == "Vesper III", v3.name
+
+
+def test_same_model_different_names_is_allowed():
+    """The intended feature is untouched: many agents MAY share a model — only
+    the NAME must be unique. An explicit A/B label is already distinct, so it
+    passes through unchanged."""
+    world = _world()
+    a = world.spawn_agent("Vesper", "x", "groq-llama", "plaza")
+    b = world.spawn_agent("Bram", "y", "groq-llama", "plaza")   # SAME model, new name
+    assert (a.name, b.name) == ("Vesper", "Bram")
+    assert a.profile == b.profile == "groq-llama"
+    ab = world.spawn_agent("Vesper·groq", "x", "groq-llama", "plaza")  # A/B label
+    assert ab.name == "Vesper·groq"
