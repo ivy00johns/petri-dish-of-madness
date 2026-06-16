@@ -34,6 +34,7 @@ import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
 import { InspectorLayout } from './inspector/InspectorLayout';
+import { ChronicleView } from './components/chronicle/ChronicleView';
 
 type WorldView = 'village' | 'map';
 type Sim = SimulationState & SimulationControls;
@@ -112,6 +113,12 @@ export default function App() {
         <Routes>
           {/* "/" keeps the 3D village as the default live view. */}
           <Route path="/" element={<LiveLayout sim={sim} />} />
+          {/* EM-201 — the Chronicle: a full-width reading view of the saga.
+              Like /inspector, it does NOT mount LiveLayout/CozyWorld. */}
+          <Route
+            path="/chronicle"
+            element={<ChronicleView world={sim.world} history={sim.history} />}
+          />
           {/*
             "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's
             <Canvas>) is NOT rendered on this route, so React/R3F unmount the

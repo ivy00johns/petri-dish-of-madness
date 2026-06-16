@@ -26,10 +26,16 @@ interface HeaderProps {
   mockMode: boolean;
 }
 
+// EM-201 — the three top-level views.
+const NAV_TABS = [
+  { to: '/', label: 'Live' },
+  { to: '/chronicle', label: 'Chronicle' },
+  { to: '/inspector', label: 'Inspector' },
+] as const;
+
 export function Header({ tick, day, running, connected, mockMode }: HeaderProps) {
   const [tickFlash, setTickFlash] = useState(false);
   const location = useLocation();
-  const onInspector = location.pathname === '/inspector';
 
   useEffect(() => {
     setTickFlash(true);
@@ -49,15 +55,26 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
           CHAOS LAB v1
         </span>
 
-        {/* Route toggle — 3D live world ⇄ 2D analysis annex. */}
-        <Link
-          to={onInspector ? '/' : '/inspector'}
-          className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid transition-colors rounded-sm no-underline"
-          aria-label={onInspector ? 'Back to the live 3D world' : 'Open the Inspector analysis annex'}
-          title={onInspector ? 'Back to the live world' : 'Open the Inspector (analysis)'}
-        >
-          {onInspector ? '← Live' : 'Inspector'}
-        </Link>
+        {/* Route nav — Live · Chronicle · Inspector (EM-201). */}
+        <nav className="flex items-center gap-1" aria-label="Views">
+          {NAV_TABS.map(({ to, label }) => {
+            const active = location.pathname === to;
+            return (
+              <Link
+                key={to}
+                to={to}
+                aria-current={active ? 'page' : undefined}
+                className={`font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border rounded-sm no-underline transition-colors ${
+                  active
+                    ? 'border-lab-acid text-lab-acid bg-lab-chrome'
+                    : 'border-lab-border-bright text-lab-text bg-lab-chrome hover:bg-lab-border hover:text-lab-acid'
+                }`}
+              >
+                {label}
+              </Link>
+            );
+          })}
+        </nav>
       </div>
 
       {/* Center — tick / day counter */}
