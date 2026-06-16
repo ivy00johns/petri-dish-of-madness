@@ -776,6 +776,10 @@ class SpawnBody(BaseModel):
     # (protagonist | supporting | background). Absent ⇒ protagonist (the
     # zero-behavior-change default). Unknown value -> 400.
     cadence_tier: str | None = Field(default=None, max_length=20)
+    # run-663 — A/B opt-in: spawn the SAME persona across multiple models as
+    # labeled contestants. Each entry must be a known profile name. Only valid
+    # in god mode; governance + ab_models is a 400.
+    ab_models: list[str] | None = None
 
 
 def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str]:
@@ -813,10 +817,104 @@ def _spawn_mode(body: SpawnBody) -> str:
     return mode or "god"
 
 
+def _ab_tag(profile_name: str) -> str:
+    """run-663 — derive short label from a profile name.
+
+    Uses the segment before the first '-' (e.g. 'mistral-small' → 'mistral',
+    'groq-llama' → 'groq'). When there is no '-', the whole name is the tag
+    (e.g. 'kimi' → 'kimi').
+    """
+    return profile_name.split("-")[0]
+
+
 @app.post("/api/agents")
 async def spawn_agent(body: SpawnBody, response: Response):
     if _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
+
+    # run-663 — A/B opt-in: when ab_models is present and non-empty (god mode
+    # only) spawn one agent per model using the shared name/personality.
+    if body.ab_models:
+        mode = _spawn_mode(body)
+        if mode != "god":
+            raise HTTPException(
+                400,
+                "ab_models is only supported in god mode",
+            )
+        # Name is required; personality is optional (defaults to generic).
+        # Profile is NOT required here — each variant supplies its own.
+        name = body.name
+        if body.persona:
+            # Resolve from persona card but do NOT require suggested_profile.
+            wanted = body.persona.strip().lower()
+            card = next(
+                (c for c in load_personas() if c["name"].strip().lower() == wanted),
+                None,
+            )
+            if card is None:
+                raise HTTPException(400, f"Unknown persona: {body.persona!r}")
+            name = name or card["name"]
+            personality = body.personality or card["personality"] or "A generic agent."
+        else:
+            personality = body.personality or "A generic agent."
+        if not name:
+            raise HTTPException(400, "name is required (directly or via persona)")
+
+        # Validate all profiles before touching the world.
+        for prof_name in body.ab_models:
+            if _router.get_profile(prof_name) is None:
+                raise HTTPException(400, f"Unknown profile: {prof_name!r}")
+
+        cadence_tier = body.cadence_tier or "protagonist"
+        if cadence_tier not in _VALID_CADENCE_TIERS:
+            raise HTTPException(
+                400,
+                f"Unknown cadence_tier: {body.cadence_tier!r} "
+                "(protagonist|supporting|background)",
+            )
+
+        # Spawn one agent per model in the A/B group.
+        spawned: list[dict] = []
+        for prof_name in body.ab_models:
+            tag = _ab_tag(prof_name)
+            variant_name = f"{name}·{tag}"
+            agent = _world.spawn_agent(
+                name=variant_name,
+                personality=personality,
+                profile=prof_name,
+                location=body.location,
+                cadence_tier=cadence_tier,
+            )
+            _router.reassign(agent.id, prof_name)
+            if _loop and _repo:
+                run_id = _loop._run_id or 1
+                _repo.save_agent(run_id, agent, _world.tick)
+                _loop._emit_event({
+                    "kind": "agent_spawned",
+                    "actor_id": agent.id,
+                    "actor_type": "god",
+                    "profile": prof_name,
+                    "profile_color": _loop._get_profile_color(agent),
+                    "text": f"{agent.name} spawned (A/B group: {name}).",
+                    "payload": {
+                        "agent_id": agent.id,
+                        "name": agent.name,
+                        "method": "god",
+                        "ab_group": name,  # correlates variants in the UI
+                    },
+                })
+            spawned.append({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "profile": prof_name,
+            })
+        if _loop:
+            _loop._broadcast_world_state()
+        response.status_code = 201
+        return {"status": "ok", "mode": "god", "agents": spawned}
+
+    # ── Single-spawn path (unchanged, byte-identical to pre-run-663) ──────────
+
     # W11b / EM-092 — persona prefill: explicit fields win, the card fills gaps,
     # unknown persona / still-missing name|profile -> 400.
     name, personality, profile = _resolve_spawn_fields(body)

@@ -929,6 +929,15 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
         elif _noneish(args.get("target")):
             args.pop("target", None)
 
+    elif action == "vote":
+        # run-663 — the model JSON-encodes an all-numeric rule_id as a NUMBER
+        # (e.g. 36219503), which misses the string-keyed rule → "unknown rule".
+        # Coerce to str so the vote lands (covers historical all-numeric ids;
+        # new ids are now `r_`-prefixed and can't be numberified).
+        rid = args.get("rule_id")
+        if rid is not None and not isinstance(rid, str):
+            args["rule_id"] = str(rid)
+
     caps = _ARG_STRING_CAPS.get(action)
     if caps:
         for key, cap in caps.items():
@@ -3403,10 +3412,21 @@ class AgentRuntime:
                         "payload": {"error": "target_not_found"}}
             ok, reason = self.world.action_insult(agent, target)
             if ok:
+                # run-663: render the barb in the feed text when present so
+                # insults are not flavorless — the raw insult_text stays in
+                # the payload unchanged for downstream consumers.
+                barb = args.get("text", "")
+                if barb:
+                    display_barb = barb[:200]  # truncate gracefully; never drop
+                    insult_text = (
+                        f'{agent.name} insults {target.name}: "{display_barb}"'
+                    )
+                else:
+                    insult_text = f"{agent.name} insults {target.name}!"
                 return {**base, "kind": "conflict", "target_id": target.id,
-                        "text": f"{agent.name} insults {target.name}!",
+                        "text": insult_text,
                         "payload": {"action": "insult",
-                                    "insult_text": args.get("text", ""), "thought": thought}}
+                                    "insult_text": barb, "thought": thought}}
             else:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to insult but: {reason}",
