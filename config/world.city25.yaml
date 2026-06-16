@@ -224,7 +224,7 @@ world:
   narrator:
     enabled: true                # EM-201: the Chronicle — narrated chapters of the emergent saga
     every_n_ticks: 100           # EM-201: bigger window → meatier chapters (was 50)
-    model_profile: gemini-flash  # cheapest free profile (FreeLLMAPI); never a paid lane
+    model_profile: deepseek-pro  # EM-201: a stronger FREE lane for richer prose (still FreeLLMAPI; never a paid lane)
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }

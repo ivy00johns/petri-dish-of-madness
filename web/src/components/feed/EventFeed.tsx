@@ -446,6 +446,12 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
   // centerpiece — speech rows read slightly larger with inline speaker/model
   // attribution, so the conversation scans without hovering.
   const speech = event.kind === 'agent_speech';
+  // EM-201 — a Chronicle chapter is a wall of prose; in the LIVE feed it
+  // collapses to a one-line teaser (the full text lives in the Chronicle tab).
+  const chapter = event.kind === 'narrator_summary';
+  const chapterTeaser = chapter
+    ? `📖 New chapter — "${(event.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 64)}…" · read it in the Chronicle`
+    : null;
   // Surface the animal's in-character thought (or any agent_action thought) on hover.
   const tip = animal
     ? (typeof event.payload?.animal_thought === 'string' ? event.payload.animal_thought : event.thought)
@@ -486,7 +492,7 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
           }`}
           style={godPost ? { color: 'var(--lab-god-bright)' } : undefined}
         >
-          {event.text ?? `[${event.kind}]`}
+          {chapter ? chapterTeaser : (event.text ?? `[${event.kind}]`)}
         </span>
 
         {/* Inline model attribution on EVERY model-decided line (not just
