@@ -120,6 +120,17 @@
            pointer-events-none;
   }
 
+  /* Chronicle (EM-205) — a literary drop-cap on the first letter of a chapter.
+     Serif prose embedded in the mono HUD; the acid initial ties it to the lab. */
+  .chronicle-dropcap::first-letter {
+    @apply text-lab-acid;
+    float: left;
+    font-weight: 700;
+    font-size: 3.1em;
+    line-height: 0.72;
+    padding: 0.06em 0.12em 0 0;
+  }
+
   /* Grid lines on canvas bg */
   .canvas-grid {
     background-image:

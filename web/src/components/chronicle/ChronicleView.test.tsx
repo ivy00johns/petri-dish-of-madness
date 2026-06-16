@@ -1,15 +1,27 @@
 /**
- * ChronicleView (EM-201) — the Chronicle tab projects `narrator_summary`
- * chapters into a paginated reading view; degrades to a labelled empty state.
+ * ChronicleView (EM-201) — integration tests for the Chronicle reading room.
+ *
+ * PRESERVE-EXACTLY hooks:
+ *   - data-testid="chapter-prose" textContent contains the chapter text
+ *   - buttons with exact text "◀ Prev" and "Next ▶"
+ *   - text node exactly "{i+1} / {N}" (unique in the footer counter)
+ *   - <select aria-label="Chronicle model"> with first option "Default (free)"
+ *   - "Build from history" button POSTs /api/chronicle/build with correct body
+ *   - empty state shows text containing "has not yet begun"
+ *   - default selection = the LATEST chapter (selected null → last index)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import { ChronicleView, readChapters } from './ChronicleView';
+import { ChronicleView } from './ChronicleView';
+import { readChapters } from './chronicle';
 import { ev } from '../../test-utils/fixtures';
 import type { WorldState } from '../../types';
 
+// ============================================================
+// readChapters (re-exported from chronicle.ts via ChronicleView)
+// ============================================================
 describe('readChapters', () => {
   it('gathers narrator_summary chapters in window order; skips non-chapters + empties', () => {
     const history = [
@@ -26,6 +38,9 @@ describe('readChapters', () => {
   });
 });
 
+// ============================================================
+// ChronicleView — core behaviour
+// ============================================================
 describe('ChronicleView', () => {
   it('shows a labelled empty state before any chapter exists', () => {
     render(<ChronicleView world={null} history={[]} />);
@@ -48,8 +63,91 @@ describe('ChronicleView', () => {
     expect(screen.getByTestId('chapter-prose').textContent).toContain('First chapter');
     expect(screen.getByText('1 / 2')).toBeTruthy();
   });
+
+  it('clicking a chapter index entry jumps to that chapter', async () => {
+    const history = [
+      ev({ kind: 'narrator_summary', text: 'Alpha chapter contents.', tick: 100,
+           payload: { from_tick: 0, to_tick: 100 } }),
+      ev({ kind: 'narrator_summary', text: 'Beta chapter contents.', tick: 200,
+           payload: { from_tick: 100, to_tick: 200 } }),
+      ev({ kind: 'narrator_summary', text: 'Gamma chapter contents.', tick: 300,
+           payload: { from_tick: 200, to_tick: 300 } }),
+    ];
+    render(<ChronicleView world={null} history={history} />);
+    // Default is latest (chapter 3 = Gamma)
+    expect(screen.getByTestId('chapter-prose').textContent).toContain('Gamma chapter');
+
+    // The index shows roman numerals; click "I" entry to jump to chapter 1
+    // The index entries are buttons; find the one whose text row1 contains "I"
+    // We'll look for an index button that shows the first chapter's title
+    const indexButtons = screen.getAllByRole('button');
+    // The chapter index button for chapter 1 will have aria-current undefined (not active)
+    // and contain the title derived from "Alpha chapter contents."
+    const alphaBtn = indexButtons.find(
+      (btn) =>
+        btn.textContent?.includes('Alpha chapter') &&
+        !btn.textContent?.includes('◀') &&
+        !btn.textContent?.includes('▶'),
+    );
+    expect(alphaBtn).toBeTruthy();
+    await userEvent.click(alphaBtn!);
+
+    expect(screen.getByTestId('chapter-prose').textContent).toContain('Alpha chapter');
+    expect(screen.getByText('1 / 3')).toBeTruthy();
+  });
+
+  it('keyboard ArrowLeft/ArrowRight turns pages', async () => {
+    const user = userEvent.setup();
+    const history = [
+      ev({ kind: 'narrator_summary', text: 'Page one text.', tick: 100,
+           payload: { from_tick: 0, to_tick: 100 } }),
+      ev({ kind: 'narrator_summary', text: 'Page two text.', tick: 200,
+           payload: { from_tick: 100, to_tick: 200 } }),
+      ev({ kind: 'narrator_summary', text: 'Page three text.', tick: 300,
+           payload: { from_tick: 200, to_tick: 300 } }),
+    ];
+    render(<ChronicleView world={null} history={history} />);
+    // starts at latest (page 3)
+    expect(screen.getByText('3 / 3')).toBeTruthy();
+
+    // ArrowLeft → page 2
+    await user.keyboard('{ArrowLeft}');
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+    expect(screen.getByTestId('chapter-prose').textContent).toContain('Page two text');
+
+    // ArrowLeft → page 1
+    await user.keyboard('{ArrowLeft}');
+    expect(screen.getByText('1 / 3')).toBeTruthy();
+
+    // ArrowRight → page 2
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+  });
+
+  it('keyboard navigation is ignored when typing in the filter input', async () => {
+    const user = userEvent.setup();
+    const history = [
+      ev({ kind: 'narrator_summary', text: 'Only chapter.', tick: 100,
+           payload: { from_tick: 0, to_tick: 100 } }),
+      ev({ kind: 'narrator_summary', text: 'Second chapter.', tick: 200,
+           payload: { from_tick: 100, to_tick: 200 } }),
+    ];
+    render(<ChronicleView world={null} history={history} />);
+    // Latest = chapter 2
+    expect(screen.getByText('2 / 2')).toBeTruthy();
+
+    // Focus the filter input and press ArrowLeft — should NOT navigate
+    const filterInput = screen.getByPlaceholderText(/filter chapters/i);
+    await user.click(filterInput);
+    await user.keyboard('{ArrowLeft}');
+    // Still on chapter 2
+    expect(screen.getByText('2 / 2')).toBeTruthy();
+  });
 });
 
+// ============================================================
+// Build from history
+// ============================================================
 describe('Build from history', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -60,7 +158,7 @@ describe('Build from history', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const world = {
-      profiles: [{ name: 'kimi', adapter: 'x', model_id: 'x', color: '#fff' }],
+      profiles: [{ name: 'kimi', adapter: 'x', model_id: 'x', color: 'x' }],
     } as unknown as WorldState;
 
     render(<ChronicleView world={world} history={[]} />);

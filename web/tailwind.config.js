@@ -21,6 +21,11 @@ export default {
           text: '#e8e8f0',
           muted: '#5a5a72',
           dim: '#3a3a50',
+          // EM-201 Chronicle — a legible secondary tier (≥4.5:1 WCAG AA on the
+          // lab dark surfaces) for the reading view, where lab-muted/lab-dim are
+          // too faint for meaningful prose-adjacent text. Scoped to the
+          // Chronicle on purpose; the dense HUD keeps muted/dim as-is.
+          'muted-bright': '#8b8ba8',
           acid: '#c8ff00',
           'acid-dim': '#8ab300',
           danger: '#ff3333',
