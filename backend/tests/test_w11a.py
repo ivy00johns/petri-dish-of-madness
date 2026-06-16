@@ -372,6 +372,40 @@ def test_narrator_unavailable_profile_makes_zero_calls():
     assert repo.get_events(loop._run_id, kinds=["narrator_summary"]) == []
 
 
+def test_chronicle_backfill_chronicles_existing_history():
+    """EM-201 — build_chronicle_from_history backfills one chapter per
+    un-chronicled window over the EXISTING run, and is idempotent."""
+    params = _make_params(narrator=NarratorParams(
+        model_profile="narrator-mock", every_n_ticks=2))  # enabled False ⇒ no auto
+    tm = TextMock("A chapter of the saga.")
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 6))  # advance the run; no auto-chapters fire
+    assert world.tick == 6
+    assert repo.get_events(loop._run_id, kinds=["narrator_summary"]) == []
+
+    asyncio.run(loop.build_chronicle_from_history("narrator-mock", every=2))
+    rows = repo.get_events(loop._run_id, kinds=["narrator_summary"], order="asc")
+    assert tm.calls == 3, "one LLM call per generated chapter"
+    windows = [(r["payload"]["from_tick"], r["payload"]["to_tick"]) for r in rows]
+    assert windows == [(0, 2), (2, 4), (4, 6)]
+
+    # idempotent — a second build skips windows already chronicled.
+    asyncio.run(loop.build_chronicle_from_history("narrator-mock", every=2))
+    assert len(repo.get_events(loop._run_id, kinds=["narrator_summary"])) == 3
+
+
+def test_chronicle_backfill_unknown_model_is_a_noop():
+    """The picker never forces a paid lane: an unknown/unconfigured model does
+    nothing (the API maps this to a 400; the engine is a clean no-op)."""
+    params = _make_params(narrator=NarratorParams(model_profile="narrator-mock"))
+    tm = TextMock()
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 4))
+    asyncio.run(loop.build_chronicle_from_history("no-such-profile", every=2))
+    assert tm.calls == 0
+    assert repo.get_events(loop._run_id, kinds=["narrator_summary"]) == []
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. animal_action payload.place (event-log.md v1.2.0 note 2)
 # ──────────────────────────────────────────────────────────────────────────────

@@ -159,6 +159,9 @@ class TickLoop:
         # so a failed call is simply skipped (no retry) until the next window.
         self._narrator_task: asyncio.Task | None = None
         self._last_narrator_tick: int = -1
+        # EM-201 — the on-demand backfill task (chronicle the EXISTING history as
+        # chapters). One at a time; cancelled on reset like the narrator task.
+        self._chronicle_backfill_task: asyncio.Task | None = None
 
         # Wave E / EM-114 — seed the world's birth casting pool (the persona
         # library + the non-mock profile roster). The world has no view of
@@ -285,6 +288,20 @@ class TickLoop:
                 log.debug("narrator task raised during reset: %s", exc)
         self._narrator_task = None
         self._last_narrator_tick = -1
+        # EM-201 — drop any in-flight chronicle backfill: it chronicles the OLD
+        # run and must not bleed chapters into the fresh run.
+        if (
+            self._chronicle_backfill_task is not None
+            and not self._chronicle_backfill_task.done()
+        ):
+            self._chronicle_backfill_task.cancel()
+            try:
+                await self._chronicle_backfill_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("chronicle backfill raised during reset: %s", exc)
+        self._chronicle_backfill_task = None
         # W9 / EM-073 B2: properly await the cancelled tick task. A tick mid-LLM
         # call (30s timeout) could otherwise keep running and mutate the world we
         # are about to rebuild. (The old `asyncio.shield(asyncio.sleep(0.1))` was
@@ -983,6 +1000,60 @@ class TickLoop:
         except Exception as exc:
             # Contract: a failed/timed-out narrator call emits NOTHING, no retry.
             log.debug("narrator call failed for ticks %s-%s: %s", from_tick, to_tick, exc)
+
+    def start_chronicle_backfill(self, profile_name: str) -> bool:
+        """EM-201 — kick off the on-demand backfill as a background task (so the
+        API returns immediately and chapters stream in live). Returns False when
+        a backfill is already in flight."""
+        if (
+            self._chronicle_backfill_task is not None
+            and not self._chronicle_backfill_task.done()
+        ):
+            return False
+        self._chronicle_backfill_task = asyncio.create_task(
+            self.build_chronicle_from_history(profile_name)
+        )
+        return True
+
+    async def build_chronicle_from_history(
+        self, profile_name: str, *, every: int | None = None
+    ) -> None:
+        """EM-201 — chronicle the EXISTING run history: for each window
+        [w, w+every] from tick 0 → now that has NO chapter yet, generate one
+        SEQUENTIALLY (so each threads the previous via _previous_chapter). The
+        chapters emit live as `narrator_summary` events the Chronicle tab already
+        renders, so the user watches the saga assemble. Idempotent — windows
+        already chronicled are skipped — and the model is the CALLER's choice
+        (default free; never forced onto a paid lane). Never raises."""
+        if not profile_name or self._router.get_profile(profile_name) is None:
+            return
+        every = every or max(
+            1, int(getattr(self._narrator_cfg(), "every_n_ticks", 100) or 100)
+        )
+        to_tick = int(self._world.tick)
+        # Windows already chronicled (by their to_tick) — keeps the backfill
+        # idempotent and lets it fill gaps alongside the forward auto-chapters.
+        existing: set[int] = set()
+        try:
+            for ev in self._repo.get_events(
+                self._run_id or 1, kinds=["narrator_summary"]
+            ):
+                tt = (ev.get("payload") or {}).get("to_tick")
+                if isinstance(tt, int):
+                    existing.add(tt)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        w = 0
+        while w < to_tick:
+            w_to = min(w + every, to_tick)
+            if w_to not in existing:
+                try:
+                    await self._run_narrator(w, w_to, profile_name)
+                except asyncio.CancelledError:
+                    raise  # reset() cancels us
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.debug("backfill chapter %s-%s failed: %s", w, w_to, exc)
+            w = w_to
 
     def _advance_round_buildings(self) -> None:
         """W7 per-round hook. Runs once per round (guarded by world.round):

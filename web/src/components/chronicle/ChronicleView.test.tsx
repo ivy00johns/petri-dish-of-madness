@@ -2,12 +2,13 @@
  * ChronicleView (EM-201) — the Chronicle tab projects `narrator_summary`
  * chapters into a paginated reading view; degrades to a labelled empty state.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { ChronicleView, readChapters } from './ChronicleView';
 import { ev } from '../../test-utils/fixtures';
+import type { WorldState } from '../../types';
 
 describe('readChapters', () => {
   it('gathers narrator_summary chapters in window order; skips non-chapters + empties', () => {
@@ -46,5 +47,31 @@ describe('ChronicleView', () => {
     await userEvent.click(screen.getByText('◀ Prev'));
     expect(screen.getByTestId('chapter-prose').textContent).toContain('First chapter');
     expect(screen.getByText('1 / 2')).toBeTruthy();
+  });
+});
+
+describe('Build from history', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('POSTs /api/chronicle/build with the picked model (default = no model)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'building', model: 'kimi' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const world = {
+      profiles: [{ name: 'kimi', adapter: 'x', model_id: 'x', color: '#fff' }],
+    } as unknown as WorldState;
+
+    render(<ChronicleView world={world} history={[]} />);
+    await userEvent.selectOptions(screen.getByLabelText('Chronicle model'), 'kimi');
+    await userEvent.click(screen.getByRole('button', { name: 'Build from history' }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/chronicle/build',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ model: 'kimi' });
+    expect(await screen.findByText(/Building from history/i)).toBeTruthy();
   });
 });
