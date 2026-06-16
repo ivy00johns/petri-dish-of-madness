@@ -783,10 +783,13 @@ class TickLoop:
     # projects/structures, conflicts, spawns, world events — NOT raw event dumps.
     _NARRATOR_DIGEST_KINDS = (
         "agent_died", "animal_died", "world_extinct", "agent_starving",
-        "rule_proposed", "rule_passed", "rule_rejected",
+        "rule_proposed", "rule_passed", "rule_rejected", "town_named",
         "project_proposed", "project_funded", "project_built",
         "building_operational", "structure_state_changed",
         "conflict", "agent_spawned", "animal_spawned", "random_event",
+        # EM-201 — the chronicle needs the DRAMA, so speech + reflections are in
+        # the digest now (the thin EM-094 recap deliberately excluded them).
+        "agent_speech", "reflection",
     )
 
     def _narrator_cfg(self) -> Any:
@@ -827,9 +830,10 @@ class TickLoop:
         )
 
     def _narrator_digest(self, from_tick: int, to_tick: int) -> str:
-        """Compact digest of the window's notable events (deaths, rules, projects,
-        conflicts) for the narrator prompt — counts plus the last few feed lines,
-        never a raw event dump. Free-scale: the prompt stays tiny."""
+        """EM-201 — the CHAPTER digest for the chronicler prompt: the window's
+        events queried once, then handed to the pure `_build_chronicle_digest`
+        builder (memorable lines + laws + cast + conflict). Free-scale: bounded,
+        never a raw event dump."""
         run_id = self._run_id or 1
         try:
             rows = self._repo.get_events(
@@ -840,25 +844,79 @@ class TickLoop:
                 order="asc",
             )
         except Exception as exc:  # pragma: no cover - defensive
-            log.debug("narrator digest query failed: %s", exc)
+            log.debug("chronicle digest query failed: %s", exc)
             rows = []
+        living = [a.name for a in self._world.living_agents()]
+        town = getattr(self._world, "town_name", "") or ""
+        return self._build_chronicle_digest(rows, living, from_tick, to_tick, town)
+
+    @staticmethod
+    def _build_chronicle_digest(
+        rows: list[dict],
+        living_names: list[str],
+        from_tick: int,
+        to_tick: int,
+        town_name: str = "",
+    ) -> str:
+        """EM-201 — build the rich chapter digest from a window's event rows.
+        PURE + unit-testable. Surfaces the drama the thin EM-094 recap missed:
+        the most MEMORABLE spoken lines (longest = richest), the LAWS/namings
+        passed, the living CAST, and open CONFLICT — then a tail of other
+        notable moments for grounding. A quiet window still yields a valid,
+        charming digest (never a crash)."""
         counts: dict[str, int] = {}
+        speech: list[tuple[int, str]] = []
+        laws: list[str] = []
+        drama: list[str] = []
         for ev in rows:
             kind = ev.get("kind") or "?"
             counts[kind] = counts.get(kind, 0) + 1
-        header = ", ".join(f"{k} x{n}" for k, n in sorted(counts.items())) or "a quiet stretch"
-        lines = []
-        for ev in rows[-20:]:  # the most recent notable moments, capped
             text = (ev.get("text") or "").strip()
-            if text:
-                lines.append(f"[tick {ev.get('tick')}] {text[:140]}")
-        moments = "\n".join(lines) or "(nothing notable happened)"
-        alive = ", ".join(a.name for a in self._world.living_agents()) or "nobody"
+            if kind == "agent_speech":
+                said = ((ev.get("payload") or {}).get("said") or "").strip() or text
+                if said:
+                    speech.append((len(said), said[:300]))
+            elif kind in ("rule_passed", "town_named") and text:
+                laws.append(text[:160])
+            elif kind == "conflict" and text:
+                drama.append(text[:120])
+        cast = ", ".join(living_names) or "nobody"
+        header = ", ".join(f"{k} x{n}" for k, n in sorted(counts.items())) or "a quiet stretch"
+        speech.sort(key=lambda s: s[0], reverse=True)
+        quotes = "\n".join(f"  · {q}" for _, q in speech[:6]) or "  (no one spoke)"
+        law_block = "\n".join(f"  · {law}" for law in laws[:8]) or "  (no laws passed)"
+        drama_block = "\n".join(f"  · {d}" for d in drama[:6]) or "  (no open conflict)"
+        moments: list[str] = []
+        for ev in rows[-12:]:
+            if ev.get("kind") in ("agent_speech", "conflict"):
+                continue  # already surfaced above
+            t = (ev.get("text") or "").strip()
+            if t:
+                moments.append(f"  [tick {ev.get('tick')}] {t[:120]}")
+        moments_block = "\n".join(moments[-8:]) or "  (a quiet stretch)"
+        town = town_name.strip() if isinstance(town_name, str) else ""
         return (
-            f"Window: ticks {from_tick}-{to_tick}. Living agents: {alive}.\n"
-            f"Event counts: {header}.\n"
-            f"Notable moments:\n{moments}"
+            f"Window: ticks {from_tick}–{to_tick}. The town: {town or 'still unnamed'}. "
+            f"The cast: {cast}.\n"
+            f"Event counts: {header}.\n\n"
+            f"MEMORABLE LINES (their actual words):\n{quotes}\n\n"
+            f"LAWS / NAMINGS this stretch:\n{law_block}\n\n"
+            f"CONFLICT:\n{drama_block}\n\n"
+            f"OTHER NOTABLE MOMENTS:\n{moments_block}"
         )
+
+    def _previous_chapter(self) -> str:
+        """EM-201 — text of the most recent chapter (narrator_summary), so the
+        chronicler can continue the saga instead of writing disconnected
+        recaps. Empty on the first chapter or any query failure."""
+        try:
+            rows = self._repo.get_events(
+                self._run_id or 1, kinds=["narrator_summary"],
+                order="desc", limit=1,
+            )
+        except Exception:  # pragma: no cover - defensive
+            return ""
+        return (rows[0].get("text") or "").strip() if rows else ""
 
     async def _run_narrator(self, from_tick: int, to_tick: int, profile_name: str) -> None:
         """Body of one narrator window (background task): build the digest, make
@@ -866,33 +924,45 @@ class TickLoop:
         emits NOTHING (no retry) and never propagates — the loop never stalls."""
         try:
             digest = self._narrator_digest(from_tick, to_tick)
+            # EM-201 — thread the PREVIOUS chapter so the saga is continuous,
+            # not a string of disconnected recaps.
+            previous = self._previous_chapter()
+            prev_block = (
+                "\n\nThe PREVIOUS chapter (continue the story naturally FROM here "
+                "— do not repeat it):\n" + previous
+            ) if previous else ""
             messages = [
                 {
                     "role": "system",
                     "content": (
-                        "You are the narrator of a tiny simulated village of LLM "
-                        "agents. Given a digest of the last stretch of events, "
-                        "write a vivid 2-3 sentence recap in past tense. Mention "
-                        "deaths, laws passed, projects, and conflicts when present; "
-                        "if it was quiet, say so with charm. Reply with ONLY the "
-                        "2-3 sentences — no lists, no preamble, no markdown."
+                        "You are the Chronicler of a tiny living town of AI agents "
+                        "— a wry, literary narrator writing its ongoing saga. Given "
+                        "a digest of the latest stretch (memorable lines, laws, the "
+                        "cast, conflict) and the previous chapter, write the NEXT "
+                        "CHAPTER: one or two vivid paragraphs in past tense that "
+                        "capture the drama, the characters and their schemes, the "
+                        "laws and betrayals, and the absurd. QUOTE a memorable line "
+                        "verbatim when one lands; name names. If it was a genuinely "
+                        "quiet stretch, say so with charm. Reply with ONLY the "
+                        "chapter prose — no title, no list, no markdown."
                     ),
                 },
-                {"role": "user", "content": digest},
+                {"role": "user", "content": digest + prev_block},
             ]
             profile = self._router.get_profile(profile_name)
             text = await asyncio.wait_for(
                 self._router.chat(
                     profile_name,
                     messages,
-                    max_tokens=min(256, getattr(profile, "max_tokens", 256) or 256),
-                    temperature=0.7,
+                    # A chapter is a paragraph or two — give it room (was 256).
+                    max_tokens=min(700, getattr(profile, "max_tokens", 700) or 700),
+                    temperature=0.85,
                 ),
-                timeout=30.0,
+                timeout=45.0,
             )
             text = (text or "").strip()
             if not text:
-                return  # an empty recap is a failed call: emit nothing
+                return  # an empty chapter is a failed call: emit nothing
             payload = {"from_tick": from_tick, "to_tick": to_tick, "profile": profile_name}
             routed_via = self._router.last_routed_via(profile_name)
             if routed_via:
@@ -905,7 +975,7 @@ class TickLoop:
                 # Standalone system event: this background task runs concurrently
                 # with agent turns, so never inherit the in-flight turn_id.
                 "turn_id": None,
-                "text": text[:600],
+                "text": text[:2000],  # a chapter, not a 2-sentence recap
                 "payload": payload,
             })
         except asyncio.CancelledError:

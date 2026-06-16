@@ -222,8 +222,8 @@ world:
   # a single `narrator_summary` event. A failed/timed-out call emits nothing
   # and is never retried — the tick loop never stalls on the narrator.
   narrator:
-    enabled: false
-    every_n_ticks: 50
+    enabled: true                # EM-201: the Chronicle — narrated chapters of the emergent saga
+    every_n_ticks: 100           # EM-201: bigger window → meatier chapters (was 50)
     model_profile: gemini-flash  # cheapest free profile (FreeLLMAPI); never a paid lane
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
