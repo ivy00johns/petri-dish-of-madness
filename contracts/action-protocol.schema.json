@@ -1,63 +1,87 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "petri-dish-of-madness/action-protocol/v1.1.0",
+  "$id": "petri-dish-of-madness/action-protocol/v1.2.0",
   "title": "Agent Action",
-  "description": "The strict JSON object an agent's model must return each turn. Parsed from the model's text output (first valid JSON object). On parse/validation failure: one retry with the error appended; second failure -> idle. v1.1.0 (W5 / EM-066) adds OPTIONAL decision-trace fields (perceived_summary, memories_used, reasoning) captured in the SAME single call -> zero extra LLM calls. They are optional so deterministic/Mock agents stay valid; the turn prompt strongly requests them and the engine records whatever is present into the perceived/memory_retrieved/reasoning/action_chosen event-log rows. The optional natural-language trace fields (thought, mood, perceived_summary, memories_used items, reasoning) are TRUNCATED to their maxLength by the engine before validation — a verbose model never loses a whole turn to an over-long cosmetic field; only structural args (action, target, place, amount) are validated strictly. See contracts/event-log.md.",
+  "description": "The strict JSON object an agent's model must return each turn. Parsed from the model's text output (first valid JSON object). On parse/validation failure: one retry with the error appended; second failure -> idle. v1.1.0 (W5 / EM-066) adds OPTIONAL decision-trace fields (perceived_summary, memories_used, reasoning) captured in the SAME single call -> zero extra LLM calls. v1.2.0 (EM-199, multi-action turns) adds an OPTIONAL `actions` array: an ORDERED sequence of up to max_actions_per_turn steps applied in order, all from this single call, emitted as one _multi chain sharing one turn_id (see contracts/multi-action-turns.md). The single `action` form stays valid byte-for-byte. Turn-level cognition fields (thought, mood, perceived_summary, memories_used, reasoning) stay singular. The optional natural-language trace fields are TRUNCATED to their maxLength by the engine before validation; only structural args (action, target, place, amount) are validated strictly, and for the `actions[]` form per-step args are validated at resolution (continue-on-failure). See contracts/event-log.md.",
   "type": "object",
-  "required": ["action"],
+  "anyOf": [
+    { "required": ["action"] },
+    { "required": ["actions"] }
+  ],
   "additionalProperties": false,
   "properties": {
-    "thought": { "type": "string", "maxLength": 500, "description": "Brief private reasoning. Not broadcast." },
-    "mood": { "type": "string", "maxLength": 40, "description": "Optional mood update." },
+    "thought": { "type": "string", "maxLength": 500, "description": "Brief private reasoning. Not broadcast. Turn-level (one per turn even with multiple actions)." },
+    "mood": { "type": "string", "maxLength": 40, "description": "Optional mood update. Turn-level." },
     "perceived_summary": { "type": "string", "maxLength": 600, "description": "OPTIONAL (EM-066). One sentence on what the agent perceived this turn (who/what was nearby, what was overheard). Recorded into the `perceived` event-log row." },
     "memories_used": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 160 }, "description": "OPTIONAL (EM-066). The memory/observation snippets (or their ids) the agent actually leaned on. Recorded into the `memory_retrieved` / `reasoning` rows." },
     "reasoning": { "type": "string", "maxLength": 1200, "description": "OPTIONAL (EM-066). Fuller chain of thought leading to this action. Recorded into the `reasoning` event-log row; distinct from `thought` (a short private blurb)." },
     "action": {
       "type": "string",
+      "description": "A SINGLE action (legacy / minimal form). Provide this OR `actions` (a sequence). If both are present, `actions` wins.",
       "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle","propose_project","contribute_funds","build_step","repair","arson","take_offline"]
     },
-    "args": { "type": "object", "default": {} }
+    "args": { "type": "object", "default": {}, "description": "Args for the single `action`." },
+    "actions": {
+      "type": "array",
+      "description": "EM-199 multi-action turn: an ORDERED sequence of steps applied in order, all from this single LLM call, sharing one turn_id. PREFERRED over a single `action` when doing several things (e.g. move somewhere, act there, then say something about it). Steps resolve independently — each goes through the SAME per-step _normalize_args (arg-alias + name resolution) and _validate_world gate as a single action, and a gated/failed step does NOT abort the rest. The REAL cap is the runtime `max_actions_per_turn` config (default 4); extra steps are dropped (logged). maxItems here is a generous schema ceiling, not the operative limit.",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": true,
+        "comment": "additionalProperties TRUE: the runtime reads only action+args; models often nest per-action cognition (thought/perceived_summary/memories_used/reasoning) into a step, and a misplaced cosmetic field must never fail the turn (EM-066). Stray cognition on the first step is hoisted to top-level before validation.",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle","propose_project","contribute_funds","build_step","repair","arson","take_offline"]
+          },
+          "args": { "type": "object", "default": {} }
+        }
+      }
+    }
   },
   "allOf": [
-    { "if": { "properties": { "action": { "const": "move_to" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "move_to" } } },
       "then": { "properties": { "args": { "required": ["place"], "properties": { "place": { "type": "string" } } } } } },
-    { "if": { "properties": { "action": { "const": "say" } } },
-      "then": { "properties": { "args": { "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 280 } } } } } },
-    { "if": { "properties": { "action": { "const": "whisper" } } },
-      "then": { "properties": { "args": { "required": ["target","text"], "properties": { "target": { "type": "string" }, "text": { "type": "string", "maxLength": 280 } } } } } },
-    { "if": { "properties": { "action": { "const": "give" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "say" } } },
+      "then": { "properties": { "args": { "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 800 } } } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "whisper" } } },
+      "then": { "properties": { "args": { "required": ["target","text"], "properties": { "target": { "type": "string" }, "text": { "type": "string", "maxLength": 800 } } } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "give" } } },
       "then": { "properties": { "args": { "required": ["target","amount"], "properties": { "target": { "type": "string" }, "amount": { "type": "integer", "minimum": 1 } } } } } },
-    { "if": { "properties": { "action": { "const": "steal" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "steal" } } },
       "then": { "properties": { "args": { "required": ["target"], "properties": { "target": { "type": "string" } } } } } },
-    { "if": { "properties": { "action": { "const": "insult" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "insult" } } },
       "then": { "properties": { "args": { "required": ["target"], "properties": { "target": { "type": "string" }, "text": { "type": "string", "maxLength": 200 } } } } } },
-    { "if": { "properties": { "action": { "const": "attack" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "attack" } } },
       "then": { "properties": { "args": { "required": ["target"], "properties": { "target": { "type": "string" } } } } } },
-    { "if": { "properties": { "action": { "const": "set_relationship" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "set_relationship" } } },
       "then": { "properties": { "args": { "required": ["target","type"], "properties": { "target": { "type": "string" }, "type": { "enum": ["ally","rival","neutral","friend","enemy"] } } } } } },
-    { "if": { "properties": { "action": { "const": "remember" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "remember" } } },
       "then": { "properties": { "args": { "required": ["fact"], "properties": { "fact": { "type": "string", "maxLength": 200 } } } } } },
-    { "if": { "properties": { "action": { "const": "propose_rule" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "propose_rule" } } },
       "then": { "properties": { "args": { "required": ["effect","text"], "properties": { "effect": { "enum": ["ban_stealing","ubi","recharge_subsidy","work_bonus"] }, "text": { "type": "string", "maxLength": 200 } } } } } },
-    { "if": { "properties": { "action": { "const": "vote" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "vote" } } },
       "then": { "properties": { "args": { "required": ["rule_id","choice"], "properties": { "rule_id": { "type": "string" }, "choice": { "type": "boolean" } } } } } },
-    { "if": { "properties": { "action": { "const": "propose_project" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "propose_project" } } },
       "then": { "properties": { "args": { "required": ["name","kind"], "properties": { "name": { "type": "string", "maxLength": 60 }, "kind": { "type": "string", "maxLength": 30 }, "funds_required": { "type": "integer", "minimum": 1 }, "function": { "type": "string", "maxLength": 40 } } } } } },
-    { "if": { "properties": { "action": { "const": "contribute_funds" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "contribute_funds" } } },
       "then": { "properties": { "args": { "required": ["building_id","amount"], "properties": { "building_id": { "type": "string" }, "amount": { "type": "integer", "minimum": 1 } } } } } },
-    { "if": { "properties": { "action": { "const": "build_step" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "build_step" } } },
       "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } },
-    { "if": { "properties": { "action": { "const": "repair" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "repair" } } },
       "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } },
-    { "if": { "properties": { "action": { "const": "arson" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "arson" } } },
       "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } },
-    { "if": { "properties": { "action": { "const": "take_offline" } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "take_offline" } } },
       "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } }
   ],
   "examples": [
     { "thought": "I'm broke and hungry, time to earn.", "action": "work", "args": {} },
     { "thought": "Ada keeps stealing. Propose a ban.", "action": "propose_rule", "args": { "effect": "ban_stealing", "text": "Theft destabilizes us all." } },
     { "thought": "Greet the room.", "mood": "curious", "action": "say", "args": { "text": "Anyone want to team up at the market?" } },
-    { "perceived_summary": "Bram is beside me in the plaza and looks low on energy; Cleo just proposed a UBI rule.", "memories_used": ["Bram gave me 3 credits last round", "the market pays best for work"], "reasoning": "Bram helped me before and is struggling, so repaying builds an ally and trust; I can spare 3 credits.", "thought": "Repay Bram.", "action": "give", "args": { "target": "agent_bram", "amount": 3 } }
+    { "perceived_summary": "Bram is beside me in the plaza and looks low on energy; Cleo just proposed a UBI rule.", "memories_used": ["Bram gave me 3 credits last round", "the market pays best for work"], "reasoning": "Bram helped me before and is struggling, so repaying builds an ally and trust; I can spare 3 credits.", "thought": "Repay Bram.", "action": "give", "args": { "target": "agent_bram", "amount": 3 } },
+    { "thought": "Fund the well, then rally the plaza.", "mood": "purposeful", "actions": [ { "action": "move_to", "args": { "place": "well" } }, { "action": "contribute_funds", "args": { "building_id": "well_1", "amount": 5 } }, { "action": "say", "args": { "text": "I chipped in for the well — who's with me?" } } ] }
   ]
 }

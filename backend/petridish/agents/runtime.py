@@ -14,6 +14,7 @@ Per-turn flow:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -37,7 +38,10 @@ log = logging.getLogger(__name__)
 ACTION_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
-    "required": ["action"],
+    # EM-199 — a turn carries EITHER a single `action` (legacy/minimal) OR an
+    # ordered `actions` sequence. anyOf keeps both forms valid; if both are
+    # present, the runtime prefers `actions` (see _normalize_steps).
+    "anyOf": [{"required": ["action"]}, {"required": ["actions"]}],
     "additionalProperties": False,
     "properties": {
         "thought": {"type": "string", "maxLength": 500},
@@ -93,45 +97,81 @@ ACTION_SCHEMA = {
             ],
         },
         "args": {"type": "object", "default": {}},
+        # EM-199 — multi-action turns: an ORDERED sequence applied in order, all
+        # from this single response, emitted as one _multi chain sharing one
+        # turn_id. Per-step args are validated at RESOLUTION (continue-on-
+        # failure), so items only check the action enum + args-is-object here.
+        # maxItems is a generous schema ceiling; the runtime enforces the
+        # configurable max_actions_per_turn (default 4) and truncates+logs above.
+        # additionalProperties is TRUE (EM-066 ethos): free models routinely
+        # scatter per-action cognition (thought/perceived_summary/memories_used/
+        # reasoning) INTO each step — the runtime reads only action+args and
+        # ignores the rest, so a misplaced cosmetic field must NEVER fail the
+        # turn (the kimi idle-fallback regression). Stray cognition on the first
+        # step is hoisted to top-level by _hoist_step_cognition before validation.
+        "actions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+                "type": "object",
+                "required": ["action"],
+                "additionalProperties": True,
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "move_to", "say", "whisper", "work", "forage", "recharge",
+                            "give", "steal", "insult", "attack", "set_relationship",
+                            "remember", "propose_rule", "vote", "idle",
+                            "propose_project", "contribute_funds", "build_step",
+                            "repair", "arson", "take_offline",
+                            "post_billboard", "read_billboard", "answer_proclamation",
+                        ],
+                    },
+                    "args": {"type": "object", "default": {}},
+                },
+            },
+        },
     },
     # Per-action arg requirements mirrored from action-protocol.schema.json so the
     # inline schema validates the 6 new construction actions structurally (the
     # canonical contract is contracts/action-protocol.schema.json). Only the
     # behavioral args are validated strictly here; cosmetic/optional args are open.
     "allOf": [
-        {"if": {"properties": {"action": {"const": "propose_project"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "propose_project"}}},
          "then": {"properties": {"args": {"required": ["name", "kind"], "properties": {
              "name": {"type": "string", "maxLength": 60},
              "kind": {"type": "string", "maxLength": 30},
              "funds_required": {"type": "integer", "minimum": 1},
              "function": {"type": "string", "maxLength": 40},
          }}}}},
-        {"if": {"properties": {"action": {"const": "contribute_funds"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "contribute_funds"}}},
          "then": {"properties": {"args": {"required": ["building_id", "amount"], "properties": {
              "building_id": {"type": "string"},
              "amount": {"type": "integer", "minimum": 1},
          }}}}},
-        {"if": {"properties": {"action": {"const": "build_step"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "build_step"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "repair"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "repair"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "arson"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "arson"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "take_offline"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "take_offline"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
          }}}}},
-        {"if": {"properties": {"action": {"const": "post_billboard"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "post_billboard"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
          }}}}},
-        {"if": {"properties": {"action": {"const": "answer_proclamation"}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
          }}}}},
@@ -172,7 +212,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "attack":           {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "set_relationship": {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "propose_rule":     {"tier": "llm",    "location_gate": "governance",    "agreement_gate": None},
-    "vote":             {"tier": "llm",    "location_gate": "governance",    "agreement_gate": None},
+    # EM-199 — voting is un-gated (location_gate None): governance was dead
+    # because only the proposer, at Town Hall, ever voted (run 648 — Mox alone),
+    # so no rule reached a majority. Civic participation now works from anywhere;
+    # PROPOSING still requires Town Hall (a deliberate civic act).
+    "vote":             {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     # W7 construction actions.
     "propose_project":  {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "contribute_funds": {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
@@ -755,6 +799,13 @@ _ARG_STRING_CAPS: dict[str, dict[str, int]] = {
     "propose_project": {"name": 60, "kind": 30, "function": 40},
     "post_billboard": {"text": 280},
     "answer_proclamation": {"text": 280},
+    # EM-199 follow-up — chat length: a GENEROUS safety bound on spoken text
+    # (session 189 averaged ~500 chars/line, max ~1900). 800 graceful-truncates
+    # only runaway monologues so one giant say can't blow the token budget and
+    # fail the turn; normal rich dialogue (the 189 feel) sails through. NOT a
+    # throttle — it is ~4× the recent terse average. Truncated, never rejected.
+    "say": {"text": 800},
+    "whisper": {"text": 800},
 }
 
 
@@ -789,6 +840,58 @@ def _resolve_agent_target(raw: str, agent: AgentState, world: World) -> str | No
     return min(best, key=lambda a: a.id).id
 
 
+# EM-199 — turn-level cognition the model may scatter into the first step.
+_HOISTABLE_COGNITION = (
+    "thought", "mood", "perceived_summary", "memories_used",
+    "reasoning", "commitment", "reflection", "bond",
+)
+
+
+def _hoist_step_cognition(action_dict: dict) -> None:
+    """Free models told to return an `actions` sequence routinely put
+    turn-level cognition (thought / mood / perceived_summary / memories_used /
+    reasoning / commitment / reflection / bond) INSIDE the first step instead of
+    at the top level. Lift any such field from `actions[0]` up to the top level
+    when it is absent there — so the 💭 thought still surfaces on the feed and
+    the decision trace keeps its reasoning. The step's own copy is harmless
+    (items tolerate extras; the runtime reads only action+args per step).
+    Mutates in place; never raises. Runs BEFORE sanitize/validate so the hoisted
+    values are truncated and validated like any top-level field."""
+    actions = action_dict.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return
+    first = actions[0]
+    if not isinstance(first, dict):
+        return
+    for key in _HOISTABLE_COGNITION:
+        if key in first and not action_dict.get(key):
+            action_dict[key] = first[key]
+
+
+def _resolve_place_fuzzy(raw: str, world: World) -> str | None:
+    """EM-199 — resolve a loose/hallucinated place name to the closest KNOWN
+    place id, or None when nothing is a SAFE match (so gibberish stays and is
+    cleanly rejected, never mis-teleported). Order: exact id → case-insensitive
+    id → a known id appearing as a token of the input (plaza_bloom → plaza) →
+    a conservative difflib closest match (catches typos like town_hall →
+    townhall). Never raises."""
+    if raw in world.places:
+        return raw
+    low = raw.strip().lower()
+    by_lower = {pid.lower(): pid for pid in world.places}
+    if low in by_lower:
+        return by_lower[low]
+    # A known place id appearing as a whole token of the input. Token-membership
+    # (not prefix) avoids "homestead" → "home" style false hits.
+    tokens = {t for t in re.split(r"[^a-z0-9]+", low) if t}
+    for pid in world.places:
+        if pid.lower() in tokens:
+            return pid
+    # Last resort: a single close fuzzy match above a conservative cutoff.
+    match = difflib.get_close_matches(low, list(by_lower), n=1, cutoff=0.8)
+    return by_lower[match[0]] if match else None
+
+
 def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
     """Rewrite behavioral args in place so well-intentioned-but-misshapen
     responses validate instead of dying. Never raises; never invents a value
@@ -803,8 +906,11 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
         if isinstance(place, str):
             place = place.strip()
             if place not in world.places:
-                by_lower = {pid.lower(): pid for pid in world.places}
-                place = by_lower.get(place.lower(), place)
+                # EM-199 — case-insensitive, then fuzzy: a hallucinated name
+                # (plaza_bloom→plaza) resolves to the closest KNOWN place
+                # instead of wasting the move; gibberish stays (→ cleanly
+                # rejected by _validate_world, never mis-teleported).
+                place = _resolve_place_fuzzy(place, world) or place
             args["place"] = place
         elif _noneish(args.get("place")):
             # A null/None-string place reads better as MISSING than as the
@@ -1546,10 +1652,13 @@ def _assemble_context(
         trace_instructions = ""
     else:
         action_warning = (
-            "⚠ SAYING you will build/fund/work on something does NOT do it — "
-            "words change nothing. Use propose_project / contribute_funds / "
-            "build_step (or work / forage / give) to actually act. Your action "
-            "THIS TURN is the only thing that happens."
+            "⚠ SAYING you will do something does NOT do it — words alone change "
+            "nothing; back your talk with a real action. You have a FULL range: "
+            "gossip and scheme, trade and give, forage and work, befriend and "
+            "feud, propose and vote on rules, and propose / fund / BUILD projects "
+            "that grow the town. Chase what YOUR character wants — and remember "
+            "the city only rises if someone actually builds and governs it, so "
+            "turn your ambitions into proposals, funding, build_steps, and votes."
         )
         format_template = (
             '{"action": "<verb>", "args": {...}, "mood": "optional mood update", '
@@ -1566,6 +1675,45 @@ def _assemble_context(
             'distinct from the short "thought"). These three are optional but '
             "strongly preferred — they are recorded into the decision trace."
         )
+
+    # EM-199 — multi-action turns: tell the model it may do SEVERAL things in
+    # ONE turn (move + fund + say), the lever for "do more per call". Suppressed
+    # when the cap is 1 (legacy single-action behavior).
+    max_actions = int(getattr(params, "max_actions_per_turn", 4) or 1)
+    if max_actions > 1:
+        # EM-163 — the building/proposing tools are tier-gated off the
+        # background menu, so the combo EXAMPLE must not name them for
+        # background agents (the prompt must never suggest a rejected action).
+        if background:
+            combo_examples = (
+                "move→work/forage→say; react to a neighbour→give→say; "
+                "move→vote→say"
+            )
+        else:
+            combo_examples = (
+                "move→work/forage→say; propose_project→contribute_funds→"
+                "build_step (push a project toward completion in ONE turn); "
+                "move to Town Hall→propose_rule→say; react→give/vote→say"
+            )
+        multi_action_line = (
+            f'\nDO SEVERAL MEANINGFUL THINGS THIS TURN: return "actions" — an '
+            f'ordered list of up to {max_actions} steps, done in order — that '
+            f'actually MOVE THE WORLD. Good turns chain real progress, e.g.: '
+            f'{combo_examples}. Make every step COUNT toward the story or the '
+            f'city — do NOT pad your turn with billboard posts or filler. A '
+            f'single "action" is fine when one thing is all that matters.'
+        )
+    else:
+        multi_action_line = ""
+    # EM-199 follow-up — restore the session-189 chatter: spoken lines had
+    # collapsed into terse one-liners. Push for rich, in-character dialogue
+    # (the runtime caps it generously at 800 chars, so length is free).
+    speech_line = (
+        '\nWhen you say/whisper, write a REAL line of dialogue in YOUR voice — '
+        'gossip, banter, argue, flirt, scheme, react to what just happened — a '
+        'sentence or three with personality, NOT a terse status. The talk is '
+        'the heart of this world; make it worth reading.'
+    )
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
@@ -1601,15 +1749,18 @@ Mood: {agent.mood}{faction_line}
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
 
+=== OPEN PROPOSALS — vote NOW (from anywhere; {len(world.living_agents()) // 2 + 1} yes-votes passes it) ===
+{chr(10).join(f"  id={r.id} [{r.effect}] {r.text!r} — vote with rule_id={r.id}, choice=true (back it) or false (block it)" for r in proposed_rules) or "  (none — propose one at Town Hall if the town needs a law)"}
+
 === VALID ACTIONS ===
 {chr(10).join(f"  {v}" for v in valid_actions)}
 
 {action_warning}
 
-RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Put "action" FIRST, and keep "thought" to one short sentence:
+RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {format_template}
-
-The "action" field is required and must come first. "args" must match the action.{trace_instructions}
+{multi_action_line}{speech_line}
+Provide EITHER a single "action" OR an "actions" list. "args" must match each action.{trace_instructions}
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
@@ -2518,8 +2669,25 @@ class AgentRuntime:
         memories_used = action_dict.get("memories_used")
         reasoning = action_dict.get("reasoning")
 
-        # Apply the action
-        result_event = self._apply_action(agent, action_dict, profile_name, profile_color)
+        # EM-199 — apply the turn's action SEQUENCE in order (move + fund + say
+        # → one _multi chain sharing this turn_id → three feed lines). The
+        # single-action form normalizes to a one-step list, so legacy turns are
+        # byte-identical. Steps resolve independently (continue-on-failure).
+        max_steps = int(getattr(self.world.params, "max_actions_per_turn", 4) or 1)
+        steps, dropped_steps = self._normalize_steps(action_dict, max_steps)
+        if dropped_steps:
+            log.warning(
+                "agent %s returned %d actions; capped to max_actions_per_turn="
+                "%d (dropped %d)",
+                agent.name, len(steps) + dropped_steps, max_steps, dropped_steps,
+            )
+        action_chain, step_results = self._apply_steps(
+            agent, steps, profile_name, profile_color,
+            action_dict.get("thought", ""),
+        )
+        result_event = (
+            {"_multi": action_chain} if len(action_chain) != 1 else action_chain[0]
+        )
 
         # Surface the model the proxy actually routed this turn to as an
         # ADDITIVE, OPTIONAL field inside each emitted event's payload.
@@ -2543,18 +2711,36 @@ class AgentRuntime:
                 result_event.setdefault("payload", {}).update(cadence_meta)
         self._note_llm_turn(agent)
 
-        # Assemble the decision-trace chain for loop._execute_turn to emit. The
-        # `resolved` outcome reads the applied event(s): a parse_failure kind from
-        # _apply_action means the action was gated/failed at resolution time.
-        resolved_evt = (
-            result_event["_multi"][0] if "_multi" in result_event else result_event
+        # Assemble the decision-trace chain for loop._execute_turn to emit.
+        # EM-199 — the turn resolved a SEQUENCE: `outcome` is ok if ANY step
+        # resolved (continue-on-failure), and `state_deltas` aggregate across
+        # the whole chain. A one-step (legacy) turn reads byte-identically.
+        outcome = "ok" if any(r["ok"] for r in step_results) else "failed"
+        state_deltas: dict = {}
+        chain_events = (
+            result_event["_multi"] if "_multi" in result_event else [result_event]
         )
-        outcome = "failed" if resolved_evt.get("kind") == "parse_failure" else "ok"
-        state_deltas = {}
-        rpayload = resolved_evt.get("payload", {})
-        for k in ("credits_delta", "energy_delta", "amount"):
-            if k in rpayload:
-                state_deltas[k] = rpayload[k]
+        for evt in chain_events:
+            ep = evt.get("payload", {})
+            for k in ("credits_delta", "energy_delta", "amount"):
+                if k in ep:
+                    state_deltas[k] = state_deltas.get(k, 0) + ep[k]
+
+        first_step = step_results[0]
+        action_chosen = {
+            "chosen_tool": first_step["action"],
+            "args": first_step["args"],
+            "tier": _action_tier(first_step["action"]),
+        }
+        # EM-199 — the full ordered sequence, additive ONLY on a genuine
+        # multi-action turn so single-action / reflex traces keep their exact
+        # pre-EM-199 key set (preserves exact-equality assertions).
+        if len(step_results) > 1:
+            action_chosen["actions"] = [
+                {"action": r["action"], "args": r["args"],
+                 "tier": _action_tier(r["action"])}
+                for r in step_results
+            ]
 
         trace = {
             "perceived": {**perceived, "perceived_summary": perceived_summary},
@@ -2565,22 +2751,24 @@ class AgentRuntime:
                 "perceived_summary": perceived_summary,
                 "memories_used": memories_used,
             },
-            "action_chosen": {
-                "chosen_tool": action_dict.get("action"),
-                "args": action_dict.get("args") or {},
-                "tier": _action_tier(action_dict.get("action")),
-            },
+            "action_chosen": action_chosen,
             "resolved": {"outcome": outcome, "state_deltas": state_deltas},
         }
 
         # ── W11b cognition, all parsed from the SAME single response ──────────
-        chosen_action = action_dict.get("action")
         outcome_ok = outcome == "ok"
         extra_events: list[dict] = []
 
-        # EM-079 — commitments: record/keep/lapse.
+        # EM-079/EM-199 — commitment accounting is multi-aware: a successful
+        # resolution call (project/build/economy) anywhere in the sequence
+        # credits follow-through; any successful non-talk step resets the
+        # staleness clock; an all-talk/idle/failed turn ages every commitment.
+        # _commitment_step distills the sequence to the single (action, ok)
+        # that best represents it, so _advance_commitments keeps its
+        # single-action contract (and tests) unchanged.
+        commit_action, commit_ok = self._commitment_step(step_results)
         extra_events.extend(self._advance_commitments(
-            agent, chosen_action, outcome_ok, action_dict.get("commitment"),
+            agent, commit_action, commit_ok, action_dict.get("commitment"),
             profile_name, profile_color,
         ))
 
@@ -2653,11 +2841,12 @@ class AgentRuntime:
                 "payload": reflection_payload,
             })
 
-        # EM-081 — distribute this turn's speech to co-located overhearers.
-        if outcome_ok:
-            self._distribute_overheard(
-                agent, chosen_action, action_dict.get("args") or {}
-            )
+        # EM-081/EM-199 — distribute EACH successful speech step to co-located
+        # overhearers (not just the first action), so a `say` that rode along
+        # with a move/work still reaches the room.
+        for r in step_results:
+            if r["ok"] and r["action"] in ("say", "whisper"):
+                self._distribute_overheard(agent, r["action"], r["args"])
 
         # EM-145 — god-voice delivery events (built before the LLM call).
         extra_events.extend(delivery_events)
@@ -2828,6 +3017,11 @@ class AgentRuntime:
             self._forget_response(profile_name, messages)
             return None, _no_json_error(text, finish_reason), meta
 
+        # EM-199 — lift turn-level cognition the model scattered into actions[0]
+        # up to the top level (before sanitize/validate), so a 💭 thought / trace
+        # nested in a step still counts. The step keeps its copy (items tolerate
+        # extras); the runtime reads only action+args per step.
+        _hoist_step_cognition(action_dict)
         # Optional EM-066 trace fields must never fail a turn — truncate, don't reject.
         _sanitize_optional_trace_fields(action_dict)
         # EM-125 — a malformed/disallowed bond is popped HERE (before schema
@@ -2902,6 +3096,142 @@ class AgentRuntime:
             note(profile_name, parsed=False, truncated=False, timed_out=True)
         except TypeError:
             note(profile_name, parsed=False, truncated=False)
+
+    @staticmethod
+    def _normalize_steps(action_dict: dict, max_steps: int) -> tuple[list[dict], int]:
+        """EM-199 — flatten a parsed turn into an ORDERED list of {action, args}
+        steps. Prefers the `actions` sequence; falls back to the single `action`
+        (so legacy turns become a one-step list). Truncates to max_steps.
+        Returns (steps, dropped_count); dropped>0 means the model over-asked and
+        the tail was cut (the caller logs it — never a silent cap)."""
+        raw = action_dict.get("actions")
+        steps: list[dict] = []
+        if isinstance(raw, list) and raw:
+            steps = [
+                {"action": s.get("action"), "args": (s.get("args") or {})}
+                for s in raw
+                if isinstance(s, dict) and s.get("action")
+            ]
+        if not steps:  # no (valid) actions[] → the single-action form
+            steps = [{
+                "action": action_dict.get("action"),
+                "args": action_dict.get("args") or {},
+            }]
+        dropped = len(steps) - max_steps if max_steps > 0 and len(steps) > max_steps else 0
+        if dropped:
+            steps = steps[:max_steps]
+        return steps, dropped
+
+    def _apply_steps(
+        self,
+        agent: AgentState,
+        steps: list[dict],
+        profile_name: str,
+        profile_color: str,
+        thought: str,
+    ) -> tuple[list[dict], list[dict]]:
+        """EM-199 — apply each step in order through the SAME pipeline a single
+        action takes: per-step _normalize_args (collapse arg aliases like
+        destination→place, resolve agent NAMES to ids — EM-140) → _validate_world
+        gate (tier rule, target reachable, place known, funds, blackout, …) →
+        _apply_action_inner dispatch. All resulting events (and each step's
+        drained EM-113 relationship shifts) concatenate into ONE chain that
+        loop._execute_turn tags with this turn's turn_id.
+
+        Gating is per-step at APPLY time, so a step is checked against the state
+        the PRIOR steps just produced — `work` after a `move_to` is validated at
+        the destination, not the origin. Continue-on-failed-step: a gated /
+        arg-missing / raising step emits its own parse_failure (carrying the
+        world's reason) and NEVER aborts its siblings — the `say` still happens
+        even if the `contribute_funds` was rejected. The turn `thought` (💭)
+        rides ONLY the first event of the chain (and only the first step's
+        payload), never duplicated.
+
+        Returns (chain, step_results) where step_results aligns 1:1 with `steps`
+        and carries {action, args, ok} for trace / commitment / overheard
+        accounting."""
+        chain: list[dict] = []
+        step_results: list[dict] = []
+        for idx, step in enumerate(steps):
+            # EM-140/EM-199 — normalize THEN gate, the single-action order
+            # (_validate_target assumes names already resolved to ids).
+            _normalize_args(step, agent, self.world)
+            action = step.get("action")
+            args = step.get("args") or {}
+            gate_error = _validate_world(step, agent, self.world)
+            if gate_error:
+                # A world-rejected step: surface the reason and move on. No
+                # inner dispatch, so nothing was parked to drain.
+                chain.append({
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "tick": self.world.tick,
+                    "kind": "parse_failure",
+                    "text": f"{agent.name}'s {action} was rejected: {gate_error}",
+                    "payload": {"action": action, "error": gate_error,
+                                "rejected": True},
+                })
+                step_results.append({"action": action, "args": args, "ok": False})
+                continue
+            # The turn thought rides the first step only (payload + 💭); later
+            # steps carry no thought so payload.thought never duplicates.
+            step_dict = {"action": action, "args": args,
+                         "thought": thought if idx == 0 else ""}
+            raised = False
+            try:
+                ev = self._apply_action_inner(
+                    agent, step_dict, profile_name, profile_color
+                )
+                step_events = ev["_multi"] if "_multi" in ev else [ev]
+            except Exception as exc:  # a bad step never aborts its siblings
+                raised = True
+                step_events = [{
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "tick": self.world.tick,
+                    "kind": "parse_failure",
+                    "text": f"{agent.name}'s {action} could not resolve: {exc}",
+                    "payload": {"action": action, "error": str(exc)},
+                }]
+            finally:
+                # EM-113 — drain parked relationship shifts even on the
+                # exception path so a parked event never leaks onto the next
+                # agent's chain (dropped with the failed step, like _apply_action).
+                shifts = self.world.drain_relationship_events()
+            chain.extend(step_events)
+            if shifts and not raised:
+                tick = self.world.tick
+                chain.extend({"tick": tick, **s} for s in shifts)
+            primary = step_events[0] if step_events else None
+            ok = bool(primary) and primary.get("kind") != "parse_failure"
+            step_results.append({"action": action, "args": args, "ok": ok})
+        # EM-199 — the turn's thought rides the FIRST event of the chain only.
+        if chain:
+            self._surface_thought(chain[0], thought)
+        return chain, step_results
+
+    @staticmethod
+    def _commitment_step(step_results: list[dict]) -> tuple[str | None, bool]:
+        """EM-199 — distill a turn's SEQUENCE to the single (action, ok) that
+        best represents it for EM-079 commitment accounting: a successful
+        resolution call (project/build/economy) wins (credits follow-through),
+        else any successful non-talk call (resets the staleness clock), else the
+        first step (ages — pure talk / idle / failure). Keeps
+        _advance_commitments on its unchanged single-action contract."""
+        resolution = next(
+            (r for r in step_results
+             if r["ok"] and r["action"] in _COMMIT_RESOLUTION_ACTIONS), None)
+        if resolution:
+            return resolution["action"], True
+        nontalk = next(
+            (r for r in step_results
+             if r["ok"] and r["action"] not in _TALK_ACTIONS), None)
+        if nontalk:
+            return nontalk["action"], True
+        first = step_results[0]
+        return first["action"], first["ok"]
 
     def _apply_action(
         self,

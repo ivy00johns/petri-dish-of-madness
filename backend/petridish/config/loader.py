@@ -615,6 +615,11 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    # EM-199 — multi-action turns: the max number of actions one LLM turn may
+    # resolve from a single `actions` sequence (move + fund + say → 3 feed lines
+    # from one call). A generous guardrail (4× the old single-action limit), NOT
+    # a throttle. Steps beyond this are dropped (logged). 1 ⇒ legacy single-action.
+    max_actions_per_turn: int = 4
     # Wave D2 / EM-170 — turn-latency guard: hard wall-clock budget (seconds)
     # for ONE agent-turn LLM consult (router.chat, including the adapter's
     # internal retry). On timeout the call is cancelled and the turn resolves
@@ -1177,6 +1182,8 @@ def _parse_world(
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        # EM-199 — multi-action turns cap; absent ⇒ 4 (move+fund+say+one more).
+        max_actions_per_turn=int(w.get("max_actions_per_turn", 4)),
         # Wave D2 / EM-170 — absent/0 ⇒ guard disabled (today's behavior).
         turn_llm_budget_seconds=float(w.get("turn_llm_budget_seconds", 0) or 0),
         # Wave D3 / EM-187 — absent ⇒ resume-on-boot ON (the shipped default).

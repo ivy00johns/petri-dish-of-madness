@@ -325,7 +325,11 @@ def test_propose_rule_succeeds_at_governance_place():
     assert ok and rule is not None, reason
 
 
-def test_vote_fails_away_from_governance_place():
+def test_vote_is_not_location_gated_em199():
+    """EM-199 — voting is UN-gated: a civic vote lands from ANYWHERE (governance
+    was dead when only the proposer, at Town Hall, could vote — run 648). Bo
+    votes from the plaza and it counts. PROPOSING a rule still requires Town
+    Hall (see the propose_rule tests)."""
     world = _world([
         _agent("agent_ada", "Ada", "townhall"),
         _agent("agent_bo", "Bo", "plaza"),
@@ -334,9 +338,8 @@ def test_vote_fails_away_from_governance_place():
     ok, _, rule = world.action_propose_rule(ada, "ubi", "Basic income!")
     assert ok
     ok, reason, _ = world.action_vote(bo, rule.id, True)
-    assert not ok
-    assert reason == "civic actions happen at the town hall — move there first"
-    assert bo.id not in rule.votes, "a gated vote must not be recorded"
+    assert ok, f"vote should land from the plaza now (un-gated): {reason}"
+    assert rule.votes.get(bo.id) is True, "the off-governance vote must be recorded"
 
 
 def test_vote_succeeds_at_governance_place():
