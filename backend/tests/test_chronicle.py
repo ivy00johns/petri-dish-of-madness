@@ -49,6 +49,43 @@ def test_build_chronicle_digest_handles_a_quiet_window():
     assert "Ada" in digest
 
 
+def test_guard_rejects_leaked_reasoning_keeps_clean_prose():
+    """EM-201 — a reasoning model (deepseek-v4-pro) intermittently emits its
+    chain of thought instead of the chapter. The guard rejects those and keeps
+    real prose, so a garbage 'chapter' is never stored."""
+    leak = ("The chronicler must write the next chapter based on the digest. "
+            "The task is to generate one or two vivid paragraphs in past tense.")
+    assert TickLoop._looks_like_leaked_reasoning(leak)
+    for t in (
+        "Let me draft a first paragraph: the town stirred.",
+        "Okay, let me write the chapter.",
+        "I need to capture the drama of this stretch.",
+        "Based on the digest, this was a quiet stretch.",
+        "I'll write about Ada and the refreshments stand.",
+        # the actual leak forms seen in the live run (deepseek AND qwen, via reroute):
+        "Thinking. 1.  **Analyze the Request:**     *   **Role:** Chronicler of a tiny living town of AI agents.",
+        "We are given a \"digest\" of the latest stretch (ticks 300-400) and the previous chapter. We need to write.",
+    ):
+        assert TickLoop._looks_like_leaked_reasoning(t), t
+    # the GORGEOUS clean chapters (deepseek + qwen) must PASS the guard.
+    for clean in (
+        "The second hundred ticks of Ledger's Folly unfolded like a farce staged by actors.",
+        "The neon pink of Ledger's Folly pulsed like a wound dressing the town's freshly stitched identity.",
+        "The air in Ledger's Folly thrummed with a manic certainty as the final vote sealed the name.",
+        "Ada was practically conducting an invisible orchestra of construction.",
+        "First the sun rose over the plaza, then the schemes began.",  # not "first, i"
+    ):
+        assert not TickLoop._looks_like_leaked_reasoning(clean), clean
+
+
+def test_clean_chapter_strips_think_blocks_and_titles():
+    assert TickLoop._clean_chapter(
+        "<think>I should write about Ada.</think>The town stirred.") == "The town stirred."
+    assert TickLoop._clean_chapter("  The town stirred.  ") == "The town stirred."
+    # a leading markdown title line is dropped, prose kept
+    assert TickLoop._clean_chapter("## Chapter 5\nThe town awoke.") == "The town awoke."
+
+
 def test_build_chronicle_digest_picks_the_longest_quotes():
     """When many lines were spoken, the richest (longest) ones are surfaced."""
     rows = [

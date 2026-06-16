@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from datetime import datetime, timezone
 from typing import Callable, Any
 
@@ -939,6 +940,53 @@ class TickLoop:
             return ""
         return (rows[0].get("text") or "").strip() if rows else ""
 
+    # EM-201 — meta-reasoning OPENERS a reasoning model emits instead of the
+    # chapter. The FreeLLMAPI proxy intermittently reroutes ANY lane to a
+    # thinking model, so this guards every profile. A real chapter (wry
+    # past-tense narrative) never opens with any of these.
+    _REASONING_MARKERS = (
+        "thinking", "the chronicler", "the task", "the request", "the digest",
+        "the instructions", "the output", "the user", "we are given",
+        "we are told", "we need", "we must", "we should", "we have to",
+        "analyze", "analyzing", "let me", "okay", "alright", "first, i",
+        "first i", "i need", "i should", "i'll ", "i will ", "i'm going",
+        "i am going", "i must", "here is the", "here's the", "based on the",
+        "to write this", "for this chapter", "step 1", "1.", "1)",
+    )
+    # Prompt-echo phrases a leak parrots back (from the chronicler system
+    # prompt / the task) that a real chapter would never contain in its opening.
+    _PROMPT_ECHO = (
+        "tiny living town of ai", "analyze the request", "the previous chapter",
+        "vivid paragraph", "in past tense", "chronicler of a", "the digest",
+        "memorable line", "quote a memorable", "no markdown",
+    )
+
+    @staticmethod
+    def _clean_chapter(text: str) -> str:
+        """EM-201 — strip any <think>…</think> reasoning block a thinking model
+        (or a proxy reroute) wraps the prose in, then trim. Returns the chapter."""
+        text = re.sub(r"(?is)<think>.*?</think>", "", text)
+        text = re.sub(r"(?is)<thinking>.*?</thinking>", "", text)
+        text = text.strip()
+        # The prompt forbids a title, but models sometimes prepend "## Chapter N"
+        # — drop a single leading markdown heading line, keep the prose.
+        text = re.sub(r"^#{1,6}\s+.*?(?:\n+|$)", "", text, count=1)
+        return text.strip()
+
+    @classmethod
+    def _looks_like_leaked_reasoning(cls, text: str) -> bool:
+        """EM-201 — true when the 'chapter' is a reasoning model thinking out
+        loud (or a structured 'analyze the request' dump) rather than writing
+        prose. Two signals: a meta-reasoning OPENER, or a prompt-echo phrase in
+        the first ~250 chars. So 'The neon pink of Ledger's Folly pulsed like a
+        wound…' passes, while 'Thinking. 1. **Analyze the Request:** **Role:**
+        Chronicler of a tiny living town of AI agents…' is rejected."""
+        head = text.lstrip("#*->•“”\"' \n\t").lower()
+        if any(head.startswith(m) for m in cls._REASONING_MARKERS):
+            return True
+        opening = text[:250].lower()
+        return any(p in opening for p in cls._PROMPT_ECHO)
+
     async def _run_narrator(self, from_tick: int, to_tick: int, profile_name: str) -> None:
         """Body of one narrator window (background task): build the digest, make
         ONE LLM call, emit ONE `narrator_summary` event. A failed/timed-out call
@@ -981,9 +1029,15 @@ class TickLoop:
                 ),
                 timeout=45.0,
             )
-            text = (text or "").strip()
-            if not text:
-                return  # an empty chapter is a failed call: emit nothing
+            text = self._clean_chapter(text or "")
+            if not text or self._looks_like_leaked_reasoning(text):
+                # EM-201 — empty, or a REASONING model leaking its chain of
+                # thought ("The chronicler must write…" instead of the chapter).
+                # Emit nothing so the window stays un-chronicled and a clean
+                # model (or retry) can fill it — never a garbage chapter.
+                log.debug("chapter rejected (empty or leaked reasoning) for %s-%s",
+                          from_tick, to_tick)
+                return
             payload = {"from_tick": from_tick, "to_tick": to_tick, "profile": profile_name}
             routed_via = self._router.last_routed_via(profile_name)
             if routed_via:
