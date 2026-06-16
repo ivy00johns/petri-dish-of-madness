@@ -859,6 +859,10 @@ class TickLoop:
                 to_tick=to_tick,
                 kinds=list(self._NARRATOR_DIGEST_KINDS),
                 order="asc",
+                # EM-201/EM-187 — chronicle across the resume-on-boot fork so a
+                # backfilled window finds its events even when they live in an
+                # ANCESTOR run (the tick range still scopes the window).
+                lineage=True,
             )
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("chronicle digest query failed: %s", exc)
@@ -929,7 +933,7 @@ class TickLoop:
         try:
             rows = self._repo.get_events(
                 self._run_id or 1, kinds=["narrator_summary"],
-                order="desc", limit=1,
+                order="desc", limit=1, lineage=True,  # continuity across forks
             )
         except Exception:  # pragma: no cover - defensive
             return ""
@@ -1036,7 +1040,7 @@ class TickLoop:
         existing: set[int] = set()
         try:
             for ev in self._repo.get_events(
-                self._run_id or 1, kinds=["narrator_summary"]
+                self._run_id or 1, kinds=["narrator_summary"], lineage=True
             ):
                 tt = (ev.get("payload") or {}).get("to_tick")
                 if isinstance(tt, int):
