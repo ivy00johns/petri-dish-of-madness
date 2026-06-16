@@ -406,6 +406,119 @@ def test_chronicle_backfill_unknown_model_is_a_noop():
     assert repo.get_events(loop._run_id, kinds=["narrator_summary"]) == []
 
 
+def test_chronicle_rebuild_regenerates_already_chronicled_windows():
+    """EM-201 follow-on — rebuild=True does NOT skip already-chronicled windows:
+    it regenerates EVERY window 0→now (fresh prose + fresh stamps)."""
+    from petridish.engine.loop import CHRONICLER_VERSION
+
+    params = _make_params(narrator=NarratorParams(
+        model_profile="narrator-mock", every_n_ticks=2))  # enabled False ⇒ no auto
+    tm = TextMock("A chapter of the saga.")
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 6))
+    assert world.tick == 6
+
+    # First build chronicles all three windows.
+    asyncio.run(loop.build_chronicle_from_history("narrator-mock", every=2))
+    assert tm.calls == 3
+    first = repo.get_events(loop._run_id, kinds=["narrator_summary"], order="asc")
+    assert [(r["payload"]["from_tick"], r["payload"]["to_tick"]) for r in first] == \
+        [(0, 2), (2, 4), (4, 6)]
+
+    # A plain (non-rebuild) build skips every window — they're all chronicled.
+    asyncio.run(loop.build_chronicle_from_history("narrator-mock", every=2))
+    assert tm.calls == 3, "non-rebuild must skip already-chronicled windows"
+
+    # rebuild=True regenerates ALL of them again (3 more calls, 3 more rows).
+    asyncio.run(loop.build_chronicle_from_history(
+        "narrator-mock", every=2, rebuild=True))
+    assert tm.calls == 6, "rebuild must NOT skip — every window regenerated"
+    after = repo.get_events(loop._run_id, kinds=["narrator_summary"], order="asc")
+    assert len(after) == 6, "rebuild appends fresh chapters for every window"
+    # Every emitted chapter carries the server-computed facts + version stamp.
+    for r in after:
+        payload = r["payload"]
+        assert payload["chronicler_version"] == CHRONICLER_VERSION
+        chaos = payload["chaos"]
+        assert set(chaos.keys()) == {
+            "cast", "quotes", "laws", "conflicts", "deaths", "counts"}
+        assert set(chaos["counts"].keys()) == {
+            "spoken", "laws", "clashes", "deaths"}
+
+
+def test_chronicle_chapter_payload_carries_chaos_and_version():
+    """EM-201 follow-on — a generated chapter STAMPS the server-computed `chaos`
+    facts (cast/quotes/laws/conflicts/deaths/counts) and chronicler_version, with
+    real counts drawn from the window's events (not an all-zero reconstruction)."""
+    from petridish.engine.loop import CHRONICLER_VERSION
+
+    params = _make_params(narrator=NarratorParams(
+        model_profile="narrator-mock", every_n_ticks=10))  # enabled False ⇒ no auto
+    tm = TextMock("The town schemed and a law passed.")
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 8))  # advance the run so a window exists
+    assert world.tick == 8
+
+    # Seed the window [0,8] with real drama the facts must surface.
+    run_id = loop._run_id
+    repo.save_event(run_id, {"kind": "agent_speech", "actor_id": "agent_ada",
+                             "text": 'Ada says: "We must build the dividend engine now."',
+                             "payload": {"said": "We must build the dividend engine now."}}, 3)
+    repo.save_event(run_id, {"kind": "rule_passed", "actor_id": "system",
+                             "text": "By vote, a UBI of 10 credits passes.",
+                             "payload": {}}, 5)
+    repo.save_event(run_id, {"kind": "conflict", "actor_id": "system",
+                             "text": "Bram insults Ada!", "payload": {}}, 6)
+
+    asyncio.run(loop.build_chronicle_from_history("narrator-mock", every=10))
+
+    rows = repo.get_events(run_id, kinds=["narrator_summary"], order="asc")
+    assert rows, "a chapter must have been generated for the window"
+    payload = rows[0]["payload"]
+    assert payload["chronicler_version"] == CHRONICLER_VERSION
+    chaos = payload["chaos"]
+    assert chaos["counts"]["spoken"] == 1
+    assert chaos["counts"]["laws"] == 1
+    assert chaos["counts"]["clashes"] == 1
+    assert chaos["counts"]["deaths"] == 0
+    assert "Ada" in chaos["cast"]
+    assert any("dividend engine" in q["said"] for q in chaos["quotes"])
+    assert chaos["quotes"][0]["speaker"] == "Ada"
+    assert any("UBI" in law for law in chaos["laws"])
+    assert any("insults" in c for c in chaos["conflicts"])
+
+
+def test_chronicle_chaos_counts_include_commitment_lapsed_through_query():
+    """EM-201 follow-on — a commitment_lapsed event IS a clash. It must survive the
+    _NARRATOR_DIGEST_KINDS whitelist used by the real get_events query so the
+    server-stamped chaos.counts.clashes / chaos.conflicts[] match the frontend's
+    full-history reconstruction. This exercises the QUERY boundary (where rows are
+    dropped), not just the pure facts builder."""
+    params = _make_params(narrator=NarratorParams(
+        model_profile="narrator-mock", every_n_ticks=10))
+    tm = TextMock("A promise was broken and the town seethed.")
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 8))
+    assert world.tick == 8
+
+    run_id = loop._run_id
+    repo.save_event(run_id, {"kind": "conflict", "actor_id": "system",
+                             "text": "Bram insults Ada!", "payload": {}}, 4)
+    repo.save_event(run_id, {"kind": "commitment_lapsed", "actor_id": "agent_mox",
+                             "text": "Mox broke a promise to Ada.", "payload": {}}, 6)
+
+    asyncio.run(loop.build_chronicle_from_history("narrator-mock", every=10))
+
+    rows = repo.get_events(run_id, kinds=["narrator_summary"], order="asc")
+    assert rows, "a chapter must have been generated for the window"
+    chaos = rows[0]["payload"]["chaos"]
+    # BOTH the conflict AND the commitment_lapsed must be counted as clashes.
+    assert chaos["counts"]["clashes"] == 2, \
+        "commitment_lapsed must reach the facts builder through the real query"
+    assert any("insults" in c for c in chaos["conflicts"])
+    assert any("broke a promise" in c for c in chaos["conflicts"])
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. animal_action payload.place (event-log.md v1.2.0 note 2)
 # ──────────────────────────────────────────────────────────────────────────────

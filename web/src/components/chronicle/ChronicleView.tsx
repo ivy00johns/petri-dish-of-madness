@@ -107,10 +107,17 @@ function ChapterIndex({
                 <p className="font-serif text-[12px] text-lab-text leading-snug line-clamp-2 mt-0.5">
                   {c.title}
                 </p>
-                {/* Row 3: model badge */}
-                {c.profile && (
+                {/* Row 3: model badge + version */}
+                {(c.profile || c.chroniclerVersion !== undefined) && (
                   <span className="font-mono text-[9px] text-lab-muted-bright block mt-0.5 truncate">
-                    {c.profile}
+                    {c.profile
+                      ? c.routedVia && c.routedVia !== c.profile
+                        ? `${c.profile} → ${c.routedVia}`
+                        : c.profile
+                      : ''}
+                    {c.chroniclerVersion !== undefined
+                      ? `${c.profile ? ' · ' : ''}chronicle v${c.chroniclerVersion}`
+                      : ''}
                   </span>
                 )}
               </button>
@@ -130,15 +137,24 @@ function ChaosPanel({
   history,
   fromTick,
   toTick,
+  payloadChaos,
 }: {
   history: WorldEvent[];
   fromTick: number;
   toTick: number;
+  payloadChaos?: import('./chronicle').ChaosFacts;
 }) {
-  const facts = useMemo(
-    () => chaosFacts(history, fromTick, toTick),
-    [history, fromTick, toTick],
+  // Prefer server-stamped payload facts; fall back to client reconstruction only
+  // when payload is absent (legacy/unstamped chapters). This fixes all-zero stats
+  // for old chapters that are no longer in the browser history buffer.
+  const clientFacts = useMemo(
+    () =>
+      payloadChaos === undefined
+        ? chaosFacts(history, fromTick, toTick)
+        : null,
+    [payloadChaos, history, fromTick, toTick],
   );
+  const facts = payloadChaos ?? clientFacts!;
 
   const allEmpty =
     facts.cast.length === 0 &&
@@ -385,6 +401,30 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
     }
   }
 
+  async function rebuild() {
+    setBuilding(true);
+    setBuildMsg(null);
+    try {
+      const res = await fetch('/api/chronicle/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rebuild: true, ...(model ? { model } : {}) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBuildMsg(`Couldn't rebuild: ${data.detail ?? res.status}`);
+      } else if (data.status === 'already_running') {
+        setBuildMsg('Already building the chronicle…');
+      } else {
+        setBuildMsg('Rebuilding all chapters…');
+      }
+    } catch {
+      setBuildMsg("Couldn't reach the backend.");
+    } finally {
+      setBuilding(false);
+    }
+  }
+
   // ---- Toolbar ----
   const toolbar = (
     <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-lab-border px-4 py-2 bg-lab-surface">
@@ -416,6 +456,15 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
         className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-acid text-lab-acid bg-lab-chrome rounded-sm hover:bg-lab-border disabled:opacity-50 disabled:cursor-default transition-colors cursor-pointer"
       >
         {building ? 'Building…' : 'Build from history'}
+      </button>
+      <button
+        type="button"
+        onClick={rebuild}
+        disabled={building}
+        title="Re-generate ALL chapters from scratch, stamping server-computed chaos facts"
+        className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border text-lab-muted-bright bg-lab-chrome rounded-sm hover:bg-lab-border hover:text-lab-text disabled:opacity-50 disabled:cursor-default transition-colors cursor-pointer"
+      >
+        Rebuild all
       </button>
     </div>
   );
@@ -555,7 +604,16 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
                 </div>
                 <p className="font-mono text-[11px] text-lab-muted-bright tabular-nums">
                   Chapter {idx + 1} of {N} · ticks {chapter.fromTick}–{chapter.toTick}
-                  {chapter.profile ? ` · ${chapter.profile}` : ''}
+                  {chapter.profile
+                    ? ` · ${
+                        chapter.routedVia && chapter.routedVia !== chapter.profile
+                          ? `${chapter.profile} → ${chapter.routedVia}`
+                          : chapter.profile
+                      }`
+                    : ''}
+                  {chapter.chroniclerVersion !== undefined
+                    ? ` · chronicle v${chapter.chroniclerVersion}`
+                    : ''}
                 </p>
               </header>
 
@@ -614,6 +672,7 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
             history={history}
             fromTick={chapter.fromTick}
             toTick={chapter.toTick}
+            payloadChaos={chapter.chaos}
           />
         </div>
       </div>

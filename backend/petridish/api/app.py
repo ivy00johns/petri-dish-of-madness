@@ -619,6 +619,10 @@ class ChronicleBuildBody(BaseModel):
     # EM-201 — optional model override (the picker). Absent → the configured
     # (free) narrator profile. Never forces a paid lane on the user.
     model: str | None = Field(default=None, max_length=60)
+    # EM-201 follow-on — when True, regenerate EVERY window 0→now (fresh prose +
+    # fresh server-computed fact/version stamps), not just the un-chronicled
+    # gaps. Lets old chapters (written before the facts existed) get re-stamped.
+    rebuild: bool = False
 
 
 @app.post("/api/chronicle/build")
@@ -626,15 +630,20 @@ async def chronicle_build(body: ChronicleBuildBody):
     """EM-201 — backfill the chronicle from the EXISTING run history. Kicks off a
     background task (returns immediately); chapters emit live as narrator_summary
     events the Chronicle tab renders. The model is the caller's choice — defaults
-    to the configured (free) narrator profile, never a paid lane."""
+    to the configured (free) narrator profile, never a paid lane. EM-201
+    follow-on: `rebuild=True` regenerates every window instead of gap-filling."""
     if _loop is None or _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
     cfg = getattr(_world.params, "narrator", None)
     model = (body.model or getattr(cfg, "model_profile", "") or "").strip()
     if not model or _router.get_profile(model) is None:
         raise HTTPException(400, f"Unknown or unconfigured chronicle model: {model!r}")
-    started = _loop.start_chronicle_backfill(model)
-    return {"status": "building" if started else "already_running", "model": model}
+    started = _loop.start_chronicle_backfill(model, rebuild=body.rebuild)
+    return {
+        "status": "building" if started else "already_running",
+        "model": model,
+        "rebuild": body.rebuild,
+    }
 
 
 @app.get("/api/lanes")

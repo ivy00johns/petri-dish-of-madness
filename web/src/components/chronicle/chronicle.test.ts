@@ -122,6 +122,23 @@ describe('readChapters', () => {
     expect(ch3800?.text).toBe('Unique window 3800-3900.');
   });
 
+  it('rebuild wins when history is newest-first: higher seq wins, not array position', () => {
+    // Live runtime history arrives newest-first (useSimulation prepends new
+    // events + sorts seq desc). After a `rebuild` re-narrate, the rebuilt
+    // chapter has the HIGHER seq but sits at the FRONT of the array while the
+    // original sits later. Dedupe must keep the rebuilt one (higher seq), not
+    // the last-in-array (which would be the stale original).
+    const history = [
+      ev({ kind: 'narrator_summary', text: 'Rebuilt 0-100 (newer).', tick: 5000, seq: 99,
+           payload: { from_tick: 0, to_tick: 100 } }),
+      ev({ kind: 'narrator_summary', text: 'Original 0-100 (older).', tick: 100, seq: 10,
+           payload: { from_tick: 0, to_tick: 100 } }),
+    ];
+    const chapters = readChapters(history);
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0].text).toBe('Rebuilt 0-100 (newer).');
+  });
+
   it('falls back to event tick when payload lacks from_tick / to_tick', () => {
     const history = [
       ev({ kind: 'narrator_summary', text: 'Fallback chapter.', tick: 55 }),
@@ -136,6 +153,86 @@ describe('readChapters', () => {
       ev({ kind: 'agent_speech', text: 'hello' }),
     ];
     expect(readChapters(history)).toHaveLength(0);
+  });
+
+  it('maps payload chaos / chronicler_version / routed_via onto the Chapter', () => {
+    const payloadChaos = {
+      cast: ['Aria', 'Bret'],
+      quotes: [{ speaker: 'Aria', said: 'All is lost.' }],
+      laws: ['No stealing after dark.'],
+      conflicts: ['Aria and Bret clashed.'],
+      deaths: [],
+      counts: { spoken: 7, laws: 1, clashes: 1, deaths: 0 },
+    };
+    const history = [
+      ev({
+        kind: 'narrator_summary',
+        text: 'The chapter text.',
+        tick: 300,
+        profile: 'free',
+        payload: {
+          from_tick: 200,
+          to_tick: 300,
+          chronicler_version: 2,
+          routed_via: 'gemini-flash',
+          chaos: payloadChaos,
+        },
+      }),
+    ];
+    const [ch] = readChapters(history);
+
+    expect(ch.chroniclerVersion).toBe(2);
+    expect(ch.routedVia).toBe('gemini-flash');
+    expect(ch.chaos).toBeDefined();
+    expect(ch.chaos!.counts.spoken).toBe(7);
+    expect(ch.chaos!.counts.laws).toBe(1);
+    expect(ch.chaos!.counts.clashes).toBe(1);
+    expect(ch.chaos!.counts.deaths).toBe(0);
+    expect(ch.chaos!.cast).toEqual(['Aria', 'Bret']);
+    expect(ch.chaos!.quotes[0].said).toBe('All is lost.');
+    expect(ch.chaos!.laws[0]).toBe('No stealing after dark.');
+  });
+
+  it('tolerates missing/partial chaos payload fields gracefully', () => {
+    const history = [
+      ev({
+        kind: 'narrator_summary',
+        text: 'Sparse chapter.',
+        tick: 100,
+        payload: {
+          from_tick: 0,
+          to_tick: 100,
+          chronicler_version: 3,
+          chaos: {
+            // counts missing, cast missing, quotes malformed
+            laws: ['Law one.'],
+          },
+        },
+      }),
+    ];
+    const [ch] = readChapters(history);
+    expect(ch.chaos).toBeDefined();
+    expect(ch.chaos!.cast).toEqual([]);
+    expect(ch.chaos!.quotes).toEqual([]);
+    expect(ch.chaos!.laws).toEqual(['Law one.']);
+    expect(ch.chaos!.counts).toEqual({ spoken: 0, laws: 0, clashes: 0, deaths: 0 });
+    expect(ch.chroniclerVersion).toBe(3);
+    expect(ch.routedVia).toBeUndefined();
+  });
+
+  it('leaves chaos / chroniclerVersion / routedVia undefined when not in payload', () => {
+    const history = [
+      ev({
+        kind: 'narrator_summary',
+        text: 'Legacy chapter.',
+        tick: 100,
+        payload: { from_tick: 0, to_tick: 100 },
+      }),
+    ];
+    const [ch] = readChapters(history);
+    expect(ch.chaos).toBeUndefined();
+    expect(ch.chroniclerVersion).toBeUndefined();
+    expect(ch.routedVia).toBeUndefined();
   });
 });
 

@@ -173,3 +173,120 @@ describe('Build from history', () => {
     expect(await screen.findByText(/Building from history/i)).toBeTruthy();
   });
 });
+
+// ============================================================
+// Rebuild all
+// ============================================================
+describe('Rebuild all', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('POSTs /api/chronicle/build with rebuild:true', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'building' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ChronicleView world={null} history={[]} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Rebuild all' }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/chronicle/build',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ rebuild: true });
+    expect(await screen.findByText(/Rebuilding all chapters/i)).toBeTruthy();
+  });
+
+  it('POSTs rebuild:true AND the selected model when a model is chosen', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'building' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const world = {
+      profiles: [{ name: 'gemini', adapter: 'x', model_id: 'x', color: 'x' }],
+    } as unknown as WorldState;
+
+    render(<ChronicleView world={world} history={[]} />);
+    await userEvent.selectOptions(screen.getByLabelText('Chronicle model'), 'gemini');
+    await userEvent.click(screen.getByRole('button', { name: 'Rebuild all' }));
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      rebuild: true,
+      model: 'gemini',
+    });
+  });
+});
+
+// ============================================================
+// ChaosPanel — payload facts fix (EM-201 follow-on)
+// ============================================================
+describe('ChaosPanel payload facts', () => {
+  it('renders non-zero counts from chapter.chaos even when history buffer is empty', () => {
+    // This is the core bug fix: old chapters with no events in the browser
+    // history buffer used to show all-zero stats. With a server-stamped
+    // chaos payload, the panel must display those facts without any events.
+    const payloadChaos = {
+      cast: ['Aria', 'Bret', 'Cara'],
+      quotes: [{ speaker: 'Aria', said: 'The die is cast.' }],
+      laws: ['All debts forgiven.'],
+      conflicts: ['Bret and Cara clashed at the market.'],
+      deaths: [],
+      counts: { spoken: 42, laws: 3, clashes: 7, deaths: 0 },
+    };
+    const chapterEvent = ev({
+      kind: 'narrator_summary',
+      text: 'A tumultuous chapter unfolded.',
+      tick: 300,
+      payload: {
+        from_tick: 200,
+        to_tick: 300,
+        chronicler_version: 2,
+        chaos: payloadChaos,
+      },
+    });
+
+    // No history events in the window at all — simulates the empty-buffer bug
+    render(<ChronicleView world={null} history={[chapterEvent]} />);
+
+    // Counts from payload must be shown
+    expect(screen.getByText(/SPOKEN\s*42/i)).toBeTruthy();
+    expect(screen.getByText(/LAWS\s*3/i)).toBeTruthy();
+    expect(screen.getByText(/CLASHES\s*7/i)).toBeTruthy();
+
+    // Cast members from payload (Aria appears twice: cast chip + quote speaker label)
+    expect(screen.getAllByText('Aria').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Bret').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Cara').length).toBeGreaterThanOrEqual(1);
+
+    // A memorable line
+    expect(screen.getByText(/The die is cast/i)).toBeTruthy();
+
+    // Law text
+    expect(screen.getByText(/All debts forgiven/i)).toBeTruthy();
+  });
+
+  it('falls back to client chaosFacts when chapter.chaos is absent', () => {
+    // A chapter WITHOUT a chaos payload — client reconstruction from history events
+    const chapterEvent = ev({
+      kind: 'narrator_summary',
+      text: 'A quiet chapter.',
+      tick: 100,
+      payload: { from_tick: 0, to_tick: 100 },
+    });
+    const speechEvent = ev({
+      kind: 'agent_speech',
+      text: 'Aria says Hello world.',
+      tick: 50,
+      actor_id: 'aria',
+    });
+
+    render(<ChronicleView world={null} history={[chapterEvent, speechEvent]} />);
+
+    // Client-computed: one speech event → SPOKEN 1
+    expect(screen.getByText(/SPOKEN\s*1/i)).toBeTruthy();
+    // Cast should include Aria (extracted from text); may also appear as quote speaker
+    expect(screen.getAllByText('Aria').length).toBeGreaterThanOrEqual(1);
+  });
+});

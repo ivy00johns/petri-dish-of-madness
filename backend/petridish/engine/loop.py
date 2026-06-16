@@ -23,6 +23,13 @@ from ..config.loader import WorldConfig
 
 log = logging.getLogger(__name__)
 
+# EM-201 follow-on — the chronicler payload version stamped on EVERY chapter's
+# narrator_summary. Bump when the server-computed `chaos` facts shape (or the
+# extraction rules) changes so the frontend can detect/upgrade stale chapters.
+#   v1 = prose-only chapters (no server-computed facts)
+#   v2 = chapters carry payload["chaos"] (cast/quotes/laws/conflicts/deaths/counts)
+CHRONICLER_VERSION = 2
+
 
 def _world_params_json(world_params: object) -> dict:
     """JSON-ready view of WorldParams for the runs config blob.
@@ -804,7 +811,12 @@ class TickLoop:
         "rule_proposed", "rule_passed", "rule_rejected", "town_named",
         "project_proposed", "project_funded", "project_built",
         "building_operational", "structure_state_changed",
-        "conflict", "agent_spawned", "animal_spawned", "random_event",
+        # EM-201 — a broken promise IS a clash: the chronicle facts builder counts
+        # commitment_lapsed as a conflict, so it must survive the digest-kind
+        # whitelist or the server payload would undercount clashes vs. the
+        # frontend's full-history reconstruction.
+        "conflict", "commitment_lapsed",
+        "agent_spawned", "animal_spawned", "random_event",
         # EM-201 — the chronicle needs the DRAMA, so speech + reflections are in
         # the digest now (the thin EM-094 recap deliberately excluded them).
         "agent_speech", "reflection",
@@ -847,14 +859,14 @@ class TickLoop:
             self._run_narrator(from_tick, tick, profile_name)
         )
 
-    def _narrator_digest(self, from_tick: int, to_tick: int) -> str:
-        """EM-201 — the CHAPTER digest for the chronicler prompt: the window's
-        events queried once, then handed to the pure `_build_chronicle_digest`
-        builder (memorable lines + laws + cast + conflict). Free-scale: bounded,
-        never a raw event dump."""
+    def _narrator_window_rows(self, from_tick: int, to_tick: int) -> list[dict]:
+        """EM-201 — the window's digest-kind event rows, queried ONCE (lineage so
+        a backfilled window finds events that live in an ANCESTOR run). Shared by
+        the digest TEXT and the server-computed `chaos` facts so a chapter never
+        double-queries the same window. Returns [] on any query failure."""
         run_id = self._run_id or 1
         try:
-            rows = self._repo.get_events(
+            return self._repo.get_events(
                 run_id,
                 from_tick=from_tick,
                 to_tick=to_tick,
@@ -867,10 +879,114 @@ class TickLoop:
             )
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("chronicle digest query failed: %s", exc)
-            rows = []
+            return []
+
+    def _narrator_digest(self, from_tick: int, to_tick: int) -> str:
+        """EM-201 — the CHAPTER digest for the chronicler prompt: the window's
+        events queried once, then handed to the pure `_build_chronicle_digest`
+        builder (memorable lines + laws + cast + conflict). Free-scale: bounded,
+        never a raw event dump."""
+        rows = self._narrator_window_rows(from_tick, to_tick)
         living = [a.name for a in self._world.living_agents()]
         town = getattr(self._world, "town_name", "") or ""
         return self._build_chronicle_digest(rows, living, from_tick, to_tick, town)
+
+    # EM-201 follow-on — the speech verbs the speaker() / said() extraction keys
+    # off. Backend AND frontend MUST agree on this list (see the contract).
+    _SPEECH_VERBS = (
+        "says", "mutters", "shouts", "whispers", "proclaims", "insults",
+        "declares", "asks", "muses", "snaps", "warns", "grumbles", "sighs",
+        "laughs",
+    )
+    _SPEAKER_RE = re.compile(
+        r"^\s*(.+?)\s+(?:" + "|".join(_SPEECH_VERBS) + r")\b",
+        re.IGNORECASE,
+    )
+    # "Name verb[,:]" prefix stripped off ev.text when payload.said is absent.
+    _SAID_PREFIX_RE = re.compile(
+        r"^\s*.+?\s+(?:" + "|".join(_SPEECH_VERBS) + r")[,:]?\s*",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _chronicle_speaker(cls, ev: dict) -> str:
+        """EM-201 follow-on — the speaker of an event. Match the leading text
+        before a speech verb in ev.text; else ev.actor_id; else '—'. Backend and
+        frontend MUST agree exactly (see the contract)."""
+        text = (ev.get("text") or "").strip()
+        m = cls._SPEAKER_RE.match(text)
+        if m:
+            name = m.group(1).strip().strip('"“”\'')
+            if name:
+                return name
+        actor = (ev.get("actor_id") or "").strip()
+        return actor or "—"
+
+    @classmethod
+    def _chronicle_said(cls, ev: dict) -> str:
+        """EM-201 follow-on — the spoken words of an event: payload.said when
+        present, else ev.text with its leading 'Name verb[,:]' prefix stripped.
+        Backend and frontend MUST agree exactly (see the contract)."""
+        said = ((ev.get("payload") or {}).get("said") or "").strip()
+        if said:
+            return said
+        text = (ev.get("text") or "").strip()
+        return cls._SAID_PREFIX_RE.sub("", text, count=1).strip().strip('"“”')
+
+    @classmethod
+    def _build_chronicle_facts(
+        cls, rows: list[dict], from_tick: int, to_tick: int
+    ) -> dict:
+        """EM-201 follow-on — PURE: the server-computed `chaos` facts for one
+        window, built from the rows it is GIVEN (queries nothing). Returns the
+        EXACT contract shape: cast/quotes/laws/conflicts/deaths/counts, reusing
+        the speaker/said extraction. A quiet window yields empty lists + zero
+        counts (never a crash)."""
+        speech_rows: list[dict] = []
+        laws: list[str] = []
+        conflicts: list[str] = []
+        deaths: list[str] = []
+        for ev in rows:
+            kind = ev.get("kind") or "?"
+            text = (ev.get("text") or "").strip()
+            if kind == "agent_speech":
+                speech_rows.append(ev)
+            elif kind in ("rule_passed", "town_named"):
+                if text:
+                    laws.append(text)
+            elif kind in ("conflict", "commitment_lapsed"):
+                if text:
+                    conflicts.append(text)
+            elif kind == "agent_died":
+                if text:
+                    deaths.append(text)
+        # cast: distinct speakers in FIRST-SEEN order, cap 8.
+        cast: list[str] = []
+        for ev in speech_rows:
+            sp = cls._chronicle_speaker(ev)
+            if sp not in cast:
+                cast.append(sp)
+        cast = cast[:8]
+        # quotes: agent_speech rows by len(said) desc, top 3.
+        quoted = [
+            {"speaker": cls._chronicle_speaker(ev), "said": cls._chronicle_said(ev)}
+            for ev in speech_rows
+        ]
+        quoted.sort(key=lambda q: len(q["said"]), reverse=True)
+        quotes = quoted[:3]
+        return {
+            "cast": cast,
+            "quotes": quotes,
+            "laws": laws[:5],
+            "conflicts": conflicts[:5],
+            "deaths": deaths[:5],
+            "counts": {
+                "spoken": len(speech_rows),
+                "laws": len(laws),
+                "clashes": len(conflicts),
+                "deaths": len(deaths),
+            },
+        }
 
     @staticmethod
     def _build_chronicle_digest(
@@ -992,7 +1108,18 @@ class TickLoop:
         ONE LLM call, emit ONE `narrator_summary` event. A failed/timed-out call
         emits NOTHING (no retry) and never propagates — the loop never stalls."""
         try:
-            digest = self._narrator_digest(from_tick, to_tick)
+            # EM-201 follow-on — query the window's rows ONCE, then build the
+            # digest TEXT and the server-computed `chaos` facts from those SAME
+            # rows (no double-query). The facts are stamped into the payload so
+            # OLD chapters render real chaos stats instead of an all-zero
+            # client-side reconstruction from a short browser buffer.
+            rows = self._narrator_window_rows(from_tick, to_tick)
+            living = [a.name for a in self._world.living_agents()]
+            town = getattr(self._world, "town_name", "") or ""
+            digest = self._build_chronicle_digest(
+                rows, living, from_tick, to_tick, town
+            )
+            facts = self._build_chronicle_facts(rows, from_tick, to_tick)
             # EM-201 — thread the PREVIOUS chapter so the saga is continuous,
             # not a string of disconnected recaps.
             previous = self._previous_chapter()
@@ -1038,7 +1165,16 @@ class TickLoop:
                 log.debug("chapter rejected (empty or leaked reasoning) for %s-%s",
                           from_tick, to_tick)
                 return
-            payload = {"from_tick": from_tick, "to_tick": to_tick, "profile": profile_name}
+            payload = {
+                "from_tick": from_tick,
+                "to_tick": to_tick,
+                "profile": profile_name,
+                # EM-201 follow-on — stamp the server-computed facts + version so
+                # the frontend reads chaos stats from the payload, not from a
+                # short-lived client history buffer (which loses OLD chapters).
+                "chronicler_version": CHRONICLER_VERSION,
+                "chaos": facts,
+            }
             routed_via = self._router.last_routed_via(profile_name)
             if routed_via:
                 payload["routed_via"] = routed_via
@@ -1059,22 +1195,26 @@ class TickLoop:
             # Contract: a failed/timed-out narrator call emits NOTHING, no retry.
             log.debug("narrator call failed for ticks %s-%s: %s", from_tick, to_tick, exc)
 
-    def start_chronicle_backfill(self, profile_name: str) -> bool:
+    def start_chronicle_backfill(
+        self, profile_name: str, *, rebuild: bool = False
+    ) -> bool:
         """EM-201 — kick off the on-demand backfill as a background task (so the
         API returns immediately and chapters stream in live). Returns False when
-        a backfill is already in flight."""
+        a backfill is already in flight. EM-201 follow-on: `rebuild=True` threads
+        through to regenerate EVERY window (fresh prose + fresh fact stamps),
+        not just the gaps."""
         if (
             self._chronicle_backfill_task is not None
             and not self._chronicle_backfill_task.done()
         ):
             return False
         self._chronicle_backfill_task = asyncio.create_task(
-            self.build_chronicle_from_history(profile_name)
+            self.build_chronicle_from_history(profile_name, rebuild=rebuild)
         )
         return True
 
     async def build_chronicle_from_history(
-        self, profile_name: str, *, every: int | None = None
+        self, profile_name: str, *, every: int | None = None, rebuild: bool = False
     ) -> None:
         """EM-201 — chronicle the EXISTING run history: for each window
         [w, w+every] from tick 0 → now that has NO chapter yet, generate one
@@ -1082,7 +1222,12 @@ class TickLoop:
         chapters emit live as `narrator_summary` events the Chronicle tab already
         renders, so the user watches the saga assemble. Idempotent — windows
         already chronicled are skipped — and the model is the CALLER's choice
-        (default free; never forced onto a paid lane). Never raises."""
+        (default free; never forced onto a paid lane). Never raises.
+
+        EM-201 follow-on: when `rebuild=True`, DO NOT skip already-chronicled
+        windows — regenerate EVERY window 0→now (fresh prose + fresh fact/version
+        stamps), so old chapters written before the server-side facts existed get
+        re-stamped. When False (default), keep the idempotent gap-fill."""
         if not profile_name or self._router.get_profile(profile_name) is None:
             return
         every = every or max(
@@ -1091,20 +1236,22 @@ class TickLoop:
         to_tick = int(self._world.tick)
         # Windows already chronicled (by their to_tick) — keeps the backfill
         # idempotent and lets it fill gaps alongside the forward auto-chapters.
+        # On a rebuild we ignore this set entirely and regenerate every window.
         existing: set[int] = set()
-        try:
-            for ev in self._repo.get_events(
-                self._run_id or 1, kinds=["narrator_summary"], lineage=True
-            ):
-                tt = (ev.get("payload") or {}).get("to_tick")
-                if isinstance(tt, int):
-                    existing.add(tt)
-        except Exception:  # pragma: no cover - defensive
-            pass
+        if not rebuild:
+            try:
+                for ev in self._repo.get_events(
+                    self._run_id or 1, kinds=["narrator_summary"], lineage=True
+                ):
+                    tt = (ev.get("payload") or {}).get("to_tick")
+                    if isinstance(tt, int):
+                        existing.add(tt)
+            except Exception:  # pragma: no cover - defensive
+                pass
         w = 0
         while w < to_tick:
             w_to = min(w + every, to_tick)
-            if w_to not in existing:
+            if rebuild or w_to not in existing:
                 try:
                     await self._run_narrator(w, w_to, profile_name)
                 except asyncio.CancelledError:

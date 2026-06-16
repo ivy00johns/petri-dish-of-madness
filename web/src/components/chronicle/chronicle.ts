@@ -14,6 +14,15 @@ export interface Chapter {
   toTick: number;
   profile?: string;
   title: string;
+  /** Server-stamped chaos facts (EM-201 follow-on). Present only when the backend
+   *  generated the chapter with chronicler_version >= 2 (or whichever version added
+   *  the chaos stamp). When absent, ChaosPanel falls back to client chaosFacts(). */
+  chaos?: ChaosFacts;
+  /** CHRONICLER_VERSION at generation time, stamped server-side. */
+  chroniclerVersion?: number;
+  /** Actual model the proxy served (may differ from profile when the profile
+   *  routes to an alias or fallback). */
+  routedVia?: string;
 }
 
 export interface ChaosFacts {
@@ -88,6 +97,54 @@ export function chapterTitle(text: string): string {
 }
 
 // ============================================================
+// parseChaosFacts — defensive deserialiser for server-stamped payload
+// ============================================================
+
+/** Parse a raw payload.chaos object into a well-typed ChaosFacts, tolerating
+ *  missing or wrongly-typed fields (future-proofs against partial stamps). */
+function parseChaosFacts(raw: Record<string, unknown>): ChaosFacts {
+  const toStrArray = (v: unknown, cap: number): string[] => {
+    if (!Array.isArray(v)) return [];
+    return (v as unknown[])
+      .filter((x): x is string => typeof x === 'string')
+      .slice(0, cap);
+  };
+
+  const rawQuotes = Array.isArray(raw['quotes']) ? (raw['quotes'] as unknown[]) : [];
+  const quotes = rawQuotes
+    .filter(
+      (q): q is { speaker: string; said: string } =>
+        q !== null &&
+        typeof q === 'object' &&
+        typeof (q as Record<string, unknown>)['speaker'] === 'string' &&
+        typeof (q as Record<string, unknown>)['said'] === 'string',
+    )
+    .slice(0, 3)
+    .map((q) => ({ speaker: q.speaker, said: q.said }));
+
+  const rawCounts =
+    raw['counts'] && typeof raw['counts'] === 'object'
+      ? (raw['counts'] as Record<string, unknown>)
+      : {};
+  const toInt = (v: unknown): number =>
+    typeof v === 'number' ? Math.floor(v) : 0;
+
+  return {
+    cast: toStrArray(raw['cast'], 8),
+    quotes,
+    laws: toStrArray(raw['laws'], 5),
+    conflicts: toStrArray(raw['conflicts'], 5),
+    deaths: toStrArray(raw['deaths'], 5),
+    counts: {
+      spoken: toInt(rawCounts['spoken']),
+      laws: toInt(rawCounts['laws']),
+      clashes: toInt(rawCounts['clashes']),
+      deaths: toInt(rawCounts['deaths']),
+    },
+  };
+}
+
+// ============================================================
 // readChapters
 // ============================================================
 
@@ -99,22 +156,55 @@ export function chapterTitle(text: string): string {
 export function readChapters(history: WorldEvent[]): Chapter[] {
   const summaries = history
     .filter((e) => e.kind === 'narrator_summary' && Boolean((e.text || '').trim()))
-    .map((e) => ({
-      text: (e.text || '').trim(),
-      fromTick: Number(e.payload?.['from_tick'] ?? e.tick ?? 0),
-      toTick: Number(e.payload?.['to_tick'] ?? e.tick ?? 0),
-      profile: typeof e.profile === 'string' ? e.profile : undefined,
-    }));
+    .map((e) => {
+      const rawChaos = e.payload?.['chaos'];
+      const chaos: ChaosFacts | undefined =
+        rawChaos && typeof rawChaos === 'object'
+          ? parseChaosFacts(rawChaos as Record<string, unknown>)
+          : undefined;
+      const chroniclerVersion =
+        typeof e.payload?.['chronicler_version'] === 'number'
+          ? (e.payload['chronicler_version'] as number)
+          : undefined;
+      const routedVia =
+        typeof e.payload?.['routed_via'] === 'string'
+          ? (e.payload['routed_via'] as string)
+          : undefined;
+      return {
+        seq: typeof e.seq === 'number' ? e.seq : 0,
+        text: (e.text || '').trim(),
+        fromTick: Number(e.payload?.['from_tick'] ?? e.tick ?? 0),
+        toTick: Number(e.payload?.['to_tick'] ?? e.tick ?? 0),
+        profile: typeof e.profile === 'string' ? e.profile : undefined,
+        chaos,
+        chroniclerVersion,
+        routedVia,
+      };
+    });
 
-  // Dedupe by (fromTick, toTick) keeping the LAST occurrence
+  // Dedupe by (fromTick, toTick) keeping the HIGHEST-seq version of each window.
+  // Order-INDEPENDENT (not array position): a re-narrated chapter is emitted
+  // later → higher seq → wins, even though the live runtime history arrives
+  // newest-first (useSimulation prepends + sorts seq desc). This is what makes
+  // the `rebuild` re-narrate actually replace the old chapter in the live UI.
   const windowMap = new Map<string, typeof summaries[number]>();
   for (const s of summaries) {
     const key = `${s.fromTick}:${s.toTick}`;
-    windowMap.set(key, s); // last write wins
+    const existing = windowMap.get(key);
+    if (!existing || s.seq >= existing.seq) windowMap.set(key, s);
   }
 
   return Array.from(windowMap.values())
-    .map((s) => ({ ...s, title: chapterTitle(s.text) }))
+    .map((s): Chapter => ({
+      text: s.text,
+      fromTick: s.fromTick,
+      toTick: s.toTick,
+      profile: s.profile,
+      chaos: s.chaos,
+      chroniclerVersion: s.chroniclerVersion,
+      routedVia: s.routedVia,
+      title: chapterTitle(s.text),
+    }))
     .sort((a, b) => a.toTick - b.toTick || a.fromTick - b.fromTick);
 }
 

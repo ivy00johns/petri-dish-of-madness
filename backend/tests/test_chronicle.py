@@ -95,3 +95,90 @@ def test_build_chronicle_digest_picks_the_longest_quotes():
     ]
     digest = TickLoop._build_chronicle_digest(rows, ["X"], 0, 5)
     assert "long and dramatic monologue" in digest
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-201 follow-on — _build_chronicle_facts: server-computed `chaos` facts that
+# are STAMPED into the narrator_summary payload (so OLD chapters render real
+# stats instead of an all-zero client-side reconstruction).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_build_chronicle_facts_surfaces_quotes_cast_laws_conflicts_deaths_counts():
+    rows = [
+        {"kind": "agent_speech", "tick": 10,
+         "text": 'Vesper says: "Bankruptcy is just a rebranding opportunity, but winning? That is forever."',
+         "payload": {"said": "Bankruptcy is just a rebranding opportunity, but winning? That is forever."}},
+        {"kind": "agent_speech", "tick": 11,
+         "text": 'Mox mutters: "The cabal walks among us."',
+         "payload": {"said": "The cabal walks among us."}},
+        {"kind": "agent_speech", "tick": 12,
+         "text": 'Vesper proclaims: "Order!"',
+         "payload": {"said": "Order!"}},
+        {"kind": "rule_passed", "tick": 13,
+         "text": "By vote, a Transparency Dividend (ubi) of 10 credits passes.", "payload": {}},
+        {"kind": "town_named", "tick": 14, "text": "The town shall be called Ledger's Folly.",
+         "payload": {}},
+        {"kind": "conflict", "tick": 15, "text": "Bram insults Vesper!", "payload": {}},
+        {"kind": "commitment_lapsed", "tick": 16, "text": "Mox broke a promise to Ada.",
+         "payload": {}},
+        {"kind": "agent_died", "tick": 17, "text": "Ada starved in the plaza.", "payload": {}},
+    ]
+    facts = TickLoop._build_chronicle_facts(rows, 0, 20)
+
+    # quotes: top-3 by length, carry speaker + said.
+    assert [q["said"] for q in facts["quotes"]][0].startswith("Bankruptcy is just")
+    assert facts["quotes"][0]["speaker"] == "Vesper"
+    assert all("speaker" in q and "said" in q for q in facts["quotes"])
+    assert len(facts["quotes"]) == 3
+
+    # cast: distinct speakers in first-seen order.
+    assert facts["cast"] == ["Vesper", "Mox"]
+
+    # laws = rule_passed + town_named texts.
+    assert any("Transparency Dividend" in law for law in facts["laws"])
+    assert any("Ledger's Folly" in law for law in facts["laws"])
+
+    # conflicts = conflict + commitment_lapsed texts.
+    assert any("insults" in c for c in facts["conflicts"])
+    assert any("broke a promise" in c for c in facts["conflicts"])
+
+    # deaths = agent_died texts.
+    assert any("starved" in d for d in facts["deaths"])
+
+    # the four counts agree with the contract definitions exactly.
+    assert facts["counts"] == {"spoken": 3, "laws": 2, "clashes": 2, "deaths": 1}
+
+
+def test_build_chronicle_facts_quiet_window_is_empty_lists_and_zero_counts():
+    facts = TickLoop._build_chronicle_facts([], 30, 40)
+    assert facts["cast"] == []
+    assert facts["quotes"] == []
+    assert facts["laws"] == []
+    assert facts["conflicts"] == []
+    assert facts["deaths"] == []
+    assert facts["counts"] == {"spoken": 0, "laws": 0, "clashes": 0, "deaths": 0}
+
+
+def test_build_chronicle_facts_speaker_falls_back_to_actor_then_dash():
+    rows = [
+        # no recognizable speech verb in text → fall back to actor_id.
+        {"kind": "agent_speech", "tick": 1, "text": "(garbled transmission)",
+         "actor_id": "agent_zed", "payload": {"said": "zzz"}},
+        # no verb, no actor → the em-dash sentinel.
+        {"kind": "agent_speech", "tick": 2, "text": "...", "payload": {"said": "..."}},
+    ]
+    facts = TickLoop._build_chronicle_facts(rows, 0, 5)
+    assert "agent_zed" in facts["cast"]
+    assert "—" in facts["cast"]
+
+
+def test_build_chronicle_facts_said_strips_prefix_when_no_payload():
+    """said(ev) uses payload.said when present, else strips the 'Name verb[,:]'
+    prefix off ev.text."""
+    rows = [
+        {"kind": "agent_speech", "tick": 1,
+         "text": 'Ada declares: The festival begins!', "payload": {}},
+    ]
+    facts = TickLoop._build_chronicle_facts(rows, 0, 5)
+    assert facts["quotes"][0]["speaker"] == "Ada"
+    assert facts["quotes"][0]["said"] == "The festival begins!"
