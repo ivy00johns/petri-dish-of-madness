@@ -3412,10 +3412,21 @@ class AgentRuntime:
                         "payload": {"error": "target_not_found"}}
             ok, reason = self.world.action_insult(agent, target)
             if ok:
+                # run-663: render the barb in the feed text when present so
+                # insults are not flavorless — the raw insult_text stays in
+                # the payload unchanged for downstream consumers.
+                barb = args.get("text", "")
+                if barb:
+                    display_barb = barb[:200]  # truncate gracefully; never drop
+                    insult_text = (
+                        f'{agent.name} insults {target.name}: "{display_barb}"'
+                    )
+                else:
+                    insult_text = f"{agent.name} insults {target.name}!"
                 return {**base, "kind": "conflict", "target_id": target.id,
-                        "text": f"{agent.name} insults {target.name}!",
+                        "text": insult_text,
                         "payload": {"action": "insult",
-                                    "insult_text": args.get("text", ""), "thought": thought}}
+                                    "insult_text": barb, "thought": thought}}
             else:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to insult but: {reason}",
