@@ -119,18 +119,20 @@ Tests: each catalog type resolves to its own GLB; an off-menu kind still resolve
 neutral fallback (no dead turn).
 
 ### K2 — Props as first-class items (EM-218) · *keystone*
-Backend: the `Prop` entity + `world.props`, reflex `place_prop(kind, place?, offset?)`
-(defaults to the agent's current place), `max_props` cap, `prop_placed` event, snapshot
-(de)serialization. Frontend: `PROP_MODELS` instanced render path (drei `<Instances>`),
-fallback procedural mesh. Tests: place → snapshot → restore is byte-identical; cap is
-honored; replay reproduces props exactly.
+Backend: the `Prop` entity + `world.props`, reflex `place_prop(kind, place, offset?)` —
+the agent **chooses the target place / district** (offset positions within it; defaults to
+the current place if omitted) — a **modest** `max_props` cap (tunable up), `prop_placed`
+event, snapshot (de)serialization. Frontend: `PROP_MODELS` instanced render path (drei
+`<Instances>`), fallback procedural mesh. Tests: place → snapshot → restore is
+byte-identical; cap is honored; replay reproduces props exactly.
 
 ### K3 — Remove & demolish (EM-219)
-Backend: reflex `remove_prop(prop_id)` and a clean `demolish(building_id)`
-(owner/governance-gated, distinct from `arson`; frees the lot back to claimable per the
-EM-174/EM-181 lot model). Events `prop_removed` / `building_demolished`. Frontend clears
-the mesh and releases the lot. Tests: demolish frees the lot; arson semantics unchanged;
-gating enforced at resolution.
+Backend: reflex `remove_prop(prop_id)` and a clean `demolish(building_id)` — an **owner
+demolishes their own** freely; a **public/landmark** structure needs a **~70% governance
+vote** (distinct from `arson`; frees the lot back to claimable per the EM-174/EM-181 lot
+model). Events `prop_removed` / `building_demolished`. Frontend clears the mesh and
+releases the lot. Tests: demolish frees the lot; owner-vs-public gate enforced at
+resolution; arson semantics unchanged.
 
 ### K4 — Recolor / skin (EM-220)
 Backend: a `tint`/`skin` field on `Building`, set by a light reflex tool (agent self /
@@ -145,8 +147,10 @@ buttons). A manual curation + seeding lever; no new engine semantics beyond K2�
 
 ## Cross-links (existing ledger items — referenced, not duplicated)
 
-- **EM-182** (agent-chosen *placement*/zone) is the natural companion to K1/K2 — "build a
-  house in the industrial district." Recommend pulling it into this wave; not re-filed.
+- **EM-182** (agent-chosen *placement*/zone for **buildings**) — **pulled into this wave**
+  (per resolved decision 3): since props get district choice (K2), buildings should too, so
+  "build a house in the industrial district" works the same way. Not re-filed (it already
+  exists); sequence it alongside K1/K2.
 - **EM-169 / EM-176** (vehicles) become "a prop category" conceptually once K2 lands;
   moving traffic stays their scope.
 - **EM-123** (zoning growth) and **EM-183** (vote to move the town center) are unaffected
@@ -161,11 +165,15 @@ EM-216 (K0 assets) ──┬─► EM-217 (K1 types) ──► EM-220 (K4 recolo
 
 K4 may swap ahead of K3 (it's lighter); K5 is last (it consumes K2–K4 APIs).
 
-## Open questions (carry into implementation)
+## Resolved decisions (brainstorm 2026-06-18)
 
-1. **Prop cap value** — what `max_props` keeps the chronicle lively without flooding the
-   scene at 25 agents? (Tune from a live run, like the animal cap.)
-2. **Demolish gate** — owner-only, or governance-vote for public structures? (Lean: owner
-   for self-built, ~70% vote for public/landmark — reuse the governance texture.)
-3. **Prop placement freedom** — does `place_prop` honor an agent-chosen zone (depends on
-   EM-182), or only the agent's current place for v1? (Lean: current place for v1.)
+1. **Prop cap** — start with a **modest** `max_props` (a populated town, not an
+   overwhelming one) and tune it **up** from a live 25-agent run. Room to grow later.
+2. **Demolish gate** — an **owner demolishes their own** building freely; a **public /
+   landmark** structure requires a **~70% governance vote** (reuse the existing voting
+   texture). `arson` stays the chaotic path; demolish is the orderly/civic one.
+3. **Prop placement** — agents **choose which part of town** (a target place / district)
+   a prop goes; `place_prop(kind, place, offset?)` takes the target place as a first-class
+   arg (offset positions within it), defaulting to the current place only if omitted.
+   This is the prop cousin of EM-182 (agent-chosen placement for *buildings*) — so **pull
+   EM-182 into this wave** (see Cross-links) and buildings get the same district choice.
