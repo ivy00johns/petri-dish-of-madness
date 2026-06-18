@@ -30,6 +30,15 @@ completion budget on top. Measured on this fixture: pre-diet background
 5_120 chars; post-diet ~3_263 chars (supporting ~4_256; protagonist 5_158,
 byte-identical to pre-diet).
 
+Wave K / EM-217+218 NOTE: the protagonist (full) prompt gained two lines — the
+propose_project guidance now surfaces the BUILD_TYPES menu + the optional `place`
+arg (EM-182/217), and a `place_prop` offering (EM-218). Both ride only the
+protagonist/supporting menus (place_prop is reflex/un-tier-gated; propose_project
+stays tier-gated off background), so BACKGROUND prompts are unchanged and the
+size guard below is unaffected. The em161_protagonist_prompt_pre_diet.txt capture
+was regenerated for this intended change (protagonist ~6_862 chars); it still
+guards against UNINTENDED protagonist-prompt drift.
+
 Deterministic and offline (scripted fakes, ':memory:' DBs, no network).
 House import idiom: engine.world before agents.runtime.
 """

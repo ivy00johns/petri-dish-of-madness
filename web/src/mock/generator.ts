@@ -31,6 +31,7 @@ import type {
   Building,
   BuildingStatus,
   BillboardPost,
+  Prop,
   SpawnSpec,
 } from '../types';
 
@@ -133,6 +134,25 @@ let animals: Animal[] = seedAnimals();
 // mirrors config/world.yaml animals.model_profile so the mock's animal
 // llm_call events (and the model chip derived from them) match a live run.
 const ANIMAL_MODEL_PROFILE = 'gemini-flash';
+
+// ── Props (Wave K / EM-218) — agent/god-placed decorations the world tracks ──
+// First-class `Prop` entities (NOT scenery): they persist, replay, and can be
+// removed. Mock seeds a handful at known places so the 3D PlacedProps renderer
+// + the FE tests have representative data offline. Ids are stable strings (the
+// live backend derives them from a seeded hash; the mock just hand-stamps them
+// deterministically). (dx,dz) are small in-place offsets so co-located props
+// fan out around the place anchor instead of stacking.
+function seedProps(): Prop[] {
+  return [
+    { id: 'prop-bench-1',  kind: 'bench',    place: 'plaza',   dx: 1.6,  dz: 0.0,  owner_id: 'ada'  },
+    { id: 'prop-lamp-1',   kind: 'lamp',     place: 'plaza',   dx: -1.6, dz: 0.8,  owner_id: 'cleo' },
+    { id: 'prop-tree-1',   kind: 'tree',     place: 'commons', dx: 0.0,  dz: 1.8,  owner_id: null   },
+    { id: 'prop-fount-1',  kind: 'fountain', place: 'townhall',dx: 0.0,  dz: -2.0, owner_id: 'cleo' },
+    // An off-menu kind so the procedural fallback path is exercised in the demo.
+    { id: 'prop-mystery-1',kind: 'gnome',    place: 'market',  dx: 1.2,  dz: 1.2,  owner_id: 'bram' },
+  ];
+}
+let props: Prop[] = seedProps();
 
 // A small library of buildable projects (kind + funds + function + cost).
 const PROJECT_BLUEPRINTS: Array<{ name: string; kind: string; funds: number; fn: string }> = [
@@ -1107,6 +1127,7 @@ export function buildInitialWorldState(): WorldState {
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
+    props: props.map(p => ({ ...p })),
   };
 }
 
@@ -1218,6 +1239,7 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
+    props: props.map(p => ({ ...p })),
   };
 
   return { state, events };
@@ -1294,6 +1316,7 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
+    props: props.map(p => ({ ...p })),
   };
   return { state, events };
 }
@@ -1359,6 +1382,7 @@ export function spawnAnimalMock(spec: {
     buildings: buildings.map((b) => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map((a) => ({ ...a })),
     billboard: billboard.map((p) => ({ ...p })),
+    props: props.map((p) => ({ ...p })),
   };
   return { state, events: [evt] };
 }
@@ -1401,6 +1425,7 @@ function postBillboardMock(text: string, inReplyTo?: string): { state: WorldStat
     buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
+    props: props.map(p => ({ ...p })),
   };
   return { state, events: [evt] };
 }
@@ -1447,6 +1472,7 @@ export const mockControls = {
     buildingCounter = 0;
     lastActivityTick.clear();
     animals = seedAnimals();
+    props = seedProps();
     billboard = [];
     openCommitments = [];
     commitmentCounter = 0;

@@ -1,0 +1,130 @@
+/**
+ * propModels.test.ts — Wave K (EM-218) PROP asset-layer gate. NO canvas/WebGL:
+ *
+ *   • registry shape — every PropKind present, specs well-formed, urls under
+ *     /models/, and the (already-vendored) files EXIST on disk;
+ *   • propVariant resolver — exact known kinds, case-insensitive substring
+ *     keyword match, prototype-member hardening, and the unknown → null
+ *     procedural-fallback path (never a hole);
+ *   • license hygiene — every prop GLB is recorded in ASSET_LICENSES.md (the
+ *     reuse note this wave requires).
+ */
+
+import { describe, expect, it } from 'vitest';
+// @ts-ignore -- node builtin without @types/node
+import { existsSync, readFileSync } from 'node:fs';
+// @ts-ignore -- node builtin without @types/node
+import { resolve } from 'node:path';
+import {
+  PROP_MODELS,
+  allPropModelSpecs,
+  propModel,
+  propVariant,
+  type PropKind,
+} from './propModels';
+
+declare const process: { cwd(): string };
+const PUBLIC_DIR = resolve(process.cwd(), 'public');
+const REPO_ROOT = resolve(process.cwd(), '..');
+
+const ALL_PROP_KINDS: PropKind[] = [
+  'bench', 'lamp', 'tree', 'fence', 'bin', 'hydrant', 'fountain',
+];
+
+describe('PROP_MODELS registry', () => {
+  it('has a non-null spec for every PropKind', () => {
+    expect(Object.keys(PROP_MODELS).sort()).toEqual([...ALL_PROP_KINDS].sort());
+    for (const k of ALL_PROP_KINDS) {
+      expect(PROP_MODELS[k], k).toBeTruthy();
+    }
+  });
+
+  it('every spec is well-formed and exists on disk (already-vendored, no new downloads)', () => {
+    for (const spec of allPropModelSpecs()) {
+      expect(spec.url.startsWith('/models/'), spec.url).toBe(true);
+      expect(Number.isFinite(spec.scale)).toBe(true);
+      expect(spec.scale).toBeGreaterThan(0);
+      expect(Number.isFinite(spec.yOffset)).toBe(true);
+      const disk = resolve(PUBLIC_DIR, spec.url.replace(/^\//, ''));
+      expect(existsSync(disk), `missing prop GLB: ${disk}`).toBe(true);
+    }
+  });
+
+  it('wires only ALREADY-VENDORED kits (Kenney city/furniture + fantasy-town fountain + kaykit hydrant)', () => {
+    const urls = allPropModelSpecs().map((s) => s.url);
+    for (const u of urls) {
+      expect(
+        /^\/models\/(kenney-city|kenney-fantasy-town|kaykit-city)\//.test(u),
+        u,
+      ).toBe(true);
+    }
+  });
+});
+
+describe('propVariant (EM-218 resolver)', () => {
+  it('resolves exact known kinds to themselves', () => {
+    for (const k of ALL_PROP_KINDS) {
+      expect(propVariant(k), k).toBe(k);
+    }
+  });
+
+  it('keyword-maps realistic emergent kinds (case-insensitive substring)', () => {
+    const cases: Array<[string, PropKind]> = [
+      ['park_bench', 'bench'],
+      ['wooden_seat', 'bench'],
+      ['street_lamp', 'lamp'],
+      ['old_lantern', 'lamp'],
+      ['Lamp_Post', 'lamp'],
+      ['oak_tree', 'tree'],
+      ['flowering_shrub', 'tree'],
+      ['picket_fence', 'fence'],
+      ['garden_hedge', 'fence'],
+      ['trash_bin', 'bin'],
+      ['rubbish_can', 'bin'],
+      ['fire_hydrant', 'hydrant'],
+      ['stone_fountain', 'fountain'],
+      ['village_birdbath', 'fountain'],
+    ];
+    for (const [kind, want] of cases) {
+      expect(propVariant(kind), kind).toBe(want);
+    }
+  });
+
+  it('returns null for unknown / off-menu kinds (procedural fallback path)', () => {
+    expect(propVariant('gnome')).toBeNull();
+    expect(propVariant('moon-totem')).toBeNull();
+    expect(propVariant('')).toBeNull();
+    expect(propVariant('xyzzy')).toBeNull();
+  });
+
+  it('never resolves a prototype-member kind through the prototype chain', () => {
+    for (const evil of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(propVariant(evil), evil).toBeNull();
+    }
+  });
+});
+
+describe('propModel convenience', () => {
+  it('returns the registry spec for a known kind and null for an unknown one', () => {
+    expect(propModel('bench')).toBe(PROP_MODELS.bench);
+    expect(propModel('street_lamp')).toBe(PROP_MODELS.lamp);
+    expect(propModel('gnome')).toBeNull();
+  });
+});
+
+describe('ASSET_LICENSES.md (prop reuse recorded)', () => {
+  const doc = readFileSync(resolve(REPO_ROOT, 'ASSET_LICENSES.md'), 'utf8');
+
+  it('records every prop GLB file path', () => {
+    for (const spec of allPropModelSpecs()) {
+      expect(doc, `ASSET_LICENSES.md is missing ${spec.url}`).toContain(
+        `web/public${spec.url}`,
+      );
+    }
+  });
+
+  it('notes the Wave K no-new-download reuse', () => {
+    expect(doc).toMatch(/Wave K/);
+    expect(doc).toMatch(/PROP_MODELS/);
+  });
+});

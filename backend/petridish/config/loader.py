@@ -369,6 +369,21 @@ class AnimalParams:
 
 
 @dataclass
+class PropsParams:
+    """Wave K / EM-218 — placeable PROPS (decorations/furniture/nature) the agents
+    and god can add, move, and remove (config `world.props`). Mirrors the
+    animals.max_population shape exactly: a SINGLE population cap that protects
+    free-scale — more props = more chronicle texture, never more LLM calls.
+
+      max_population — cap on tracked props (the engine rejects place_prop over
+                       this, with guidance; 0 = unlimited). Default 48: a
+                       populated town, not overwhelming; tunable UP from a live
+                       25-agent run (per the brainstorm's resolved decision 1).
+    """
+    max_population: int = 48
+
+
+@dataclass
 class NarratorParams:
     """W11a / EM-094 — Narrator mode (config `world.narrator`).
 
@@ -693,6 +708,9 @@ class WorldParams:
     # W8 — LLM-driven chaos animals. Additive; default-disabled so a world.yaml
     # without an `animals` block behaves exactly as before.
     animals: AnimalParams = field(default_factory=AnimalParams)
+    # Wave K / EM-218 — placeable props cap. Additive; an absent `props` block
+    # uses the default max_population (48), mirroring the animals cap pattern.
+    props: PropsParams = field(default_factory=PropsParams)
     # W11a / EM-094 — Narrator mode. Additive; default-disabled (zero LLM calls)
     # so a world.yaml without a `narrator` block behaves exactly as before.
     narrator: NarratorParams = field(default_factory=NarratorParams)
@@ -934,6 +952,19 @@ def _parse_animals(raw: dict | None) -> AnimalParams:
         pet_energy_decay=_nonneg_int("pet_energy_decay", d.pet_energy_decay),
         pet_feed_amount=_nonneg_int("pet_feed_amount", d.pet_feed_amount),
     )
+
+
+def _parse_props(raw: dict | None) -> PropsParams:
+    """Parse the optional `world.props` block (Wave K / EM-218). Absent/empty ->
+    the default cap (48), mirroring _parse_animals' max_population handling."""
+    if not isinstance(raw, dict):
+        return PropsParams()
+    d = PropsParams()
+    try:
+        max_population = max(0, int(raw.get("max_population", d.max_population)))
+    except (TypeError, ValueError):
+        max_population = d.max_population
+    return PropsParams(max_population=max_population)
 
 
 def _parse_narrator(raw: dict | None) -> NarratorParams:
@@ -1253,6 +1284,7 @@ def _parse_world(
         spawn=_parse_spawn(w.get("spawn")),
         cache=_parse_cache(w.get("cache")),
         animals=_parse_animals(w.get("animals")),
+        props=_parse_props(w.get("props")),
         narrator=_parse_narrator(w.get("narrator")),
         blackout_ticks=int(w.get("blackout_ticks", 10)),
         commitments=_parse_commitments(w.get("commitments")),

@@ -109,6 +109,10 @@ export interface Building {
   funds_required: number;
   contributors: string[];       // agent ids
   function: string;             // utility while operational, e.g. "+forage" | "+energy" | "voting"
+  // Wave K (EM-220): an owner-set color skin. The renderer reads it as a material
+  // override LAYERED OVER (not replacing) the health-soot tint. Optional/null so
+  // pre-Wave-K backends and snapshots stay valid; an unknown skin name is ignored.
+  skin?: string | null;
 }
 
 // ============================================================
@@ -135,6 +139,26 @@ export interface Animal {
   // wears a bond indicator in the RosterStrip. Optional so pre-H4 backends and
   // snapshots stay valid.
   owner_id?: string | null;
+}
+
+// ============================================================
+// Prop (Wave K / EM-218) — a lightweight, agent-placed decoration the world
+// REMEMBERS (so it persists/replays/forks and can be removed). Modeled on
+// `Animal`, NOT `Building`: no health/funding/status/build-progress (Decision
+// 1 in the Wave K design). Stored in world.props; world_state gains
+// `props: [Prop]`. Each prop sits AT a place (no free-floating props), nudged
+// by an engine-assigned in-place offset (dx,dz) so co-located props don't
+// stack on the anchor. The 3D village renders each at placeToWorld(place) +
+// (dx,dz) via PROP_MODELS, with a procedural fallback (never a hole).
+// ============================================================
+
+export interface Prop {
+  id: string;                   // stable, seeded-hash id (NOT uuid4 — replay determinism)
+  kind: string;                 // free text ≤30 — FE maps to a prop model/style
+  place: string;                // place id it sits at
+  dx: number;                   // in-place offset X (engine-assigned ring), world units
+  dz: number;                   // in-place offset Z
+  owner_id?: string | null;     // agent who placed it; null/absent for god/seeded
 }
 
 export type RuleEffect = 'ban_stealing' | 'ubi' | 'recharge_subsidy' | 'work_bonus';
@@ -205,6 +229,10 @@ export interface WorldState {
   // W8: the roaming chaos critters (cat + dog). Optional so a pre-W8 backend (or
   // a snapshot predating animals) stays valid; the 3D village renders each one.
   animals?: Animal[];
+  // Wave K (EM-218): agent/god-placed decorations the world tracks. Optional so
+  // a pre-Wave-K backend (or a snapshot predating props) stays valid; the 3D
+  // village renders each via PlacedProps with a procedural fallback.
+  props?: Prop[];
   // W11b (EM-091): the notice-board posts, newest capped at 20. Optional so a
   // pre-W11b backend stays valid; the panel/3D board derive from history then.
   billboard?: BillboardPost[];

@@ -18,7 +18,7 @@
     "action": {
       "type": "string",
       "description": "A SINGLE action (legacy / minimal form). Provide this OR `actions` (a sequence). If both are present, `actions` wins.",
-      "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle","propose_project","contribute_funds","build_step","repair","arson","take_offline"]
+      "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle","propose_project","contribute_funds","build_step","repair","arson","take_offline","place_prop","remove_prop","demolish","set_building_skin"]
     },
     "args": { "type": "object", "default": {}, "description": "Args for the single `action`." },
     "actions": {
@@ -34,7 +34,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle","propose_project","contribute_funds","build_step","repair","arson","take_offline"]
+            "enum": ["move_to","say","whisper","work","forage","recharge","give","steal","insult","attack","set_relationship","remember","propose_rule","vote","idle","propose_project","contribute_funds","build_step","repair","arson","take_offline","place_prop","remove_prop","demolish","set_building_skin"]
           },
           "args": { "type": "object", "default": {} }
         }
@@ -61,11 +61,11 @@
     { "if": { "required": ["action"], "properties": { "action": { "const": "remember" } } },
       "then": { "properties": { "args": { "required": ["fact"], "properties": { "fact": { "type": "string", "maxLength": 200 } } } } } },
     { "if": { "required": ["action"], "properties": { "action": { "const": "propose_rule" } } },
-      "then": { "properties": { "args": { "required": ["effect","text"], "properties": { "effect": { "enum": ["ban_stealing","ubi","recharge_subsidy","work_bonus"] }, "text": { "type": "string", "maxLength": 200 } } } } } },
+      "then": { "properties": { "args": { "required": ["effect","text"], "properties": { "effect": { "enum": ["ban_stealing","ubi","recharge_subsidy","work_bonus","ban_arson","name_town","demolish"] }, "text": { "type": "string", "maxLength": 200 }, "name": { "type": "string", "maxLength": 60 }, "target": { "type": "string" } } } } } },
     { "if": { "required": ["action"], "properties": { "action": { "const": "vote" } } },
       "then": { "properties": { "args": { "required": ["rule_id","choice"], "properties": { "rule_id": { "type": "string" }, "choice": { "type": "boolean" } } } } } },
     { "if": { "required": ["action"], "properties": { "action": { "const": "propose_project" } } },
-      "then": { "properties": { "args": { "required": ["name","kind"], "properties": { "name": { "type": "string", "maxLength": 60 }, "kind": { "type": "string", "maxLength": 30 }, "funds_required": { "type": "integer", "minimum": 1 }, "function": { "type": "string", "maxLength": 40 } } } } } },
+      "then": { "properties": { "args": { "required": ["name","kind"], "properties": { "name": { "type": "string", "maxLength": 60 }, "kind": { "type": "string", "maxLength": 30 }, "funds_required": { "type": "integer", "minimum": 1 }, "function": { "type": "string", "maxLength": 40 }, "place": { "type": "string" } } } } } },
     { "if": { "required": ["action"], "properties": { "action": { "const": "contribute_funds" } } },
       "then": { "properties": { "args": { "required": ["building_id","amount"], "properties": { "building_id": { "type": "string" }, "amount": { "type": "integer", "minimum": 1 } } } } } },
     { "if": { "required": ["action"], "properties": { "action": { "const": "build_step" } } },
@@ -75,7 +75,15 @@
     { "if": { "required": ["action"], "properties": { "action": { "const": "arson" } } },
       "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } },
     { "if": { "required": ["action"], "properties": { "action": { "const": "take_offline" } } },
-      "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } }
+      "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "place_prop" } } },
+      "then": { "properties": { "args": { "required": ["kind"], "properties": { "kind": { "type": "string", "maxLength": 30 }, "place": { "type": "string" } } } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "remove_prop" } } },
+      "then": { "properties": { "args": { "required": ["prop_id"], "properties": { "prop_id": { "type": "string" } } } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "demolish" } } },
+      "then": { "properties": { "args": { "required": ["building_id"], "properties": { "building_id": { "type": "string" } } } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "set_building_skin" } } },
+      "then": { "properties": { "args": { "required": ["building_id","skin"], "properties": { "building_id": { "type": "string" }, "skin": { "type": "string", "maxLength": 24 } } } } } }
   ],
   "examples": [
     { "thought": "I'm broke and hungry, time to earn.", "action": "work", "args": {} },
