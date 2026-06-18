@@ -342,7 +342,29 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-215 | P2 | W20 | frontend+backend | user 2026-06-16 | **The Diary — a per-agent inner-life UI** — reflections (EM-080, `reflection {text, importance}`) today only appear as a "Diary" FILTER on the shared event feed (EventFeed.tsx:330). Give each agent a dedicated DIARY view — their private reflections over time, chronologically — the individual cousin to the town-saga Chronicle (EM-201). **Needs deeper exploration first**: is the EM-080 reflection cadence/quality rich enough, or bump the importance triggers? Then a UI (a per-agent diary panel/tab, or a diary lane in the agent panel/inspector). Pairs with pet-grief diary entries (EM-209) + the Chronicle. | open | — |
 
-_Next free ID: EM-216._
+### Wave K — The Builders' City (agents shape & decorate their own town; planned 2026-06-18, from brainstorm)
+
+> Killer-feature arc: agents **pick real building types → place/remove props → demolish →
+> re-skin what they own**, and the **god console** gets parity levers. Built breadth-first
+> (each slice a demo-able PR), **reflex-first** (the kind/type/color rides the agent's
+> existing turn — zero extra invoke-LLM calls), **population-capped**, and **replay-safe**
+> (EM-155 byte-identical snapshots). Design: `docs/superpowers/specs/2026-06-18-builders-city-design.md`.
+> **Decisions locked (user 2026-06-18):** (1) props are a NEW lightweight first-class entity
+> modeled on `Animal` (NOT a flavored Building); (2) building types are a PERMISSIVE catalog —
+> a menu surfaced in the prompt, but off-menu free-text kinds still resolve via the EM-130
+> fuzzy fallback (never a dead turn); (3) K4 recolor stays in-wave. **K0 = the asset enabler;
+> order K0→K1/K2→K3/K4→K5** (K4 may swap ahead of K3). Cross-links (referenced, not re-filed):
+> EM-182 (agent-chosen placement/zone — the companion to K1/K2), EM-169/176 (vehicles become a
+> prop category once K2 lands), EM-123/EM-183 (zoning growth + town-center vote benefit).
+
+| EM-216 | P2 | W21 | frontend | Wave K · K0 | **Asset vocabulary expansion (enabler)** — vendor curated Kenney CC0 3-D kits: Nature Kit (trees/rocks/plants/flowers), expanded Furniture/City props (benches, lamps, planters, statues, market stalls, signage), and more building GLBs for distinct types. Run the EM-152 pipeline (gltfjsx `--transform` atlas/dedupe + per-atlas toon-ramp conversion); add a `PROP_MODELS` registry (prop kind → GLB) + an expanded building catalog in `models.ts`/`cityModels.ts`; every file recorded in `ASSET_LICENSES.md`. Unblocks K1–K5 visually. Deps EM-152 ✅. | open | — |
+| EM-217 | P2 | W21 | backend+frontend | Wave K · K1 | **Agent-selectable building-type catalog** — a documented `BUILD_TYPES` catalog (tavern/market/smithy/school/temple/park/clinic/…) surfaced as choices in the turn prompt; each entry → a distinct Kenney GLB + default `function` buff + zone affinity. PERMISSIVE: off-menu/free-text kinds still resolve via today's fuzzy `operationalVariant()`/`buildingStyle()` fallback (EM-130) — never a dead turn. Extends EM-122 ✅/EM-150 ✅ (kind→GLB) without replacing the mapping. Deps EM-216. | open | — |
+| EM-218 | P2 | W21 | backend+frontend | Wave K · K2 | **Props as first-class placeable items (keystone)** — a lightweight `Prop {id, kind, place, offset, owner_id?}` entity + `world.props`, modeled on the `Animal` pattern (reflex, population-capped via `world.params.max_props`, snapshot-serialized so replay/fork stay byte-identical — EM-155; prop ids from a seeded hash, avoiding the EM-189 uuid trap). Reflex `place_prop(kind, place?, offset?)` (zero invoke-LLM; kind rides the turn), `prop_placed` event, frontend `PROP_MODELS` instanced (`<Instances>`) render path with procedural fallback (EM-148 invariant). The "an agent drops a statue in the plaza and it appears" beat. Deps EM-216. | open | — |
+| EM-219 | P2 | W21 | backend+frontend | Wave K · K3 | **Remove & demolish** — reflex `remove_prop(prop_id)` + a clean `demolish(building_id)` (owner/governance-gated, distinct from `arson`→destroyed; the freed lot returns to claimable per the EM-174 ✅/EM-181 ✅ lot model). `prop_removed` / `building_demolished` events; renderer clears the mesh + releases the lot. The city visibly *changes* — clear space, tidy up. Deps EM-218. | open | — |
+| EM-220 | P2 | W21 | backend+frontend | Wave K · K4 | **Recolor / skin a building** — a data-driven `tint`/`skin` field on `Building` set via a light reflex tool (agent self / owner), serialized; the renderer reads it as a material override layered over (not replacing) the health-soot tint. The "Ada paints her cottage" beat; pairs with the Wave I art-banner path (EM-213). May swap ahead of K3 (lighter). Deps EM-216, EM-217. | open | — |
+| EM-221 | P2 | W21 | frontend+backend | Wave K · K5 | **God-console parity** — god-panel controls over the same APIs: place/remove/recolor props, demolish buildings, and a "decorate"/"clear" prop-burst (mirrors the agent reflex tools, like the rewild/zoo-escape buttons). A manual curation + seeding lever; no new engine semantics beyond K2–K4. Deps EM-218, EM-219, EM-220. | open | — |
+
+_Next free ID: EM-222._
 
 ## Notes
 
