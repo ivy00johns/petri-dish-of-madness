@@ -54,7 +54,7 @@ const REPO_ROOT = resolve(process.cwd(), '..');
 
 const ALL_VARIANTS: VariantKey[] = [
   'garden', 'farm', 'workshop', 'library', 'clocktower',
-  'house', 'stall', 'monument', 'well', 'generic',
+  'house', 'stall', 'monument', 'well', 'zoo', 'generic',
 ];
 const ALL_PLACE_KINDS: PlaceKind[] = ['work', 'home', 'social', 'governance', 'wild'];
 
@@ -135,9 +135,10 @@ describe('MODEL_REGISTRY', () => {
     expect(Object.keys(MODEL_REGISTRY).sort()).toEqual([...ALL_VARIANTS].sort());
   });
 
-  it('keeps garden and library procedural (recorded nulls)', () => {
+  it('keeps garden, library, and zoo procedural (recorded nulls)', () => {
     expect(MODEL_REGISTRY.garden).toBeNull();
     expect(MODEL_REGISTRY.library).toBeNull();
+    expect(MODEL_REGISTRY.zoo).toBeNull();
   });
 });
 

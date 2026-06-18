@@ -19,7 +19,7 @@
  * + a small grass apron.
  */
 
-import type { Place, PlaceKind, WorldEvent } from '../../types';
+import type { Agent, Place, PlaceKind, WorldEvent } from '../../types';
 
 /** Edge length of the city ground square in world units (city span ≈ 66). */
 export const SIZE = 66;
@@ -132,6 +132,9 @@ export const BUILDING_STYLES: Record<string, BuildingStyle> = {
   library:    { body: '#e6dcc8', roof: '#9c6b4a', accent: '#caa472', tag: 'Library' },
   house:      { body: '#f2cc8f', roof: '#e07a5f', accent: '#ffe0a3', tag: 'House' },
   monument:   { body: '#dcd2c0', roof: '#bfa98a', accent: '#fff3e0', tag: 'Monument' },
+  // EM-208 H3: warm habitat palette — earthy tan walls, a terracotta/clay roof,
+  // and a leafy green accent (the animal-pen ground and foliage tones).
+  zoo:        { body: '#d4b896', roof: '#b5704a', accent: '#6aab5a', tag: 'Zoo' },
   // EM-130: the NEUTRAL fallback — a generic structure, deliberately distinct
   // from monument (cream walls + timber roof, reusing tints already in this
   // palette: clocktower body, workshop accent, clocktower accent).
@@ -148,6 +151,7 @@ const KIND_KEYWORD_STYLES: ReadonlyArray<readonly [readonly string[], string]> =
   [['garden', 'orchard', 'grove', 'bed'], 'garden'],
   [['farm'], 'farm'],
   [['library', 'school', 'archive'], 'library'],
+  [['zoo', 'menagerie', 'enclosure', 'habitat', 'sanctuary'], 'zoo'],
   [['market', 'stall', 'shop', 'booth', 'bazaar'], 'workshop'],
   [['hall', 'civic', 'center', 'centre', 'fair', 'pavilion'], 'clocktower'],
   [['house', 'home', 'inn', 'shelter', 'den'], 'house'],
@@ -207,6 +211,7 @@ export type VariantKey =
   | 'stall'
   | 'monument'
   | 'well'
+  | 'zoo'
   | 'generic';
 
 /** Exact BUILDING_STYLES keys map straight to their obvious variant. */
@@ -218,6 +223,7 @@ const EXACT_VARIANTS: Record<string, VariantKey> = {
   library: 'library',
   house: 'house',
   monument: 'monument',
+  zoo: 'zoo',
   building: 'generic',
 };
 
@@ -235,6 +241,7 @@ const VARIANT_KEYWORDS: ReadonlyArray<readonly [readonly string[], VariantKey]> 
   [['farm', 'field', 'grain', 'crop'], 'farm'],
   [['workshop', 'forge', 'smith', 'tool', 'craft'], 'workshop'],
   [['library', 'school', 'archive', 'book'], 'library'],
+  [['zoo', 'menagerie', 'enclosure', 'habitat', 'sanctuary'], 'zoo'],
   [['clock', 'tower', 'watch', 'light'], 'clocktower'],
   [['stall', 'market', 'shop', 'booth', 'stand', 'bazaar'], 'stall'],
   [['well', 'fountain', 'water'], 'well'],
@@ -318,13 +325,42 @@ export interface AnimalStyle {
 }
 
 export const ANIMAL_STYLES: Record<string, AnimalStyle> = {
-  cat: { body: '#9a8c7a', belly: '#f1e6d4', accent: '#5b4a36', tag: 'cat' },
-  dog: { body: '#c79a5b', belly: '#f3e2c0', accent: '#8a6b3a', tag: 'dog' },
+  cat:     { body: '#9a8c7a', belly: '#f1e6d4', accent: '#5b4a36', tag: 'cat'     },
+  dog:     { body: '#c79a5b', belly: '#f3e2c0', accent: '#8a6b3a', tag: 'dog'     },
+  // EM-143: 5 new species — WebGL material palette, warm/distinct per flavor.
+  // Russet-brown skittish hoarder.
+  squirrel:{ body: '#8b5e3c', belly: '#d4a96a', accent: '#5c3318', tag: 'squirrel' },
+  // Grey ransacker with pale mask highlight.
+  raccoon: { body: '#7a7a82', belly: '#d8d5cc', accent: '#3c3c44', tag: 'raccoon' },
+  // Tan/cream stubborn grazer.
+  goat:    { body: '#c8b880', belly: '#ede8d0', accent: '#8a7848', tag: 'goat'    },
+  // Orange-red cunning raider with white accent.
+  fox:     { body: '#cc5c1a', belly: '#f5dcc0', accent: '#7a2a08', tag: 'fox'     },
+  // Near-black thieving trickster with grey sheen.
+  crow:    { body: '#2a2a32', belly: '#6a6a78', accent: '#18181f', tag: 'crow'    },
 };
 
 /** Resolve an Animal style by species, defaulting to the cat tint. */
 export function animalStyle(species: string): AnimalStyle {
   return ANIMAL_STYLES[species] ?? ANIMAL_STYLES.cat;
+}
+
+/**
+ * Shared species → emoji helper (EM-143). One source of truth used in
+ * Critter.tsx, AnimalChaosFeed.tsx, and RosterStrip.tsx — no per-site drift.
+ * Unknown species fall back to 🐾 (the FALLBACK GUARANTEE: never a hole).
+ */
+export function speciesEmoji(species: string): string {
+  switch (species) {
+    case 'cat':      return '🐱';
+    case 'dog':      return '🐶';
+    case 'squirrel': return '🐿️';
+    case 'raccoon':  return '🦝';
+    case 'goat':     return '🐐';
+    case 'fox':      return '🦊';
+    case 'crow':     return '🐦‍⬛';
+    default:         return '🐾';
+  }
 }
 
 /**
@@ -406,4 +442,24 @@ export function hashUnit(seed: string): number {
   }
   // map to [0,1)
   return ((h >>> 0) % 100000) / 100000;
+}
+
+/**
+ * Wave H4 (EM-209) — resolve a pet's LIVING owner for the 3D follow/leash.
+ *
+ * The backend serializes ALL agents (alive AND dead) in to_snapshot() and
+ * never clears `owner_id` when the owner dies, so a dead owner's id keeps
+ * dangling on the pet. This helper mirrors the backend's `_owner_of()` (a
+ * dead owner ⇒ None ⇒ pet reverts to wandering) and RosterStrip's bond-line
+ * filter (drops the bond when the owner isn't `alive`): it returns the owner
+ * agent only when it exists AND is alive, else `undefined`. Keeping all three
+ * layers on this same predicate prevents the pet from leashing to its dead
+ * owner's corpse position in the 3D village.
+ */
+export function resolveLivingOwner(
+  agents: readonly Agent[],
+  ownerId: string | null | undefined,
+): Agent | undefined {
+  if (!ownerId) return undefined;
+  return agents.find((a) => a.id === ownerId && a.alive);
 }

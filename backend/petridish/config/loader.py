@@ -296,6 +296,9 @@ class BuildingParams:
                           under_construction building each round (zero LLM calls),
                           so funded projects always finish. 0 disables auto-build
                           and restores the pre-EM-115 stall->abandon behavior.
+      zoo_capacity       — Wave H3 / EM-208: how many animals a zoo (building
+                          kind=="zoo") auto-stocks AT its place when it opens
+                          (capped by animals.max_population). 0 = stock nothing.
     """
     enabled: bool = True
     build_step: int = 20
@@ -304,6 +307,7 @@ class BuildingParams:
     forage_bonus: int = 1
     work_bonus_pct: int = 50
     auto_build_per_round: int = 10
+    zoo_capacity: int = 5
 
 
 @dataclass
@@ -335,11 +339,33 @@ class AnimalParams:
       llm_chance         — P(LLM decision) on an acted tick; else a zero-LLM reflex.
       model_profile      — cheapest/fastest free profile for the LLM decision; the
                            runtime falls back to reflex-only if it is unavailable.
+      max_population     — EM-143: cap on LIVING animals (0 = unlimited; the
+                           backward-compatible default). world.spawn_animal raises
+                           ValueError once living animals >= this, surfaced as 409.
+      ambient_spawn_every — Wave H2 / EM-207: every Nth tick the menagerie may grow
+                           on its own — ONE random catalog critter at a random place,
+                           only while living animals < max_population (0 = OFF, the
+                           backward-compatible default; ambient spawning disabled).
+      ambient_spawn_chance — Wave H2 / EM-207: P(an ambient spawn lands) on an
+                           ambient-aligned tick, rolled by a DETERMINISTIC seeded
+                           hash (replay-safe; no wall-clock). 0.0 = never.
+      pet_energy_decay   — Wave H4 / EM-209: energy an OWNED pet loses each of its
+                           own turns (gentle, so a pet lasts a while). At energy 0 an
+                           owned pet dies and its owner writes a grief diary entry.
+                           Unowned animals never decline. Default 2.
+      pet_feed_amount    — Wave H4 / EM-209: energy restored when a co-located agent
+                           feeds an owned pet (feed_pet action; no credits move).
+                           Default 25.
     """
     enabled: bool = False
     act_every_n_ticks: int = 3
     llm_chance: float = 0.25
     model_profile: str = ""
+    max_population: int = 0
+    ambient_spawn_every: int = 0
+    ambient_spawn_chance: float = 0.0
+    pet_energy_decay: int = 2
+    pet_feed_amount: int = 25
 
 
 @dataclass
@@ -843,6 +869,7 @@ def _parse_buildings(raw: dict | None) -> BuildingParams:
         arson_damage=int(raw.get("arson_damage", d.arson_damage)),
         forage_bonus=int(raw.get("forage_bonus", d.forage_bonus)),
         work_bonus_pct=int(raw.get("work_bonus_pct", d.work_bonus_pct)),
+        zoo_capacity=max(0, int(raw.get("zoo_capacity", d.zoo_capacity))),
     )
 
 
@@ -874,11 +901,38 @@ def _parse_animals(raw: dict | None) -> AnimalParams:
     if not isinstance(raw, dict):
         return AnimalParams()
     d = AnimalParams()
+
+    def _ambient_every() -> int:
+        # Wave H2 / EM-207 — 0 = OFF (the backward-compatible default); clamp >= 0.
+        try:
+            return max(0, int(raw.get("ambient_spawn_every", d.ambient_spawn_every)))
+        except (TypeError, ValueError):
+            return d.ambient_spawn_every
+
+    def _ambient_chance() -> float:
+        try:
+            return min(1.0, max(0.0, float(
+                raw.get("ambient_spawn_chance", d.ambient_spawn_chance))))
+        except (TypeError, ValueError):
+            return d.ambient_spawn_chance
+
+    def _nonneg_int(key: str, default: int) -> int:
+        # Wave H4 / EM-209 — clamp >= 0 (a malformed value never breaks the block).
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
     return AnimalParams(
         enabled=bool(raw.get("enabled", d.enabled)),
         act_every_n_ticks=max(1, int(raw.get("act_every_n_ticks", d.act_every_n_ticks))),
         llm_chance=float(raw.get("llm_chance", d.llm_chance)),
         model_profile=str(raw.get("model_profile", d.model_profile) or ""),
+        max_population=max(0, int(raw.get("max_population", d.max_population))),
+        ambient_spawn_every=_ambient_every(),
+        ambient_spawn_chance=_ambient_chance(),
+        pet_energy_decay=_nonneg_int("pet_energy_decay", d.pet_energy_decay),
+        pet_feed_amount=_nonneg_int("pet_feed_amount", d.pet_feed_amount),
     )
 
 

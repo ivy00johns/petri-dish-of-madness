@@ -339,6 +339,12 @@ class Animal:
     mood: str = "content"
     alive: bool = True
     created_tick: int = 0
+    # Wave H4 / EM-209 — pets & bonds. When an agent ADOPTS a co-located animal,
+    # owner_id is set to that agent's id (the ONLY bond — pets do NOT enter the
+    # agent↔agent relationship/trust edge model). An owned pet FOLLOWS its owner,
+    # DECLINES if not fed, and on death the owner writes a GRIEF diary entry. An
+    # unowned animal (owner_id None) wanders freely as before.
+    owner_id: str | None = None
     # Optional flavour from the seed config, fed into the animal's role card. NOT
     # part of the contract Animal shape but harmless additive metadata.
     personality: str = ""
@@ -353,6 +359,7 @@ class Animal:
             "mood": self.mood,
             "alive": self.alive,
             "created_tick": self.created_tick,
+            "owner_id": self.owner_id,
         }
 
 
@@ -1070,6 +1077,47 @@ class World:
         return True, "ok", amount
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Wave H4 / EM-209 — pets & bonds. owner_id is the ONLY bond: adopting a
+    # co-located animal sets it (no credits move, no agent↔agent edge touched);
+    # feeding restores an owned pet's energy. The FOLLOW / DECLINE / GRIEF beats
+    # live in animals/runtime.py (reflex-first, deterministic, replay-safe).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_adopt(self, agent: AgentState, animal_id: str) -> tuple[bool, str]:
+        """An agent ADOPTS a co-located, living, currently-unowned animal: sets
+        animal.owner_id = agent.id. No credits move (invariant 7). The validator
+        front-loads the same gates; this stays safe if called directly."""
+        animal = self.animals.get(animal_id)
+        if animal is None:
+            return False, "no such animal"
+        if not animal.alive:
+            return False, f"{animal.name} is not alive"
+        if animal.location != agent.location:
+            return False, f"{animal.name} is not here"
+        if animal.owner_id:
+            if animal.owner_id == agent.id:
+                return False, f"you already own {animal.name}"
+            return False, f"{animal.name} already has an owner"
+        animal.owner_id = agent.id
+        return True, "ok"
+
+    def action_feed_pet(self, agent: AgentState, animal_id: str) -> tuple[bool, str]:
+        """A co-located agent FEEDS an animal: restores energy (and lifts mood) by
+        the configured pet_feed_amount. No credits move (invariant 7). Any co-located
+        agent may feed — sustaining an owned pet does not require ownership."""
+        animal = self.animals.get(animal_id)
+        if animal is None:
+            return False, "no such animal"
+        if not animal.alive:
+            return False, f"{animal.name} is not alive"
+        if animal.location != agent.location:
+            return False, f"{animal.name} is not here"
+        amount = int(getattr(getattr(self.params, "animals", None), "pet_feed_amount", 25) or 0)
+        animal.energy = min(100, int(animal.energy) + amount)
+        animal.mood = "content"
+        return True, "ok"
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Social actions
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1687,7 +1735,7 @@ class World:
         building.status = "operational"
         building.health = 100
         building.updated_tick = self.tick
-        return [
+        events = [
             self._structure_state_changed_event(
                 building, "under_construction", "operational", reason, actor_id),
             {
@@ -1704,6 +1752,60 @@ class World:
                 },
             },
         ]
+        # Wave H3 / EM-208 — a ZOO auto-stocks with animals the moment it opens.
+        # ADDITIVE + GUARDED: this hook fires ONLY for kind=="zoo"; every non-zoo
+        # completion returns the SAME two events as before (byte-identical). The
+        # stock is deterministic (seed off the building id + index) so a replay /
+        # a re-completion of the same building id yields the identical menagerie.
+        if building.kind == "zoo":
+            events.extend(self._stock_zoo(building, actor_id))
+        return events
+
+    def _stock_zoo(self, building: Building, actor_id: str | None) -> list[dict]:
+        """Wave H3 / EM-208 — populate a freshly-operational zoo. Spawns up to
+        buildings.zoo_capacity catalog critters AT the zoo's place (housing =
+        the same place), DETERMINISTICALLY (each pick seeds off the building id +
+        an index via the runtime _seed_int — NO wall-clock / NO RNG), honoring
+        the overall animals.max_population. Emits one animal_spawned with
+        payload.method "zoo_stock" per spawned animal. Returns the event list
+        (empty when the cap is already met or zoo_capacity is 0). Reuses
+        spawn_random_animal then forces the new animal's location to the zoo."""
+        # Import the seeded-hash helper here (not at module top) so engine.world
+        # keeps its zero animal-runtime import dependency, matching
+        # spawn_random_animal's catalog import.
+        from ..animals.runtime import _seed_int
+        capacity = int(self._bld_param("zoo_capacity", 5) or 0)
+        if capacity <= 0:
+            return []
+        events: list[dict] = []
+        for i in range(capacity):
+            seed = _seed_int("zoo_stock", building.id, i)
+            try:
+                animal = self.spawn_random_animal(seed)
+            except ValueError:
+                # animals.max_population reached — stop stocking (no spam).
+                break
+            if animal is None:
+                break  # no place to put it (empty world)
+            # Housing = the zoo's place: the critter lives AT the zoo, overriding
+            # the seed-derived place spawn_random_animal picked.
+            animal.location = building.location
+            events.append({
+                "kind": "animal_spawned",
+                "actor_id": animal.id,
+                "actor_type": "animal",
+                "text": f"{animal.name} the {animal.species} is brought to "
+                        f"{building.name}.",
+                "payload": {
+                    "animal_id": animal.id,
+                    "species": animal.species,
+                    "name": animal.name,
+                    "location": animal.location,
+                    "method": "zoo_stock",
+                    "building_id": building.id,
+                },
+            })
+        return events
 
     def action_repair(self, agent: AgentState, building_id: str) -> dict:
         """Restore health to 100; damaged/offline -> operational."""
@@ -2989,7 +3091,17 @@ class World:
         personality: str = "",
     ) -> Animal:
         """Create an Animal and register it in world.animals. Returns the Animal.
-        Location is clamped to a known place when possible. No credits (invariant 7)."""
+        Location is clamped to a known place when possible. No credits (invariant 7).
+
+        EM-143 — population cap (free-scale): when the configured
+        animals.max_population > 0 and living animals already meet it, raise
+        ValueError so the menagerie can't grow without bound (the API surfaces it
+        as 409). Read defensively off self.params.animals.max_population so a world
+        without the animals block (or the key) is unaffected (0 = unlimited)."""
+        animals_cfg = getattr(self.params, "animals", None)
+        max_population = int(getattr(animals_cfg, "max_population", 0) or 0)
+        if max_population > 0 and len(self.living_animals()) >= max_population:
+            raise ValueError(f"animal population cap reached: {max_population}")
         if location not in self.places and self.places:
             location = next(iter(self.places))
         animal_id = f"animal_{name.lower()}_{str(uuid.uuid4())[:6]}"
@@ -3007,6 +3119,156 @@ class World:
 
     def living_animals(self) -> list[Animal]:
         return [a for a in self.animals.values() if a.alive]
+
+    def spawn_random_animal(self, seed: int) -> Animal | None:
+        """Wave H2 / EM-207 — spawn ONE random catalog critter at a random existing
+        place, picked DETERMINISTICALLY from `seed` (a caller-supplied seeded hash —
+        no wall-clock, no RNG source — so ambient growth + rewild bursts replay
+        identically). Returns the new Animal, or None when there is no place to put
+        it. Honors the SAME max_population cap as spawn_animal (raises ValueError at
+        the cap so callers can pre-check or catch it). The species + place + name are
+        a pure function of `seed`, so a fixed seed always yields the same critter."""
+        # Import here (not at module top) so engine.world keeps zero animal-runtime
+        # import dependency — the catalog is the single source of truth (EM-143).
+        from ..animals.runtime import ANIMAL_SPECIES_CATALOG
+        species_pool = sorted(ANIMAL_SPECIES_CATALOG)
+        place_pool = sorted(self.places.keys())
+        if not species_pool or not place_pool:
+            return None
+        species = species_pool[seed % len(species_pool)]
+        location = place_pool[(seed // max(1, len(species_pool))) % len(place_pool)]
+        # A short deterministic name suffix so a burst of rewilds reads distinctly
+        # in the feed (names need not be unique — only agent names dedupe).
+        suffix = format(seed % (16 ** 4), "04x")
+        name = f"{species.capitalize()} {suffix}"
+        return self.spawn_animal(species=species, name=name, location=location)
+
+    def cull_animals(self, keep: int = 5) -> list[dict]:
+        """Wave H follow-on — THIN THE HERD: reduce LIVING animals down to `keep`,
+        keeping the OLDEST of each distinct species first (the seed cat & dog at
+        created_tick 0 lead, then species variety), removing the rest. Each removed
+        animal is set alive=False and emits an `animal_died` (payload.method
+        'culled') so it leaves the live feed/scene like any death. Deterministic
+        (sorted by created_tick then id). No credits, no LLM. Returns the events;
+        empty when already at/under `keep`."""
+        keep = max(0, int(keep))
+        living = sorted(self.living_animals(), key=lambda a: (a.created_tick, a.id))
+        if len(living) <= keep:
+            return []
+        keepers: list[str] = []          # animal ids
+        seen_species: set[str] = set()
+        # variety-first: the oldest of each distinct species, up to `keep`.
+        for a in living:
+            if a.species not in seen_species and len(keepers) < keep:
+                keepers.append(a.id)
+                seen_species.add(a.species)
+        # fill remaining slots with the next-oldest animals.
+        for a in living:
+            if len(keepers) >= keep:
+                break
+            if a.id not in keepers:
+                keepers.append(a.id)
+        keeper_ids = set(keepers)
+        events: list[dict] = []
+        for a in living:
+            if a.id in keeper_ids:
+                continue
+            a.alive = False
+            events.append({
+                "kind": "animal_died",
+                "actor_id": a.id,
+                "actor_type": "animal",
+                "text": f"{a.name} the {a.species} slips away beyond the town.",
+                "payload": {
+                    "animal_id": a.id,
+                    "species": a.species,
+                    "name": a.name,
+                    "method": "culled",
+                },
+            })
+        return events
+
+    def trigger_zoo_escape(self, zoo_building_id: str | None = None) -> list[dict]:
+        """Wave H3 / EM-208 — THE ESCAPE: a god-triggered breakout where the zoo
+        animals scatter into the city causing chaos. For each OPERATIONAL zoo
+        building (or only the named one when zoo_building_id is given), find the
+        living animals housed AT the zoo's place and RELOCATE each to a random
+        OTHER place — picked DETERMINISTICALLY (seed off the animal id + the
+        current tick via the runtime _seed_int; NO wall-clock / NO RNG, so the
+        breakout replays identically). Emits, per zoo with escapees, one
+        `random_event` (actor_type "system", is_chaotic True, the dramatic
+        "ESCAPE! N animals break loose from {zoo.name}!" line) FIRST, then one
+        is_chaotic `animal_action`{action:"escape", from_place, to_place} per
+        escapee. No-op (empty list) when there is no operational zoo or no housed
+        animals to free. Returns the ready-to-emit event list (the caller — the
+        loop / the god endpoint — emits + broadcasts)."""
+        from ..animals.runtime import _seed_int
+        # Determine the target zoos: operational kind=="zoo" buildings, sorted by
+        # id for a deterministic order. A named id narrows to that one (and only
+        # if it is itself an operational zoo).
+        zoos = sorted(
+            (b for b in self.buildings.values()
+             if b.kind == "zoo" and b.status == "operational"),
+            key=lambda b: b.id,
+        )
+        if zoo_building_id is not None:
+            zoos = [b for b in zoos if b.id == zoo_building_id]
+        events: list[dict] = []
+        place_ids = sorted(self.places.keys())
+        for zoo in zoos:
+            housed = sorted(
+                (a for a in self.living_animals() if a.location == zoo.location),
+                key=lambda a: a.id,
+            )
+            if not housed:
+                continue
+            # The places an animal could flee TO: every place that is NOT the zoo.
+            # With no other place there is nowhere to run — skip this zoo (no-op).
+            others = [p for p in place_ids if p != zoo.location]
+            if not others:
+                continue
+            escape_events: list[dict] = []
+            for animal in housed:
+                from_place = animal.location
+                seed = _seed_int("zoo_escape", animal.id, self.tick)
+                to_place = others[seed % len(others)]
+                animal.location = to_place
+                escape_events.append({
+                    "kind": "animal_action",
+                    "actor_id": animal.id,
+                    "actor_type": "animal",
+                    "target_id": None,
+                    "is_chaotic": True,
+                    "text": f"{animal.name} the {animal.species} bolts from "
+                            f"{zoo.name} and scatters into the city!",
+                    "payload": {
+                        "species": animal.species,
+                        "name": animal.name,
+                        "action": "escape",
+                        "from_place": from_place,
+                        "to_place": to_place,
+                        "building_id": zoo.id,
+                    },
+                })
+            # The dramatic banner leads, then each critter's escape line.
+            events.append({
+                "kind": "random_event",
+                "actor_id": None,
+                "actor_type": "system",
+                "target_id": None,
+                "turn_id": None,
+                "is_chaotic": True,
+                "text": f"ESCAPE! {len(escape_events)} animals break loose "
+                        f"from {zoo.name}!",
+                "payload": {
+                    "event": "zoo_escape",
+                    "building_id": zoo.id,
+                    "zoo_name": zoo.name,
+                    "escaped": len(escape_events),
+                },
+            })
+            events.extend(escape_events)
+        return events
 
     # EM-134 — per-building animal-damage cooldown: a building an animal damaged
     # within the last N ticks cannot lose health to an animal again (the same
@@ -3321,6 +3583,7 @@ class World:
                 mood=str(d.get("mood", "content")),
                 alive=bool(d.get("alive", True)),
                 created_tick=_int(d.get("created_tick")),
+                owner_id=(str(d["owner_id"]) if d.get("owner_id") else None),
             )
             world.animals[an.id] = an
 

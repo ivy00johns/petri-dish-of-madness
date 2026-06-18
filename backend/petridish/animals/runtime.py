@@ -102,8 +102,11 @@ _LOW_PRIOR = frozenset({"mark_territory"})  # mildly anti-social / off-distribut
 # (wander / nap / idle); the destructive options (knock_over) are rare so the
 # free-scale, zero-LLM path stays low-chaos and the LLM path supplies the spice.
 # Per-species so the cat and dog feel different (cats knock things over + scratch;
-# dogs chase + pounce). NOTE: reflex NEVER picks arson/steal_food — those absurd
-# escalations are LLM-only (the under-constrained toolset).
+# dogs chase + pounce). NOTE: reflex NEVER picks arson — that absurd escalation is
+# LLM-only (the under-constrained toolset). EM-143: the thief species (raccoon /
+# fox / crow) DO carry steal_food in their reflex table — it is their defining
+# chaos flavor, moves NO credits (invariant 7, see _apply), and is the comedic
+# snack-swipe, not arson.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _REFLEX_TABLE: dict[str, list[tuple[str, int]]] = {
@@ -124,6 +127,47 @@ _REFLEX_TABLE: dict[str, list[tuple[str, int]]] = {
         ("scratch", 1),
         ("mark_territory", 2),
         ("idle", 2),
+    ],
+    # EM-143 — the expanded menagerie. Each species' reflex weighting expresses its
+    # "chaos flavor" using ONLY the existing reflex verbs (no new action types).
+    "squirrel": [          # skittish hoarder: wander/pounce/nap heavy, light marking
+        ("wander", 5),
+        ("pounce", 4),
+        ("nap", 4),
+        ("idle", 2),
+        ("scratch", 1),
+        ("mark_territory", 1),
+    ],
+    "raccoon": [           # ransacker/thief: knock_over heavy + steal_food + marking
+        ("knock_over", 5),
+        ("steal_food", 3),
+        ("mark_territory", 3),
+        ("wander", 3),
+        ("scratch", 1),
+        ("idle", 1),
+    ],
+    "goat": [              # stubborn grazer: wander/scratch/mark + headbutt pounce
+        ("wander", 5),
+        ("scratch", 3),
+        ("mark_territory", 3),
+        ("pounce", 3),
+        ("nap", 1),
+        ("idle", 1),
+    ],
+    "fox": [               # cunning raider: chase/steal_food/pounce heavy
+        ("chase", 5),
+        ("steal_food", 4),
+        ("pounce", 4),
+        ("wander", 2),
+        ("nap", 1),
+        ("idle", 1),
+    ],
+    "crow": [              # thieving trickster: steal_food heavy + wander + swoop
+        ("steal_food", 5),
+        ("wander", 4),
+        ("pounce", 4),
+        ("knock_over", 2),
+        ("idle", 1),
     ],
 }
 # Fallback table for an unknown species (still deterministic, still tame).
@@ -181,7 +225,64 @@ _ROLE_CARDS: dict[str, dict[str, Any]] = {
             "snacks", "mark your favourite spots", "mean well, even mid-disaster",
         ],
     },
+    # EM-143 — the expanded menagerie. Distinct sensory + drives prose per species.
+    "squirrel": {
+        "sensory": "You experience the world as a squirrel: a russet-brown blur of "
+                   "twitching nerves and bottomless cheeks, certain that every nut, "
+                   "crumb, and shiny scrap must be hoarded RIGHT NOW or lost forever.",
+        "drives": [
+            "dart and freeze and dart again", "hoard anything that fits in your cheeks",
+            "pounce on a falling acorn", "nap in a sunlit fork of a branch",
+            "trust no one, suspect everyone",
+        ],
+    },
+    "raccoon": {
+        "sensory": "You experience the world as a raccoon: a grey bandit in a pale "
+                   "mask, clever little hands itching to pry open, tip over, and "
+                   "rifle through every latch, lid, and bin you can reach.",
+        "drives": [
+            "knock things over to see what spills", "wash and steal a stranger's snack",
+            "ransack anything with a lid", "leave your scent on what you've claimed",
+            "be gone before anyone catches you",
+        ],
+    },
+    "goat": {
+        "sensory": "You experience the world as a goat: tan and cream and supremely "
+                   "stubborn, jaw forever working, eyeing every fence, shrub, and "
+                   "unattended hat as a thing to either eat or headbutt.",
+        "drives": [
+            "graze on whatever you please", "scratch against any handy post",
+            "headbutt what offends you", "claim ground by standing on it",
+            "refuse, on principle, to be moved",
+        ],
+    },
+    "fox": {
+        "sensory": "You experience the world as a fox: a flame of orange-red with a "
+                   "white-tipped tail, all cunning and patience, reading every gap and "
+                   "blind spot for the perfect moment to raid and vanish.",
+        "drives": [
+            "stalk and chase the unwary", "snatch food with a sly pounce",
+            "raid, then slip away unseen", "outwit anything bigger than you",
+            "trust your nose over any rule",
+        ],
+    },
+    "crow": {
+        "sensory": "You experience the world as a crow: near-black with a sheen of "
+                   "grey, sharp-eyed and sharper-witted, hoarding bright trinkets and "
+                   "swooping on anything edible left a moment unguarded.",
+        "drives": [
+            "swoop on an unguarded snack", "pocket anything that glitters",
+            "trick and tease the slow-witted", "wander rooftop to ledge",
+            "remember every face that wronged you",
+        ],
+    },
 }
+
+# EM-143 — the canonical species catalog (the role-card keys). Single source of
+# truth for spawn validation (api/app.py imports it) and export. The frontend
+# species list MUST match this set verbatim: cat, dog, squirrel, raccoon, goat,
+# fox, crow.
+ANIMAL_SPECIES_CATALOG: frozenset[str] = frozenset(_ROLE_CARDS.keys())
 
 
 def _role_card(animal: Animal) -> dict[str, Any]:
@@ -294,7 +395,19 @@ class AnimalRuntime:
     def _reflex_action(self, animal: Animal, tick: int) -> dict:
         """Pick a reflex micro-behavior from the weighted table via a SEEDED hash of
         (animal.id + tick). Deterministic; ZERO router calls. Returns an
-        animal-action-shaped dict {action, args, animal_thought, mood?}."""
+        animal-action-shaped dict {action, args, animal_thought, mood?}.
+
+        Wave H4 / EM-209 — FOLLOW: an OWNED pet whose owner is alive but elsewhere
+        ALWAYS chooses `wander` this turn — and `_wander` snaps the pet to its
+        owner's place (the trailing-companion beat). When the pet is already at the
+        owner's side, it picks normally (naps, sniffs around) so it still has life."""
+        owner = self._owner_of(animal)
+        if owner is not None and owner.location != animal.location:
+            return {
+                "action": "wander",
+                "args": {},
+                "animal_thought": self._reflex_thought(animal, "wander"),
+            }
         table = _REFLEX_TABLE.get(animal.species, _REFLEX_TABLE_DEFAULT)
         seed = _seed_int("reflex", animal.id, tick)
         action = _weighted_pick(table, seed)
@@ -314,7 +427,7 @@ class AnimalRuntime:
             target = self._pick_colocated_building(animal, seed) \
                 or self._pick_colocated_agent(animal, seed)
             return {"target": target} if target else {}
-        if action in ("scratch", "pounce", "chase"):
+        if action in ("scratch", "pounce", "chase", "steal_food"):
             target = self._pick_colocated_agent(animal, seed) \
                 or self._pick_colocated_building(animal, seed)
             return {"target": target} if target else {}
@@ -342,8 +455,55 @@ class AnimalRuntime:
             return None
         return candidates[seed % len(candidates)]
 
-    @staticmethod
-    def _reflex_thought(animal: Animal, action: str) -> str:
+    # EM-143 — per-species reflex flavour lines. A species with an entry here
+    # wins; otherwise the cat/dog defaults below apply (cat keys off species=="cat").
+    _SPECIES_REFLEX_LINES: dict[str, dict[str, str]] = {
+        "squirrel": {
+            "nap": "Curled in a sunlit fork. ...for now.",
+            "wander": "Dart. Freeze. Dart. Where was that acorn?",
+            "scratch": "Mine. This bark is mine.",
+            "mark_territory": "This stash is MINE. All of it.",
+            "pounce": "ACORN! ...got it. got it!",
+            "idle": "...is something watching me?",
+        },
+        "raccoon": {
+            "knock_over": "What's in here? *clatter* ...oops.",
+            "steal_food": "I'll just... wash this. and keep it.",
+            "mark_territory": "Bandit was here.",
+            "wander": "So many lids. So little time.",
+            "scratch": "Pry it. PRY it open.",
+            "idle": "...nothing to see here, officer.",
+        },
+        "goat": {
+            "wander": "Grass over there looks better. Probably.",
+            "scratch": "This post will do nicely.",
+            "mark_territory": "I stand here. Therefore it is mine.",
+            "pounce": "HEADBUTT. No reason. Good reason.",
+            "nap": "Done. For now. Don't push me.",
+            "idle": "...no. I will not move.",
+        },
+        "fox": {
+            "chase": "Patience... now. GO.",
+            "steal_food": "Yours? It was. Past tense.",
+            "pounce": "Snatch — and gone.",
+            "wander": "Just reading the gaps. The blind spots.",
+            "nap": "One eye open. Always.",
+            "idle": "...mm. Not yet. Soon.",
+        },
+        "crow": {
+            "steal_food": "Unguarded? Then it's mine now.",
+            "wander": "Rooftop to ledge to rooftop.",
+            "pounce": "Swoop! ...shiny.",
+            "knock_over": "Hm. What happens if I... *tip*",
+            "idle": "I remember your face.",
+        },
+    }
+
+    @classmethod
+    def _reflex_thought(cls, animal: Animal, action: str) -> str:
+        species_lines = cls._SPECIES_REFLEX_LINES.get(animal.species)
+        if species_lines and action in species_lines:
+            return species_lines[action]
         cat = animal.species == "cat"
         lines = {
             "nap": "A warm spot. Nothing else matters." if cat else "Zoomies later. Nap now.",
@@ -353,6 +513,7 @@ class AnimalRuntime:
             "mark_territory": "Mine. All of it. Mine.",
             "pounce": "It moved. It must be pounced." if cat else "GOT IT! ... got what?",
             "chase": "Hunt." if cat else "BALL? STICK? PERSON? everything is the best thing!",
+            "steal_food": "Snack acquired. No regrets.",
             "idle": "...",
         }
         return lines.get(action, "...")
@@ -645,9 +806,29 @@ class AnimalRuntime:
         if agent is not None and getattr(agent, "alive", False):
             agent.mood = "ruffled"
 
+    def _owner_of(self, animal: Animal) -> Any | None:
+        """Wave H4 / EM-209 — the living owner of an OWNED pet, or None. An owned
+        pet whose owner is dead or gone (owner_id dangling) reverts to wandering."""
+        owner_id = getattr(animal, "owner_id", None)
+        if not owner_id:
+            return None
+        owner = self.world.agents.get(owner_id)
+        if owner is None or not getattr(owner, "alive", False):
+            return None
+        return owner
+
     def _wander(self, animal: Animal) -> None:
         """Deterministically shuffle the animal to a connected place (any other
-        known place), seeded — no RNG, reproducible. Stays put if alone in the map."""
+        known place), seeded — no RNG, reproducible. Stays put if alone in the map.
+
+        Wave H4 / EM-209 — FOLLOW: an OWNED pet (owner_id set, owner alive) does
+        NOT wander randomly — it trails its owner, snapping its location to the
+        owner's place. Zero LLM, deterministic, replay-safe. An unowned animal (or
+        one whose owner died / vanished) wanders as before."""
+        owner = self._owner_of(animal)
+        if owner is not None:
+            animal.location = owner.location
+            return
         place_ids = sorted(self.world.places.keys())
         others = [p for p in place_ids if p != animal.location]
         if not others:
@@ -803,4 +984,67 @@ class AnimalRuntime:
             extra_event["is_chaotic"] = is_chaotic
             events.append(extra_event)
 
+        # Wave H4 / EM-209 — DECLINE + DEATH + GRIEF. An OWNED pet loses a gentle
+        # amount of energy each of its turns; at energy 0 it dies and its owner
+        # writes a GUARANTEED grief diary entry. Deterministic, zero LLM. Done
+        # LAST so the death/grief events trail the pet's own action this turn.
+        events.extend(self._apply_owned_pet_decline(animal, tick))
+
+        return events
+
+    # ── Wave H4 / EM-209 — owned-pet decline / death / grief ───────────────────
+
+    def _pet_decay(self) -> int:
+        """Energy an owned pet loses per turn (config animals.pet_energy_decay,
+        default 2). Defensive: an absent block or malformed value -> the default."""
+        animals_cfg = getattr(self.world.params, "animals", None)
+        try:
+            return max(0, int(getattr(animals_cfg, "pet_energy_decay", 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    def _apply_owned_pet_decline(self, animal: Animal, tick: int) -> list[dict]:
+        """Drain an OWNED, living pet's energy by the configured decay and, when it
+        hits 0, kill it (alive=False) and emit BOTH an `animal_died` event (tagged
+        with the owner so the owner witnesses + their reflection accumulator gets
+        the pet_death boost) AND a `reflection` event ATTRIBUTED TO THE OWNER (the
+        guaranteed grief diary entry). Unowned animals never decline — returns []."""
+        owner = self._owner_of(animal)
+        if owner is None or not animal.alive:
+            return []
+        decay = self._pet_decay()
+        if decay <= 0:
+            return []
+        animal.energy = max(0, int(animal.energy) - decay)
+        if animal.energy > 0:
+            return []
+        # The pet has died of neglect.
+        animal.alive = False
+        animal.mood = "gone"
+        events: list[dict] = []
+        events.append({
+            "kind": "animal_died",
+            "actor_id": animal.id,
+            "actor_type": "animal",
+            "target_id": owner.id,  # the owner witnesses it (push_event)
+            "text": f"{animal.name} the {animal.species} has died.",
+            "payload": {
+                "species": animal.species,
+                "name": animal.name,
+                "cause": "neglect",
+                "owner_id": owner.id,
+                "place": animal.location,
+            },
+        })
+        # THE BEAT — a GUARANTEED grief diary entry attributed to the OWNER. Matches
+        # the agent reflection event shape (kind:"reflection", payload{text,
+        # importance}) so the diary renders it identically to a self-authored entry.
+        grief = (f"{owner.name} mourns {animal.name}, the {animal.species} "
+                 f"who followed them since they met.")
+        events.append({
+            "kind": "reflection",
+            "actor_id": owner.id,
+            "text": f"{owner.name} reflects: \"{grief}\"",
+            "payload": {"text": grief, "importance": 4.0, "pet_death": True},
+        })
         return events

@@ -319,7 +319,30 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-208 | P2 | W19 | backend+frontend | Wave H · H3 | **The Living Zoo — a civic institution**: a Zoo place-kind agents fund→build via the collective-project pipeline (EM-062) as a zoned district (EM-123), housing animals; the marquee dynamic is the **ESCAPE** (a breakout chaos event — animals loose in the city during a festival → mayhem, chronicle gold). Light visiting → chat/mood material. Upkeep/zookeeper economy DEFERRED (texture, not a management sim). Reuses EM-062 pipeline, EM-122 buildings-per-kind, EM-123 zoning. Deps EM-143, EM-207. | open | — |
 | EM-209 | P2 | W19 | backend+frontend | Wave H · H4 | **Pets & Bonds — companionship**: an agent ADOPTS an animal that follows them in 3D; the pet factors into relationships (EM-113) + reflections (EM-125); LIGHT decline if ignored; pet loss → a grief diary entry (the "Vesper adopts a cat, it trails her across the plaza, and when it dies she writes about it" beat). Reuses EM-113/125 + reflex following + H1 species. Heavy pet-needs/feeding economy DEFERRED. Deps EM-143. May ship BEFORE the zoo. | open | — |
 
-_Next free ID: EM-210._
+### Wave I — The Atelier (generative assets; researched 2026-06-16)
+
+> The agents make ART for their own town: generate images on FREE models, share them, VOTE, and the
+> winners REPLACE generic 3D assets with their creations. **Research (2026-06-16):** image gen is NOT on
+> the FreeLLMAPI proxy (text-only; `/images/generations` → 404) — use **Cloudflare Workers AI**
+> (`flux-1-schnell`, ~10k req/day free, base64) with **Pollinations.ai** (no-key URL) as fallback; the
+> `nano-banana` skill (Gemini image) is also wired in this environment. Lowest-effort visible payoff:
+> texture the NoticeBoard's existing blank paper plane via drei `useTexture`. Sharing reuses the billboard
+> (EM-091); voting reuses governance (EM-015/087); the winner sets a `plaza_banner_ref` a banner mesh
+> reads. **Net-new infra = ONE StaticFiles mount (`/assets` → `data/assets/`) + ONE background-task
+> scheduler** (narrator/animal pattern — gen runs OFF the agent critical path, rate-limited; free-scale
+> holds). Build image-first; audio is a stretch.
+
+| EM-210 | P2 | W20 | backend+frontend | Wave I · I1 | **Image-gen foundation** — a reflex `create_image(prompt)` (prompt rides the turn, zero invoke-LLM) parks a BACKGROUND gen task (Cloudflare Workers AI flux-1-schnell / Pollinations fallback / nano-banana) that writes `data/assets/images/<id>.png`, served via a new `/assets` StaticFiles mount, and emits an `image_posted` event. First visible: the NoticeBoard paper plane renders the newest image as a `useTexture` map. "See what they create." Off-critical-path (skips not queues; never stalls a tick). | open | — |
+| EM-211 | P2 | W20 | backend+frontend | Wave I · I2 | **Sharing & reactions** — a `post_image` reflex (sibling of `post_billboard`, @plaza-gated) so agents post + perceive each other's art (image_ref rides the billboard snapshot); surface reactions/co-location so collaboration signals emerge ("see if collaborations occur"). Deps EM-210. | open | — |
+| EM-212 | P2 | W20 | backend+frontend | Wave I · I3 | **Vote-to-promote** — a `promote_image` governance effect (reuse propose_rule/vote/`_evaluate_rule` strict-majority + rule events) crowns winning images → a town "gallery". Relax the one-open-proposal-per-effect guard so multiple images contend. v1 = per-image pass/fail majority (ranked N-of-1 is the only NEW logic — deferred). Deps EM-210, EM-211. | open | — |
+| EM-213 | P2 | W20 | frontend+backend | Wave I · I4 | **Asset replacement (the killer demo)** — a voted-winning image becomes a REAL 3D asset: an `_on_rule_activated` promote_image branch sets `plaza_banner_ref`; a textured banner/decal mesh (planeGeometry + meshToonMaterial `map`) on a building face / over the plaza renders it, REPLACING the generic asset. "Agents redesign their own town." Deps EM-212. | open | — |
+| EM-214 | P3 | W20 | backend+frontend | Wave I · I5 (stretch) | **Voices / audio** — agent spoken lines via the browser **Web Speech API** ($0, client-side, no network) for v1; free SFX/music gen is NOT mature (slow, GPU-bound) → DEFERRED. Optional cloud TTS (Google free tier) only if server-side audio files are ever wanted. | open | — |
+
+### Wave J — Inner life (the Diary; user 2026-06-16)
+
+| EM-215 | P2 | W20 | frontend+backend | user 2026-06-16 | **The Diary — a per-agent inner-life UI** — reflections (EM-080, `reflection {text, importance}`) today only appear as a "Diary" FILTER on the shared event feed (EventFeed.tsx:330). Give each agent a dedicated DIARY view — their private reflections over time, chronologically — the individual cousin to the town-saga Chronicle (EM-201). **Needs deeper exploration first**: is the EM-080 reflection cadence/quality rich enough, or bump the importance triggers? Then a UI (a per-agent diary panel/tab, or a diary lane in the agent panel/inspector). Pairs with pet-grief diary entries (EM-209) + the Chronicle. | open | — |
+
+_Next free ID: EM-216._
 
 ## Notes
 

@@ -23,6 +23,7 @@
 import { useMemo } from 'react';
 import type { Agent, Animal, FocusTarget, WorldEvent, WorldState } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
+import { speciesEmoji } from '../world3d/worldSpace';
 // Declares the --rel-* relationship registers (plus reuses the shared :root
 // tokens WorldMap/inspector already declare) — token-only colors, no literals.
 import './roster-tokens.css';
@@ -293,7 +294,12 @@ function CritterCard({
   onSelect: (t: FocusTarget | null) => void;
 }) {
   const placeName = world.places.find((p) => p.id === animal.location)?.name ?? animal.location;
-  const emoji = animal.species === 'cat' ? '🐱' : '🐶';
+  const emoji = speciesEmoji(animal.species);
+  // Wave H4 (EM-209): resolve the owner name when this pet is owned by a
+  // living agent. Absent owner_id or a dead/missing owner ⇒ no bond line.
+  const ownerAgent = animal.owner_id
+    ? world.agents.find((a) => a.id === animal.owner_id && a.alive)
+    : undefined;
 
   return (
     <StripCard
@@ -364,6 +370,19 @@ function CritterCard({
             ▸ {placeName}
           </span>
         </div>
+
+        {/* Row 4 (Wave H4 EM-209): bond indicator — only when owned by a
+            living agent. Uses lab-* tokens only (token-guard compliant). */}
+        {ownerAgent && (
+          <div className="mt-1">
+            <span
+              className="font-mono text-[9px] text-lab-muted truncate block"
+              title={`Adopted by ${ownerAgent.name}`}
+            >
+              🔗 {ownerAgent.name}{"'"}s pet
+            </span>
+          </div>
+        )}
       </div>
     </StripCard>
   );

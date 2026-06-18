@@ -17,6 +17,14 @@ import type { WorldState, ModelProfile, Rule, SpawnSpec, SpawnMode, Agent } from
 import { PersonaPicker, usePersonaLibrary } from './PersonaPicker';
 import { inspectorApi } from '../../inspector/api';
 import type { PersonaRow, GodMiracleKind } from '../../inspector/api';
+import { AnimalSpawnForm } from './AnimalSpawnForm';
+import type { AnimalSpawnSpec } from './AnimalSpawnForm';
+// Token sources for the dynamic inline colors below (STATE row reads
+// --rel-ally / --lab-warn / --lab-text; the reassign swatch falls back to the
+// neutral). Imported here so these vars resolve no matter the mount order —
+// design-token-guard stays clean (no hardcoded hex in this module).
+import '../../inspector/inspector-tokens.css';
+import '../panels/roster-tokens.css';
 
 interface ControlPanelProps {
   world: WorldState | null;
@@ -30,6 +38,18 @@ interface ControlPanelProps {
   onInject: (kind?: string) => void;
   /** Ad-hoc spawn (W7 EM-063): god (immediate) or governance (proposal). */
   onSpawn: (spec: SpawnSpec) => void;
+  /** EM-143: spawn an animal from the MENAGERIE god panel. */
+  onSpawnAnimal: (spec: AnimalSpawnSpec) => void;
+  /**
+   * EM-207 H2: REWILD burst — spawn count random catalog critters. Returns
+   * {spawned, cap_reached} so the panel can flash a confirmation.
+   */
+  onRewild: (count?: number) => Promise<{ spawned: number; cap_reached: boolean }>;
+  /**
+   * EM-208 H3: ZOO ESCAPE — triggers an escape from the operational zoo.
+   * Returns {escaped, zoos} so the panel can flash a confirmation.
+   */
+  onZooEscape: (zooBuildingId?: string) => Promise<{ escaped: number; zoos: number }>;
   /** W11b (EM-091d): god reply on the billboard (≤280 chars, no local echo). */
   onBillboardReply: (text: string) => void;
   /** W11b (EM-092): mock mode renders the persona picker's no-backend state. */
@@ -38,6 +58,26 @@ interface ControlPanelProps {
 }
 
 const INJECT_KINDS = ['windfall', 'famine', 'blackout', 'festival'] as const;
+
+/**
+ * Read a declared CSS custom property (mirrors the inspector's `cssVar`).
+ * Returns '' when there is no DOM (SSR / jsdom tests), so callers fall through
+ * to a token-referencing default rather than a hardcoded hex.
+ */
+function cssVar(name: string): string {
+  if (typeof window === 'undefined') return '';
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/**
+ * The neutral swatch color for an agent with no model color yet. Resolves the
+ * declared `--inspector-node-neutral` token at runtime (token-only — no
+ * hardcoded hex in this module). Falls back to the var() reference itself when
+ * unresolved, which is a valid CSS color for the `border` / `color` slots.
+ */
+function neutralColor(): string {
+  return cssVar('--inspector-node-neutral') || 'var(--inspector-node-neutral)';
+}
 
 function SpeedSlider({
   value,
@@ -130,6 +170,11 @@ function ReassignRow({
 
   const selectedProfile = profiles.find(p => p.name === selected);
   const displayColor = selectedProfile?.color ?? currentColor;
+  // The 8-digit-hex alpha trick only applies to a 6-digit hex profile color; a
+  // var()-resolved neutral fallback is left opaque (no corrupting suffix).
+  const swatchBg = /^#[0-9a-fA-F]{6}$/.test(displayColor)
+    ? displayColor + '30'
+    : displayColor;
 
   return (
     <div
@@ -141,7 +186,7 @@ function ReassignRow({
       <div
         className="w-5 h-5 rounded-full flex items-center justify-center shrink-0 font-mono text-[9px] font-bold"
         style={{
-          backgroundColor: displayColor + '30',
+          backgroundColor: swatchBg,
           border: `1.5px solid ${displayColor}`,
           color: displayColor,
         }}
@@ -503,6 +548,139 @@ function BillboardReply({ onPost }: { onPost: (text: string) => void }) {
 }
 
 /**
+ * RewildButton (EM-207 H2) — the MENAGERIE "Rewild" god burst. One click
+ * seeds up to `count` random catalog critters; flashes "N critters rewilded"
+ * (or a cap-reached note). lab-* tokens only.
+ */
+function RewildButton({
+  onRewild,
+}: {
+  onRewild: (count?: number) => Promise<{ spawned: number; cap_reached: boolean }>;
+}) {
+  const [count, setCount] = useState(4);
+  const [busy, setBusy] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+  }, []);
+
+  const handleRewild = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setFlash(null);
+    const result = await onRewild(count);
+    setBusy(false);
+    const msg = result.cap_reached
+      ? `${result.spawned} critter${result.spawned === 1 ? '' : 's'} rewilded — cap reached.`
+      : `${result.spawned} critter${result.spawned === 1 ? '' : 's'} rewilded.`;
+    setFlash(msg);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlash(null), 2400);
+  }, [busy, count, onRewild]);
+
+  return (
+    <div className="p-2 space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <input
+          type="number"
+          min={1}
+          max={20}
+          value={count}
+          onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value))))}
+          className="lab-input w-12 text-[11px] text-center tabular-nums"
+          aria-label="Rewild count"
+          title="Number of critters to spawn (1–20)"
+        />
+        <button
+          type="button"
+          className="lab-btn flex-1"
+          style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+          onClick={() => void handleRewild()}
+          disabled={busy}
+          aria-label={`Rewild — spawn ${count} random critter${count === 1 ? '' : 's'}`}
+          title="Seeds a burst of random catalog species (up to the population cap)"
+        >
+          {busy ? '…' : '🌿 REWILD'}
+        </button>
+      </div>
+      {flash && (
+        <p
+          className="font-mono text-[10px] text-center animate-flash"
+          style={{ color: 'var(--lab-god-bright)' }}
+          role="status"
+          aria-live="polite"
+        >
+          {flash}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * ZooEscapeButton (EM-208 H3) — the MENAGERIE "Zoo escape" god trigger. One
+ * click causes zoo animals to scatter into the city; flashes "N animals
+ * escaped!" (or "No zoo to escape from." if there are none). lab-* tokens
+ * only; no hardcoded hex.
+ */
+function ZooEscapeButton({
+  onZooEscape,
+}: {
+  onZooEscape: (zooBuildingId?: string) => Promise<{ escaped: number; zoos: number }>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+  }, []);
+
+  const handleEscape = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setFlash(null);
+    const result = await onZooEscape();
+    setBusy(false);
+    const msg =
+      result.zoos === 0
+        ? 'No zoo to escape from.'
+        : result.escaped === 0
+          ? 'No animals to escape.'
+          : `${result.escaped} animal${result.escaped === 1 ? '' : 's'} escaped!`;
+    setFlash(msg);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlash(null), 2400);
+  }, [busy, onZooEscape]);
+
+  return (
+    <div className="p-2 space-y-1.5">
+      <button
+        type="button"
+        className="lab-btn w-full"
+        style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+        onClick={() => void handleEscape()}
+        disabled={busy}
+        aria-label="Trigger zoo escape — scatter zoo animals into the city"
+        title="Relocates all zoo animals to random city places (chaos!)"
+      >
+        {busy ? '…' : '🦁 ZOO ESCAPE'}
+      </button>
+      {flash && (
+        <p
+          className="font-mono text-[10px] text-center animate-flash"
+          style={{ color: 'var(--lab-god-bright)' }}
+          role="status"
+          aria-live="polite"
+        >
+          {flash}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
  * GodGroupLabel (Wave A.2 EM-138) — one GOD CONSOLE group heading, in the
  * established god ink (the --lab-god-* tokens BillboardReply already wears).
  */
@@ -837,6 +1015,9 @@ export function ControlPanel({
   onReassign,
   onInject,
   onSpawn,
+  onSpawnAnimal,
+  onRewild,
+  onZooEscape,
   onBillboardReply,
   mockMode,
   profiles,
@@ -938,11 +1119,8 @@ export function ControlPanel({
       </div>
 
       {/* ── Model Reassign — THE MARQUEE FEATURE ─────────────── */}
-      <div
-        className="lab-header mt-0.5 flex items-center justify-between"
-        style={{ borderColor: '#c8ff00', borderTopWidth: '2px' }}
-      >
-        <span style={{ color: '#c8ff00' }}>⇄ MODEL REASSIGN</span>
+      <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-acid">
+        <span className="text-lab-acid">⇄ MODEL REASSIGN</span>
         <span className="font-mono text-[9px] text-lab-acid opacity-70">LIVE SWAP</span>
       </div>
 
@@ -959,7 +1137,7 @@ export function ControlPanel({
               agentId={agent.id}
               agentName={agent.name}
               currentProfile={agent.profile}
-              currentColor={agent.profile_color ?? '#888888'}
+              currentColor={agent.profile_color ?? neutralColor()}
               profiles={profiles}
               onReassign={onReassign}
             />
@@ -1024,6 +1202,25 @@ export function ControlPanel({
       </div>
       <SpawnForm world={world} profiles={profiles} mockMode={mockMode} onSpawn={onSpawn} />
 
+      {/* ── MENAGERIE: add an animal (EM-143) + rewild burst (EM-207) ─ */}
+      <div
+        className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god"
+        role="heading"
+        aria-level={2}
+      >
+        <span className="font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">
+          🐾 MENAGERIE
+        </span>
+        <span className="font-mono text-[9px] text-lab-muted opacity-70">ADD ANIMAL</span>
+      </div>
+      {/* EM-207 H2: REWILD burst — above the manual spawn form */}
+      <div className="border-b border-lab-border/40 mx-1 pb-1">
+        <RewildButton onRewild={onRewild} />
+        {/* EM-208 H3: ZOO ESCAPE — scatter housed animals into the city */}
+        <ZooEscapeButton onZooEscape={onZooEscape} />
+      </div>
+      <AnimalSpawnForm world={world} onSpawn={onSpawnAnimal} />
+
       {/* ── Status ──────────────────────────────────────────────── */}
       {world && (
         <>
@@ -1043,8 +1240,8 @@ export function ControlPanel({
                   style={{
                     color:
                       label === 'STATE'
-                        ? world.running ? '#27ae60' : '#ff9900'
-                        : '#e8e8f0',
+                        ? world.running ? 'var(--rel-ally)' : 'var(--lab-warn)'
+                        : 'var(--lab-text)',
                   }}
                 >
                   {value}

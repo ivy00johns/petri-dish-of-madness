@@ -91,6 +91,9 @@ ACTION_SCHEMA = {
                 "repair", "arson", "take_offline",
                 # W11b / EM-091 — billboard reflex tools (plaza/townhall only).
                 "post_billboard", "read_billboard",
+                # Wave H4 / EM-209 — pets & bonds: adopt a co-located unowned
+                # animal, feed a co-located one (owner sustains a declining pet).
+                "adopt", "feed_pet",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -127,6 +130,7 @@ ACTION_SCHEMA = {
                             "propose_project", "contribute_funds", "build_step",
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
+                            "adopt", "feed_pet",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -174,6 +178,15 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
+         }}}}},
+        # Wave H4 / EM-209 — pets & bonds: both reflex tools require an animal_id.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "adopt"}}},
+         "then": {"properties": {"args": {"required": ["animal_id"], "properties": {
+             "animal_id": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "feed_pet"}}},
+         "then": {"properties": {"args": {"required": ["animal_id"], "properties": {
+             "animal_id": {"type": "string"},
          }}}}},
     ],
 }
@@ -229,6 +242,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # turn's response args (zero extra LLM calls).
     "post_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
     "read_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
+    # Wave H4 / EM-209 — pets & bonds reflex tools 🟢: no location_gate (the
+    # CO-LOCATION gate is animal-specific and enforced in _validate_world), no
+    # agreement_gate. adopt claims a co-located unowned animal; feed_pet restores
+    # a co-located animal's energy. Both move NO credits (invariant 7). Offered
+    # only when a co-located eligible animal exists (see _assemble_context).
+    "adopt":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "feed_pet":         {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -312,6 +332,12 @@ _IMPORTANCE_WEIGHTS: dict[str, float] = {
     "agent_died": 5.0,
     "world_extinct": 5.0,
     "animal_died": 2.0,
+    # Wave H4 / EM-209 — losing an OWNED pet is acutely salient to the owner: it
+    # pulls their next LLM turn (the grief reflection is GUARANTEED separately by
+    # the animal runtime emitting a reflection attributed to the owner, but this
+    # weight lets the owner ALSO add its own words). Carried on the same
+    # animal_died event for an owned pet (payload.owner_id set).
+    "pet_death": 4.0,
     "conflict": 3.0,
     "rule_passed": 2.0,
     "rule_rejected": 2.0,
@@ -1220,6 +1246,32 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if not str(args.get("text") or "").strip():
             return "answer_proclamation requires text"
 
+    # ── Wave H4 / EM-209 — pets & bonds (the CO-LOCATION gate, animal-specific).
+    elif action == "adopt":
+        animal_id = args.get("animal_id")
+        animal = (getattr(world, "animals", {}) or {}).get(animal_id)
+        if animal is None:
+            return f"unknown animal '{animal_id}'"
+        if not getattr(animal, "alive", False):
+            return f"{getattr(animal, 'name', animal_id)} is not alive"
+        if getattr(animal, "location", None) != agent.location:
+            return f"{getattr(animal, 'name', animal_id)} is not here — you must be at the same place to adopt it"
+        owner_id = getattr(animal, "owner_id", None)
+        if owner_id:
+            if owner_id == agent.id:
+                return f"you already own {getattr(animal, 'name', animal_id)}"
+            return f"{getattr(animal, 'name', animal_id)} already has an owner"
+
+    elif action == "feed_pet":
+        animal_id = args.get("animal_id")
+        animal = (getattr(world, "animals", {}) or {}).get(animal_id)
+        if animal is None:
+            return f"unknown animal '{animal_id}'"
+        if not getattr(animal, "alive", False):
+            return f"{getattr(animal, 'name', animal_id)} is not alive"
+        if getattr(animal, "location", None) != agent.location:
+            return f"{getattr(animal, 'name', animal_id)} is not here — you must be at the same place to feed it"
+
     return None
 
 
@@ -1295,6 +1347,17 @@ def _assemble_context(
 
     active_rules = [r for r in world.rules.values() if r.status == "active"]
     proposed_rules = [r for r in world.rules.values() if r.status == "proposed"]
+
+    # Wave H4 / EM-209 — co-located living animals (pets & bonds). Sorted by
+    # (name, id) so the menu assembles deterministically. `here_unowned` drives
+    # the adopt offer; `here_animals` drives feed_pet (any co-located animal can
+    # be fed). owner_id None = adoptable.
+    here_animals = sorted(
+        (a for a in getattr(world, "living_animals", lambda: [])()
+         if getattr(a, "location", None) == agent.location),
+        key=lambda a: (a.name, a.id),
+    )
+    here_unowned = [a for a in here_animals if not getattr(a, "owner_id", None)]
 
     # Buildings at the agent's place + active projects it could contribute to.
     # Co-located buildings drive build_step/repair/arson/take_offline gating; the
@@ -1407,6 +1470,21 @@ def _assemble_context(
             "(everyone, and the watchers, can read it)")
         valid_actions.append(
             f"read_billboard - read the latest billboard posts ({len(board)} on the board)")
+
+    # ── Wave H4 / EM-209 — pets & bonds (offered only when an eligible co-located
+    # animal exists, so the menu stays small). adopt: a co-located UNOWNED animal;
+    # feed_pet: ANY co-located animal (owner sustains a declining companion).
+    if here_unowned:
+        adopt_list = ", ".join(f"{a.name} (animal_id={a.id})" for a in here_unowned)
+        valid_actions.append(
+            f"adopt (animal_id) - adopt a co-located stray as your pet; it will "
+            f"follow you everywhere: {adopt_list}")
+    if here_animals:
+        feed_list = ", ".join(
+            f"{a.name} (animal_id={a.id}, energy={a.energy})" for a in here_animals)
+        valid_actions.append(
+            f"feed_pet (animal_id) - feed a co-located animal to restore its "
+            f"energy (a hungry pet declines): {feed_list}")
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
     # Offered to EVERY agent (no location gate) whenever a decree is live, so the
@@ -1935,6 +2013,11 @@ class AgentRuntime:
         """Salience weight of one event for the reflection accumulator (EM-080)."""
         kind = event.get("kind")
         weight = _IMPORTANCE_WEIGHTS.get(kind, 0.0)
+        # Wave H4 / EM-209 — an animal_died for an OWNED pet (payload.owner_id set)
+        # is graver than an ambient critter death: it pulls the owner's next LLM
+        # turn so they may add their own words to the guaranteed grief reflection.
+        if kind == "animal_died" and (event.get("payload") or {}).get("owner_id"):
+            weight = max(weight, _IMPORTANCE_WEIGHTS.get("pet_death", 0.0))
         if kind == "economy":
             payload = event.get("payload") or {}
             moved = payload.get("amount", payload.get("credits_delta", 0)) or 0
@@ -3599,6 +3682,35 @@ class AgentRuntime:
             # take_offline returns a SINGLE structure_state_changed event dict (no _multi).
             result = self.world.action_take_offline(agent, building_id)
             return _emit_world_result(result, base, thought)
+
+        # ── Wave H4 / EM-209 — pets & bonds reflex tools ───────────────────────
+        elif action == "adopt":
+            animal_id = args.get("animal_id", "")
+            ok, reason = self.world.action_adopt(agent, animal_id)
+            animal = (getattr(self.world, "animals", {}) or {}).get(animal_id)
+            pet_name = getattr(animal, "name", animal_id)
+            if ok:
+                return {**base, "kind": "agent_action",
+                        "text": f"{agent.name} adopts {pet_name}!",
+                        "payload": {"action": "adopt", "animal_id": animal_id,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to adopt but: {reason}",
+                    "payload": {"action": "adopt", "error": reason}}
+
+        elif action == "feed_pet":
+            animal_id = args.get("animal_id", "")
+            ok, reason = self.world.action_feed_pet(agent, animal_id)
+            animal = (getattr(self.world, "animals", {}) or {}).get(animal_id)
+            pet_name = getattr(animal, "name", animal_id)
+            if ok:
+                return {**base, "kind": "agent_action",
+                        "text": f"{agent.name} feeds {pet_name}.",
+                        "payload": {"action": "feed_pet", "animal_id": animal_id,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to feed {pet_name} but: {reason}",
+                    "payload": {"action": "feed_pet", "error": reason}}
 
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────
         elif action == "post_billboard":

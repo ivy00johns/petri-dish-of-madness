@@ -19,6 +19,7 @@ from ..config.loader import load_config, load_personas, WorldConfig
 from ..engine.world import World, AgentState, PlaceState
 from ..engine.loop import TickLoop, _run_config_json
 from ..agents.runtime import AgentRuntime
+from ..animals.runtime import ANIMAL_SPECIES_CATALOG, _seed_int
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
 
@@ -623,6 +624,11 @@ class ChronicleBuildBody(BaseModel):
     # fresh server-computed fact/version stamps), not just the un-chronicled
     # gaps. Lets old chapters (written before the facts existed) get re-stamped.
     rebuild: bool = False
+    # EM-201 follow-on — when True, the CHEAP fix: re-derive chaos for OLD (v1)
+    # chapters and re-emit them WITH THEIR ORIGINAL PROSE (zero LLM), narrate only
+    # the true gaps, skip windows already carrying a v2 chapter. Wins over rebuild
+    # when set (preserves the original prose).
+    restamp: bool = False
 
 
 @app.post("/api/chronicle/build")
@@ -638,11 +644,14 @@ async def chronicle_build(body: ChronicleBuildBody):
     model = (body.model or getattr(cfg, "model_profile", "") or "").strip()
     if not model or _router.get_profile(model) is None:
         raise HTTPException(400, f"Unknown or unconfigured chronicle model: {model!r}")
-    started = _loop.start_chronicle_backfill(model, rebuild=body.rebuild)
+    started = _loop.start_chronicle_backfill(
+        model, rebuild=body.rebuild, restamp=body.restamp
+    )
     return {
         "status": "building" if started else "already_running",
         "model": model,
         "rebuild": body.rebuild,
+        "restamp": body.restamp,
     }
 
 
@@ -1081,8 +1090,9 @@ async def get_animals():
 
 
 class SpawnAnimalBody(BaseModel):
-    # Audit B15: same caps as SpawnBody (species is enum-checked in the handler).
-    species: str            # cat | dog
+    # Audit B15: same caps as SpawnBody (species is enum-checked in the handler
+    # against ANIMAL_SPECIES_CATALOG — the 7-species menagerie, EM-143).
+    species: str            # cat | dog | squirrel | raccoon | goat | fox | crow
     name: str = Field(max_length=40)
     location: str = Field(default="plaza", max_length=40)
     personality: str = Field(default="", max_length=280)
@@ -1092,17 +1102,24 @@ class SpawnAnimalBody(BaseModel):
 async def spawn_animal_endpoint(body: SpawnAnimalBody, response: Response):
     """Spawn an animal immediately (god-mode), emitting animal_spawned. Animals
     have no credits (invariant 7) and are NOT in the agent round-robin — they act
-    on the slow animal cadence."""
+    on the slow animal cadence. Species is validated against the menagerie catalog
+    (EM-143); the configured animals.max_population cap returns 409 when reached."""
     if _world is None:
         raise HTTPException(503, "Not initialized")
-    if body.species not in ("cat", "dog"):
-        raise HTTPException(400, f"Unknown species: {body.species!r} (cat|dog)")
-    animal = _world.spawn_animal(
-        species=body.species,
-        name=body.name,
-        location=body.location,
-        personality=body.personality,
-    )
+    if body.species not in ANIMAL_SPECIES_CATALOG:
+        allowed = ", ".join(sorted(ANIMAL_SPECIES_CATALOG))
+        raise HTTPException(400, f"Unknown species: {body.species!r} (one of: {allowed})")
+    try:
+        animal = _world.spawn_animal(
+            species=body.species,
+            name=body.name,
+            location=body.location,
+            personality=body.personality,
+        )
+    except ValueError as exc:
+        # The population cap (world.spawn_animal) raises ValueError when the
+        # menagerie is full — surface it as 409 Conflict, not a 500.
+        raise HTTPException(409, str(exc))
     if _loop:
         _loop._emit_event({
             "kind": "animal_spawned",
@@ -1120,6 +1137,114 @@ async def spawn_animal_endpoint(body: SpawnAnimalBody, response: Response):
         _loop._broadcast_world_state()
     response.status_code = 201
     return {"status": "ok", "animal_id": animal.id}
+
+
+class RewildBody(BaseModel):
+    # Wave H2 / EM-207 — how many critters to seed in one click. Bounded so a god
+    # button can't request a runaway burst; the cap still stops it short.
+    count: int = Field(default=4, ge=1, le=50)
+
+
+@app.post("/api/god/rewild")
+async def god_rewild(body: RewildBody = RewildBody()):
+    """Wave H2 / EM-207 — the REWILD god button: seed a BURST of random catalog
+    critters in one click. Spawns up to `count` random species at random places,
+    stopping the moment living animals reaches animals.max_population. Each spawn
+    is DETERMINISTIC (seeded off the world tick + the burst index — no Math.random
+    / no wall-clock, so it is replay-safe + testable) and emits an `animal_spawned`
+    (payload.method 'rewild'); one world_state broadcast at the end. Returns
+    {spawned: N, cap_reached: bool}. 503 when the world isn't initialized."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    count = int(body.count)
+    spawned = 0
+    cap_reached = False
+    tick = int(getattr(_world, "tick", 0))
+    animals_cfg = getattr(_world.params, "animals", None)
+    max_population = int(getattr(animals_cfg, "max_population", 0) or 0)
+    for i in range(count):
+        # Pre-check the cap so we report cap_reached cleanly (and never spam the
+        # ValueError path), then defensively catch a racing ValueError too.
+        if max_population > 0 and len(_world.living_animals()) >= max_population:
+            cap_reached = True
+            break
+        seed = _seed_int("rewild", tick, i)
+        try:
+            animal = _world.spawn_random_animal(seed)
+        except ValueError:
+            cap_reached = True
+            break
+        if animal is None:
+            break  # no place to put it (empty world) — nothing more to do
+        spawned += 1
+        _loop._emit_event({
+            "kind": "animal_spawned",
+            "actor_id": animal.id,
+            "actor_type": "animal",
+            "text": f"{animal.name} the {animal.species} is rewilded into the world.",
+            "payload": {
+                "animal_id": animal.id,
+                "species": animal.species,
+                "name": animal.name,
+                "location": animal.location,
+                "method": "rewild",
+            },
+        })
+    if spawned:
+        _loop._broadcast_world_state()
+    return {"spawned": spawned, "cap_reached": cap_reached}
+
+
+class CullBody(BaseModel):
+    # Wave H follow-on — how many LIVING animals to KEEP after thinning the herd.
+    keep: int = Field(default=5, ge=0, le=100)
+
+
+@app.post("/api/god/cull")
+async def god_cull(body: CullBody = CullBody()):
+    """Wave H follow-on — THIN THE HERD: reduce living animals down to `keep`
+    (oldest-of-each-species first, so the seed cat & dog + species variety stay),
+    removing the rest. Each removed animal emits an `animal_died` (method
+    'culled'); one world_state broadcast. Returns {removed: N, kept: M}. 503 when
+    the world isn't initialized. The reverse of REWILD — relief when testing/
+    rewilds have flooded the feed, without resetting the world."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    events = _world.cull_animals(int(body.keep))
+    for e in events:
+        _loop._emit_event(e)
+    if events:
+        _loop._broadcast_world_state()
+    return {"removed": len(events), "kept": len(_world.living_animals())}
+
+
+class ZooEscapeBody(BaseModel):
+    # Wave H3 / EM-208 — optionally target ONE operational zoo by id; omit to
+    # break loose EVERY operational zoo at once.
+    zoo_building_id: str | None = None
+
+
+@app.post("/api/god/zoo_escape")
+async def god_zoo_escape(body: ZooEscapeBody = ZooEscapeBody()):
+    """Wave H3 / EM-208 — THE ESCAPE god button: trigger a zoo breakout. Calls
+    World.trigger_zoo_escape (deterministic + replay-safe: each animal's new
+    place is a seeded hash of its id + the world tick, no wall-clock / no
+    Math.random), emits the resulting event batch (one dramatic random_event +
+    one is_chaotic animal_action{action:"escape"} per freed animal) via the loop
+    emit path, then one world_state broadcast. Returns {escaped: N, zoos: M}.
+    A no-op (no operational zoo or no housed animals) returns {escaped: 0,
+    zoos: 0} with no broadcast. 503 when the world isn't initialized. Mirrors the
+    H2 /api/god/rewild structure."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    events = _world.trigger_zoo_escape(body.zoo_building_id)
+    escaped = sum(1 for e in events if e.get("kind") == "animal_action")
+    zoos = sum(1 for e in events if e.get("kind") == "random_event")
+    for evt in events:
+        _loop._emit_event(evt)
+    if events:
+        _loop._broadcast_world_state()
+    return {"escaped": escaped, "zoos": zoos}
 
 
 @app.delete("/api/agents/{agent_id}")

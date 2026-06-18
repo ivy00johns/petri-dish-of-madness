@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { Agent } from '../../types';
 import {
   BUILDING_STYLES,
   SLOT_BASE_RADIUS,
@@ -13,6 +14,7 @@ import {
   healthTint,
   humanizeKind,
   operationalVariant,
+  resolveLivingOwner,
   slotLayout,
   type VariantKey,
   type WorldPoint,
@@ -172,6 +174,57 @@ describe('operationalVariant (EM-122)', () => {
   });
 });
 
+// ── EM-208 H3: zoo style + variant ──────────────────────────────────────────
+
+describe('buildingStyle("zoo") (EM-208 H3)', () => {
+  it('resolves to the zoo palette with tag "Zoo"', () => {
+    const style = buildingStyle('zoo');
+    expect(style.tag).toBe('Zoo');
+    expect(style.body).toBe(BUILDING_STYLES.zoo.body);
+    expect(style.roof).toBe(BUILDING_STYLES.zoo.roof);
+  });
+
+  it('keyword-maps menagerie/enclosure/habitat/sanctuary to zoo palette with humanized tag', () => {
+    const cases: Array<[string, string]> = [
+      ['city_menagerie', 'City Menagerie'],
+      ['animal_enclosure', 'Animal Enclosure'],
+      ['wildlife_habitat', 'Wildlife Habitat'],
+      ['nature_sanctuary', 'Nature Sanctuary'],
+    ];
+    for (const [kind, tag] of cases) {
+      const style = buildingStyle(kind);
+      expect(style.body, kind).toBe(BUILDING_STYLES.zoo.body);
+      expect(style.tag, kind).toBe(tag);
+    }
+  });
+
+  it('unknown kind still falls back to generic with humanized tag (fallback guarantee)', () => {
+    const style = buildingStyle('xyzzy_tower_thing');
+    expect(style.body).toBe(BUILDING_STYLES.building.body);
+    expect(style.tag).toBe('Xyzzy Tower Thing');
+    expect(style.tag).not.toBe('Zoo');
+  });
+});
+
+describe('operationalVariant("zoo") (EM-208 H3)', () => {
+  it('maps exact "zoo" kind to the zoo variant', () => {
+    expect(operationalVariant('zoo')).toBe('zoo');
+  });
+
+  it('keyword-maps zoo-related kinds to zoo variant', () => {
+    expect(operationalVariant('city_zoo')).toBe('zoo');
+    expect(operationalVariant('animal_enclosure')).toBe('zoo');
+    expect(operationalVariant('wildlife_habitat')).toBe('zoo');
+    expect(operationalVariant('nature_sanctuary')).toBe('zoo');
+    expect(operationalVariant('wild_menagerie')).toBe('zoo');
+  });
+
+  it('unknown kind still falls back to generic (fallback guarantee)', () => {
+    expect(operationalVariant('xyzzy')).toBe('generic');
+    expect(operationalVariant('')).toBe('generic');
+  });
+});
+
 // ── EM-122: healthTint ───────────────────────────────────────────────────────
 
 /** Channel sum (0..765) as a simple brightness proxy for monotonicity checks. */
@@ -278,5 +331,54 @@ describe('slotLayout (EM-131)', () => {
     const solo = slotLayout(CENTER, ['only']);
     expect(solo.size).toBe(1);
     expect(dist(solo.get('only')!, CENTER)).toBeCloseTo(SLOT_BASE_RADIUS, 6);
+  });
+});
+
+// ── Wave H4 (EM-209): resolveLivingOwner ─────────────────────────────────────
+//
+// Locks the THREE pet-bond layers in agreement on a single predicate
+// (owner exists AND is alive):
+//   • backend  — _owner_of() returns None for a dead owner ⇒ pet wanders
+//     (test_pet_with_dead_or_missing_owner_reverts_to_wandering)
+//   • RosterStrip — drops the bond line via `a.alive` (the "bond dies with the
+//     owner" test)
+//   • CozyWorld 3D — gates the follow/leash ownerPos on this helper so the pet
+//     never leashes to a dead owner's corpse position.
+// to_snapshot() serializes dead agents and the backend never clears owner_id
+// on owner death, so a dead owner's id keeps dangling — this is the guard.
+
+function agent(id: string, alive: boolean): Agent {
+  return { id, alive } as Agent;
+}
+
+describe('resolveLivingOwner (Wave H4 EM-209 — pet bond agreement)', () => {
+  const owner = agent('agent-owner', true);
+  const deadOwner = agent('agent-dead', false);
+  const bystander = agent('agent-other', true);
+  const roster: Agent[] = [owner, deadOwner, bystander];
+
+  it('returns the owner when it exists and is alive (pet follows/leashes)', () => {
+    expect(resolveLivingOwner(roster, 'agent-owner')).toBe(owner);
+  });
+
+  it('returns undefined when the owner is DEAD (the dangling owner_id case)', () => {
+    // The corpse is still in the snapshot, but the pet must revert to wander.
+    expect(resolveLivingOwner(roster, 'agent-dead')).toBeUndefined();
+  });
+
+  it('returns undefined when owner_id points at no agent (missing owner)', () => {
+    expect(resolveLivingOwner(roster, 'agent-ghost')).toBeUndefined();
+  });
+
+  it('returns undefined for an absent owner_id (unowned pet — null/undefined)', () => {
+    expect(resolveLivingOwner(roster, null)).toBeUndefined();
+    expect(resolveLivingOwner(roster, undefined)).toBeUndefined();
+    expect(resolveLivingOwner(roster, '')).toBeUndefined();
+  });
+
+  it('matches by id, not position — never resolves a different living agent', () => {
+    // A dead owner must NOT silently fall through to some other alive agent.
+    expect(resolveLivingOwner(roster, 'agent-dead')).not.toBe(bystander);
+    expect(resolveLivingOwner([], 'agent-owner')).toBeUndefined();
   });
 });

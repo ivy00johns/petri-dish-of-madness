@@ -1,0 +1,7 @@
+{
+  "tokenSources": [
+    "src/inspector/inspector-tokens.css",
+    "src/components/panels/roster-tokens.css"
+  ],
+  "ignorePathContains": [".config.", ".d.ts", ".test.", ".spec."]
+}

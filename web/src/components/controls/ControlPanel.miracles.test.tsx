@@ -38,6 +38,9 @@ function renderPanel() {
       onReassign={vi.fn()}
       onInject={vi.fn()}
       onSpawn={vi.fn()}
+      onSpawnAnimal={vi.fn()}
+      onRewild={vi.fn(async () => ({ spawned: 0, cap_reached: false }))}
+      onZooEscape={vi.fn(async () => ({ escaped: 0, zoos: 0 }))}
       onBillboardReply={vi.fn()}
       mockMode={false}
       profiles={[profile({ name: 'model-a' })]}
