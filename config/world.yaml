@@ -254,6 +254,7 @@ world:
     arson_damage: 50       # health removed per arson
     forage_bonus: 1        # extra forage_reward at an operational garden/farm's place
     work_bonus_pct: 50     # extra work_reward % at an operational workshop's place
+    zoo_capacity: 5        # Wave H3 / EM-208: animals a zoo auto-stocks when it opens (capped by animals.max_population)
 
   # W7 / EM-063 — ad-hoc spawn. god = immediate (default, best for tinkering);
   # governance = spawn enqueues an admit_agent proposal, admitted iff the vote passes.
@@ -282,6 +283,20 @@ world:
     llm_chance: 0.9           # P(LLM decision) on an acted tick; else a reflex micro-behavior
                               # (raised from 0.6 on 2026-06-12 — the reflex pool repeats fast)
     model_profile: gemini-flash  # cheapest/fastest free profile; falls back to reflex-only if unavailable
+    max_population: 5         # EM-143/Wave-H: cap on LIVING animals (0 = unlimited). Kept SMALL so the
+                              # menagerie never out-talks the human cast in the feed (a cap of 12 flooded
+                              # it during build/testing). POST /api/animals returns 409 once full; the
+                              # REWILD god button still seeds a burst on demand when you want chaos.
+    ambient_spawn_every: 0    # Wave H2 / EM-207: every Nth tick the menagerie may grow on its own (0 = OFF).
+                              # OFF by default — passive growth toward the cap was drowning the feed; use
+                              # REWILD on demand instead. Set e.g. 40 to let the town teem slowly again.
+    ambient_spawn_chance: 0.5 # P(an ambient spawn lands) on an ambient-aligned tick (deterministic). Moot
+                              # while ambient_spawn_every is 0.
+    pet_energy_decay: 2       # Wave H4 / EM-209: energy an OWNED pet loses per its turn (gentle, so a
+                              # pet lasts a while). At 0 it dies and the owner writes a grief diary entry.
+                              # Unowned animals never decline. KEEP IN SYNC with the AnimalParams default.
+    pet_feed_amount: 25       # Wave H4 / EM-209: energy restored when a co-located agent feeds a pet
+                              # (no credits move). Lets the owner sustain a declining companion.
 
   # W11b / EM-083 — real blackout: the `blackout` random event disables recharge
   # at the affected places (home-kind places) for this many ticks; expiry

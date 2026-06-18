@@ -86,6 +86,31 @@ def test_clean_chapter_strips_think_blocks_and_titles():
     assert TickLoop._clean_chapter("## Chapter 5\nThe town awoke.") == "The town awoke."
 
 
+def test_looks_truncated_rejects_cutoffs_and_stubs():
+    """EM-201 follow-on — the proxy reroutes the chronicler lane to models
+    (nvidia/nemotron) that hit the token cap mid-sentence, or return a
+    degenerate stub (the literal 'A' chapter seen live). Both survive
+    _clean_chapter AND the reasoning guard, so the writer rejects them via
+    _looks_truncated and leaves the window for a clean model / retry to fill."""
+    # finish_reason == "length": the reply was cut off at the cap mid-generation
+    assert TickLoop._looks_truncated(
+        "The town gathered in the plaza as the vote", "length")
+    # degenerate stubs: the 'A', a lone em-dash, an ellipsis, one terse word,
+    # whitespace — none is a paragraph, all rejected regardless of finish_reason
+    for stub in ("A", "—", "...", "Quiet.", "   "):
+        assert TickLoop._looks_truncated(stub, "stop"), stub
+    # real chapters PASS even when terse (the suite's shortest valid prose) and
+    # even when the proxy omits finish_reason (None) — the floor stays well under
+    # 9 words / 58 chars so a charming one-liner is never mistaken for a cutoff
+    for clean in (
+        "Ada was practically conducting an invisible orchestra of construction.",
+        "First the sun rose over the plaza, then the schemes began.",
+        "The town stirred, and the schemes began anew.",
+    ):
+        assert not TickLoop._looks_truncated(clean, "stop"), clean
+        assert not TickLoop._looks_truncated(clean, None), clean
+
+
 def test_build_chronicle_digest_picks_the_longest_quotes():
     """When many lines were spoken, the richest (longest) ones are surfaced."""
     rows = [

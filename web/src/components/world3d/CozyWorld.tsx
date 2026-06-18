@@ -39,7 +39,7 @@ import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, WORLD_REACH } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, resolveLivingOwner, WORLD_REACH } from './worldSpace';
 import { GOLDEN_HOUR } from './toon';
 import { preloadHeroModels } from './assets/Model';
 import { allCityModelSpecs } from './assets/cityModels';
@@ -733,6 +733,11 @@ function Scene({
 
       {/* W8: the roaming chaos critters (cat + dog), each wandering near its
           place; chaotic ones wear the magenta accent. 3D stays primary. */}
+      {/* Wave H4 (EM-209): owned pets follow their owner. We resolve the owner's
+          current animated position from animMap (the same mutable ref that
+          Villager updates each frame), so the pet trails the owner in real time.
+          Falls back to standard wander when owner_id is absent/null or owner
+          not found — no crash, no stuck-at-origin. */}
       {animals.map((animal) => {
         const center = placeCenters.get(animal.location) ?? { x: 0, z: 0 };
         let anim = critterMap.current.get(animal.id);
@@ -741,6 +746,18 @@ function Scene({
           anim = { x: center.x, z: center.z };
           critterMap.current.set(animal.id, anim);
         }
+        // Resolve the owner's live animated position (undefined = unowned,
+        // owner unknown, or owner DEAD — Critter falls back to wander, never
+        // crashes). The owner must be alive: to_snapshot() serializes dead
+        // agents and the backend never clears owner_id on owner death, so we
+        // gate on `a.alive` to mirror the backend's _owner_of() (a dead owner
+        // ⇒ pet reverts to wandering) and RosterStrip's bond line. Without
+        // this gate all three layers would disagree and the pet would leash
+        // to its dead owner's corpse position.
+        const ownerAgent = resolveLivingOwner(agents, animal.owner_id);
+        const ownerPos = ownerAgent
+          ? (animMap.current.get(ownerAgent.id) ?? undefined)
+          : undefined;
         return (
           <Critter
             key={animal.id}
@@ -751,6 +768,7 @@ function Scene({
             model={animalModels?.get(animal.id) ?? null}
             focused={focus?.type === 'animal' && focus.id === animal.id}
             onPick={onPick ? () => onPick({ type: 'animal', id: animal.id }) : undefined}
+            ownerPos={ownerPos}
           />
         );
       })}

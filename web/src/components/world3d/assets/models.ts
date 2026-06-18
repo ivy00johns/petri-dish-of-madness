@@ -70,6 +70,7 @@ export const MODEL_REGISTRY: Record<VariantKey, ModelSpec | null> = {
   stall: { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // storefront → 2.44u
   monument: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 }, // → 2.60u
   well: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 }, // city fountain → 2.60u
+  zoo: null, // EM-208 H3: procedural enclosure mesh — no CC0 zoo kit acquired
   generic: { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // tall commercial → 2.33u, 4.06u tall
 };
 

@@ -488,6 +488,73 @@ def test_chronicle_chapter_payload_carries_chaos_and_version():
     assert any("insults" in c for c in chaos["conflicts"])
 
 
+def test_chronicle_restamp_keeps_prose_adds_facts_and_fills_gaps():
+    """EM-201 follow-on — restamp_chronicle: an OLD v1 chapter is re-emitted with
+    its ORIGINAL prose + re-derived chaos + version (NO LLM call); a true GAP is
+    narrated fresh; a window already carrying a v2 chapter is skipped entirely."""
+    from petridish.engine.loop import CHRONICLER_VERSION
+
+    params = _make_params(narrator=NarratorParams(
+        model_profile="narrator-mock", every_n_ticks=2))  # enabled False ⇒ no auto
+    tm = TextMock("Freshly narrated gap chapter.")
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 6))  # windows (0,2) (2,4) (4,6)
+    run_id = loop._run_id
+
+    # (0,2): an OLD v1 chapter (NO chronicler_version) + real drama to surface.
+    repo.save_event(run_id, {"kind": "agent_speech", "actor_id": "agent_ada",
+                             "text": 'Ada says: "The cabal walks among us."',
+                             "payload": {"said": "The cabal walks among us."}}, 1)
+    repo.save_event(run_id, {"kind": "narrator_summary", "actor_id": "narrator",
+                             "actor_type": "system", "profile": "deepseek-pro",
+                             "text": "The original gorgeous prose of window 0-2.",
+                             "payload": {"from_tick": 0, "to_tick": 2,
+                                         "profile": "deepseek-pro"}}, 2)  # v1: no version
+    # (2,4): already a v2 chapter — must be SKIPPED (not re-emitted).
+    repo.save_event(run_id, {"kind": "narrator_summary", "actor_id": "narrator",
+                             "actor_type": "system", "profile": "auto",
+                             "text": "Already a v2 chapter for 2-4.",
+                             "payload": {"from_tick": 2, "to_tick": 4, "profile": "auto",
+                                         "chronicler_version": CHRONICLER_VERSION,
+                                         "chaos": {"cast": [], "quotes": [], "laws": [],
+                                                   "conflicts": [], "deaths": [],
+                                                   "counts": {"spoken": 0, "laws": 0,
+                                                              "clashes": 0, "deaths": 0}}}}, 3)
+    # (4,6): NO chapter → a true gap.
+
+    asyncio.run(loop.restamp_chronicle("narrator-mock", every=2))
+
+    # Only the GAP window made an LLM call.
+    assert tm.calls == 1, "only the true gap is narrated; v1 restamped no-LLM; v2 skipped"
+
+    rows = repo.get_events(run_id, kinds=["narrator_summary"], order="asc")
+
+    def latest(ft, tt):
+        ms = [r for r in rows if r["payload"].get("from_tick") == ft
+              and r["payload"].get("to_tick") == tt]
+        return ms[-1] if ms else None
+
+    # (0,2) restamped: SAME prose, now with version + re-derived chaos, marked restamped,
+    # original attribution preserved.
+    r02 = latest(0, 2)
+    assert r02["text"] == "The original gorgeous prose of window 0-2.", "prose preserved"
+    assert r02["payload"]["chronicler_version"] == CHRONICLER_VERSION
+    assert r02["payload"].get("restamped") is True
+    assert r02["payload"]["profile"] == "deepseek-pro", "original attribution kept"
+    assert r02["payload"]["chaos"]["counts"]["spoken"] == 1, "facts re-derived from DB"
+    assert "Ada" in r02["payload"]["chaos"]["cast"]
+
+    # (2,4) v2 skipped — still exactly one row.
+    rows24 = [r for r in rows if r["payload"].get("from_tick") == 2
+              and r["payload"].get("to_tick") == 4]
+    assert len(rows24) == 1, "an already-v2 window is not re-emitted"
+
+    # (4,6) gap narrated fresh, stamped v2.
+    r46 = latest(4, 6)
+    assert r46 is not None and r46["payload"]["chronicler_version"] == CHRONICLER_VERSION
+    assert r46["text"] == "Freshly narrated gap chapter."
+
+
 def test_chronicle_chaos_counts_include_commitment_lapsed_through_query():
     """EM-201 follow-on — a commitment_lapsed event IS a clash. It must survive the
     _NARRATOR_DIGEST_KINDS whitelist used by the real get_events query so the

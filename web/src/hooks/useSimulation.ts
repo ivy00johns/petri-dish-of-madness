@@ -9,6 +9,8 @@ import { buildInitialWorldState, generateTick, mockControls } from '../mock/gene
 import { inspectorApi, eventRowToWorldEvent } from '../inspector/api';
 
 const MOCK_MODE = import.meta.env.VITE_MOCK === '1';
+// EM-207 H2: catalog for mock REWILD burst species selection.
+const REWILD_CATALOG = ['cat', 'dog', 'squirrel', 'raccoon', 'goat', 'fox', 'crow'] as const;
 const MAX_EVENTS = 200;
 // Event-history memory cap (frontend-inspector.md v1.1.0 §1). In live mode the
 // history is SEEDED from GET /api/events on mount (keyset-paginated backfill)
@@ -76,6 +78,25 @@ export interface SimulationControls {
    * locally and surface the agent_spawned event in the feed.
    */
   spawnAgent: (spec: SpawnSpec) => void;
+  /**
+   * EM-143: spawn an animal from the MENAGERIE god panel. Live: POST
+   * /api/animals with {species, name?, location}. Mock: synthesize an
+   * animal_spawned event so mock-mode works offline.
+   */
+  spawnAnimal: (spec: { species: string; name?: string; location: string }) => void;
+  /**
+   * EM-207 H2: REWILD god burst. Live: POST /api/god/rewild {count}; mock:
+   * synthesizes N animal_spawned events (one per critter, random species from
+   * the catalog). Returns {spawned, cap_reached} in live mode; mock always
+   * succeeds up to the synthesized count.
+   */
+  rewild: (count?: number) => Promise<{ spawned: number; cap_reached: boolean }>;
+  /**
+   * EM-208 H3: ZOO ESCAPE god trigger. Live: POST /api/god/zoo_escape
+   * {zoo_building_id?}. Mock: synthesizes a random_event + a couple of
+   * is_chaotic animal_action escape events. Returns {escaped, zoos}.
+   */
+  triggerZooEscape: (zooBuildingId?: string) => Promise<{ escaped: number; zoos: number }>;
   /**
    * W11b (EM-091d): god reply on the village billboard. Live: POST
    * /api/billboard {text, in_reply_to?} with NO optimistic echo — the backend
@@ -579,6 +600,99 @@ export function useSimulation(): SimulationState & SimulationControls {
     }
   }, [mockMode, apiPost, pushHistory]);
 
+  // EM-143: spawn an animal. Live: POST /api/animals; mock: synthesize the event.
+  const spawnAnimal = useCallback((spec: { species: string; name?: string; location: string }) => {
+    if (mockMode) {
+      const { state, events: newEvents } = mockControls.spawnAnimal(spec);
+      setWorld(state);
+      setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+      pushHistory(newEvents);
+    } else {
+      apiPost('/api/animals', spec);
+    }
+  }, [mockMode, apiPost, pushHistory]);
+
+  // EM-207 H2: REWILD burst. Live: POST /api/god/rewild {count}.
+  // Mock: synthesize N animal_spawned events for random catalog species.
+  const rewild = useCallback(async (count = 4): Promise<{ spawned: number; cap_reached: boolean }> => {
+    if (mockMode) {
+      // Mock: pick random species and synthesize events (up to count).
+      let spawned = 0;
+      for (let i = 0; i < count; i++) {
+        const species = REWILD_CATALOG[Math.floor(Math.random() * REWILD_CATALOG.length)];
+        const { state, events: newEvents } = mockControls.spawnAnimal({ species });
+        setWorld(state);
+        setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+        pushHistory(newEvents);
+        spawned += 1;
+      }
+      return { spawned, cap_reached: false };
+    } else {
+      try {
+        const res = await fetch('/api/god/rewild', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ count }),
+        });
+        if (res.ok) {
+          return (await res.json()) as { spawned: number; cap_reached: boolean };
+        }
+      } catch {
+        // network error — fall through
+      }
+      return { spawned: 0, cap_reached: false };
+    }
+  }, [mockMode, pushHistory]);
+
+  // EM-208 H3: ZOO ESCAPE god trigger. Live: POST /api/god/zoo_escape.
+  // Mock: synthesize a random_event (chaos) + two animal_action escape events.
+  const triggerZooEscape = useCallback(async (zooBuildingId?: string): Promise<{ escaped: number; zoos: number }> => {
+    if (mockMode) {
+      const escaped = 2;
+      const escapeEvents: WorldEvent[] = [
+        {
+          type: 'event',
+          seq: nextSyntheticSeq(),
+          tick: world?.tick ?? 0,
+          kind: 'random_event',
+          actor_id: 'system',
+          text: `ESCAPE! ${escaped} animals break loose from the City Zoo!`,
+          is_chaotic: true,
+          ts: new Date().toISOString(),
+          payload: { actor_type: 'system', is_chaotic: true },
+        },
+        ...Array.from({ length: escaped }, (_, i) => ({
+          type: 'event' as const,
+          seq: nextSyntheticSeq(),
+          tick: world?.tick ?? 0,
+          kind: 'animal_action',
+          actor_id: `mock-animal-${i}`,
+          text: `A zoo animal escapes and scatters into the city!`,
+          is_chaotic: true,
+          ts: new Date().toISOString(),
+          payload: { action: 'escape', from_place: 'zoo', to_place: 'plaza', is_chaotic: true },
+        })),
+      ];
+      setEvents(prev => [...escapeEvents, ...prev].slice(0, MAX_EVENTS));
+      pushHistory(escapeEvents);
+      return { escaped, zoos: 1 };
+    } else {
+      try {
+        const res = await fetch('/api/god/zoo_escape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(zooBuildingId ? { zoo_building_id: zooBuildingId } : {}),
+        });
+        if (res.ok) {
+          return (await res.json()) as { escaped: number; zoos: number };
+        }
+      } catch {
+        // network error — fall through
+      }
+      return { escaped: 0, zoos: 0 };
+    }
+  }, [mockMode, world, pushHistory, nextSyntheticSeq]);
+
   // W11b (EM-091d): god reply on the billboard. Live mode is optimistic-FREE
   // by contract — we wait for the WS billboard_posted event rather than
   // synthesizing a local echo (a failed POST must not leave a ghost post).
@@ -643,6 +757,9 @@ export function useSimulation(): SimulationState & SimulationControls {
     reassignModel,
     injectEvent,
     spawnAgent,
+    spawnAnimal,
+    rewild,
+    triggerZooEscape,
     postBillboard,
     getProfiles,
     seekTick,

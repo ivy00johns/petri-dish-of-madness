@@ -383,6 +383,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
             onReassign={sim.reassignModel}
             onInject={sim.injectEvent}
             onSpawn={sim.spawnAgent}
+            onSpawnAnimal={sim.spawnAnimal}
+            onRewild={sim.rewild}
+            onZooEscape={sim.triggerZooEscape}
             onBillboardReply={sim.postBillboard}
             mockMode={sim.mockMode}
             profiles={sim.getProfiles()}

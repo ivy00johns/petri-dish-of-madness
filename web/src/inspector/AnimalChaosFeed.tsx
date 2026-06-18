@@ -32,6 +32,7 @@ import { useMemo } from 'react';
 import type { PanelProps } from './types';
 import type { WorldEvent } from '../types';
 import { llmDecidedAnimalTurns, isLlmDecidedAction } from '../lib/animalIdentity';
+import { speciesEmoji } from '../components/world3d/worldSpace';
 import { VirtualList } from './VirtualList';
 import './inspector-tokens.css';
 
@@ -103,9 +104,7 @@ export function isAnimalEvent(e: WorldEvent): boolean {
 /** A species glyph for the actor, read from the event payload when present. */
 function speciesIcon(e: WorldEvent): string {
   const species = typeof e.payload?.species === 'string' ? e.payload.species : null;
-  if (species === 'cat') return '🐱';
-  if (species === 'dog') return '🐶';
-  return '🐾';
+  return speciesEmoji(species ?? '');
 }
 
 /** The animal's chosen action key (payload.action), or the kind as a fallback. */
@@ -260,6 +259,48 @@ function ChaosEntry({ event, llmDecided = false }: ChaosEntryProps) {
   );
 }
 
+/**
+ * EM-207 H2 — per-species count legend strip. One pill per species that has
+ * at least one event, sorted by event count desc. Reads speciesEmoji from
+ * worldSpace so the icon stays consistent with the 3D world + spawn form.
+ */
+function SpeciesLegend({ chaos }: { chaos: WorldEvent[] }) {
+  const counts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of chaos) {
+      const sp = typeof e.payload?.species === 'string' ? e.payload.species : null;
+      if (sp) map.set(sp, (map.get(sp) ?? 0) + 1);
+    }
+    return [...map.entries()].sort((a, b) => b[1] - a[1]);
+  }, [chaos]);
+
+  if (counts.length === 0) return null;
+
+  return (
+    <div
+      className="flex flex-wrap gap-1 px-2 py-1 border-b shrink-0"
+      style={{ borderColor: 'var(--chaos-border)' }}
+      aria-label="Species in chaos feed"
+    >
+      {counts.map(([sp, n]) => (
+        <span
+          key={sp}
+          className="font-mono text-[9px] tabular-nums px-1 py-px rounded-sm"
+          style={{
+            color: CHAOS_ACCENT,
+            border: `1px solid var(--chaos-border)`,
+            background: 'var(--chaos-surface)',
+          }}
+          title={`${sp}: ${n} event${n === 1 ? '' : 's'}`}
+          aria-label={`${sp} ${n} event${n === 1 ? '' : 's'}`}
+        >
+          {speciesEmoji(sp)} {sp} ×{n}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function AnimalChaosFeed(props: PanelProps) {
   const { events, currentTick, historyLoading } = props;
 
@@ -304,6 +345,9 @@ export default function AnimalChaosFeed(props: PanelProps) {
           EM-065
         </span>
       </div>
+
+      {/* EM-207 H2: per-species count legend — shows when the menagerie is diverse. */}
+      <SpeciesLegend chaos={chaos} />
 
       {/* The magenta stream — VIRTUALIZED (wave F): only the visible window
           mounts; the spacer keeps scrollbar geometry honest at 10k+ events.

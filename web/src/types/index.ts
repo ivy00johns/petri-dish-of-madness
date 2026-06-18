@@ -120,7 +120,7 @@ export interface Building {
 // Rendered as a roaming cat + dog in the 3D village (species-shaped, tinted).
 // ============================================================
 
-export type AnimalSpecies = 'cat' | 'dog';
+export type AnimalSpecies = 'cat' | 'dog' | 'squirrel' | 'raccoon' | 'goat' | 'fox' | 'crow';
 
 export interface Animal {
   id: string;
@@ -130,6 +130,11 @@ export interface Animal {
   energy: number;               // 0..100
   mood: string;                 // short free text
   alive: boolean;
+  // Wave H4 (EM-209): the agent that adopted this animal, or null/absent when
+  // unowned. An owned pet FOLLOWS its owner in the 3D village (Critter.tsx) and
+  // wears a bond indicator in the RosterStrip. Optional so pre-H4 backends and
+  // snapshots stay valid.
+  owner_id?: string | null;
 }
 
 export type RuleEffect = 'ban_stealing' | 'ubi' | 'recharge_subsidy' | 'work_bonus';

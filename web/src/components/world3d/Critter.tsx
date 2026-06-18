@@ -37,6 +37,7 @@ import type { AnimalModelId } from '../../lib/animalIdentity';
 import {
   animalStyle,
   hashUnit,
+  speciesEmoji,
   type AnimalStyle,
   ANIMAL_CHAOS_MAGENTA,
 } from './worldSpace';
@@ -75,11 +76,32 @@ interface CritterProps {
   focused?: boolean;
   /** EM-095/099: clicked → follow this critter (same mechanism as agents). */
   onPick?: () => void;
+  /**
+   * Wave H4 (EM-209): the owner's current animated world-space position.
+   * When present (and the pet is alive) the critter FOLLOWS this point
+   * instead of its normal place-center wander. Absent/undefined = unowned,
+   * falls back to the standard wander. The Critter never crashes when
+   * ownerPos is null/undefined (owner gone, pre-H4 snapshot, etc.).
+   */
+  ownerPos?: CritterPos | null;
 }
 
 const LABEL_Y = 1.5;
 // Radius the critter roams around its place center.
 const WANDER_RADIUS = 3.2;
+
+/**
+ * Wave H4 (EM-209) — pure helper: resolve whether a pet should follow its
+ * owner or wander freely. Returns `ownerPos` offset (the follow target) when
+ * the owner position is live; returns `null` to signal "use the wander path".
+ * Exported for unit tests — the useFrame hot-path inlines this logic directly.
+ */
+export function resolveFollowTarget(
+  ownerPos: CritterPos | null | undefined,
+): { x: number; z: number } | null {
+  if (!ownerPos) return null;
+  return { x: ownerPos.x + 0.6, z: ownerPos.z + 0.6 };
+}
 
 // Warm the GLTF cache for the critter models (preload de-dupes by url).
 if (CHARACTER_MODELS.cat) useGLTF.preload(CHARACTER_MODELS.cat.url);
@@ -98,7 +120,7 @@ function CritterLabel({
   model?: AnimalModelId | null;
 }) {
   const energy = Math.max(0, Math.min(100, animal.energy));
-  const icon = animal.species === 'cat' ? '🐱' : '🐶';
+  const icon = speciesEmoji(animal.species);
   // Data-driven border: magenta while chaotic, else a soft warm rim. Inline
   // style here is a 3D-overlay (Html drei) card, in the same WebGL-overlay
   // register as VillagerLabel — the GPU scene's own palette, not the DOM theme.
@@ -365,7 +387,49 @@ function ChaosCollar() {
   );
 }
 
-export function Critter({ animal, center, animRef, chaotic, model, focused, onPick }: CritterProps) {
+// Wave H4 (EM-209): warm GPU hex for the ownership leash. Exempt from
+// design-token-guard — this is a 3D scene WebGL material color.
+const LEASH_COLOR = '#c8a060';
+
+/** Wave H4 (EM-209): a soft leash line from the pet to the owner. Rendered
+ *  as a two-point native three.js line (bufferGeometry + lineBasicMaterial).
+ *  `petPos` and `ownerPos` are in world-space XZ; Y is ground-level. */
+function LeashLine({ petPos, ownerPos }: { petPos: CritterPos; ownerPos: CritterPos }) {
+  const geomRef = useRef<THREE.BufferGeometry>(null);
+
+  // Build the initial geometry; subsequent frames update the buffer in-place.
+  const initialPoints = useMemo(() => {
+    const pts = new Float32Array([
+      petPos.x, 0.35, petPos.z,
+      ownerPos.x, 0.9, ownerPos.z,
+    ]);
+    return pts;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps — intentionally no deps; useFrame keeps it live
+
+  useFrame(() => {
+    const g = geomRef.current;
+    if (!g) return;
+    const attr = g.getAttribute('position') as THREE.BufferAttribute;
+    if (!attr) return;
+    attr.setXYZ(0, petPos.x, 0.35, petPos.z);
+    attr.setXYZ(1, ownerPos.x, 0.9, ownerPos.z);
+    attr.needsUpdate = true;
+  });
+
+  return (
+    <line>
+      <bufferGeometry ref={geomRef}>
+        <bufferAttribute
+          attach="attributes-position"
+          args={[initialPoints, 3]}
+        />
+      </bufferGeometry>
+      <lineBasicMaterial color={LEASH_COLOR} transparent opacity={0.45} />
+    </line>
+  );
+}
+
+export function Critter({ animal, center, animRef, chaotic, model, focused, onPick, ownerPos }: CritterProps) {
   const groupRef = useRef<THREE.Group>(null);
   const motion = useRef<MotionState>({ moving: false });
   const [hovered, setHovered] = useState(false);
@@ -406,12 +470,26 @@ export function Critter({ animal, center, animRef, chaotic, model, focused, onPi
       return;
     }
 
-    // Roam: a slow looping orbit around the place center, with a gentle radius
-    // wobble so it reads as wandering rather than a perfect circle.
-    wanderPhase.current += delta * (0.5 + wanderSeed * 0.4);
-    const r = WANDER_RADIUS * (0.55 + 0.45 * Math.abs(Math.sin(wanderPhase.current * 0.7)));
-    const targetX = center.x + Math.cos(wanderPhase.current) * r;
-    const targetZ = center.z + Math.sin(wanderPhase.current) * r;
+    // Wave H4 (EM-209): owned pets FOLLOW the owner; unowned pets wander.
+    // ownerPos absent/null ⇒ fall back to the standard place-center wander.
+    // Dead pets are handled above (early return), so we only reach here alive.
+    let targetX: number;
+    let targetZ: number;
+    if (ownerPos) {
+      // Trail the owner with a small offset so the pet doesn't sit exactly on
+      // top of the agent (avoids z-fighting and looks more natural).
+      targetX = ownerPos.x + 0.6;
+      targetZ = ownerPos.z + 0.6;
+      // Keep wander phase ticking so the fallback is smooth if ownership drops.
+      wanderPhase.current += delta * (0.5 + wanderSeed * 0.4);
+    } else {
+      // Roam: a slow looping orbit around the place center, with a gentle radius
+      // wobble so it reads as wandering rather than a perfect circle.
+      wanderPhase.current += delta * (0.5 + wanderSeed * 0.4);
+      const r = WANDER_RADIUS * (0.55 + 0.45 * Math.abs(Math.sin(wanderPhase.current * 0.7)));
+      targetX = center.x + Math.cos(wanderPhase.current) * r;
+      targetZ = center.z + Math.sin(wanderPhase.current) * r;
+    }
 
     // Lerp toward the roaming target (frame-rate aware) so re-centres are smooth.
     const lerp = 1 - Math.pow(0.06, delta);
@@ -438,45 +516,54 @@ export function Critter({ animal, center, animRef, chaotic, model, focused, onPi
   });
 
   return (
-    <group
-      ref={groupRef}
-      onClick={handleClick}
-      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
-      onPointerOut={() => setHovered(false)}
-    >
-      {/* body: rigged GLB for cat/dog when alive (procedural critter as the
-          streaming fallback — contract rule 7); dead critters and unmodeled
-          species keep the Wave B procedural body. */}
-      {animal.alive && spec ? (
-        <CharacterModelBoundary
-          fallback={
-            <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
-          }
-        >
-          <Suspense
+    <>
+      <group
+        ref={groupRef}
+        onClick={handleClick}
+        onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+        onPointerOut={() => setHovered(false)}
+      >
+        {/* body: rigged GLB for cat/dog when alive (procedural critter as the
+            streaming fallback — contract rule 7); dead critters and unmodeled
+            species keep the Wave B procedural body. */}
+        {animal.alive && spec ? (
+          <CharacterModelBoundary
             fallback={
               <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
             }
           >
-            <CharacterModel spec={spec} motion={motion} />
-          </Suspense>
-        </CharacterModelBoundary>
-      ) : (
-        <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
+            <Suspense
+              fallback={
+                <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
+              }
+            >
+              <CharacterModel spec={spec} motion={motion} />
+            </Suspense>
+          </CharacterModelBoundary>
+        ) : (
+          <ProceduralCritterBody animal={animal} style={style} accent={accent} motion={motion} />
+        )}
+
+        {chaotic && animal.alive && <ChaosCollar />}
+
+        {/* EM-095/099: follow indicator — flat acid ring (in-canvas GPU palette,
+            mirroring --lab-acid). */}
+        {focused && (
+          <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.45, 0.6, 24]} />
+            <meshBasicMaterial color="#c8ff00" transparent opacity={0.75} />
+          </mesh>
+        )}
+
+        {showLabel && <CritterLabel animal={animal} chaotic={chaotic} model={model} />}
+      </group>
+
+      {/* Wave H4 (EM-209): bond leash — drawn from pet to owner when the pet
+          is alive and the owner's position is known. Rendered outside the pet's
+          group so both endpoints are in scene world-space (no local offset). */}
+      {animal.alive && ownerPos && (
+        <LeashLine petPos={animRef} ownerPos={ownerPos} />
       )}
-
-      {chaotic && animal.alive && <ChaosCollar />}
-
-      {/* EM-095/099: follow indicator — flat acid ring (in-canvas GPU palette,
-          mirroring --lab-acid). */}
-      {focused && (
-        <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[0.45, 0.6, 24]} />
-          <meshBasicMaterial color="#c8ff00" transparent opacity={0.75} />
-        </mesh>
-      )}
-
-      {showLabel && <CritterLabel animal={animal} chaotic={chaotic} model={model} />}
-    </group>
+    </>
   );
 }

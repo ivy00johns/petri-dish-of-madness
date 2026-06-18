@@ -895,6 +895,101 @@ function WellStructure({ body, roof, offline }: VariantProps) {
   );
 }
 
+// zoo: open animal pens with enclosure fencing, a small ranger lodge, and a
+// cheerful flag — warm habitat tones, reusing the toonMaterial helpers.
+
+function ZooStructure({ style, body, roof, offline }: VariantProps) {
+  const penGround = toonMaterial('#b8956a'); // packed earth
+  const fencePost = toonMaterial(WOOD_DARK);
+  const fenceRail = toonMaterial(WOOD);
+  const accent = toonMaterial(style.accent, {
+    emissive: style.accent,
+    emissiveIntensity: offline ? 0 : 0.2,
+  });
+
+  // Pen fencing: four corner posts + two rails per side, one shared pen wall
+  const postPositions: Array<[number, number]> = [
+    [-1.3, -1.1], [0.2, -1.1],
+    [-1.3,  0.4], [0.2,  0.4],
+  ];
+  return (
+    <group>
+      {/* packed-earth floor pad */}
+      <mesh position={[0, 0.04, -0.15]} receiveShadow material={penGround}>
+        <boxGeometry args={[3.0, 0.08, 2.2]} />
+      </mesh>
+
+      {/* ── ranger lodge (small, right side) ── */}
+      <RoundedBox
+        args={[1.3, 1.6, 1.1]}
+        radius={0.1}
+        smoothness={3}
+        position={[1.0, 0.9, 0.05]}
+        castShadow
+        receiveShadow
+        material={toonMaterial(body)}
+      />
+      {/* lodge roof */}
+      <mesh
+        position={[1.0, 1.85, 0.05]}
+        rotation={[0, Math.PI / 4, 0]}
+        castShadow
+        material={toonMaterial(roof)}
+      >
+        <coneGeometry args={[1.0, 0.7, 4]} />
+      </mesh>
+      {/* lodge door */}
+      <mesh position={[1.0, 0.55, 0.61]} material={toonMaterial(DOOR)}>
+        <planeGeometry args={[0.42, 0.85]} />
+      </mesh>
+      {/* lodge window */}
+      <GlowWindow position={[1.52, 0.95, 0.05]} rotation={[0, Math.PI / 2, 0]} size={[0.38, 0.4]} offline={offline} />
+
+      {/* ── enclosure pen (left / center) ── */}
+      {postPositions.map(([px, pz], i) => (
+        <mesh key={i} position={[px, 0.45, pz]} castShadow material={fencePost}>
+          <cylinderGeometry args={[0.055, 0.07, 0.9, 6]} />
+        </mesh>
+      ))}
+      {/* horizontal rails — two per long side */}
+      {([0.22, 0.52] as const).map((py, i) => (
+        <group key={`r${i}`}>
+          <mesh position={[-0.55, py, -1.1]} castShadow material={fenceRail}>
+            <boxGeometry args={[1.55, 0.05, 0.06]} />
+          </mesh>
+          <mesh position={[-0.55, py, 0.4]} castShadow material={fenceRail}>
+            <boxGeometry args={[1.55, 0.05, 0.06]} />
+          </mesh>
+          <mesh position={[-1.3, py, -0.35]} castShadow material={fenceRail}>
+            <boxGeometry args={[0.06, 0.05, 1.56]} />
+          </mesh>
+          <mesh position={[0.2, py, -0.35]} castShadow material={fenceRail}>
+            <boxGeometry args={[0.06, 0.05, 1.56]} />
+          </mesh>
+        </group>
+      ))}
+
+      {/* ── flag on the lodge ── */}
+      <mesh position={[1.0, 2.65, 0.05]} castShadow material={toonMaterial(WOOD_DARK)}>
+        <cylinderGeometry args={[0.03, 0.03, 0.9, 6]} />
+      </mesh>
+      <mesh position={[1.22, 2.9, 0.05]}>
+        <planeGeometry args={[0.44, 0.28]} />
+        <meshToonMaterial
+          color={style.accent}
+          gradientMap={toonGradientMap()}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+
+      {/* ── decorative accent bloom (a plant / watering trough glow) ── */}
+      <mesh position={[-0.55, 0.38, -0.35]} castShadow material={accent}>
+        <sphereGeometry args={[0.22, 10, 10]} />
+      </mesh>
+    </group>
+  );
+}
+
 // generic: the pre-EM-122 neutral structure, kept as the fallback silhouette.
 
 function GenericStructure({ style, body, roof, offline }: VariantProps) {
@@ -944,6 +1039,7 @@ const VARIANT_COMPONENTS: Record<VariantKey, ComponentType<VariantProps>> = {
   stall: StallStructure,
   monument: MonumentStructure,
   well: WellStructure,
+  zoo: ZooStructure,
   generic: GenericStructure,
 };
 
@@ -1082,6 +1178,7 @@ const OPERATIONAL_LABEL_Y: Record<VariantKey, number> = {
   workshop: 3.6,
   well: 3.4,
   stall: 3.2,
+  zoo: 3.8,
   farm: 2.4,
   garden: 2.6,
 };

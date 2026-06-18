@@ -18,7 +18,7 @@
 import { useRef, useEffect, useCallback } from 'react';
 import type { WorldState, WorldEvent } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
-import { PLACE_STYLES } from '../world3d/worldSpace';
+import { PLACE_STYLES, speciesEmoji } from '../world3d/worldSpace';
 // Declares the shared :root tokens (incl. --marker-animal, the chaos magenta)
 // the canvas reads via getComputedStyle — token-only color, no hardcoded hex.
 import '../../inspector/inspector-tokens.css';
@@ -400,19 +400,13 @@ function drawAnimal(
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // Species marker: emoji renders in its own colors; non-cat/dog species use
-  // their initial tinted with the accent.
-  const emoji = animal.species === 'cat' ? '🐱' : animal.species === 'dog' ? '🐶' : null;
+  // Species marker: the shared speciesEmoji() helper (EM-143) renders the right
+  // glyph for every species, with a 🐾 fallback for unknowns — one source of
+  // truth across the 3D critters, roster, chaos feed, spawn form, and this map.
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  if (emoji) {
-    ctx.font = `${Math.round(r * 1.5)}px "IBM Plex Mono", monospace`;
-    ctx.fillText(emoji, ax, ay + 0.5);
-  } else {
-    ctx.font = `600 ${Math.round(r)}px "IBM Plex Mono", monospace`;
-    ctx.fillStyle = accent;
-    ctx.fillText((animal.species[0] ?? '?').toUpperCase(), ax, ay + 0.5);
-  }
+  ctx.font = `${Math.round(r * 1.5)}px "IBM Plex Mono", monospace`;
+  ctx.fillText(speciesEmoji(animal.species), ax, ay + 0.5);
 
   // Name label beneath, in the chaos accent.
   ctx.font = 'bold 9px "IBM Plex Mono", monospace';

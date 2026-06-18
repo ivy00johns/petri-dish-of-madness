@@ -1298,6 +1298,71 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
   return { state, events };
 }
 
+// ── Ad-hoc animal spawn (EM-143) — mirrors POST /api/animals ─────────────────
+
+let animalSpawnCounter = 0;
+
+/**
+ * Synthesize a god-spawned animal from the AnimalSpawnForm spec. Returns the
+ * new world state (animal added) plus the animal_spawned event. Mock mode only.
+ */
+export function spawnAnimalMock(spec: {
+  species: string;
+  name?: string;
+  location?: string;
+}): { state: WorldState; events: WorldEvent[] } {
+  animalSpawnCounter += 1;
+  const location =
+    PLACES.some((p) => p.id === spec.location) ? (spec.location ?? 'plaza') : 'plaza';
+  const id = `animal-spawn-${animalSpawnCounter}`;
+  const speciesLabel = spec.species.charAt(0).toUpperCase() + spec.species.slice(1);
+  const animalName = spec.name?.trim() || `${speciesLabel} ${animalSpawnCounter}`;
+
+  const newAnimal: Animal = {
+    id,
+    species: spec.species as Animal['species'],
+    name: animalName,
+    location,
+    energy: 90,
+    mood: 'curious',
+    alive: true,
+  };
+  animals.push(newAnimal);
+
+  const placeName = PLACES.find((p) => p.id === location)?.name ?? location;
+  const evt: WorldEvent = {
+    type: 'event',
+    seq: nextSeq(),
+    tick,
+    kind: 'animal_spawned',
+    actor_id: id,
+    target_id: null,
+    profile: null,
+    profile_color: null,
+    text: `${animalName} (${spec.species}) appears at ${placeName}.`,
+    payload: { species: spec.species, location },
+    ts: new Date().toISOString(),
+    turn_id: null,
+    actor_type: 'animal',
+    sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+  };
+
+  const state: WorldState = {
+    type: 'world_state',
+    seq: nextSeq(),
+    tick, day, running,
+    tick_interval_seconds: tickIntervalSeconds,
+    places: PLACES,
+    agents: agents.map((a) => ({ ...a })),
+    rules: rules.map((r) => ({ ...r })),
+    profiles: PROFILES,
+    buildings: buildings.map((b) => ({ ...b, contributors: [...b.contributors] })),
+    animals: animals.map((a) => ({ ...a })),
+    billboard: billboard.map((p) => ({ ...p })),
+  };
+  return { state, events: [evt] };
+}
+
 // ── God billboard reply (W11b EM-091d) — mirrors POST /api/billboard ─────────
 
 /**
@@ -1354,6 +1419,7 @@ export const mockControls = {
     }
   },
   spawn: (spec: SpawnSpec) => spawnAgentMock(spec),
+  spawnAnimal: (spec: { species: string; name?: string; location?: string }) => spawnAnimalMock(spec),
   /** W11b (EM-091d): god reply on the billboard — mirrors POST /api/billboard. */
   postBillboard: (text: string, inReplyTo?: string) => postBillboardMock(text, inReplyTo),
   isRunning: () => running,
@@ -1385,6 +1451,7 @@ export const mockControls = {
     openCommitments = [];
     commitmentCounter = 0;
     spawnCounter = 0;
+    animalSpawnCounter = 0;
     tickIntervalSeconds = TICK_INTERVAL; // config value, like a backend reset
     seedRng(0);
     return buildInitialWorldState();

@@ -16,7 +16,7 @@ from dataclasses import asdict, is_dataclass
 
 from .world import World, AgentState
 from ..agents.runtime import AgentRuntime
-from ..animals.runtime import AnimalRuntime
+from ..animals.runtime import AnimalRuntime, _seed_int
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
 from ..config.loader import WorldConfig
@@ -548,6 +548,13 @@ class TickLoop:
         # stamped with the tick they actually resolve on.
         self._maybe_schedule_animals()
 
+        # Wave H2 / EM-207 — AMBIENT spawning: every `ambient_spawn_every` ticks the
+        # menagerie may grow on its own (ONE random catalog critter at a random
+        # place), with a DETERMINISTIC seeded roll (replay-safe) and ONLY while
+        # under max_population. OFF by default (ambient_spawn_every:0). Synchronous +
+        # cheap (no LLM) — it just mutates world state + emits one event.
+        self._maybe_schedule_ambient_animal()
+
         # W11a / EM-094 — Narrator mode (OFF by default): on an every_n_ticks-
         # aligned tick, schedule ONE recap LLM call as a background task — same
         # off-critical-path pattern as the animals. Disabled = zero calls.
@@ -799,6 +806,78 @@ class TickLoop:
             acted = True
         if acted:
             self._broadcast_world_state()
+
+    def _ambient_seed(self, tick: int) -> int:
+        """Wave H2 / EM-207 — the DETERMINISTIC seed for the ambient roll/spawn at
+        `tick`: a stable hash of (run id + tick), the SAME replay-safe pattern the
+        animal activity-roll uses (no wall-clock, no RNG). A fixed (run, tick)
+        always yields the same roll AND the same species/place."""
+        return _seed_int("ambient", self._run_id or 0, tick)
+
+    def _maybe_schedule_ambient_animal(self) -> None:
+        """Wave H2 / EM-207 — let the menagerie grow on its own.
+
+        Every `animals.ambient_spawn_every` ticks (0 = OFF), with a DETERMINISTIC
+        seeded roll against `ambient_spawn_chance`, spawn ONE random catalog species
+        at a random existing place — ONLY while living animals < max_population.
+        Emits `animal_spawned` with payload.method 'ambient' + broadcasts a fresh
+        world_state so the new critter appears immediately. Skips SILENTLY at the
+        cap (catches the spawn_animal ValueError). NEVER raises (hot-path safe)."""
+        cfg = self._animals_cfg()
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return
+        every = int(getattr(cfg, "ambient_spawn_every", 0) or 0)
+        if every <= 0:
+            return  # ambient spawning disabled (the backward-compatible default)
+        tick = self._world.tick
+        if tick <= 0 or tick % every != 0:
+            return
+        # Cap pre-check (free-scale): never even roll when the menagerie is full.
+        max_population = int(getattr(cfg, "max_population", 0) or 0)
+        if max_population > 0 and len(self._world.living_animals()) >= max_population:
+            return
+        seed = self._ambient_seed(tick)
+        try:
+            chance = float(getattr(cfg, "ambient_spawn_chance", 0.0) or 0.0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            chance = 0.0
+        if chance <= 0.0:
+            return
+        # Map the seed into [0, 1) deterministically (mirrors the animal roll).
+        if (seed % 1_000_000) / 1_000_000 >= min(1.0, chance):
+            return  # the roll didn't land this window
+        try:
+            animal = self._world.spawn_random_animal(seed)
+        except ValueError:
+            return  # raced the cap — skip silently (best-effort ambient chaos)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("ambient animal spawn failed: %s", exc)
+            return
+        if animal is None:
+            return  # no place to put it
+        self._emit_event({
+            "kind": "animal_spawned",
+            "actor_id": animal.id,
+            "actor_type": "animal",
+            "turn_id": None,  # standalone system event, outside the agent turn chain
+            "text": f"{animal.name} the {animal.species} wanders in.",
+            "payload": {
+                "animal_id": animal.id,
+                "species": animal.species,
+                "name": animal.name,
+                "location": animal.location,
+                "method": "ambient",
+            },
+        })
+        self._runtime.push_event({
+            "kind": "animal_spawned",
+            "actor_id": animal.id,
+            "actor_type": "animal",
+            "tick": tick,
+            "payload": {"species": animal.species, "name": animal.name,
+                        "location": animal.location, "method": "ambient"},
+        })
+        self._broadcast_world_state()
 
     # ──────────────────────────────────────────────────────────────────────────
     # W11a / EM-094 — Narrator mode (event-log.md v1.2.0 note 1)
@@ -1103,6 +1182,24 @@ class TickLoop:
         opening = text[:250].lower()
         return any(p in opening for p in cls._PROMPT_ECHO)
 
+    @staticmethod
+    def _looks_truncated(text: str, finish_reason: str | None) -> bool:
+        """EM-201 follow-on — true when the chapter reply was CUT OFF rather than
+        finished, so it must not be stored (a clean model / retry fills the
+        window later). Two shapes seen live, both of which survive _clean_chapter
+        AND _looks_like_leaked_reasoning:
+          • finish_reason == 'length' — the proxy rerouted the lane to a model
+            (nvidia/nemotron) that hit the token cap mid-sentence.
+          • a degenerate stub too short to be prose — the literal 'A' chapter, a
+            lone em-dash. The floor stays well under the suite's shortest real
+            chapter (9 words / 58 chars) so terse-but-real prose still passes.
+        The 45s wait_for timeout never reaches here — it raises and emits nothing.
+        """
+        if finish_reason == "length":
+            return True
+        stripped = text.strip()
+        return len(stripped) < 12 or len(stripped.split()) < 3
+
     async def _run_narrator(self, from_tick: int, to_tick: int, profile_name: str) -> None:
         """Body of one narrator window (background task): build the digest, make
         ONE LLM call, emit ONE `narrator_summary` event. A failed/timed-out call
@@ -1157,13 +1254,21 @@ class TickLoop:
                 timeout=45.0,
             )
             text = self._clean_chapter(text or "")
-            if not text or self._looks_like_leaked_reasoning(text):
-                # EM-201 — empty, or a REASONING model leaking its chain of
-                # thought ("The chronicler must write…" instead of the chapter).
-                # Emit nothing so the window stays un-chronicled and a clean
-                # model (or retry) can fill it — never a garbage chapter.
-                log.debug("chapter rejected (empty or leaked reasoning) for %s-%s",
-                          from_tick, to_tick)
+            finish_reason = (self._router.last_usage(profile_name) or {}).get("finish_reason")
+            if (
+                not text
+                or self._looks_truncated(text, finish_reason)
+                or self._looks_like_leaked_reasoning(text)
+            ):
+                # EM-201 — empty, a TRUNCATED/degenerate reply (length-capped or a
+                # lone 'A' from a rerouted nvidia/nemotron lane), or a REASONING
+                # model leaking its chain of thought ("The chronicler must write…"
+                # instead of the chapter). Emit nothing so the window stays
+                # un-chronicled and a clean model (or retry) can fill it — never a
+                # garbage chapter.
+                log.debug(
+                    "chapter rejected (empty/truncated/leaked, finish=%s) for %s-%s",
+                    finish_reason, from_tick, to_tick)
                 return
             payload = {
                 "from_tick": from_tick,
@@ -1196,21 +1301,26 @@ class TickLoop:
             log.debug("narrator call failed for ticks %s-%s: %s", from_tick, to_tick, exc)
 
     def start_chronicle_backfill(
-        self, profile_name: str, *, rebuild: bool = False
+        self, profile_name: str, *, rebuild: bool = False, restamp: bool = False
     ) -> bool:
         """EM-201 — kick off the on-demand backfill as a background task (so the
         API returns immediately and chapters stream in live). Returns False when
-        a backfill is already in flight. EM-201 follow-on: `rebuild=True` threads
-        through to regenerate EVERY window (fresh prose + fresh fact stamps),
-        not just the gaps."""
+        a backfill is already in flight. `rebuild=True` regenerates EVERY window
+        (fresh prose + fresh fact stamps), not just the gaps. `restamp=True`
+        (EM-201 follow-on) is the cheap path: re-derive `chaos` for OLD (pre-facts,
+        v1) chapters and re-emit them WITH THEIR ORIGINAL PROSE (zero LLM), narrate
+        only the true GAPS, and skip windows that already carry a v2 chapter."""
         if (
             self._chronicle_backfill_task is not None
             and not self._chronicle_backfill_task.done()
         ):
             return False
-        self._chronicle_backfill_task = asyncio.create_task(
-            self.build_chronicle_from_history(profile_name, rebuild=rebuild)
+        coro = (
+            self.restamp_chronicle(profile_name)
+            if restamp
+            else self.build_chronicle_from_history(profile_name, rebuild=rebuild)
         )
+        self._chronicle_backfill_task = asyncio.create_task(coro)
         return True
 
     async def build_chronicle_from_history(
@@ -1259,6 +1369,83 @@ class TickLoop:
                 except Exception as exc:  # pragma: no cover - defensive
                     log.debug("backfill chapter %s-%s failed: %s", w, w_to, exc)
             w = w_to
+
+    async def restamp_chronicle(self, profile_name: str, *, every: int | None = None) -> None:
+        """EM-201 follow-on — fill the chronicle WITHOUT rewriting good prose.
+
+        For each window 0→now: a window that already carries a v2 chapter
+        (chronicler_version stamped) is SKIPPED; an OLD v1 chapter (prose but no
+        server-computed facts — written before chaos-stamping existed) is
+        RESTAMPED — its `chaos` re-derived from the DB events and re-emitted WITH
+        ITS ORIGINAL PROSE + chronicler_version (zero LLM); a true GAP (no chapter
+        at all) is narrated fresh on `profile_name` (one LLM call). The re-emitted
+        restamp carries a higher seq, so the dedupe (frontend + _previous_chapter)
+        prefers it over the stale v1. Never raises."""
+        if not profile_name or self._router.get_profile(profile_name) is None:
+            return
+        every = every or max(
+            1, int(getattr(self._narrator_cfg(), "every_n_ticks", 100) or 100)
+        )
+        to_tick = int(self._world.tick)
+        # Latest chapter per window (ascending seq ⇒ last write wins = newest).
+        latest: dict[tuple[int, int], dict] = {}
+        try:
+            for ev in self._repo.get_events(
+                self._run_id or 1, kinds=["narrator_summary"], lineage=True, order="asc"
+            ):
+                p = ev.get("payload") or {}
+                ft, tt = p.get("from_tick"), p.get("to_tick")
+                if isinstance(ft, int) and isinstance(tt, int):
+                    latest[(ft, tt)] = {"text": ev.get("text") or "", "payload": p}
+        except Exception:  # pragma: no cover - defensive
+            pass
+        w = 0
+        while w < to_tick:
+            w_to = min(w + every, to_tick)
+            try:
+                chap = latest.get((w, w_to))
+                if chap is None:
+                    await self._run_narrator(w, w_to, profile_name)        # gap → narrate
+                elif not (chap["payload"] or {}).get("chronicler_version"):
+                    self._restamp_chapter(w, w_to, chap)                   # v1 → restamp (no LLM)
+                # else: already v2 → skip
+            except asyncio.CancelledError:
+                raise  # reset() cancels us
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("restamp window %s-%s failed: %s", w, w_to, exc)
+            w = w_to
+
+    def _restamp_chapter(self, from_tick: int, to_tick: int, chap: dict) -> None:
+        """Re-emit an old chapter's ORIGINAL prose with re-derived `chaos` facts +
+        the current chronicler_version — no LLM call. Preserves the original
+        profile/routed_via so the chapter still credits the model that wrote it."""
+        text = (chap.get("text") or "").strip()
+        if not text:
+            return
+        old = chap.get("payload") or {}
+        rows = self._narrator_window_rows(from_tick, to_tick)
+        facts = self._build_chronicle_facts(rows, from_tick, to_tick)
+        profile = old.get("profile") or "restamp"
+        payload = {
+            "from_tick": from_tick,
+            "to_tick": to_tick,
+            "profile": profile,
+            "chronicler_version": CHRONICLER_VERSION,
+            "chaos": facts,
+            "restamped": True,
+        }
+        rv = old.get("routed_via")
+        if rv:
+            payload["routed_via"] = rv
+        self._emit_event({
+            "kind": "narrator_summary",
+            "actor_id": "narrator",
+            "actor_type": "system",
+            "profile": profile,
+            "turn_id": None,
+            "text": text[:2000],
+            "payload": payload,
+        })
 
     def _advance_round_buildings(self) -> None:
         """W7 per-round hook. Runs once per round (guarded by world.round):
