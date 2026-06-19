@@ -1814,6 +1814,29 @@ async def fork_run(body: ForkBody):
     return result
 
 
+def _enrich_profile_colors(events: list[dict]) -> list[dict]:
+    """Backfilled events from the event log carry `profile` (the deciding model)
+    but NOT `profile_color` — it is not a stored column; only the live WS
+    broadcast stamps it (loop._get_profile_color). The live-feed/​inspector model
+    chip needs profile_color, so derive it here from `profile` at the backfill
+    boundary, making /api/events + /api/replay consistent with the live broadcast
+    (otherwise all history renders chip-less — starkly visible across a fork/​
+    resume lineage). Idempotent: an event that already has a profile_color (live
+    rows) is left untouched; events without a profile (animals/system) are
+    untouched and render via the kind-fallback. In place; returns the same list.
+    """
+    color_for = (
+        getattr(_loop, "_get_profile_color_for_profile", None)
+        if _loop is not None else None
+    )
+    if not callable(color_for):
+        return events
+    for e in events:
+        if e.get("profile") and not e.get("profile_color"):
+            e["profile_color"] = color_for(e["profile"])
+    return events
+
+
 @app.get("/api/events")
 async def get_events(
     run_id: int | None = None,  # query param: scope to a past run (default: active run)
@@ -1834,7 +1857,7 @@ async def get_events(
     if _repo is None or run_id is None:
         return []
     kind_list = [k for k in kinds.split(",") if k] if kinds else None
-    return _repo.get_events(
+    return _enrich_profile_colors(_repo.get_events(
         run_id,
         from_tick=from_tick,
         to_tick=to_tick,
@@ -1846,7 +1869,7 @@ async def get_events(
         limit=limit,
         order=order,
         lineage=lineage,
-    )
+    ))
 
 
 @app.get("/api/events/stats")
@@ -1922,7 +1945,9 @@ async def get_replay(tick: int = Query(...), run_id: int | None = None):
         return {"base": None, "events": []}
     base = _repo.nearest_snapshot(run_id, tick)
     from_tick = (base["tick"] + 1) if base is not None else 0
-    events = _repo.get_events(run_id, from_tick=from_tick, to_tick=tick, order="asc")
+    events = _enrich_profile_colors(
+        _repo.get_events(run_id, from_tick=from_tick, to_tick=tick, order="asc")
+    )
     return {"base": base, "events": events}
 
 

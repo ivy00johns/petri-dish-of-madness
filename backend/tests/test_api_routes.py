@@ -335,3 +335,51 @@ def test_start_and_pause_return_ok(client):
     body = resp.json()
     assert body.get("status") == "ok"
     assert body.get("running") is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Backfill model-chip regression: /api/events must carry profile_color
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_events_backfill_includes_profile_color(client):
+    """The live-feed model chip needs profile_color, which is NOT a stored column
+    (only the live WS broadcast stamps it via loop._get_profile_color). Backfilled
+    events from /api/events must therefore have profile_color DERIVED from profile,
+    or history renders chip-less (the resume/fork made this stark). Regression:
+    profile_color was null for every backfilled event."""
+    _all_agents_to_mock(client)
+    client.post("/api/control/pause")
+    for _ in range(3):
+        client.post("/api/control/step")
+
+    events = client.get("/api/events?order=desc&limit=200").json()
+    profiled = [e for e in events if e.get("profile")]
+    assert profiled, "expected some backfilled events to carry a profile"
+    bad = [
+        e for e in profiled
+        if not (isinstance(e.get("profile_color"), str)
+                and e["profile_color"].startswith("#"))
+    ]
+    assert not bad, (
+        f"{len(bad)}/{len(profiled)} backfilled events have a profile but no hex "
+        f"profile_color (model chip would not render). e.g. {bad[0] if bad else None}"
+    )
+
+
+def test_replay_events_include_profile_color(client):
+    """Same enrichment for the inspector scrub path (/api/replay returns the
+    fold-forward event delta), so scrubbed history shows model chips too."""
+    _all_agents_to_mock(client)
+    client.post("/api/control/pause")
+    for _ in range(2):
+        client.post("/api/control/step")
+    tick = client.get("/api/state").json()["tick"]
+
+    replay = client.get(f"/api/replay?tick={tick}").json()
+    profiled = [e for e in replay.get("events", []) if e.get("profile")]
+    bad = [
+        e for e in profiled
+        if not (isinstance(e.get("profile_color"), str)
+                and e["profile_color"].startswith("#"))
+    ]
+    assert not bad, f"{len(bad)} replay events have a profile but no hex profile_color"
