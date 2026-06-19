@@ -34,6 +34,13 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 > **W15–W17** (Wave D: D1 city vocabulary+generator · D2 population scaling · D3 life).
 > Direction lock: the art target is Emergence World's dense zoned city, not Stardew-cozy;
 > the Wave C medieval core persists as a historic district (EM-156).
+> **Wave L (Cognition) filed 2026-06-18** via `plan-intake` from
+> `docs/research/smallville-to-sid-2026-06-18.md` (Smallville→Sid research + repo-grounded
+> assessment) — **EM-222–224**, opening **W22**. Three research spikes stripped of the doc's
+> wrong premises (the assumed Phaser/TS stack, rebuild-what's-already-shipped stages, and the
+> cost-minimization program that contradicts the max-call-rate north star): relevance-scored
+> long-term retrieval (the one missing Smallville mechanism), recursive+reactive planning, and
+> PIANO's coherence trick for multi-action turns. Open questions preserved per item.
 
 ## Format & conventions
 
@@ -367,8 +374,11 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 | EM-219 | P2 | W21 | backend+frontend | Wave K · K3 | **Remove & demolish** — reflex `remove_prop(prop_id)` + a clean `demolish(building_id)` (OWNER demolishes their own freely, PUBLIC/landmark needs a ~70% governance vote, distinct from `arson`→destroyed; the freed lot returns to claimable per the EM-174 ✅/EM-181 ✅ lot model). `prop_removed` / `building_demolished` events; renderer clears the mesh + releases the lot. The city visibly *changes* — clear space, tidy up. Deps EM-218. **Public demolish requires a ~70% supermajority (verify-pass fix).** | done | wave-K 2026-06-18 |
 | EM-220 | P2 | W21 | backend+frontend | Wave K · K4 | **Recolor / skin a building** — a data-driven `tint`/`skin` field on `Building` set via a light reflex tool (agent self / owner), serialized; the renderer reads it as a material override layered over (not replacing) the health-soot tint. The "Ada paints her cottage" beat; pairs with the Wave I art-banner path (EM-213). May swap ahead of K3 (lighter). Deps EM-216, EM-217. | done | wave-K 2026-06-18 |
 | EM-221 | P2 | W21 | frontend+backend | Wave K · K5 | **God-console parity** — god-panel controls over the same APIs: place/remove/recolor props, demolish buildings, and a "decorate"/"clear" prop-burst (mirrors the agent reflex tools, like the rewild/zoo-escape buttons). A manual curation + seeding lever; no new engine semantics beyond K2–K4. Deps EM-218, EM-219, EM-220. | done | wave-K 2026-06-18 |
+| EM-222 | P2 | W22 | backend | Sid research 2026-06-18 | **Relevance-scored long-term memory retrieval** (the one missing Smallville mechanism, **highest value of this batch**) — today memory is a recency *window* (`_effective_memory_window`, last-N events); **no embeddings exist**. Add recency×importance×**relevance** retrieval over an embedded memory stream so agents recall *relevant* old events, not just recent ones. Importance scoring (EM-159) + reflection (EM-080) already shipped — this is purely the relevance + long-term-store axis. **North-star-aligned: ADDS calls** (embeddings + richer prompts), not a cost-cut. **OPEN Q (gating): does FreeLLMAPI expose an embeddings endpoint?** If not → lexical/BM25 vs. a dedicated Ollama embed model — that answer decides the approach. Spike first. Source: `docs/research/smallville-to-sid-2026-06-18.md`. | open | — |
+| EM-223 | P2 | W22 | backend | Sid research 2026-06-18 | **Recursive + reactive planning** — agents emit a flat one-line plan ("D1: water seedlings → buy seeds"); Smallville decomposes daily→hourly→5–15-min with re-planning on perception. Deeper plans = more believable routines + more calls (north-star-aligned). **OPEN Q:** decomposition depth for our tick cadence, and how re-planning interacts with salience-gated reflex turns (EM-159/EM-160) — **must not fight the spontaneity floor**. Spike. Source: `docs/research/smallville-to-sid-2026-06-18.md`. | open | — |
+| EM-224 | P2 | W22 | backend | Sid research 2026-06-18 | **PIANO coherence for multi-action turns** — adopt PIANO's bottleneck→single-decision→broadcast trick to keep speech and action aligned across multi-action turns (EM-199), preventing "says 'sure!' while doing something else." **Take ONLY the coherence idea — explicitly reject PIANO's parallelize-to-cut-latency motive** (we want more calls, not fewer-blocking ones). **OPEN Q:** how to structure the bottleneck inside the existing single-LLM-turn → multi-action flow. Spike. Source: `docs/research/smallville-to-sid-2026-06-18.md`. | open | — |
 
-_Next free ID: EM-222._
+_Next free ID: EM-225._
 
 ## Notes
 
