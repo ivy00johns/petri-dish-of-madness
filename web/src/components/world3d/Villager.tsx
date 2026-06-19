@@ -37,6 +37,7 @@ import {
   nextMoving,
   stepYaw,
   yawTowards,
+  villagerModelFor,
   VILLAGER_MOVE,
 } from './characterAnim';
 
@@ -360,7 +361,8 @@ export function Villager({ agent, target, animRef, routedVia, bubbles, focused, 
 
   const color = agent.profile_color ?? '#b0b0b0';
   const bodyColor = shade(color, 0.85);
-  const spec = CHARACTER_MODELS.villager;
+  // EM-216b: per-agent villager mesh from the variety pool (deterministic by id).
+  const spec = villagerModelFor(agent.id);
 
   useFrame((_, delta) => {
     const g = groupRef.current;

@@ -8,7 +8,8 @@
  * and Critter.tsx consume these from their useFrame loops.
  */
 
-import { CHARACTER_MODELS, type ModelSpec } from './assets/models';
+import { CHARACTER_MODELS, VILLAGER_POOL, type ModelSpec } from './assets/models';
+import { hashUnit } from './worldSpace';
 
 // ── Movement state (hysteresis) ───────────────────────────────────────────────
 
@@ -111,4 +112,15 @@ export function critterModelFor(species: string): ModelSpec | null {
     case 'crow': return CHARACTER_MODELS.crow;
     default: return null;
   }
+}
+
+/**
+ * EM-216b — resolve an AGENT to its villager mesh, picked deterministically from
+ * the agent id out of VILLAGER_POOL so the cast looks distinct (not all the same
+ * Rogue). Stable across frame/reload/fork (EM-155). A missing id falls back to
+ * slot 0 (the KayKit Rogue = the CHARACTER_MODELS.villager default).
+ */
+export function villagerModelFor(agentId: string | null | undefined): ModelSpec {
+  if (!agentId || VILLAGER_POOL.length === 0) return VILLAGER_POOL[0];
+  return VILLAGER_POOL[Math.floor(hashUnit(agentId) * VILLAGER_POOL.length) % VILLAGER_POOL.length];
 }
