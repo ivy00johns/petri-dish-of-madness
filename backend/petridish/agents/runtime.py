@@ -2080,7 +2080,8 @@ If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
 
 
 def _perceived_context(
-    agent: AgentState, world: World, recent_events: list[dict], params: Any
+    agent: AgentState, world: World, recent_events: list[dict], params: Any,
+    *, memory_events: list[dict] | None = None,
 ) -> tuple[dict, dict]:
     """Derive the `perceived` + `memory_retrieved` payload bodies for the decision
     trace from the SAME context fed to the model (no extra work, no LLM calls).
@@ -2088,6 +2089,11 @@ def _perceived_context(
     Returns (perceived, memory) where:
       perceived = {visible_agents:[id], nearby_places:[id], overheard:[seq], ...}
       memory    = {memories:[{ref?, tick, kind, text}], window}
+
+    EM-222 — when the caller passes `memory_events` (the already-retrieved,
+    prebounded set the LLM path fed the model), the trace reflects EXACTLY that
+    (merged top-K + recent tail). Otherwise (reflex/background/legacy) it
+    re-derives the EM-161 blind-recency window the model was fed.
     """
     visible_agents = [
         a.id for a in world.living_agents()
@@ -2097,10 +2103,14 @@ def _perceived_context(
     # over-broad; v1 perception is "where I am", so nearby = current place only.
     nearby_places = [agent.location] if agent.location in world.places else []
 
-    # EM-161 — the SAME effective window _assemble_context fed the model
-    # (background shrinks to 8), so the trace stays truthful to the prompt.
-    window = _effective_memory_window(agent, params)
-    fed = recent_events[-window:]
+    if memory_events is not None:
+        fed = memory_events
+        window = len(fed)
+    else:
+        # EM-161 — the SAME effective window _assemble_context fed the model
+        # (background shrinks to 8), so the trace stays truthful to the prompt.
+        window = _effective_memory_window(agent, params)
+        fed = recent_events[-window:]
     # overheard: seqs of the events the agent witnessed this window (best-effort;
     # the per-agent memory buffer stores text/tick/kind, seq may be absent).
     overheard = [e.get("seq") for e in fed if e.get("seq") is not None]
@@ -2144,6 +2154,11 @@ class AgentRuntime:
         # run (per the contract: "logged once, degraded") instead of per turn, so
         # a proxy/DB outage does not flood the log every protagonist turn.
         self._memory_retrieval_degraded: bool = False
+        # EM-222 — circuit breaker: once the embed lane fails, skip retrieval
+        # entirely until this tick (a cooldown), then allow ONE recovery probe,
+        # so a persistent proxy/DB outage can't stall every protagonist turn for
+        # the embed timeout. 0 ⇒ no cooldown pending.
+        self._memory_retrieval_retry_tick: int = 0
         # Rolling per-agent event buffers
         self._memory: dict[str, list[dict]] = {}
         # W11b / EM-079 — per-agent active commitments:
@@ -2185,6 +2200,7 @@ class AgentRuntime:
         self._repo = repo
         self._run_id = run_id
         self._memory_retrieval_degraded = False
+        self._memory_retrieval_retry_tick = 0
 
     def reset_state(self) -> None:
         """Clear ALL per-run cognition state (memories, commitments, importance
@@ -2201,6 +2217,7 @@ class AgentRuntime:
         self._last_llm_tick.clear()
         # EM-222 — re-arm the one-shot retrieval-degraded log for the new run.
         self._memory_retrieval_degraded = False
+        self._memory_retrieval_retry_tick = 0
 
     # ── W11b config accessors (defensive: the loader is owned elsewhere) ──────
 
@@ -2294,29 +2311,51 @@ class AgentRuntime:
         never blocked by a down proxy or DB. North-star-aligned: the embed calls
         ADD work, never cache-to-mute.
         """
-        window_slice = recent_events[-_effective_memory_window(agent, params=world.params):]
+        # Blind-recency fallback, computed defensively — returned on every
+        # non-retrieval path AND on any failure, so a turn NEVER dies here.
+        try:
+            window_slice = recent_events[-_effective_memory_window(agent, params=world.params):]
+        except Exception:
+            window_slice = list(recent_events[-12:])
 
-        params = self._memory_retrieval_params()
+        # Param coercion is inside the guard too: a malformed config block must
+        # not raise out of memory retrieval.
+        try:
+            params = self._memory_retrieval_params()
+        except Exception:
+            return window_slice
+
         # Background keeps its blind-recency diet (EM-161); disabled ⇒ blind for
-        # every tier; no embed profile / no repo wired ⇒ nothing to retrieve.
+        # every tier; no embed profile / no repo wired ⇒ nothing to retrieve;
+        # circuit OPEN (a recent embed failure, still inside the cooldown) ⇒ skip
+        # the embed entirely so a down proxy can't stall every protagonist turn.
         if (
             _cadence_tier(agent) == "background"
             or not params.enabled
             or not getattr(self.router, "has_embeddings", False)
             or self._repo is None
             or self._run_id is None
+            or (self._memory_retrieval_degraded
+                and world.tick < self._memory_retrieval_retry_tick)
         ):
             return window_slice
 
+        # EM-170 sibling — cap embed wall-time so a slow/degraded embed lane can't
+        # stall the sequential tick loop; a failure opens a cooldown circuit.
+        EMBED_BUDGET_S = 6.0
+        COOLDOWN_TICKS = 25
         try:
             query = build_query_text(agent, world, recent_events)
-            qvecs = await self.router.embed([query])
+            qvecs = await asyncio.wait_for(
+                self.router.embed([query]), timeout=EMBED_BUDGET_S
+            )
             query_vec = qvecs[0] if qvecs else []
 
             candidates = self._repo.fetch_memory_candidates(
                 self._run_id, agent.id, BROADCAST_KINDS, params.candidate_limit
             )
             if not candidates:
+                self._memory_retrieval_degraded = False  # the probe succeeded
                 return window_slice
 
             cand_seqs = [c["seq"] for c in candidates if c.get("seq") is not None]
@@ -2325,11 +2364,20 @@ class AgentRuntime:
             )
             # Embed the misses ONCE and persist them, so the second turn is a pure
             # cache hit (the embed-once invariant). A candidate with empty text
-            # still gets embedded (the embedder maps "" to a stable zero-ish
-            # vector) so the seq is cached and never re-attempted.
+            # still gets embedded (the embedder maps "" to a stable zero vector)
+            # so the seq is cached and never re-attempted.
             misses = [c for c in candidates if c["seq"] not in embeddings]
             if misses:
-                vecs = await self.router.embed([c.get("text", "") for c in misses])
+                vecs = await asyncio.wait_for(
+                    self.router.embed([c.get("text", "") for c in misses]),
+                    timeout=EMBED_BUDGET_S,
+                )
+                # A misbehaving proxy returning the wrong count must NOT cache
+                # vectors against the wrong seq — degrade instead of poisoning.
+                if len(vecs) != len(misses):
+                    raise ValueError(
+                        f"embed returned {len(vecs)} vectors for {len(misses)} inputs"
+                    )
                 rows: list[tuple[int, str, int, list[float]]] = []
                 for c, vec in zip(misses, vecs):
                     embeddings[c["seq"]] = vec
@@ -2350,29 +2398,38 @@ class AgentRuntime:
             topk = scored[: params.top_k]
 
             # Merge the retrieved top-K with the recent tail (the immediate
-            # context never drops out, however the scoring ranked it), dedupe by
-            # seq (the recent-tail in-memory events carry no seq — they are kept
-            # as-is, distinct from the DB candidates), and order by tick ascending
-            # so the prompt reads oldest→newest like the blind-recency block.
+            # context never drops out, however the scoring ranked it), ordered
+            # oldest→newest like the blind-recency block. Dedupe on BOTH seq AND
+            # a content key (tick, kind, text): the recent in-memory tail events
+            # carry NO seq, so seq-dedupe alone would render a recent event TWICE
+            # when it also surfaces as a scored DB candidate — the content key
+            # collapses that overlap.
             tail = recent_events[-params.recent_tail:]
             merged: list[dict] = []
             seen_seqs: set[Any] = set()
+            seen_keys: set[tuple] = set()
             for evt in list(topk) + list(tail):
                 seq = evt.get("seq")
+                key = (int(evt.get("tick", 0) or 0), evt.get("kind"), evt.get("text", ""))
+                if seq is not None and seq in seen_seqs:
+                    continue
+                if key in seen_keys:
+                    continue
                 if seq is not None:
-                    if seq in seen_seqs:
-                        continue
                     seen_seqs.add(seq)
+                seen_keys.add(key)
                 merged.append(evt)
             merged.sort(key=lambda e: int(e.get("tick", 0) or 0))
+            self._memory_retrieval_degraded = False  # a full pass = probe recovered
             return merged
         except Exception as exc:  # never let a turn die on retrieval
             if not self._memory_retrieval_degraded:
-                self._memory_retrieval_degraded = True
                 log.warning(
                     "EM-222 memory retrieval degraded to blind recency "
                     "(embeddings/DB unavailable): %s", exc,
                 )
+            self._memory_retrieval_degraded = True
+            self._memory_retrieval_retry_tick = world.tick + COOLDOWN_TICKS
             return window_slice
 
     @staticmethod
@@ -2957,8 +3014,11 @@ class AgentRuntime:
             })
 
         # Decision-trace perception/memory derived from the SAME context (EM-066).
+        # EM-222 — pass the retrieved memory_events so the trace reflects what the
+        # model actually saw (the merged top-K + tail), not the blind window.
         perceived, memory = _perceived_context(
-            agent, self.world, recent_events, self.world.params
+            agent, self.world, recent_events, self.world.params,
+            memory_events=memory_events,
         )
         if pending_overheard:
             # EM-081 — overheard speech lands in the perceived chain event's

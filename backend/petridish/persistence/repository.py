@@ -172,6 +172,11 @@ class SQLiteRepository:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_run_actor ON events(run_id, actor_id)"
         )
+        # EM-222 — fetch_memory_candidates filters on target_id too; without this
+        # the OR-branch degrades to a run-length scan for sparse agents.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_run_target ON events(run_id, target_id)"
+        )
 
     def _migrate_runs_v1_3_0(self) -> None:
         """Idempotent runs-table upgrade for pre-W11a file DBs (EM-086): add

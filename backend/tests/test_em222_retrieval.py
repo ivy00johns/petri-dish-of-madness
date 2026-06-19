@@ -3,8 +3,9 @@ EM-222 — pure unit tests for the relevance-scored memory retriever
 (backend/petridish/agents/memory_retrieval.py). NO router, NO DB, NO world: the
 scoring half is pure + deterministic, so these tests exercise it directly over
 plain dicts + a tiny fake embeddings table. The async orchestration
-(_retrieve_memory: embed → fetch → score → merge) is covered by the integration
-tests, not here.
+(_retrieve_memory: embed → fetch → score → merge → dedupe) is covered by
+backend/tests/test_em222_integration.py (a real AgentRuntime + Router + repo),
+not here.
 
 Self-check: backend/.venv/bin/python -m pytest backend/tests/test_em222_retrieval.py -q
 """

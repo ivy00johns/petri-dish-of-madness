@@ -1476,7 +1476,11 @@ def _pad_agents(
 
     profile_names = {p.name for p in profiles}
     # Round-robin lanes for cards without a usable suggestion + Citizen-N fill.
-    rr_lanes = [p.name for p in profiles if p.adapter != "mock"] or ["mock"]
+    # EM-222 — the dedicated `embed` profile is an embeddings model (bge-m3), NOT
+    # a chat lane; never round-robin/assign an agent onto it.
+    rr_lanes = [
+        p.name for p in profiles if p.adapter != "mock" and p.name != "embed"
+    ] or ["mock"]
     rr_cursor = 0
 
     def _pick_profile(suggested: str = "") -> str:

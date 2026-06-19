@@ -22,6 +22,7 @@ import pytest
 
 from petridish.config.loader import ModelProfile
 from petridish.persistence.repository import SQLiteRepository
+from petridish.providers.adapters import OpenAICompatibleAdapter
 from petridish.providers.base import ProviderError
 from petridish.providers.mock import MockProvider
 from petridish.providers.router import Router
@@ -289,3 +290,151 @@ def test_fetch_candidates_text_may_be_empty_string():
     rows = repo.fetch_memory_candidates(run_id, "ada", _BROADCAST, limit=50)
     assert rows and rows[0]["text"] == ""
     repo.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Group 4: OpenAICompatibleAdapter.embed — out-of-order `index` reorder + errors
+#
+# The proxy may return the embeddings `data` list in any order; the adapter
+# MUST realign each vector to its INPUT text position via the `index` field
+# (otherwise memory A gets memory B's embedding and the whole ranking is
+# poisoned). We monkeypatch the HTTP seam (_post_with_retry) so no network is
+# touched and we control the exact response body.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _embed_adapter() -> OpenAICompatibleAdapter:
+    return OpenAICompatibleAdapter(
+        profile="embed", base_url="http://localhost:3001/v1",
+        api_key="", model_id="bge-m3", color="#777",
+    )
+
+
+def _patch_embed_response(monkeypatch, body: dict) -> None:
+    """Replace the adapter HTTP seam so embed() consumes `body` directly."""
+    async def _fake_post(client, url, headers, payload, profile):
+        return body, None
+    monkeypatch.setattr(
+        "petridish.providers.adapters._post_with_retry", _fake_post
+    )
+
+
+async def test_embed_reorders_out_of_order_index_to_input_order(monkeypatch):
+    """The proxy returns the `data` list SHUFFLED (index 2, 0, 1). The adapter
+    sorts by `index`, so the returned vectors line up with the INPUT text order
+    — vec[0] is text 0's embedding, etc. (A regression here silently swaps one
+    memory's embedding for another's.)"""
+    body = {
+        "data": [
+            {"index": 2, "embedding": [0.0, 0.0, 1.0]},   # belongs to text[2]
+            {"index": 0, "embedding": [1.0, 0.0, 0.0]},   # belongs to text[0]
+            {"index": 1, "embedding": [0.0, 1.0, 0.0]},   # belongs to text[1]
+        ]
+    }
+    _patch_embed_response(monkeypatch, body)
+    adapter = _embed_adapter()
+    vecs = await adapter.embed(["text-zero", "text-one", "text-two"])
+    assert vecs == [
+        [1.0, 0.0, 0.0],   # text 0
+        [0.0, 1.0, 0.0],   # text 1
+        [0.0, 0.0, 1.0],   # text 2
+    ]
+
+
+async def test_embed_malformed_response_raises_provider_error(monkeypatch):
+    """A response missing the `embedding` key (or `data` entirely) is a malformed
+    completion — the adapter raises ProviderError (the documented behavior; the
+    Router/retriever then degrade to blind recency rather than caching garbage)."""
+    # Missing the `embedding` key inside a data item.
+    _patch_embed_response(monkeypatch, {"data": [{"index": 0}]})
+    adapter = _embed_adapter()
+    with pytest.raises(ProviderError):
+        await adapter.embed(["x"])
+
+    # Missing the `data` list entirely (e.g. an error envelope leaked through).
+    _patch_embed_response(monkeypatch, {"error": "bad request"})
+    with pytest.raises(ProviderError):
+        await adapter.embed(["x"])
+
+
+async def test_embed_empty_data_returns_empty_list(monkeypatch):
+    """An empty `data` list is well-formed (zero inputs / zero vectors) — it
+    yields [], never an error: the shape is valid, just empty."""
+    _patch_embed_response(monkeypatch, {"data": []})
+    adapter = _embed_adapter()
+    assert await adapter.embed([]) == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Group 5: chat-lane EXCLUSION — the embed model must never serve chat.
+#
+# Two independent guarantees:
+#   (a) build_world/casting (loader._pad_agents) never assigns an agent the
+#       `embed` profile — rr_lanes excludes it. We force round-robin (every
+#       padded agent must pick a lane, with `embed` the ONLY other non-mock
+#       profile available) and assert no agent.profile == 'embed'.
+#   (b) Router._pick_detour_candidate never returns `embed` even when it is the
+#       only otherwise-"healthy" non-home lane (a sick home lane must NOT detour
+#       chat traffic onto the embeddings model).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_casting_never_assigns_embed_profile_to_an_agent():
+    """_pad_agents round-robins padded agents across non-mock chat lanes; the
+    `embed` profile is excluded from rr_lanes, so no agent is ever cast onto it
+    — even when `embed` is the ONLY non-mock profile besides the chat lane."""
+    from petridish.config.loader import _pad_agents, AgentConfig, PlaceConfig
+
+    profiles = [
+        ModelProfile(name="lane", adapter="openai", model_id="m"),
+        ModelProfile(name="embed", adapter="openai", model_id="bge-m3"),
+        ModelProfile(name="mock", adapter="mock", model_id="mock"),
+    ]
+    places = [PlaceConfig(id="plaza", name="Plaza", x=0, y=0, kind="social")]
+    # One hand-listed agent + pad to 8 → 7 padded agents each pick a lane.
+    seed = [AgentConfig(name="Ada", personality="", profile="lane",
+                        location="plaza")]
+    # Persona cards WITHOUT a usable suggested_profile force the round-robin
+    # _pick_profile path (the one that consults rr_lanes).
+    personas = [{"name": f"P{i}", "personality": "", "suggested_profile": ""}
+                for i in range(10)]
+
+    padded = _pad_agents(seed, agent_count=8, places=places,
+                         profiles=profiles, personas=personas)
+    assert len(padded) == 8
+    assert all(a.profile != "embed" for a in padded), (
+        "casting must never assign the embeddings lane to an agent"
+    )
+    # The round-robin actually used the chat lane (not just mock fallback),
+    # proving `embed` was a candidate that got correctly skipped.
+    assert any(a.profile == "lane" for a in padded)
+
+
+def test_pick_detour_candidate_never_returns_embed_lane():
+    """A sick home chat lane must never detour onto the embeddings model, even
+    when `embed` is the only other available non-mock lane: _pick_detour_candidate
+    skips `embed` explicitly (EM-222), returning None instead."""
+    profiles = [
+        # `home` is the (sick) chat lane; api_key_env satisfied so available().
+        ModelProfile(name="home", adapter="openai", model_id="m",
+                     api_key_env="EM222_FAKE_KEY"),
+        ModelProfile(name="embed", adapter="openai", model_id="bge-m3",
+                     api_key_env="EM222_FAKE_KEY"),
+    ]
+    import os
+    os.environ["EM222_FAKE_KEY"] = "x"
+    try:
+        router = Router(
+            profiles=profiles,
+            adapter_overrides={"home": MockProvider(), "embed": MockProvider()},
+            cache_enabled=False,
+        )
+        # Sicken the home lane: enough error demerits to cross sick_threshold.
+        for _ in range(5):
+            router.note_lane_error("home")
+        assert router.lane_sick("home") is True
+        # `embed` is the only other available non-mock lane — and it must be
+        # excluded, so there is NO healthy candidate.
+        assert router._pick_detour_candidate("home") is None, (
+            "the embeddings lane must never be a chat detour substitute"
+        )
+    finally:
+        os.environ.pop("EM222_FAKE_KEY", None)

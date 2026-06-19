@@ -654,6 +654,8 @@ class Router:
         for idx, (name, profile) in enumerate(self._profiles.items()):
             if name == home or profile.adapter == "mock":
                 continue
+            if name == _EMBED_PROFILE:
+                continue  # EM-222 — the embeddings lane is not a chat substitute
             if name == self._auto_backup:
                 continue  # EM-205 — the universal backup is never a pinned detour
             if exclude is not None and name in exclude:
