@@ -271,7 +271,11 @@ describe('MODEL_POOLS (EM-216b variety)', () => {
 // ── Declared clips exist in the GLBs ─────────────────────────────────────────
 
 describe('animation clips', () => {
-  it.each([['villager'], ['cat'], ['dog']] as const)(
+  it.each([
+    ['villager'], ['cat'], ['dog'],
+    // EM-216b: the 5 new critters were clip-normalized to Idle/Walk like cat/dog.
+    ['squirrel'], ['raccoon'], ['goat'], ['fox'], ['crow'],
+  ] as const)(
     '%s GLB contains the declared idle/walk clips',
     (key) => {
       const spec = CHARACTER_MODELS[key]!;
