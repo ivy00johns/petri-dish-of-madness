@@ -28,10 +28,13 @@ agents recall *relevant* old events, not merely recent ones. Importance scoring
 relevance + long-term-store axis**. North-star-aligned: it **adds** calls (embeddings +
 richer prompts), it is not a cost-cut.
 
-- **OPEN QUESTION (gating):** does FreeLLMAPI expose an embeddings endpoint? If **yes** →
-  embed the memory stream + cosine relevance. If **no** → lexical/BM25 fallback **or** a
-  dedicated local Ollama embedding model. This answer decides the whole approach — resolve
-  it before scoping the spike.
+- **GATING QUESTION — RESOLVED (2026-06-19):** FreeLLMAPI embeddings are **live**. The proxy
+  `/v1/embeddings` returns 200 for **`bge-m3`** (1024-dim) and **`gemini-embedding-001`**
+  (3072-dim); OpenAI-style ids (`text-embedding-3-small`, `ada-002`, `nomic`, `mxbai`, `jina`,
+  `voyage`) 400 'unknown model' — the proxy routes by its own embedding families. So: **embed
+  the memory stream + cosine relevance**, using **`bge-m3`** as the default (1024-dim ⇒ cheaper
+  storage + cosine across a per-event stream; reach for `gemini-embedding-001` only if recall
+  is weak). The lexical/BM25 and local-Ollama fallbacks are **no longer needed**.
 
 ### EM-223 — Recursive + reactive planning
 Agents emit a flat one-line plan (e.g. "D1 plan: water seedlings → buy seeds"). Smallville
