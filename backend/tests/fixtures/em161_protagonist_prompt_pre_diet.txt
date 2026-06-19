@@ -91,7 +91,7 @@ Mood: neutral
   steal (target) - steal from: Supporter, Bystander, Filler02, Filler17
   work - earn credits (you are at a work place)
   vote (rule_id, choice) - vote on: id=rule_prop_1 effect=ban_stealing text='No taking what is not yours'
-  propose_project (name, kind, funds_required?, function?, place?) - start a new building/collective project. kind is free-text but pick from this menu when you can: tavern, market, smithy, school, temple, clinic, park, granary, well, workshop, garden, house, library, monument, farm. place? = a place id to build there (else here)
+  propose_project (name, kind, funds_required?, function?, place?) - start a new building/collective project. kind is free-text but pick from this menu when you can: tavern, market, smithy, school, temple, clinic, park, granary, well, workshop, garden, house, library, monument, farm, bakery, bank, theater, lighthouse, bathhouse, dock. place? = a place id to build there (else here)
   contribute_funds (building_id, amount) - fund an active project below to push it toward construction
   arson (building_id=b1) - burn this building (a crime; witnesses lose trust)
   build_step (building_id=b6) - add construction progress here

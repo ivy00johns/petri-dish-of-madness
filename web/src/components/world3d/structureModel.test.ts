@@ -35,6 +35,8 @@ const ALL_VARIANTS: VariantKey[] = [
   'house', 'stall', 'monument', 'well', 'zoo', 'generic',
   // EM-216/EM-217 distinct build-type variants
   'tavern', 'market', 'smithy', 'temple', 'school', 'clinic', 'granary',
+  // EM-216b catalog expansion
+  'bakery', 'bank', 'theater', 'lighthouse', 'bathhouse', 'dock',
 ];
 const ALL_PLACE_KINDS: PlaceKind[] = ['social', 'work', 'governance', 'home', 'wild'];
 
