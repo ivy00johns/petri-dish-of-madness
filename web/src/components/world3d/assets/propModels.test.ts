@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   PROP_MODELS,
+  PROP_POOLS,
   allPropModelSpecs,
   propModel,
   propVariant,
@@ -123,6 +124,46 @@ describe('propModel convenience', () => {
     expect(propModel('bench')).toBe(PROP_MODELS.bench);
     expect(propModel('street_lamp')).toBe(PROP_MODELS.lamp);
     expect(propModel('gnome')).toBeNull();
+  });
+});
+
+describe('PROP_POOLS (EM-216b variety)', () => {
+  it('each pool has ≥2 distinct GLBs and slot 0 is the PROP_MODELS default', () => {
+    for (const [kind, pool] of Object.entries(PROP_POOLS)) {
+      if (!pool) continue;
+      expect(pool.length, kind).toBeGreaterThanOrEqual(2);
+      expect(new Set(pool.map((s) => s.url)).size, kind).toBe(pool.length);
+      expect(pool[0].url, kind).toBe(PROP_MODELS[kind as PropKind].url);
+    }
+  });
+
+  it('every pool member is well-formed and exists on disk', () => {
+    for (const [kind, pool] of Object.entries(PROP_POOLS)) {
+      if (!pool) continue;
+      for (const spec of pool) {
+        expect(spec.scale, `${kind} ${spec.url}`).toBeGreaterThan(0);
+        expect(Number.isFinite(spec.yOffset), `${kind} ${spec.url}`).toBe(true);
+        const disk = resolve(PUBLIC_DIR, spec.url.replace(/^\//, ''));
+        expect(existsSync(disk), `missing pool GLB: ${disk}`).toBe(true);
+      }
+    }
+  });
+
+  it('propModel picks a stable, distributed pool member from the prop id', () => {
+    for (const [kind, pool] of Object.entries(PROP_POOLS)) {
+      if (!pool) continue;
+      const ids = Array.from({ length: 24 }, (_, i) => `prop_${kind}_${i}`);
+      const picks = ids.map((id) => propModel(kind, id));
+      for (const p of picks) expect(pool, kind).toContain(p);
+      expect(propModel(kind, ids[0])).toBe(propModel(kind, ids[0])); // deterministic
+      expect(new Set(picks.map((s) => s!.url)).size, kind).toBeGreaterThan(1); // distributes
+    }
+  });
+
+  it('propModel without id returns the single PROP_MODELS default (slot 0)', () => {
+    for (const kind of Object.keys(PROP_POOLS)) {
+      expect(propModel(kind), kind).toBe(PROP_MODELS[kind as PropKind]);
+    }
   });
 });
 
