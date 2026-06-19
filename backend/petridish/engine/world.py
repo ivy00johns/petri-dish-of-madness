@@ -617,6 +617,12 @@ class World:
         # emits it through the normal event pipeline. Keeps action_vote's signature
         # intact while letting the spawn happen world-side (single source of truth).
         self.pending_spawn_events: list[dict] = []
+        # Wave I / EM-210 — transient image-fetch outbox (NOT snapshotted). Each
+        # entry {"image_id","prompt","url"} parked by action_create_image at turn
+        # time; the loop drains it each tick into bounded best-effort PNG fetches
+        # (semaphore, skip-under-load). Same transient class as pending_spawn_events
+        # — never serialized (the PNG is an external side-artifact; EM-190).
+        self.pending_image_fetches: list[dict] = []
         # Wave E / EM-113 — relationship_changed outbox. Reflex type transitions
         # (and accepted set_relationship type changes) park their ready-to-emit
         # event dicts here; the runtime drains them at the end of _apply_action
@@ -655,6 +661,14 @@ class World:
         # actor_type, text}, capped to the 20 newest (append order = oldest →
         # newest). Serialized in to_snapshot()/world_state — THE frontend seam.
         self.billboard: list[dict] = []
+        # Wave I / EM-210 — the gallery (the image record store). List of
+        # {image_id, prompt, proposer_id, created_tick, url, promoted}; all
+        # JSON-safe + deterministic at creation. Capped to the newest
+        # params.image_gen.max_gallery (pop-oldest on append, mirror
+        # _append_billboard). Serialized in to_snapshot() ONLY when non-empty so
+        # pre-Wave-I snapshots restore byte-identically. THE frontend seam for the
+        # 3-D notice-board texture.
+        self.gallery: list[dict] = []
         # PROTOTYPE (god-channel) — loud-tier god proclamations, distinct from the
         # opt-in billboard. While a proclamation is active it rides EVERY agent's
         # prompt (runtime._assemble_context), so the god's word is guaranteed to
@@ -666,6 +680,11 @@ class World:
         # vote passes (_on_rule_activated). Empty = unnamed. Serialized in
         # to_snapshot() so the frontend/header can show it.
         self.town_name: str = ""
+        # Wave I / EM-213 — the plaza banner: the gallery image_id the town VOTED
+        # to hang over the plaza (promote_image governance). Empty = unset (the
+        # frontend renders a procedural fallback). Serialized in to_snapshot() only
+        # when non-empty so pre-Wave-I snapshots restore byte-identically.
+        self.plaza_banner_ref: str = ""
         # EM-137 (god console) — one-shot god whispers awaiting delivery, keyed
         # by agent id. post_whisper_as_god queues lines here; the runtime pops
         # the target's queue into its NEXT prompt exactly once. EM-145: queued
@@ -1672,6 +1691,7 @@ class World:
     def action_propose_rule(
         self, agent: AgentState, effect: str, text: str,
         name: str | None = None, target: str | None = None,
+        image_id: str | None = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -1682,8 +1702,11 @@ class World:
         # PROTOTYPE (god-channel): name_town — naming the town by consensus vote.
         # Wave K / EM-219: demolish — a PUBLIC/landmark structure is demolished by
         # consensus (the orderly civic counterpart to a lone owner's demolish).
+        # Wave I / EM-212: promote_image — the town VOTES a gallery image onto the
+        # plaza banner. Carries the image_id on the payload (like demolish's target);
+        # scoped per-image so two distinct images may have open votes at once.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town", "demolish"}
+                         "ban_arson", "name_town", "demolish", "promote_image"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -1710,16 +1733,39 @@ class World:
             if building.status == "destroyed":
                 return False, f"{building.name} is already rubble", None
             payload = {"target": target}
+        # Wave I / EM-212 — promote_image carries the gallery image_id on the payload
+        # (like demolish's target); a promotion of an image that does not exist is
+        # meaningless. The id may also arrive via the generic `target` arg (the
+        # runtime maps either key), so accept both.
+        if effect == "promote_image":
+            image_id = str(image_id or target or "").strip()
+            if not image_id:
+                return False, "promote_image requires an image_id", None
+            if not any(g.get("image_id") == image_id for g in self.gallery):
+                return False, f"promote_image requires a real image id (got {image_id!r})", None
+            # FINDING 4 — reject a no-op re-promotion of the image ALREADY on the
+            # banner (mirrors the name_town current-name guard and demolish's
+            # already-rubble guard), so the SAME promotion can't re-pass forever
+            # (the run-663 name_town spam pattern).
+            if image_id == self.plaza_banner_ref:
+                return False, "that image already hangs over the plaza", None
+            payload = {"image_id": image_id}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
-        # blocked.
+        # blocked. Wave I / EM-212: promote_image is scoped per IMAGE_ID the same
+        # way (two distinct images may have open votes; the SAME image may not be
+        # double-proposed).
         for rule in self.rules.values():
             if rule.effect != effect or rule.status != "proposed":
                 continue
             if effect == "demolish":
                 if (rule.payload or {}).get("target") == payload.get("target"):
                     return False, f"a demolish vote for {payload.get('target')!r} is already open", None
+                continue
+            if effect == "promote_image":
+                if (rule.payload or {}).get("image_id") == payload.get("image_id"):
+                    return False, f"a promote vote for {payload.get('image_id')!r} is already open", None
                 continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
@@ -1731,7 +1777,7 @@ class World:
         # vote is fresh.
         active = (
             self._active_rule(effect)
-            if effect not in ("name_town", "demolish") else None
+            if effect not in ("name_town", "demolish", "promote_image") else None
         )
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
@@ -1770,7 +1816,10 @@ class World:
                 # holds two simultaneously-active identical effects.
                 # name_town is a one-shot rename, not a stackable law — it never
                 # "renews"; a passing name supersedes whatever the town was called.
-                existing = self._active_rule(rule.effect) if rule.effect != "name_town" else None
+                existing = (
+                    self._active_rule(rule.effect)
+                    if rule.effect not in ("name_town", "promote_image") else None
+                )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
                     existing.renewed_at.append(self.tick)
@@ -1821,6 +1870,33 @@ class World:
                 evt["actor_type"] = "system"
                 evt["payload"]["proposal_id"] = rule.id
                 self.pending_spawn_events.append(evt)
+            return
+        # Wave I / EM-213 — promote_image: a passing vote hangs the gallery image
+        # over the plaza. Sets plaza_banner_ref, marks the record promoted=True, and
+        # parks an `image_promoted` system event in the SAME outbox name_town/demolish
+        # use (drained + emitted by the loop's _flush_spawn_events). A vanished image
+        # is a silent no-op (the vote still applied).
+        if rule.effect == "promote_image":
+            rule.applied = True
+            image_id = (rule.payload or {}).get("image_id")
+            record = next(
+                (g for g in self.gallery if g.get("image_id") == image_id), None)
+            if record is not None:
+                self.plaza_banner_ref = str(image_id)
+                record["promoted"] = True
+                proposer = self.agents.get(record.get("proposer_id"))
+                proposer_name = proposer.name if proposer else "an artist"
+                self.pending_spawn_events.append({
+                    "kind": "image_promoted",
+                    "actor_id": "system",
+                    "actor_type": "system",
+                    "text": f"🖼 By vote, {proposer_name}'s image now hangs over the plaza.",
+                    "payload": {
+                        "image_id": str(image_id),
+                        "url": str(record.get("url", "")),
+                        "proposal_id": rule.id,
+                    },
+                })
             return
         if rule.effect != "admit_agent":
             return
@@ -2557,6 +2633,162 @@ class World:
             "text": f"📌 {agent.name} pins a note to the billboard: "
                     f"\"{_truncate(entry['text'], 80)}\"",
             "payload": {"place": agent.location, "text": entry["text"]},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave I / EM-210–213 — The Atelier: agents generate ART for their town.
+    # Reflex-first (zero critical-path LLM calls), replay-safe (seeded ids, the
+    # PNG an external side-artifact that never re-enters the sim). See
+    # contracts/wave-i-atelier.md §2.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    IMAGEGEN_DEFAULT_MAX_GALLERY = 30   # newest images retained in self.gallery
+    IMAGE_PROMPT_CAP = 240              # prompt chars kept (and the schema maxLength)
+
+    def _image_gen_max_gallery(self) -> int:
+        """The gallery cap, read modestly from config (params.image_gen.max_gallery),
+        mirroring the props/animals max_population reads. Defaults to 30 when the
+        block is absent (pre-Wave-I worlds / tests that build WorldParams directly).
+        Floored at 1 (a 0/negative cap would discard every image on append)."""
+        cfg = getattr(self.params, "image_gen", None)
+        try:
+            return max(1, int(_block_get(cfg, "max_gallery", self.IMAGEGEN_DEFAULT_MAX_GALLERY)))
+        except (TypeError, ValueError):
+            return self.IMAGEGEN_DEFAULT_MAX_GALLERY
+
+    def _image_id(
+        self, place: str, proposer_id: str, created_tick: int, ordinal: int
+    ) -> str:
+        """Wave I / EM-210 — a SEEDED, replay-stable image id (NEVER uuid4 — the
+        EM-155 keystone). Mirrors _prop_id: a sha256 of (place, proposer,
+        created_tick, ordinal, city_seed) via the animal layer's _seed_int.
+
+        FINDING 2/3 (contract §0.2): `created_tick` is part of the seed so ids are
+        unique across the run's FULL history. The gallery cap evicts old records,
+        so the window-only collision check below cannot guarantee uniqueness — but
+        `tick` (monotonic, deterministic) does, so a later same-place/same-proposer
+        image can never alias an EVICTED id. `ordinal` disambiguates multiple images
+        at the SAME tick/place/proposer; the collision bump stays belt-and-suspenders.
+        Still fully replay-safe (tick is deterministic in replay)."""
+        from ..animals.runtime import _seed_int
+        seed = _seed_int(
+            "image", self.city_seed, place, proposer_id, created_tick, ordinal)
+        return f"img_{format(seed % (16 ** 10), '010x')}"
+
+    @staticmethod
+    def _image_url(image_id: str) -> str:
+        """The image url — DERIVED from the id (§0.2), so it is known at reflex
+        time and identical across runs/replays. The PNG is a side-artifact written
+        under data/assets/images/<id>.png by the loop; its bytes never re-enter the sim."""
+        return f"/assets/images/{image_id}.png"
+
+    def _append_gallery(
+        self, image_id: str, prompt: str, proposer_id: str, tick: int, url: str
+    ) -> dict:
+        """Append a gallery record + cap to the newest max_gallery (pop-oldest,
+        mirror _append_billboard). Returns the record dict."""
+        record = {
+            "image_id": image_id,
+            "prompt": prompt,
+            "proposer_id": proposer_id,
+            "created_tick": tick,
+            "url": url,
+            "promoted": False,
+        }
+        self.gallery.append(record)
+        del self.gallery[: -self._image_gen_max_gallery()]
+        return record
+
+    def newest_gallery_image_for(self, proposer_id: str) -> dict | None:
+        """The agent's newest gallery record (or None) — the default post_image picks this."""
+        for record in reversed(self.gallery):
+            if record.get("proposer_id") == proposer_id:
+                return record
+        return None
+
+    def action_create_image(self, agent: AgentState, prompt: str) -> dict:
+        """Wave I / EM-210 (I1) — reflex tool, UNGATED (create art anywhere). Records
+        a deterministic gallery entry + parks a transient fetch + emits image_posted,
+        ALL synchronously at turn time (no LLM, no network here). The async PNG fetch
+        is drained by the loop and emits NOTHING (off the replay surface)."""
+        prompt = str(prompt or "").strip()[: self.IMAGE_PROMPT_CAP]
+        if not prompt:
+            return self._fail_event(
+                agent.id, "create_image", "prompt required",
+                f"{agent.name} faced a blank canvas but pictured nothing to paint.")
+        place = agent.location
+        # ordinal = images already created this tick+place (breaks seeded ties so a
+        # second image the same tick gets a distinct id; bump on the rare collision).
+        ordinal = sum(
+            1 for g in self.gallery
+            if g.get("created_tick") == self.tick
+            and g.get("proposer_id") == agent.id
+        )
+        image_id = self._image_id(place, agent.id, self.tick, ordinal)
+        existing = {g.get("image_id") for g in self.gallery}
+        while image_id in existing:
+            ordinal += 1
+            image_id = self._image_id(place, agent.id, self.tick, ordinal)
+        url = self._image_url(image_id)
+        self._append_gallery(image_id, prompt, agent.id, self.tick, url)
+        self.pending_image_fetches.append(
+            {"image_id": image_id, "prompt": prompt, "url": url})
+        return {
+            "kind": "image_posted",
+            "actor_id": agent.id,
+            "text": f"🎨 {agent.name} paints \"{_truncate(prompt, 60)}\".",
+            "payload": {
+                "image_id": image_id,
+                "prompt": prompt,
+                "url": url,
+                "place": place,
+            },
+        }
+
+    def action_post_image(self, agent: AgentState, image_id: str | None = None) -> dict:
+        """Wave I / EM-211 (I2) — reflex tool, @billboard-gated (like post_billboard).
+        Posts an EXISTING gallery image (default: the agent's newest) to the billboard
+        so others perceive it: a billboard entry whose payload carries image_ref=url.
+        Validates the image exists + belongs-or-is-public (a promoted image is public)."""
+        if not self.billboard_here(agent.location):
+            return self._fail_event(
+                agent.id, "post_image", "no billboard here",
+                f"{agent.name} looked for a billboard to hang art on, but there is none here.")
+        image_id = str(image_id or "").strip()
+        record: dict | None = None
+        if image_id:
+            record = next(
+                (g for g in self.gallery if g.get("image_id") == image_id), None)
+            if record is None:
+                return self._fail_event(
+                    agent.id, "post_image", f"unknown image {image_id!r}",
+                    f"{agent.name} reached for an image that does not exist ({image_id!r}).")
+            # Belongs-or-is-public: own art always; others' only once promoted (public).
+            if record.get("proposer_id") != agent.id and not record.get("promoted"):
+                return self._fail_event(
+                    agent.id, "post_image", "image not yours",
+                    f"{agent.name} cannot post someone else's unpromoted image.")
+        else:
+            record = self.newest_gallery_image_for(agent.id)
+            if record is None:
+                return self._fail_event(
+                    agent.id, "post_image", "no image to post",
+                    f"{agent.name} has not painted anything to post yet — create_image first.")
+        url = str(record.get("url", ""))
+        entry = self._append_billboard(
+            agent.id, "human_agent",
+            f"{agent.name} shares art: \"{_truncate(str(record.get('prompt', '')), 60)}\"")
+        return {
+            "kind": "billboard_posted",
+            "actor_id": agent.id,
+            "text": f"🖼 {agent.name} pins art to the billboard: "
+                    f"\"{_truncate(str(record.get('prompt', '')), 60)}\"",
+            "payload": {
+                "place": agent.location,
+                "text": entry["text"],
+                "image_ref": url,
+                "image_id": record.get("image_id"),
+            },
         }
 
     def post_billboard_as_god(self, text: str, in_reply_to: Any = None) -> dict:
@@ -3943,6 +4175,15 @@ class World:
                  "until_tick": int(m.get("until_tick", 0))}
                 for m in self.active_miracles
             ]
+        # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
+        # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
+        # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
+        # [] / "" on restore). pending_image_fetches is NEVER serialized (transient
+        # outbox; the PNG is an external side-artifact off the replay surface).
+        if self.gallery:
+            snap["gallery"] = [dict(g) for g in self.gallery]
+        if self.plaza_banner_ref:
+            snap["plaza_banner_ref"] = self.plaza_banner_ref
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -4213,6 +4454,15 @@ class World:
             for m in (state.get("active_miracles") or [])
             if isinstance(m, dict) and m.get("kind")
         ]
+        # Wave I / EM-210+213 — restore the gallery + the voted plaza banner
+        # (additive: pre-Wave-I snapshots lack the keys and restore [] / "", so a
+        # fork/replay of an Atelier world re-hangs the same banner and re-lists the
+        # same art). Drop malformed gallery rows defensively (id required).
+        world.gallery = [
+            dict(g) for g in (state.get("gallery") or [])
+            if isinstance(g, dict) and g.get("image_id")
+        ]
+        world.plaza_banner_ref = str(state.get("plaza_banner_ref", "") or "")
         # EM-145 — restore queued god whispers (only for agents that exist).
         world.pending_whispers = {
             str(aid): [str(t) for t in (lines or []) if str(t).strip()]

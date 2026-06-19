@@ -21,3 +21,10 @@ os.environ["EM_DB_PATH"] = ":memory:"
 # the relevance-retrieval path is still exercised end-to-end, just offline.
 # Set before any test imports the app / builds a Router.
 os.environ["EM_EMBED_MOCK"] = "1"
+
+# Wave I / EM-210 — The Atelier image provider must be hermetic: never hit a
+# free image endpoint from the suite (non-deterministic latency, and the loop's
+# best-effort fetch would otherwise write real PNGs into data/). EM_IMAGEGEN_MOCK
+# forces build_provider() to the MockImageProvider (a fixed tiny PNG, no network),
+# mirroring the EM_EMBED_MOCK pattern above. Set before any app/loop import.
+os.environ["EM_IMAGEGEN_MOCK"] = "1"

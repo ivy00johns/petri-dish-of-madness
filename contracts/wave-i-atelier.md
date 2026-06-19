@@ -19,8 +19,12 @@ QE agent gates each slice. File ownership is at the bottom — do not edit a fil
    critical path. (Image *bytes* come from a free image endpoint off the critical path.)
 2. **Replay-safety (EM-155) — the keystone.** Everything that lands in a world snapshot is
    **seeded-deterministic**, never `uuid4`, never wall-clock:
-   - `image_id = "img_" + format(_seed_int("image", world.city_seed, place, proposer_id, ordinal) % (16**10), "010x")`
-     (mirror `_prop_id`, `engine/world.py:~1276`; collision → bump ordinal, mirror props).
+   - `image_id = "img_" + format(_seed_int("image", world.city_seed, place, proposer_id, created_tick, ordinal) % (16**10), "010x")`
+     (mirror `_prop_id`, `engine/world.py:~1276`). **`created_tick` is part of the seed** so ids
+     are unique across the run's FULL history — the gallery cap evicts old records, so a
+     window-only collision check cannot guarantee uniqueness, but `tick` (monotonic, deterministic)
+     does. `ordinal` disambiguates multiple images at the same tick/place/proposer; collision →
+     bump ordinal. Still fully replay-safe (tick is deterministic in replay).
    - `url = "/assets/images/" + image_id + ".png"` — **derived from the id**, so it is known at
      reflex time and is identical across runs/replays.
    - The actual PNG is an **external side-artifact** in `data/assets/images/`. Its bytes NEVER

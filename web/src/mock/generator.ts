@@ -31,6 +31,7 @@ import type {
   Building,
   BuildingStatus,
   BillboardPost,
+  GalleryImage,
   Prop,
   SpawnSpec,
 } from '../types';
@@ -101,6 +102,63 @@ let buildingCounter = 0;
 // ── Billboard (W11b EM-091) — the village notice board, capped 20 newest ─────
 const BILLBOARD_CAP = 20;
 let billboard: BillboardPost[] = [];
+
+// ── Gallery (Wave I / EM-210) — agent-generated art the world remembers ──────
+// Mirrors world.gallery: capped newest at GALLERY_CAP, appended newest-LAST (so
+// the tail is the freshest — the notice board textures gallery[last]). Each id
+// is a stable hand-stamped string (the live backend derives it from a seeded
+// hash); `url` is RELATIVE and derived from the id (`/assets/images/<id>.png`),
+// fed straight to drei useTexture — no host hardcoded. `plaza_banner_ref` is the
+// promoted image's id (EM-213); empty until a vote hangs one over the plaza.
+const GALLERY_CAP = 30;            // config image_gen.max_gallery default
+let gallery: GalleryImage[] = [];
+let imageCounter = 0;
+let plazaBannerRef = '';
+
+// A small library of painterly prompts so the synthesized art reads in-world.
+const IMAGE_PROMPTS = [
+  'a golden-hour view of the plaza fountain',
+  'the clock tower at dusk, long shadows',
+  'a still life of market fruit and coins',
+  'the commons in bloom, foragers at work',
+  'a portrait of the town, rendered in warm light',
+  'the hearth glowing through a winter window',
+];
+
+/** Append a gallery image (newest-last, capped). Returns the new record. */
+function pushGalleryImage(img: GalleryImage): GalleryImage {
+  gallery = [...gallery, img].slice(-GALLERY_CAP);
+  return img;
+}
+
+/**
+ * Synthesize a gallery image for `proposer` and emit the image_posted event
+ * (EM-211, I1). The url is derived from the stable id so it is known at creation
+ * (replay-safe in spirit) and the 3D notice board can texture it. Pushes the
+ * record and returns the event.
+ */
+function makeImagePosted(proposer: Agent, turnId: string | null): WorldEvent {
+  imageCounter += 1;
+  // 10-hex id mirroring the backend's `img_` + zero-padded hex shape.
+  const imageId = `img_${imageCounter.toString(16).padStart(10, '0')}`;
+  const prompt = pick(IMAGE_PROMPTS);
+  const url = `/assets/images/${imageId}.png`;
+  pushGalleryImage({
+    image_id: imageId,
+    prompt,
+    proposer_id: proposer.id,
+    created_tick: tick,
+    url,
+    promoted: false,
+  });
+  return emit({
+    kind: 'image_posted',
+    actor: proposer,
+    turnId,
+    text: `🎨 ${proposer.name} paints "${prompt}".`,
+    payload: { image_id: imageId, prompt, url, place: proposer.location },
+  });
+}
 
 // ── Commitments (W11b EM-079) — talk-claims tracked to made/lapsed ───────────
 // A `say` turn occasionally commits to something concrete (commitment_made);
@@ -1107,6 +1165,40 @@ function seedBillboard() {
   });
 }
 
+/**
+ * Seed the gallery so the 3D notice board has art on first paint and the FE
+ * tests have offline substrate (EM-210/213). Two images: one ordinary, and one
+ * already promoted over the plaza (plaza_banner_ref) so PlazaBanner textures it.
+ */
+function seedGallery() {
+  if (gallery.length > 0) return;
+  imageCounter = 0;
+
+  imageCounter += 1;
+  const firstId = `img_${imageCounter.toString(16).padStart(10, '0')}`;
+  pushGalleryImage({
+    image_id: firstId,
+    prompt: 'a golden-hour view of the plaza fountain',
+    proposer_id: 'esi',
+    created_tick: 0,
+    url: `/assets/images/${firstId}.png`,
+    promoted: true,
+  });
+  // The seeded image already hangs over the plaza (a prior vote, in spirit).
+  plazaBannerRef = firstId;
+
+  imageCounter += 1;
+  const secondId = `img_${imageCounter.toString(16).padStart(10, '0')}`;
+  pushGalleryImage({
+    image_id: secondId,
+    prompt: 'the clock tower at dusk, long shadows',
+    proposer_id: 'cleo',
+    created_tick: 0,
+    url: `/assets/images/${secondId}.png`,
+    promoted: false,
+  });
+}
+
 // ── Generator ─────────────────────────────────────────────────────────────────
 
 export function buildInitialWorldState(): WorldState {
@@ -1119,6 +1211,7 @@ export function buildInitialWorldState(): WorldState {
   });
   seedBuildings();
   seedBillboard();
+  seedGallery();
   return {
     type: 'world_state',
     seq: nextSeq(),
@@ -1132,6 +1225,8 @@ export function buildInitialWorldState(): WorldState {
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
     props: props.map(p => ({ ...p })),
+    gallery: gallery.map(g => ({ ...g })),
+    plaza_banner_ref: plazaBannerRef,
   };
 }
 
@@ -1212,6 +1307,13 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
   //    phantom-lapse sweep — the new feed surfaces look real offline (§7).
   events.push(...advanceSimTexture(actor, turnId));
 
+  // ── Atelier (Wave I / EM-211): the acting agent occasionally paints — a
+  //    reflex create_image that records a gallery entry + emits image_posted.
+  //    Ungated (art anywhere). The newest entry textures the 3D notice board.
+  if (rnd() < 0.12) {
+    events.push(makeImagePosted(actor, turnId));
+  }
+
   // ── Death check ─────────────────────────────────────────────────────────────
   if (actor.energy <= 0) {
     actor.zero_energy_turns++;
@@ -1244,6 +1346,8 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
     props: props.map(p => ({ ...p })),
+    gallery: gallery.map(g => ({ ...g })),
+    plaza_banner_ref: plazaBannerRef,
   };
 
   return { state, events };
@@ -1321,6 +1425,8 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
     props: props.map(p => ({ ...p })),
+    gallery: gallery.map(g => ({ ...g })),
+    plaza_banner_ref: plazaBannerRef,
   };
   return { state, events };
 }
@@ -1387,6 +1493,8 @@ export function spawnAnimalMock(spec: {
     animals: animals.map((a) => ({ ...a })),
     billboard: billboard.map((p) => ({ ...p })),
     props: props.map((p) => ({ ...p })),
+    gallery: gallery.map((g) => ({ ...g })),
+    plaza_banner_ref: plazaBannerRef,
   };
   return { state, events: [evt] };
 }
@@ -1430,6 +1538,8 @@ function postBillboardMock(text: string, inReplyTo?: string): { state: WorldStat
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
     props: props.map(p => ({ ...p })),
+    gallery: gallery.map(g => ({ ...g })),
+    plaza_banner_ref: plazaBannerRef,
   };
   return { state, events: [evt] };
 }
@@ -1456,6 +1566,8 @@ function snapshotState(): WorldState {
     animals: animals.map(a => ({ ...a })),
     billboard: billboard.map(p => ({ ...p })),
     props: props.map(p => ({ ...p })),
+    gallery: gallery.map(g => ({ ...g })),
+    plaza_banner_ref: plazaBannerRef,
   };
 }
 
@@ -1668,6 +1780,9 @@ export const mockControls = {
     props = seedProps();
     propCounter = 0;
     billboard = [];
+    gallery = [];
+    imageCounter = 0;
+    plazaBannerRef = '';
     openCommitments = [];
     commitmentCounter = 0;
     spawnCounter = 0;

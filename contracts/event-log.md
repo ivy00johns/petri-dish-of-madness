@@ -246,6 +246,30 @@ Wave E kinds (contracts/wave-e.md):
   returns to normal."`. Payload: `{kind, until_tick}`. Emitted exactly once
   per expiry; the one-time `calm_spirits` never produces one.
 
+Wave I kinds (contracts/wave-i-atelier.md — The Atelier; all free-scale, none
+adds a critical-path LLM call):
+
+- `image_posted` (I1 / EM-210) — an agent generated ART (reflex `create_image`,
+  ungated). Recorded SYNCHRONOUSLY at turn time (the gallery entry + this event);
+  the PNG bytes come from a free image endpoint OFF the critical path and the
+  fetch task emits nothing (off the replay surface). `actor_id` = the agent,
+  `actor_type` = human_agent. Payload: `{image_id, prompt, url, place}` where
+  `image_id = "img_" + 10hex` is seeded-deterministic (`_seed_int`, never uuid4)
+  and `url = "/assets/images/<image_id>.png"` is DERIVED from the id. Text e.g.
+  `🎨 {name} paints "{prompt-excerpt}".`
+
+- `billboard_posted` with `payload.image_ref` (I2 / EM-211) — the EXISTING kind,
+  now with an additive optional `payload.image_ref = url` (and `image_id`) when an
+  agent posts a gallery image via reflex `post_image` (@billboard-gated). Pre-Wave-I
+  consumers ignore the extra keys; the post still renders as an ordinary billboard line.
+
+- `image_promoted` (I4 / EM-213) — the town VOTED a gallery image onto the plaza
+  banner (governance `promote_image` rule passed → `_on_rule_activated`). Standalone
+  system event parked in the spawn-event outbox (drained by the loop's
+  `_flush_spawn_events`): `actor_id` = "system", `actor_type` = system,
+  `turn_id` null. Payload: `{image_id, url, proposal_id}`. Text e.g.
+  `🖼 By vote, {proposer}'s image now hangs over the plaza.`
+
 ## 5. Snapshots (replay cost bound)
 
 Write a `snapshots(run_id, tick, state_json)` row:

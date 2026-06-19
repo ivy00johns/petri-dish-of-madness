@@ -16,9 +16,10 @@
  */
 
 import { useCallback, useState } from 'react';
-import { Billboard, RoundedBox, Text, useCursor } from '@react-three/drei';
+import { Billboard, RoundedBox, Text, useCursor, useTexture } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import { MiniMarker } from './Building';
+import { ModelBoundary } from './ModelBoundary';
 import { useProximity, PLACE_LABEL_DIST } from './useProximity';
 import { toonMaterial } from './toon';
 
@@ -35,6 +36,13 @@ interface NoticeBoardProps {
   z: number;
   /** Newest billboard post, or null when the board is bare. */
   newest: NoticeBoardPost | null;
+  /**
+   * Wave I (EM-211, I1): the RELATIVE url of the newest gallery image, threaded
+   * onto the front paper-plane mesh as a texture (`/assets/images/<id>.png`).
+   * null/undefined ⇒ the procedural flat-PAPER fallback. A 404 ALSO falls back
+   * (ModelBoundary), so the board is never a blank/erroring mesh (EM-148).
+   */
+  imageUrl?: string | null;
   /** Clicking the board zooms the camera to it (EM-095 idiom). */
   onPick?: () => void;
 }
@@ -60,7 +68,43 @@ function snippet(text: string): string {
   return text.slice(0, SNIPPET_MAX - 1).trimEnd() + '…';
 }
 
-export function NoticeBoard({ x, z, newest, onPick }: NoticeBoardProps) {
+// Geometry of the front (newest) pinned note — shared by the textured and
+// procedural variants so the texture lands exactly where the blank paper was.
+const FRONT_PAPER_POS: [number, number, number] = [-0.55, 1.55, 0.075];
+const FRONT_PAPER_ROT: [number, number, number] = [0, 0, 0.06];
+const FRONT_PAPER_SIZE: [number, number] = [0.55, 0.7];
+
+/**
+ * The procedural flat-PAPER front note (Wave I fallback): the original blank
+ * paper-plane, god-tinted when the watchers posted last. Rendered when there is
+ * no gallery image AND as the Suspense/error fallback while/if a texture fails.
+ */
+function ProceduralPaper({ god }: { god: boolean }) {
+  return (
+    <mesh position={FRONT_PAPER_POS} rotation={FRONT_PAPER_ROT} material={toonMaterial(god ? PAPER_GOD : PAPER)}>
+      <planeGeometry args={FRONT_PAPER_SIZE} />
+    </mesh>
+  );
+}
+
+/**
+ * Wave I (EM-211, I1): the newest gallery image textured onto the front note.
+ * drei useTexture suspends while the bytes stream and THROWS on a 404 — the
+ * caller wraps this in ModelBoundary so both windows fall back to
+ * ProceduralPaper (never a blank/erroring mesh, EM-148). meshToonMaterial keeps
+ * the cel look consistent with the rest of the village.
+ */
+function TexturedPaper({ url }: { url: string }) {
+  const map = useTexture(url);
+  return (
+    <mesh position={FRONT_PAPER_POS} rotation={FRONT_PAPER_ROT}>
+      <planeGeometry args={FRONT_PAPER_SIZE} />
+      <meshToonMaterial map={map} />
+    </mesh>
+  );
+}
+
+export function NoticeBoard({ x, z, newest, imageUrl, onPick }: NoticeBoardProps) {
   const [hovered, setHovered] = useState(false);
   useCursor(hovered && Boolean(onPick));
 
@@ -105,14 +149,21 @@ export function NoticeBoard({ x, z, newest, onPick }: NoticeBoardProps) {
 
       {/* pinned papers — the newest one tinted god-violet when the watchers
           posted last, so the board itself hints who spoke. (Front-face only is
-          fine: the solid board occludes them from behind.) */}
-      <mesh
-        position={[-0.55, 1.55, 0.075]}
-        rotation={[0, 0, 0.06]}
-        material={toonMaterial(newest?.god ? PAPER_GOD : PAPER)}
-      >
-        <planeGeometry args={[0.55, 0.7]} />
-      </mesh>
+          fine: the solid board occludes them from behind.) Wave I (EM-211): when
+          a gallery image exists, the newest note becomes that artwork (textured)
+          with the procedural PAPER as the Suspense/404 fallback (EM-148). */}
+      {imageUrl ? (
+        // key={imageUrl}: the boundary latches `failed` forever once a texture
+        // 404s (no internal reset). Keying it to the url remounts a FRESH
+        // boundary when the image changes/retries, so one transient 404 doesn't
+        // permanently pin the procedural paper for the rest of the session
+        // (matches the CityScape keyed-remount idiom).
+        <ModelBoundary key={imageUrl} fallback={<ProceduralPaper god={Boolean(newest?.god)} />}>
+          <TexturedPaper url={imageUrl} />
+        </ModelBoundary>
+      ) : (
+        <ProceduralPaper god={Boolean(newest?.god)} />
+      )}
       <mesh position={[0.35, 1.45, 0.075]} rotation={[0, 0, -0.08]} material={toonMaterial(PAPER)}>
         <planeGeometry args={[0.6, 0.5]} />
       </mesh>

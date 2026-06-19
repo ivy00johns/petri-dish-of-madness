@@ -283,6 +283,13 @@ world:
   props:
     max_population: 48     # cap on tracked props (place_prop is rejected over this; 0 = unlimited)
 
+  # Wave I / EM-210 — The Atelier: agents generate ART on a FREE image endpoint
+  # (reflex-first, zero critical-path LLM calls; the PNG is an external
+  # side-artifact off the replay surface). More art = more chronicle texture.
+  image_gen:
+    max_concurrent: 2      # in-flight PNG fetches; the loop skips a fetch above this (skip-under-load)
+    max_gallery: 30        # newest images retained in world.gallery (pop-oldest on append)
+
   # W7 / EM-063 — ad-hoc spawn. god = immediate (default, best for tinkering);
   # governance = spawn enqueues an admit_agent proposal, admitted iff the vote passes.
   spawn:

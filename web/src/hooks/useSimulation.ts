@@ -375,6 +375,12 @@ export function useSimulation(): SimulationState & SimulationControls {
           setMockMode(false);
         }
         if (msg.type === 'world_state') {
+          // Wave I (EM-210/213): the per-tick world_state snapshot now also
+          // carries `gallery` + `plaza_banner_ref`. They ride this same
+          // pass-through (the whole message is the WorldState the hook exposes),
+          // so the 3D notice board / PlazaBanner pick them up with no special
+          // case. image_posted / image_promoted are ordinary events and flow
+          // through the standard event/history path below.
           setWorld(msg);
         } else if (msg.type === 'event') {
           // Extract thought from payload if present
