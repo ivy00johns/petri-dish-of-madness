@@ -48,6 +48,10 @@ const KAYKIT_ADVENTURERS = '/models/kaykit-adventurers';
 const KENNEY_FANTASY_TOWN = '/models/kenney-fantasy-town';
 const KENNEY_CITY = '/models/kenney-city';
 const QUATERNIUS = '/models/quaternius';
+// EM-216 new-kit acquisition: CC0 building/anchor GLBs vendored from poly.pizza
+// (Quaternius / Kenney mirrors). Fills the recorded garden/library/zoo nulls
+// and the wild anchor, and gives the EM-217 build-type catalog distinct meshes.
+const POLY = '/models/poly';
 
 /**
  * Operational-building models, keyed by EM-122's `operationalVariant(kind)`.
@@ -61,17 +65,30 @@ const QUATERNIUS = '/models/quaternius';
  * (1.693 tall), fountain 2.000. All land at 2.3–3.4u long, ≤4.1u tall.
  */
 export const MODEL_REGISTRY: Record<VariantKey, ModelSpec | null> = {
-  garden: null, // procedural flower beds stay — no CC0 garden kit acquired
+  // EM-216: Quaternius "Crops" plot → ~2.95u garden bed (was procedural null).
+  garden: { url: `${POLY}/garden.glb`, scale: 1.65, yOffset: 0 },
   farm: { url: `${KENNEY_CITY}/industrial-h.glb`, scale: 2.4, yOffset: 0 }, // warehouse → 3.17u
   workshop: { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 }, // factory → 3.36u
-  library: null, // no CC0 library model in the acquired kits — stays procedural
+  // EM-216: Quaternius "Town Center" → ~2.97u civic hall (was procedural null).
+  library: { url: `${POLY}/library.glb`, scale: 2.35, yOffset: 0 },
   clocktower: { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 }, // civic landmark → 3.36u, 3.60u tall
   house: { url: `${KENNEY_CITY}/suburban-a.glb`, scale: 2.3, yOffset: 0 }, // → 2.99u
   stall: { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // storefront → 2.44u
   monument: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 }, // → 2.60u
   well: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.3, yOffset: 0 }, // city fountain → 2.60u
-  zoo: null, // EM-208 H3: procedural enclosure mesh — no CC0 zoo kit acquired
+  // EM-216: Quaternius "Open Barn" → ~3.21u animal enclosure (was procedural null).
+  zoo: { url: `${POLY}/zoo.glb`, scale: 0.52, yOffset: 0 },
   generic: { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // tall commercial → 2.33u, 4.06u tall
+  // ── EM-216/EM-217: distinct per-build-type GLBs (poly.pizza CC0). Measured
+  //    longest-XZ × scale lands each in the (1.2, 3.4]u city footprint, height
+  //    ≤4.2u (granary/temple are the tall ones). ──
+  tavern: { url: `${POLY}/tavern.glb`, scale: 0.78, yOffset: 0 }, // Fantasy Inn → 3.14u, 2.72u tall
+  market: { url: `${POLY}/market.glb`, scale: 1.4, yOffset: 0 }, // Village Market stalls → 2.95u
+  smithy: { url: `${POLY}/smithy.glb`, scale: 0.8, yOffset: 0 }, // Blacksmith forge → 3.11u
+  temple: { url: `${POLY}/temple.glb`, scale: 0.92, yOffset: 0 }, // columned Temple → 2.02u, 3.98u tall
+  school: { url: `${POLY}/school.glb`, scale: 1.65, yOffset: 0 }, // Kenney Small Building → 2.71u
+  clinic: { url: `${POLY}/clinic.glb`, scale: 1.45, yOffset: 0 }, // Kenney Large Building → 2.96u
+  granary: { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 }, // Silo House → 2.40u, 4.08u tall
 };
 
 /**
@@ -87,7 +104,8 @@ export const PLACE_MODELS: Record<PlaceKind, ModelSpec | null> = {
   work: { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 2.0, yOffset: 0 }, // wide storefront → 3.28u
   governance: { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 }, // grand civic block → 3.36u
   home: { url: `${KENNEY_CITY}/suburban-b.glb`, scale: 1.8, yOffset: 0 }, // → 3.29u
-  wild: null, // parks are trees — the wild anchor stays procedural
+  // EM-216: Quaternius "Gazebo" park hero → ~2.90u (was procedural null).
+  wild: { url: `${POLY}/park.glb`, scale: 2.3, yOffset: 0 },
 };
 
 /**

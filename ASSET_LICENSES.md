@@ -34,6 +34,26 @@ from commercial games.
 | Kenney Furniture Kit 2.0 — bench | `web/public/models/kenney-city/bench.glb` (~8 KB) | [kenney.nl](https://kenney.nl/assets/furniture-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `bench` street prop + Wave K `PROP_MODELS.bench` (EM-218) |
 | Kenney Furniture Kit 2.0 — trashcan | `web/public/models/kenney-city/trashcan.glb` (~4 KB) | [kenney.nl](https://kenney.nl/assets/furniture-kit) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `bin` street prop + Wave K `PROP_MODELS.bin` (EM-218) |
 | KayKit City Builder Bits 1.0 — fire hydrant | `web/public/models/kaykit-city/firehydrant.glb` (~28 KB) | [GitHub](https://github.com/KayKit-Game-Assets/KayKit-City-Builder-Bits-1.0) | Kay Lousberg ([kaylousberg.com](https://www.kaylousberg.com)) | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) (per bundled `LICENSE.txt`) | `hydrant` street prop (gltf+bin+png repacked to GLB with `citybits_texture.png` embedded) + Wave K `PROP_MODELS.hydrant` (EM-218) |
+| Quaternius — Fox Statue | `web/public/models/poly-props/statue.glb` (~64 KB) | [poly.pizza](https://poly.pizza/m/abxyXID5EA) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.statue` (EM-216 new-kit prop) |
+| Isa Lousberg — Medium Pot | `web/public/models/poly-props/planter.glb` (~32 KB) | [poly.pizza](https://poly.pizza/m/y05UXwo0fM) | Isa Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.planter` (EM-216 new-kit prop) |
+| Quaternius — Flowers | `web/public/models/poly-props/flower.glb` (~362 KB) | [poly.pizza](https://poly.pizza/m/NBUxHir6FJ) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.flower` (EM-216 new-kit prop) |
+| Quaternius — Rocks | `web/public/models/poly-props/rock.glb` (~5 KB) | [poly.pizza](https://poly.pizza/m/OQvi8PIZ40) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.rock` (EM-216 new-kit prop) |
+| Quaternius — Bush | `web/public/models/poly-props/bush.glb` (~127 KB) | [poly.pizza](https://poly.pizza/m/ooG6CkLyE8) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.bush` (EM-216 new-kit prop) |
+| Quaternius — Cube Crate | `web/public/models/poly-props/crate.glb` (~12 KB) | [poly.pizza](https://poly.pizza/m/YAghI6GBls) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.crate` (EM-216 new-kit prop) |
+| Kenney — Barrel | `web/public/models/poly-props/barrel.glb` (~16 KB) | [poly.pizza](https://poly.pizza/m/hTJs1zFzFz) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.barrel` (EM-216 new-kit prop) |
+| Kenney — Signpost Single | `web/public/models/poly-props/sign.glb` (~3 KB) | [poly.pizza](https://poly.pizza/m/D2vibGZw28) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.sign` (EM-216 new-kit prop) |
+| Quaternius — Market Stand | `web/public/models/poly-props/stall.glb` (~61 KB) | [poly.pizza](https://poly.pizza/m/hts7l0NZxW) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_MODELS.stall` (EM-216 new-kit prop) |
+| Quaternius — Crops | `web/public/models/poly/garden.glb` (~1.9 MB) | [poly.pizza](https://poly.pizza/m/Ro6K0Yg7mx) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.garden` community-garden bed (EM-216 — was procedural null) |
+| Quaternius — Town Center | `web/public/models/poly/library.glb` (~121 KB) | [poly.pizza](https://poly.pizza/m/CoERW5nFdE) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.library` civic hall (EM-216 — was procedural null) |
+| Quaternius — Open Barn | `web/public/models/poly/zoo.glb` (~73 KB) | [poly.pizza](https://poly.pizza/m/ZIdWHxYsUv) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.zoo` animal enclosure (EM-208/EM-216 — was procedural null) |
+| Quaternius — Gazebo | `web/public/models/poly/park.glb` (~39 KB) | [poly.pizza](https://poly.pizza/m/xYZB1TmGMv) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PLACE_MODELS.wild` park anchor (EM-216 — was procedural null) |
+| Quaternius — Fantasy Inn | `web/public/models/poly/tavern.glb` (~354 KB) | [poly.pizza](https://poly.pizza/m/x3ZcGn3jr4) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.tavern` build-type (EM-217) |
+| Quaternius — Village Market | `web/public/models/poly/market.glb` (~374 KB) | [poly.pizza](https://poly.pizza/m/0TsHLxX6CB) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.market` build-type (EM-217) |
+| Quaternius — Blacksmith | `web/public/models/poly/smithy.glb` (~551 KB) | [poly.pizza](https://poly.pizza/m/bV52eTG1Aj) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.smithy` build-type (EM-217) |
+| Quaternius — Temple | `web/public/models/poly/temple.glb` (~284 KB) | [poly.pizza](https://poly.pizza/m/CE2Mn7lh6A) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.temple` build-type (EM-217) |
+| Kenney — Small Building | `web/public/models/poly/school.glb` (~34 KB) | [poly.pizza](https://poly.pizza/m/gyjF60t7CG) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.school` build-type (EM-217) |
+| Kenney — Large Building | `web/public/models/poly/clinic.glb` (~109 KB) | [poly.pizza](https://poly.pizza/m/ppwtREejXg) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.clinic` build-type (EM-217) |
+| Quaternius — Silo House | `web/public/models/poly/granary.glb` (~125 KB) | [poly.pizza](https://poly.pizza/m/ZgstejsAcN) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.granary` build-type (EM-217) |
 
 All vendored GLBs were re-packed headlessly with `@gltf-transform` (gltf→glb
 embedding, `resample`/`dedup`/`prune`); no art content was authored or altered
@@ -49,12 +69,21 @@ Everything NOT listed above in the 3-D village (the procedural building
 variants and Suspense fallbacks, scenery, foliage) is procedural geometry
 generated in code — no external art assets.
 
-**Wave K (EM-216/218) — asset REUSE, no new downloads.** The placeable-prop
-system (`web/src/components/world3d/assets/propModels.ts`, `PROP_MODELS`) wires
-the new `Prop` entity to the GLBs ALREADY vendored above — bench, lamp/
-streetlight, tree, fence, bin/trashcan, hydrant, and the fantasy-town fountain
-(shared BY URL; one download, one toonified scene). No Kenney/KayKit kit was
-downloaded for this wave. Acquiring a wider Nature/Furniture vocabulary
-(statues, planters, rocks, flowers, distinct per-type building GLBs) is the
-recorded HITL follow-on (EM-216 closes when those land; the registries here
-consume them with zero further wiring).
+**Wave K (EM-218) — initial asset reuse.** The placeable-prop system
+(`web/src/components/world3d/assets/propModels.ts`, `PROP_MODELS`) first wired
+the `Prop` entity to GLBs ALREADY vendored above — bench, lamp/streetlight,
+tree, fence, bin/trashcan, hydrant, and the fantasy-town fountain (shared BY
+URL; one download, one toonified scene).
+
+**EM-216 new-kit acquisition (the rows above under `poly/` and `poly-props/`).**
+The recorded HITL follow-on landed: a wider CC0 vocabulary sourced from
+[poly.pizza](https://poly.pizza) (Quaternius / Kenney / Isa Lousberg mirrors,
+**every model verified `"Licence":"CC0 1.0"` before vendoring** — CC-BY models
+were rejected). Two dirs: `poly-props/` holds the 9 net-new `PROP_MODELS` props
+(statue, planter, flower, rock, bush, crate, barrel, sign, stall); `poly/` holds
+11 buildings/anchors that fill the recorded `MODEL_REGISTRY.garden/library/zoo`
++ `PLACE_MODELS.wild` nulls and give the EM-217 build-type catalog (tavern,
+market, smithy, temple, school, clinic, granary) its own distinct silhouettes.
+All repacked with `@gltf-transform` (`copy`/`dedup`/`prune`, no DRACO/meshopt)
+and toonified at load time; no art was authored or altered. New payload ~4.6 MB
+(the Quaternius "Crops" garden plot is the bulk at ~1.9 MB).
