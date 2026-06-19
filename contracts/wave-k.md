@@ -116,6 +116,12 @@ same world methods/tools the agents use, emit god-ink events (`actor_type:"god"`
 | `POST /api/god/demolish` | `{building_id}` | demolish immediately (god override) |
 | `POST /api/god/reskin` | `{building_id, skin}` | set building skin |
 
+**Response shapes (FE-consumed — pinned to prevent drift):** `place_prop` →
+`{placed, cap_reached}`; `clear_props` → `{cleared}`; `demolish` → `{demolished: true}`;
+`reskin` → `{reskinned: true}`. The `useSimulation` hook reads exactly these keys; a backend
+test asserts them so a mock returning the right shape can never again mask a live mismatch
+(found in the Wave K verify pass).
+
 ## 6. Frontend
 
 - **Types (`web/src/types/index.ts`):** add `Prop {id, kind, place, dx, dz, owner_id}`;

@@ -1356,7 +1356,10 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                     f"remove one before placing another")
 
     elif action == "remove_prop":
-        prop_id = args.get("prop_id")
+        # EM-199 defense-in-depth — a multi-action turn can hand us an object/array
+        # id; coerce to str BEFORE the dict lookup so an unhashable id is a clean
+        # rejection, never a loop-killing TypeError (mirror the place_prop str()).
+        prop_id = str(args.get("prop_id") or "").strip()
         prop = (getattr(world, "props", {}) or {}).get(prop_id)
         if prop is None:
             return f"unknown prop '{prop_id}'"
@@ -1369,7 +1372,10 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                     f"you must be there to clear an unowned prop")
 
     elif action == "demolish":
-        building_id = args.get("building_id")
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup (an
+        # object/array building_id from a multi-action turn would otherwise raise
+        # an unhashable-type TypeError and kill the loop).
+        building_id = str(args.get("building_id") or "").strip()
         building = _buildings(world).get(building_id)
         if building is None:
             return f"unknown building '{building_id}'"
@@ -1387,10 +1393,18 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                     f"propose a demolish rule at the town hall and let the town vote")
 
     elif action == "set_building_skin":
-        building_id = args.get("building_id")
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup (an
+        # object/array building_id from a multi-action turn would otherwise raise
+        # an unhashable-type TypeError and kill the loop).
+        building_id = str(args.get("building_id") or "").strip()
         building = _buildings(world).get(building_id)
         if building is None:
             return f"unknown building '{building_id}'"
+        # EM-108 menu/resolution agreement — the menu only offers set_building_skin
+        # for a building with status != "destroyed" (_assemble_context filter); the
+        # resolution gate must reject rubble too, or a stale id re-skins thin air.
+        if _building_field(building, "status") == "destroyed":
+            return f"{_building_field(building, 'name', building_id)} is rubble — nothing to re-skin"
         b_loc = _building_field(building, "location")
         if b_loc != agent.location:
             return f"you must be at the building's place ('{b_loc}') to re-skin it"
@@ -3417,7 +3431,25 @@ class AgentRuntime:
             _normalize_args(step, agent, self.world)
             action = step.get("action")
             args = step.get("args") or {}
-            gate_error = _validate_world(step, agent, self.world)
+            # EM-199 defense-in-depth — the gate itself runs under a guard so a
+            # raising gate (e.g. an object/array id reaching a dict lookup as an
+            # unhashable key) becomes a parse_failure step, never a loop-killing
+            # raise. _apply_action_inner below is guarded the same way.
+            try:
+                gate_error = _validate_world(step, agent, self.world)
+            except Exception as exc:
+                chain.append({
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "tick": self.world.tick,
+                    "kind": "parse_failure",
+                    "text": f"{agent.name}'s {action} was rejected: {exc}",
+                    "payload": {"action": action, "error": str(exc),
+                                "rejected": True},
+                })
+                step_results.append({"action": action, "args": args, "ok": False})
+                continue
             if gate_error:
                 # A world-rejected step: surface the reason and move on. No
                 # inner dispatch, so nothing was parked to drain.

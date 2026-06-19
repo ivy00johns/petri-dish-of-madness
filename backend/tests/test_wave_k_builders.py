@@ -564,3 +564,156 @@ def test_normalize_args_drops_noneish_place():
     doc = {"action": "place_prop", "args": {"kind": "bench", "place": None}}
     _normalize_args(doc, ada, world)
     assert "place" not in doc["args"]  # null place reads as MISSING (→ defaults here)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX 2 (Wave K adversarial review) — a PUBLIC/landmark demolish requires a ~70%
+# SUPERMAJORITY (the user's locked decision + design spec + contract §3), NOT the
+# simple >50% majority ordinary rules pass on. With 5 living agents, 3/5 (60%)
+# must NOT demolish; 4/5 (80%) must.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _world_with_n_agents(n: int) -> World:
+    params = WorldParams(
+        energy_decay_per_turn=0.0, death_after_zero_turns=99, turns_per_day=999,
+        buildings=BuildingParams(enabled=True),
+        props=PropsParams(max_population=48),
+    )
+    agents = [
+        AgentState(id=f"agent_{i}", name=f"A{i}", personality="", profile="mock",
+                   location="townhall", energy=100, credits=100)
+        for i in range(n)
+    ]
+    return World(params, _places(), agents)
+
+
+def test_public_demolish_needs_70pct_supermajority_3of5_fails():
+    """3/5 yes (60%) is a simple majority but BELOW the ~70% demolish bar → the
+    rule does NOT pass and the building stands."""
+    world = _world_with_n_agents(5)
+    b = _owned_building(world, owner="public", place="plaza")
+    proposer = world.agents["agent_0"]
+    ok, msg, rule = world.action_propose_rule(
+        proposer, "demolish", "Tear it down", target=b.id)
+    assert ok, msg
+    # 3 yes, 2 no — a simple majority, but only 60% (< ceil(0.7*5)=4).
+    world.action_vote(world.agents["agent_0"], rule.id, True)
+    world.action_vote(world.agents["agent_1"], rule.id, True)
+    world.action_vote(world.agents["agent_2"], rule.id, True)
+    world.action_vote(world.agents["agent_3"], rule.id, False)
+    world.action_vote(world.agents["agent_4"], rule.id, False)
+    assert world.rules[rule.id].status != "active", "60% must NOT clear the demolish bar"
+    assert world.buildings[b.id].status == "operational", "the building still stands"
+
+
+def test_public_demolish_70pct_supermajority_4of5_passes():
+    """4/5 yes (80%) clears the ~70% demolish bar → the building is demolished."""
+    world = _world_with_n_agents(5)
+    b = _owned_building(world, owner="public", place="plaza")
+    proposer = world.agents["agent_0"]
+    ok, msg, rule = world.action_propose_rule(
+        proposer, "demolish", "Tear it down", target=b.id)
+    assert ok, msg
+    for i in range(4):  # 4 yes
+        world.action_vote(world.agents[f"agent_{i}"], rule.id, True)
+    world.action_vote(world.agents["agent_4"], rule.id, False)  # 1 no
+    assert world.rules[rule.id].status == "active", "80% clears the demolish bar"
+    assert world.buildings[b.id].status == "destroyed"
+
+
+def test_ordinary_rule_keeps_simple_majority_bar():
+    """An ordinary (non-demolish) rule still passes on the simple >50% majority —
+    the supermajority change is scoped to `demolish` only."""
+    world = _world_with_n_agents(5)
+    proposer = world.agents["agent_0"]
+    ok, msg, rule = world.action_propose_rule(proposer, "ubi", "Universal credits")
+    assert ok, msg
+    # 3/5 yes (60%) — clears the simple-majority bar for an ordinary rule.
+    for i in range(3):
+        world.action_vote(world.agents[f"agent_{i}"], rule.id, True)
+    assert world.rules[rule.id].status == "active", "ordinary rules keep the >50% bar"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX 3 (Wave K adversarial review) — a multi-action turn (EM-199) whose step
+# carries an OBJECT/ARRAY-valued building_id must NOT crash the TickLoop with an
+# unhashable-type TypeError. Defense-in-depth: the gate coerces ids to str before
+# the dict lookup AND the per-step gate runs under the same try/except as the
+# inner dispatch, so the bad step becomes a parse_failure and the turn continues.
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_multi_action_object_building_id_is_parse_failure_not_raise():
+    from petridish.engine.loop import TickLoop
+    from petridish.config.loader import ModelProfile, WorldConfig
+    from petridish.persistence.repository import SQLiteRepository
+    from petridish.providers.mock import MockProvider
+    from petridish.providers.router import Router
+    from petridish.agents.runtime import AgentRuntime
+
+    world = _world()
+    _owned_building(world, owner="agent_a", place="plaza")
+    ada = world.agents["agent_a"]
+    # A multi-action turn: a step with an OBJECT-valued building_id (a model that
+    # returned a nested object instead of a bare id), then a benign `say` that MUST
+    # still resolve (the loop never dies, the turn never aborts its siblings).
+    script = [{"actions": [
+        {"action": "demolish", "args": {"building_id": {"id": "bld_test1"}}},
+        {"action": "say", "args": {"text": "the loop survives"}},
+    ]}]
+    profiles = [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#2ecc71")]
+    router = Router(profiles, adapter_overrides={"mock": MockProvider(script=script)})
+    router.reassign(ada.id, "mock")
+    router.inject_world(world)
+    runtime = AgentRuntime(world, router)
+
+    # The whole turn must NOT raise (pre-fix: TypeError: unhashable type 'dict').
+    result = await runtime.run_turn(ada)
+    evts = result["_multi"] if "_multi" in result else [result]
+    kinds = [e.get("kind") for e in evts]
+    assert "parse_failure" in kinds, "the object-id step rejects cleanly"
+    assert "agent_speech" in kinds, "the sibling `say` still resolved — turn continued"
+    assert world.buildings["bld_test1"].status == "operational"  # never demolished
+
+
+def test_validate_world_object_id_is_rejection_not_raise():
+    """The gate itself must turn an unhashable (object/array) id into a guidance
+    string, never raise — for demolish, remove_prop, and set_building_skin."""
+    world = _world()
+    ada = world.agents["agent_a"]
+    _owned_building(world, owner="agent_a", place="plaza")
+    world.action_place_prop(ada, "bench", "plaza")
+    for doc in (
+        {"action": "demolish", "args": {"building_id": {"id": "x"}}},
+        {"action": "demolish", "args": {"building_id": ["bld_test1"]}},
+        {"action": "remove_prop", "args": {"prop_id": {"id": "x"}}},
+        {"action": "set_building_skin", "args": {"building_id": {"id": "x"}, "skin": "rose"}},
+    ):
+        err = _validate_world(doc, ada, world)
+        assert isinstance(err, str) and err, f"{doc} must reject with guidance, not raise"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX 4 (Wave K adversarial review) — set_building_skin must enforce the
+# destroyed-status gate the menu already applies (EM-108 menu/resolution
+# divergence): the menu only offers re-skin for status != "destroyed", so the
+# resolution path must reject rubble too.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_set_building_skin_rejects_destroyed_building_at_resolution():
+    world = _world()
+    b = _owned_building(world, owner="agent_a", place="plaza", status="destroyed")
+    ada = world.agents["agent_a"]
+    evt = world.action_set_building_skin(ada, b.id, "rose")
+    assert evt["kind"] == "parse_failure"
+    assert "rubble" in evt["text"].lower()
+    assert world.buildings[b.id].skin is None  # untouched
+
+
+def test_validate_world_rejects_reskin_of_owned_destroyed_building():
+    world = _world()
+    b = _owned_building(world, owner="agent_a", place="plaza", status="destroyed")
+    ada = world.agents["agent_a"]
+    err = _validate_world(
+        {"action": "set_building_skin", "args": {"building_id": b.id, "skin": "rose"}},
+        ada, world)
+    assert err is not None and "rubble" in err.lower()

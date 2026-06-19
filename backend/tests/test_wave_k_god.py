@@ -281,6 +281,9 @@ def test_api_place_prop_happy_path_and_persists_god_events():
                             json={"kind": "fountain", "place": "plaza", "count": 3})
         assert resp.status_code == 201, resp.text
         body = resp.json()
+        # FE (useSimulation.placeProps) reads result.placed — lock its presence so
+        # a mock can never mask a live shape drift (Wave K regression).
+        assert "placed" in body, "FE consumes result.placed"
         assert body["placed"] == 3
         assert body["cap_reached"] is False
         assert len(appmod._world.props) == before + 3
@@ -343,7 +346,12 @@ def test_api_clear_props_removes_and_can_clear_all():
         # Clear just plaza.
         resp = client.post("/api/god/clear_props", json={"place": "plaza"})
         assert resp.status_code == 200, resp.text
-        assert resp.json()["removed"] == 2
+        # FE (useSimulation.clearProps) reads result.cleared — it MUST be present,
+        # so a mock can never mask a live shape drift (Wave K regression).
+        body = resp.json()
+        assert "cleared" in body, "FE consumes result.cleared"
+        assert body["cleared"] == 2
+        assert body["removed"] == 2  # back-compat key kept
         assert all(p.place != "plaza" for p in appmod._world.props.values())
 
         # Clear ALL (no place).
@@ -377,7 +385,11 @@ def test_api_demolish_immediate_override_and_persists():
                       kind="monument")
         resp = client.post("/api/god/demolish", json={"building_id": b.id})
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"status": "ok", "building_id": b.id}
+        body = resp.json()
+        # FE (useSimulation.godDemolish) reads result.demolished — it MUST be
+        # present (a mock can never again mask a live shape drift).
+        assert body["demolished"] is True, "FE consumes result.demolished"
+        assert body["building_id"] == b.id
         assert appmod._world.buildings[b.id].status == "destroyed"
 
         rows = appmod._repo.get_events(appmod._loop._run_id,
@@ -414,13 +426,19 @@ def test_api_reskin_sets_skin_and_persists():
         resp = client.post("/api/god/reskin",
                            json={"building_id": b.id, "skin": "plum"})
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"status": "ok", "building_id": b.id, "skin": "plum"}
+        body = resp.json()
+        # FE (useSimulation.godReskin) reads result.reskinned — it MUST be present
+        # (a mock can never again mask a live shape drift).
+        assert body["reskinned"] is True, "FE consumes result.reskinned"
+        assert body["building_id"] == b.id
+        assert body["skin"] == "plum"
         assert appmod._world.buildings[b.id].skin == "plum"
 
         # Empty skin clears it.
         resp = client.post("/api/god/reskin",
                            json={"building_id": b.id, "skin": ""})
         assert resp.status_code == 200, resp.text
+        assert resp.json()["reskinned"] is True
         assert resp.json()["skin"] is None
         assert appmod._world.buildings[b.id].skin is None
 
@@ -466,3 +484,44 @@ def test_api_snapshot_round_trips_after_god_endpoints():
             assert isinstance(rp, Prop)
             assert (rp.kind, rp.place, rp.owner_id) == \
                    (prop.kind, prop.place, prop.owner_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX 1 (Wave K adversarial review) — the live god endpoints MUST return the EXACT
+# keys the frontend hook (web/src/hooks/useSimulation.ts) consumes: place_prop →
+# `placed`, clear_props → `cleared`, demolish → `demolished`, reskin → `reskinned`.
+# A mock previously masked a live shape drift (clear=removed, demolish/reskin=
+# status:ok); this guards each contract key at the route layer so it can't recur.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_god_endpoints_return_exact_frontend_keys():
+    from fastapi.testclient import TestClient
+    from petridish.api.app import app
+    appmod = sys.modules["petridish.api.app"]
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        # place_prop → result.placed
+        r = client.post("/api/god/place_prop",
+                        json={"kind": "lamp", "place": "plaza", "count": 2})
+        assert r.status_code == 201, r.text
+        assert "placed" in r.json(), "FE reads result.placed"
+
+        # clear_props → result.cleared
+        r = client.post("/api/god/clear_props", json={"place": "plaza"})
+        assert r.status_code == 200, r.text
+        assert "cleared" in r.json(), "FE reads result.cleared"
+
+        # demolish → result.demolished
+        b = _building(appmod._world, bid="bld_fekeys", owner="public",
+                      kind="monument")
+        r = client.post("/api/god/demolish", json={"building_id": b.id})
+        assert r.status_code == 200, r.text
+        assert r.json().get("demolished") is True, "FE reads result.demolished"
+
+        # reskin → result.reskinned
+        b2 = _building(appmod._world, bid="bld_fekeys2", owner="public",
+                       kind="library")
+        r = client.post("/api/god/reskin",
+                        json={"building_id": b2.id, "skin": "sage"})
+        assert r.status_code == 200, r.text
+        assert r.json().get("reskinned") is True, "FE reads result.reskinned"

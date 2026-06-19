@@ -1301,9 +1301,10 @@ async def god_clear_props_endpoint(body: GodClearPropsBody = GodClearPropsBody()
     """Wave K / EM-221 — remove props at `place`, or ALL props when `place` is
     omitted (god override — no ownership gate). Reuses World.god_clear_props. Each
     cleared prop emits a `prop_removed` (actor_type 'god', payload.method 'god');
-    one world_state broadcast. Returns {removed: N}. A no-op (nothing to clear)
-    returns {removed: 0} with no broadcast. 400 unknown place; 503 when the world
-    isn't initialized."""
+    one world_state broadcast. Returns {cleared: N, removed: N} (the FE reads
+    `cleared`; `removed` is kept for back-compat). A no-op (nothing to clear)
+    returns {cleared: 0, ...} with no broadcast. 400 unknown place; 503 when the
+    world isn't initialized."""
     if _world is None or _loop is None:
         raise HTTPException(503, "Not initialized")
     try:
@@ -1316,7 +1317,9 @@ async def god_clear_props_endpoint(body: GodClearPropsBody = GodClearPropsBody()
         _loop._emit_event(evt)
     if events:
         _loop._broadcast_world_state()
-    return {"removed": len(events)}
+    # FE (useSimulation.clearProps) reads result.cleared; keep `removed` for
+    # back-compat so existing callers/tests don't break.
+    return {"cleared": len(events), "removed": len(events)}
 
 
 class GodDemolishBody(BaseModel):
@@ -1330,8 +1333,9 @@ async def god_demolish_endpoint(body: GodDemolishBody):
     _demolish_building path (same status flip + lot free as the owner tool and the
     governance effect, so it round-trips byte-identically). Emits one
     `building_demolished` (actor_type 'god', payload.method 'god', by 'god'); one
-    world_state broadcast. Returns {status: 'ok', building_id}. 404 unknown
-    building; 409 already rubble; 503 when the world isn't initialized."""
+    world_state broadcast. Returns {demolished: true, status: 'ok', building_id}
+    (the FE reads `demolished`). 404 unknown building; 409 already rubble; 503 when
+    the world isn't initialized."""
     if _world is None or _loop is None:
         raise HTTPException(503, "Not initialized")
     try:
@@ -1345,7 +1349,8 @@ async def god_demolish_endpoint(body: GodDemolishBody):
     evt["payload"]["method"] = "god"
     _loop._emit_event(evt)
     _loop._broadcast_world_state()
-    return {"status": "ok", "building_id": body.building_id}
+    # FE (useSimulation.godDemolish) reads result.demolished; keep status/building_id.
+    return {"demolished": True, "status": "ok", "building_id": body.building_id}
 
 
 class GodReskinBody(BaseModel):
@@ -1359,9 +1364,9 @@ async def god_reskin_endpoint(body: GodReskinBody):
     """Wave K / EM-221 — set a building's cosmetic skin (god override — no owner
     gate). Reuses World.god_reskin (same skin field + clamp as the agent tool). An
     empty skin clears it. Emits one `building_reskinned` (actor_type 'god',
-    payload.method 'god'); one world_state broadcast. Returns {status: 'ok',
-    building_id, skin}. 404 unknown building; 503 when the world isn't
-    initialized."""
+    payload.method 'god'); one world_state broadcast. Returns {reskinned: true,
+    status: 'ok', building_id, skin} (the FE reads `reskinned`). 404 unknown
+    building; 503 when the world isn't initialized."""
     if _world is None or _loop is None:
         raise HTTPException(503, "Not initialized")
     try:
@@ -1372,7 +1377,9 @@ async def god_reskin_endpoint(body: GodReskinBody):
     evt["payload"]["method"] = "god"
     _loop._emit_event(evt)
     _loop._broadcast_world_state()
-    return {"status": "ok", "building_id": body.building_id, "skin": evt["payload"]["skin"]}
+    # FE (useSimulation.godReskin) reads result.reskinned; keep status/building_id/skin.
+    return {"reskinned": True, "status": "ok", "building_id": body.building_id,
+            "skin": evt["payload"]["skin"]}
 
 
 @app.delete("/api/agents/{agent_id}")

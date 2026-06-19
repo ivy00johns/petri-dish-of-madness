@@ -1330,6 +1330,9 @@ class World:
         """Wave K / EM-219 — remove a prop the agent OWNS, or any UNOWNED prop the
         agent is co-located with. A non-owner removing an owned prop, or removing
         from afar, is rejected with guidance. Emits prop_removed."""
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup so an
+        # object/array prop_id is a clean soft-fail, never an unhashable TypeError.
+        prop_id = str(prop_id or "").strip()
         prop = self.props.get(prop_id)
         if prop is None:
             return self._fail_event(
@@ -1392,6 +1395,10 @@ class World:
         to use governance (a public/landmark demolish goes through propose_rule →
         vote → the demolish rule effect — see _on_rule_activated). Emits
         building_demolished."""
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup so an
+        # object/array building_id (from a multi-action turn) is a clean soft-fail,
+        # never an unhashable-type TypeError (mirror place_prop's str()).
+        building_id = str(building_id or "").strip()
         building = self.buildings.get(building_id)
         if building is None:
             return self._fail_event(
@@ -1414,11 +1421,22 @@ class World:
         """Wave K / EM-220 — the OWNER re-skins their building (a cosmetic palette
         override layered over the health-soot tint, FE-side). Owner-only. An empty
         skin clears it back to the default. Emits building_reskinned."""
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup so an
+        # object/array building_id is a clean soft-fail, never an unhashable
+        # TypeError.
+        building_id = str(building_id or "").strip()
         building = self.buildings.get(building_id)
         if building is None:
             return self._fail_event(
                 agent.id, "set_building_skin", "building_not_found",
                 f"{agent.name} tried to re-skin an unknown structure.")
+        # EM-108 menu/resolution agreement — the menu hides re-skin for a destroyed
+        # building (status != "destroyed" filter); the resolution path must reject
+        # rubble too, never re-skin a stale id.
+        if building.status == "destroyed":
+            return self._fail_event(
+                agent.id, "set_building_skin", "destroyed",
+                f"{building.name} is rubble — nothing to re-skin.")
         if building.owner_id != agent.id:
             return self._fail_event(
                 agent.id, "set_building_skin", "not the owner",
@@ -1885,6 +1903,26 @@ class World:
         living_ids = {a.id for a in living}
         yes_votes = sum(1 for aid, v in rule.votes.items() if v and aid in living_ids)
         no_votes = sum(1 for aid, v in rule.votes.items() if not v and aid in living_ids)
+
+        # Wave K / EM-219 — a public/landmark `demolish` is irreversible (it tears
+        # down a standing structure), so it requires a ~70% SUPERMAJORITY rather
+        # than the simple strict majority ordinary rules pass on (the user's locked
+        # decision + design spec + contract wave-k.md §3). Ordinary effects keep
+        # their existing bar.
+        if rule.effect == "demolish":
+            yes_needed = math.ceil(0.7 * living_count)
+            if yes_votes >= yes_needed:
+                return "active"
+            # The vote fails once a yes-supermajority is mathematically out of reach
+            # (everyone still unvoted couldn't carry it). Handled by the all-voted
+            # fall-through below; here we only ACTIVATE early on a clear pass.
+            no_threshold = living_count // 2
+            if no_votes > no_threshold:
+                return "rejected"
+            voted = sum(1 for aid in rule.votes if aid in living_ids)
+            if voted >= living_count:
+                return "rejected"
+            return None
 
         threshold = living_count // 2  # strict majority: > floor(living/2)
         if yes_votes > threshold:
