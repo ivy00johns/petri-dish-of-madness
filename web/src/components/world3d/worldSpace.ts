@@ -158,6 +158,19 @@ export const BUILDING_STYLES: Record<string, BuildingStyle> = {
   granary:    { body: '#ecd28a', roof: '#c08a3a', accent: '#e7b84f', tag: 'Granary' },
   // well — cool stone walls, a slate roof, a water-blue accent.
   well:       { body: '#cfc8bc', roof: '#7e766a', accent: '#5fa3c0', tag: 'Well' },
+  // ── EM-216b catalog expansion — each its own distinct palette + label ──
+  // bakery — warm flour-cream walls, a crusty golden roof, a berry-jam accent.
+  bakery:     { body: '#f3e2bc', roof: '#cf9b54', accent: '#d9594c', tag: 'Bakery' },
+  // bank — cool marble-grey walls, a deep slate roof, a gilded accent (vault gold).
+  bank:       { body: '#d8d8d0', roof: '#4a4f57', accent: '#e8c768', tag: 'Bank' },
+  // theater — plum-rose walls, a deep-curtain maroon roof, a spotlight-gold accent.
+  theater:    { body: '#d9a7b4', roof: '#6e2b3c', accent: '#ffd36a', tag: 'Theater' },
+  // lighthouse — white-and-red striped read: pale walls, a signal-red roof, a beam-yellow accent.
+  lighthouse: { body: '#f0ece4', roof: '#d2433a', accent: '#ffe08a', tag: 'Lighthouse' },
+  // bathhouse — pale aqua walls, a steam-blue roof, a tiled teal accent.
+  bathhouse:  { body: '#cfe6e3', roof: '#5a8fa0', accent: '#3fa8a0', tag: 'Bathhouse' },
+  // dock — weathered timber walls, a tar-dark roof, a rope/buoy orange accent.
+  dock:       { body: '#caa978', roof: '#4f4334', accent: '#e8843a', tag: 'Dock' },
   // EM-130: the NEUTRAL fallback — a generic structure, deliberately distinct
   // from monument (cream walls + timber roof, reusing tints already in this
   // palette: clocktower body, workshop accent, clocktower accent).
@@ -276,7 +289,14 @@ export type VariantKey =
   | 'temple'
   | 'school'
   | 'clinic'
-  | 'granary';
+  | 'granary'
+  // ── EM-216b: catalog expansion ──
+  | 'bakery'
+  | 'bank'
+  | 'theater'
+  | 'lighthouse'
+  | 'bathhouse'
+  | 'dock';
 
 /**
  * Exact BUILDING_STYLES keys map straight to their obvious variant.
@@ -310,6 +330,13 @@ const EXACT_VARIANTS: Record<string, VariantKey> = {
   park: 'garden',       // greenery — shares the garden bed GLB
   granary: 'granary',   // Silo House GLB (fallback: farm silhouette)
   well: 'well',         // stone ring + roof (fountain GLB)
+  // EM-216b catalog expansion → own distinct variant + GLB
+  bakery: 'bakery',     // cozy shopfront (fallback: stall silhouette)
+  bank: 'bank',         // grand columned facade (fallback: monument)
+  theater: 'theater',   // open proscenium stage (fallback: generic)
+  lighthouse: 'lighthouse', // tall slender tower (fallback: clocktower)
+  bathhouse: 'bathhouse',   // open water venue (fallback: generic)
+  dock: 'dock',         // waterside port/warehouse (fallback: workshop)
   building: 'generic',
 };
 

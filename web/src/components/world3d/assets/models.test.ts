@@ -33,6 +33,7 @@ import type { PlaceKind } from '../../../types';
 import {
   CHARACTER_MODELS,
   MODEL_REGISTRY,
+  MODEL_POOLS,
   PLACE_MODELS,
   allModelSpecs,
   type ModelSpec,
@@ -57,6 +58,8 @@ const ALL_VARIANTS: VariantKey[] = [
   'house', 'stall', 'monument', 'well', 'zoo', 'generic',
   // EM-216/EM-217 distinct build-type variants
   'tavern', 'market', 'smithy', 'temple', 'school', 'clinic', 'granary',
+  // EM-216b catalog expansion
+  'bakery', 'bank', 'theater', 'lighthouse', 'bathhouse', 'dock',
 ];
 const ALL_PLACE_KINDS: PlaceKind[] = ['work', 'home', 'social', 'governance', 'wild'];
 
@@ -234,10 +237,47 @@ describe('scaled footprints', () => {
   });
 });
 
+// ── EM-216b: variety pools (per-slot variation) ──────────────────────────────
+
+describe('MODEL_POOLS (EM-216b variety)', () => {
+  const poolEntries = Object.entries(MODEL_POOLS) as Array<[VariantKey, ModelSpec[]]>;
+
+  it('each pool has ≥2 distinct GLBs and includes its MODEL_REGISTRY default', () => {
+    expect(poolEntries.length).toBeGreaterThan(0);
+    for (const [variant, pool] of poolEntries) {
+      expect(pool.length, variant).toBeGreaterThanOrEqual(2);
+      const urls = pool.map((s) => s.url);
+      expect(new Set(urls).size, `${variant} has duplicate urls`).toBe(pool.length);
+      // slot 0 is the single-spec default so the no-id path agrees with the pool
+      expect(pool[0].url, `${variant} slot 0`).toBe(MODEL_REGISTRY[variant]!.url);
+    }
+  });
+
+  it('every pool member fits the city footprint and sits on the ground', () => {
+    for (const [variant, pool] of poolEntries) {
+      for (const spec of pool) {
+        const { size, min } = glbBounds(readGlbJson(diskPath(spec)));
+        const xz = Math.max(size.x, size.z) * spec.scale;
+        expect(xz, `${variant} ${spec.url} xz`).toBeGreaterThan(1.2);
+        expect(xz, `${variant} ${spec.url} xz`).toBeLessThanOrEqual(3.4);
+        expect(size.y * spec.scale, `${variant} ${spec.url} y`).toBeLessThanOrEqual(4.2);
+        expect(
+          Math.abs(min.y * spec.scale + spec.yOffset),
+          `${variant} ${spec.url} ground`,
+        ).toBeLessThan(0.15);
+      }
+    }
+  });
+});
+
 // ── Declared clips exist in the GLBs ─────────────────────────────────────────
 
 describe('animation clips', () => {
-  it.each([['villager'], ['cat'], ['dog']] as const)(
+  it.each([
+    ['villager'], ['cat'], ['dog'],
+    // EM-216b: the 5 new critters were clip-normalized to Idle/Walk like cat/dog.
+    ['squirrel'], ['raccoon'], ['goat'], ['fox'], ['crow'],
+  ] as const)(
     '%s GLB contains the declared idle/walk clips',
     (key) => {
       const spec = CHARACTER_MODELS[key]!;

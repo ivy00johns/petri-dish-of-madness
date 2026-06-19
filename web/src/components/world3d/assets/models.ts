@@ -89,6 +89,14 @@ export const MODEL_REGISTRY: Record<VariantKey, ModelSpec | null> = {
   school: { url: `${POLY}/school.glb`, scale: 1.65, yOffset: 0 }, // Kenney Small Building → 2.71u
   clinic: { url: `${POLY}/clinic.glb`, scale: 1.45, yOffset: 0 }, // Kenney Large Building → 2.96u
   granary: { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 }, // Silo House → 2.40u, 4.08u tall
+  // ── EM-216b catalog expansion (poly.pizza CC0). yOffset seats origin-centered
+  //    models (bank/bathhouse/dock) on the ground; lighthouse is the tall one. ──
+  bakery: { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },       // shopfront → 2.90u
+  bank: { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },        // Colosseum → 3.30u
+  theater: { url: `${POLY}/theater.glb`, scale: 0.099, yOffset: 0 },    // Concert Stage → 3.29u
+  lighthouse: { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 }, // Tower → 2.64u, 4.09u tall
+  bathhouse: { url: `${POLY}/bathhouse.glb`, scale: 0.32, yOffset: 0.32 },   // Public Pool → 3.20u
+  dock: { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },         // Shipping Port → 2.50u
 };
 
 /**
@@ -118,6 +126,11 @@ export const CHARACTER_MODELS: {
   villager: ModelSpec | null;
   cat: ModelSpec | null;
   dog: ModelSpec | null;
+  squirrel: ModelSpec | null;
+  raccoon: ModelSpec | null;
+  goat: ModelSpec | null;
+  fox: ModelSpec | null;
+  crow: ModelSpec | null;
 } = {
   // 2.19u tall at scale 1 → ~1.1u, matching the Wave B capsule.
   villager: {
@@ -138,16 +151,58 @@ export const CHARACTER_MODELS: {
     yOffset: 0,
     clips: { idle: 'Idle', walk: 'Walk' },
   },
+  // EM-216b: 5 distinct rigged CC0 critter meshes (Quaternius animated, clips
+  // pruned to Idle/Walk like cat/dog). No CC0 squirrel/goat/crow exist on
+  // poly.pizza, so the closest CC0 rigs stand in (rat / alpaca / pigeon),
+  // tinted per species via ANIMAL_STYLES and labeled by speciesEmoji. Scales
+  // keep them critter-small (~0.3–0.85u). Filenames name the ACTUAL animal so
+  // the substitution is explicit; swap a url here to upgrade any slot later.
+  squirrel: { url: `${QUATERNIUS}/rat.glb`, scale: 0.11, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  raccoon: { url: `${QUATERNIUS}/raccoon.glb`, scale: 0.23, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  goat: { url: `${QUATERNIUS}/alpaca.glb`, scale: 0.16, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  fox: { url: `${QUATERNIUS}/fox.glb`, scale: 0.15, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  crow: { url: `${QUATERNIUS}/pigeon.glb`, scale: 0.26, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
 };
 
-/** Every non-null spec across the three registries (preload + tests). */
+/**
+ * EM-216b — per-slot VARIETY pools. A variant with a pool renders one of
+ * SEVERAL distinct GLBs, picked deterministically from the building id
+ * (structureModel.resolveStructureModel) so agent-built houses/shops stop
+ * looking cloned — and the pick is stable across frame/reload/fork (the same
+ * id always lands on the same mesh, so EM-155 replay byte-equality holds).
+ * A variant absent here keeps its single MODEL_REGISTRY spec. Every pool
+ * member's footprint respects the city convention (≤3.4u long, ≤4.2u tall) —
+ * models.test re-measures them. The first member of each pool is the kit's
+ * MODEL_REGISTRY default so the no-id path and the pool agree on slot 0.
+ */
+export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
+  // Residences — the most-repeated structures. 3 coherent Kenney suburban
+  // houses + 3 new CC0 poly.pizza homes (modern / storybook cottage / fantasy).
+  house: [
+    { url: `${KENNEY_CITY}/suburban-a.glb`, scale: 2.3, yOffset: 0 },  // 2.99u
+    { url: `${KENNEY_CITY}/suburban-b.glb`, scale: 1.65, yOffset: 0 }, // 3.02u
+    { url: `${KENNEY_CITY}/suburban-q.glb`, scale: 2.4, yOffset: 0 },  // 2.98u
+    { url: `${POLY}/house-modern.glb`, scale: 3.3, yOffset: 0 },       // Quaternius House 2.94u
+    { url: `${POLY}/house-cottage.glb`, scale: 6.0, yOffset: 0 },      // CreativeTrio Cottage 2.80u
+    { url: `${POLY}/house-fantasy.glb`, scale: 1.1, yOffset: 0 },      // Quaternius Fantasy House 2.93u, 3.73u tall
+  ],
+  // Storefronts — three Kenney commercial blocks (already vendored).
+  stall: [
+    { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // 2.44u
+    { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 1.8, yOffset: 0 }, // 2.95u
+    { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // 2.33u, 4.06u tall
+  ],
+};
+
+/** Every non-null spec across all registries + variety pools (preload + tests). */
 export function allModelSpecs(): ModelSpec[] {
   const specs = [
     ...Object.values(MODEL_REGISTRY),
     ...Object.values(PLACE_MODELS),
     ...Object.values(CHARACTER_MODELS),
-  ].filter((s): s is ModelSpec => s !== null);
-  // De-dupe by url (a model may serve several keys).
+    ...Object.values(MODEL_POOLS).flat(),
+  ].filter((s): s is ModelSpec => s != null);
+  // De-dupe by url (a model may serve several keys / pools).
   const seen = new Set<string>();
   return specs.filter((s) => (seen.has(s.url) ? false : (seen.add(s.url), true)));
 }

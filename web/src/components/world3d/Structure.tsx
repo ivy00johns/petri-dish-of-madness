@@ -1052,6 +1052,13 @@ const VARIANT_COMPONENTS: Record<VariantKey, ComponentType<VariantProps>> = {
   school: LibraryStructure,
   clinic: GenericStructure,
   granary: FarmStructure,
+  // EM-216b catalog expansion — fallback silhouettes (GLB is the real render)
+  bakery: StallStructure,
+  bank: MonumentStructure,
+  theater: GenericStructure,
+  lighthouse: ClocktowerStructure,
+  bathhouse: GenericStructure,
+  dock: WorkshopStructure,
 };
 
 function OperationalStructure({
@@ -1209,6 +1216,13 @@ const OPERATIONAL_LABEL_Y: Record<VariantKey, number> = {
   school: 4.2,
   clinic: 4.0,
   granary: 2.4,
+  // EM-216b catalog expansion
+  bakery: 3.2,
+  bank: 5.0,
+  theater: 4.0,
+  lighthouse: 5.4,
+  bathhouse: 4.0,
+  dock: 3.6,
 };
 
 /**
@@ -1306,8 +1320,9 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
     return skinBody ? { ...style, body: skinBody } : style;
   }, [style, building.skin]);
   const { variant, spec } = useMemo(
-    () => resolveStructureModel(building.kind),
-    [building.kind],
+    // EM-216b: building.id drives the variety-pool pick (deterministic, replay-safe).
+    () => resolveStructureModel(building.kind, building.id),
+    [building.kind, building.id],
   );
   // EM-180: funds render as a treasury object, never a building shell.
   const fund = isFundBuilding(building);

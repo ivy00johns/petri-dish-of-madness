@@ -95,12 +95,20 @@ export function stepYaw(
 // ── Species → model ───────────────────────────────────────────────────────────
 
 /**
- * Resolve a critter species to its rigged GLB spec. Only cat/dog have models;
- * any other species (e.g. EM-143's god-spawned squirrels) returns null and the
- * Critter renders its procedural body instead.
+ * Resolve a critter species to its rigged GLB spec. EM-216b gave all 7 species
+ * a distinct rigged mesh; any other species (e.g. a god-spawned exotic) returns
+ * null and the Critter renders its procedural body instead.
  */
 export function critterModelFor(species: string): ModelSpec | null {
-  if (species === 'cat') return CHARACTER_MODELS.cat;
-  if (species === 'dog') return CHARACTER_MODELS.dog;
-  return null;
+  switch (species) {
+    case 'cat': return CHARACTER_MODELS.cat;
+    case 'dog': return CHARACTER_MODELS.dog;
+    // EM-216b: the 5 EM-143 species get their own rigged CC0 meshes.
+    case 'squirrel': return CHARACTER_MODELS.squirrel;
+    case 'raccoon': return CHARACTER_MODELS.raccoon;
+    case 'goat': return CHARACTER_MODELS.goat;
+    case 'fox': return CHARACTER_MODELS.fox;
+    case 'crow': return CHARACTER_MODELS.crow;
+    default: return null;
+  }
 }

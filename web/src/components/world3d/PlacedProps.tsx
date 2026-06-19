@@ -52,7 +52,8 @@ function ProceduralProp() {
 
 /** One prop: GLB via <Model> with a procedural fallback (never a hole). */
 function PlacedProp({ prop, x, z }: { prop: Prop; x: number; z: number }) {
-  const spec = useMemo(() => propModel(prop.kind), [prop.kind]);
+  // EM-216b: prop.id drives the variety-pool pick (deterministic, replay-safe).
+  const spec = useMemo(() => propModel(prop.kind, prop.id), [prop.kind, prop.id]);
   return (
     <group position={[x, 0, z]}>
       {spec ? (

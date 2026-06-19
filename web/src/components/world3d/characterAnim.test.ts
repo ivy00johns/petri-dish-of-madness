@@ -146,15 +146,19 @@ describe('stepYaw', () => {
 });
 
 describe('critterModelFor (species → GLB)', () => {
-  it('maps cat and dog to their registry specs', () => {
+  it('maps all 7 species to their registry specs (EM-216b)', () => {
     expect(critterModelFor('cat')).toBe(CHARACTER_MODELS.cat);
     expect(critterModelFor('dog')).toBe(CHARACTER_MODELS.dog);
+    expect(critterModelFor('squirrel')).toBe(CHARACTER_MODELS.squirrel);
+    expect(critterModelFor('raccoon')).toBe(CHARACTER_MODELS.raccoon);
+    expect(critterModelFor('goat')).toBe(CHARACTER_MODELS.goat);
+    expect(critterModelFor('fox')).toBe(CHARACTER_MODELS.fox);
+    expect(critterModelFor('crow')).toBe(CHARACTER_MODELS.crow);
   });
 
-  it('returns null for any other species (procedural fallback)', () => {
-    expect(critterModelFor('squirrel')).toBeNull(); // EM-143 god-spawns
+  it('returns null for unknown species (procedural fallback)', () => {
     expect(critterModelFor('')).toBeNull();
     expect(critterModelFor('CAT')).toBeNull(); // species ids are lowercase
-    expect(critterModelFor('dragon')).toBeNull();
+    expect(critterModelFor('dragon')).toBeNull(); // a god-spawned exotic
   });
 });

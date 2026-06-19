@@ -18,7 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VariantKey } from './worldSpace';
 import type { PlaceKind } from '../../types';
-import { MODEL_REGISTRY, PLACE_MODELS } from './assets/models';
+import { MODEL_REGISTRY, MODEL_POOLS, PLACE_MODELS } from './assets/models';
 import { effectiveTint } from './assets/Model';
 import {
   OFFLINE_MODEL_TINT,
@@ -35,6 +35,8 @@ const ALL_VARIANTS: VariantKey[] = [
   'house', 'stall', 'monument', 'well', 'zoo', 'generic',
   // EM-216/EM-217 distinct build-type variants
   'tavern', 'market', 'smithy', 'temple', 'school', 'clinic', 'granary',
+  // EM-216b catalog expansion
+  'bakery', 'bank', 'theater', 'lighthouse', 'bathhouse', 'dock',
 ];
 const ALL_PLACE_KINDS: PlaceKind[] = ['social', 'work', 'governance', 'home', 'wild'];
 
@@ -82,6 +84,29 @@ describe('resolveStructureModel', () => {
       expect(res.spec).toBe(MODEL_REGISTRY[res.variant]);
     },
   );
+
+  it('EM-216b: pooled variants pick a stable, distributed member from the id', () => {
+    for (const [variant, pool] of Object.entries(MODEL_POOLS)) {
+      if (!pool) continue;
+      const ids = Array.from({ length: 24 }, (_, i) => `bld_${variant}_${i}`);
+      const picks = ids.map((id) => resolveStructureModel(variant, id).spec);
+      for (const p of picks) expect(pool, variant).toContain(p); // always a pool member
+      // deterministic: same id → same spec
+      expect(resolveStructureModel(variant, ids[0]).spec).toBe(
+        resolveStructureModel(variant, ids[0]).spec,
+      );
+      // distributes: >1 distinct mesh across many ids
+      expect(new Set(picks.map((s) => s!.url)).size, variant).toBeGreaterThan(1);
+    }
+  });
+
+  it('EM-216b: no id keeps the single MODEL_REGISTRY default (pool slot 0)', () => {
+    for (const variant of Object.keys(MODEL_POOLS)) {
+      expect(resolveStructureModel(variant).spec, variant).toBe(
+        MODEL_REGISTRY[variant as keyof typeof MODEL_REGISTRY],
+      );
+    }
+  });
 
   it('fallback selection: variant is always a valid procedural key', () => {
     for (const kind of [...ALL_VARIANTS, ...EVIL_KINDS, '', 'meow', 'Grand Plaza Hotel']) {

@@ -23,8 +23,8 @@
  * and buildingStyle — this layer guards independently, belt and braces).
  */
 
-import { MODEL_REGISTRY, PLACE_MODELS, type ModelSpec } from './assets/models';
-import { operationalVariant, type VariantKey } from './worldSpace';
+import { MODEL_REGISTRY, MODEL_POOLS, PLACE_MODELS, type ModelSpec } from './assets/models';
+import { hashUnit, operationalVariant, type VariantKey } from './worldSpace';
 
 export interface StructureModelResolution {
   /** The EM-122 procedural silhouette — always the Suspense fallback. */
@@ -37,9 +37,22 @@ export interface StructureModelResolution {
  * Resolve which GLB (if any) an OPERATIONAL building of `kind` renders.
  * Never throws — evil/emergent kinds fall through operationalVariant to
  * 'generic', and the registry lookup is own-property guarded on top.
+ *
+ * EM-216b: when the variant has a VARIETY pool AND an `id` is supplied, the
+ * GLB is picked deterministically from the id (so a row of agent-built houses
+ * isn't six copies of the same mesh) — stable across frame/reload/fork, so the
+ * EM-155 replay invariant holds. Without an `id` (or pool), the single
+ * MODEL_REGISTRY spec stands, which is pool slot 0 by construction.
  */
-export function resolveStructureModel(kind: string): StructureModelResolution {
+export function resolveStructureModel(kind: string, id?: string): StructureModelResolution {
   const variant = operationalVariant(kind);
+  const pool = Object.prototype.hasOwnProperty.call(MODEL_POOLS, variant)
+    ? MODEL_POOLS[variant]
+    : undefined;
+  if (pool && pool.length > 0 && id) {
+    const idx = Math.floor(hashUnit(id) * pool.length) % pool.length;
+    return { variant, spec: pool[idx] };
+  }
   const spec = Object.prototype.hasOwnProperty.call(MODEL_REGISTRY, variant)
     ? MODEL_REGISTRY[variant]
     : null;
