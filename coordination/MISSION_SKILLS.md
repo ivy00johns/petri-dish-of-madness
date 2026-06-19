@@ -149,9 +149,10 @@ Runtime: Workflow mode (ultracode). Design/contracts inline; implement + verify 
 - [x] `orchestrator` — ✅ driving this build.
 - [x] seam mapping — ✅ 3 parallel `Explore` agents (backend reflex/scheduler/billboard · governance/replay · API/static/frontend).
 - [x] `contract-author` — ✅ authored inline: `contracts/wave-i-atelier.md` v1.0.0.
-- [ ] QE agent — MANDATORY; `coordination/qa-report.json` per slice, hermetic (`EM_IMAGEGEN_MOCK`).
-- [ ] wave gate — `pytest` + `npm test` + `tsc -b` + `vite build` green between every wave.
-- [ ] `design-token-guard` — UI waves (I1/I4); zero NEW violations (EM-193 ratchet).
-- [ ] `nano-banana` — build-time seed art for the default/empty banner + NoticeBoard state (named in the Wave I research; build-time only, NOT a runtime call).
-- [ ] `render-sanity` / `ux-review` — post-build browser pass IF the full stack is up (uvicorn + vite + live Mock run); else record a deferral reason (standing pattern since W11b).
-- [ ] `/code-review` (external CLI) — Phase-4 diff review is user-triggered/billed; note as a handoff, do not auto-run.
+- [x] QE agent — ✅ `coordination/qa-report.json` (proceed=true, all scores 5); `backend/tests/test_wave_i_integration.py` (11 cross-cutting + the EM-155 fork/replay keystone).
+- [x] adversarial verify — ✅ 4-lens skeptic panel (replay · governance · determinism+fixture · frontend) found 1 CRITICAL + 2 HIGH + 1 MED + 1 LOW; all 5 fixed and load-bearing-verified via the fix workflow.
+- [x] wave gate — ✅ run by the lead after implement AND after fix: backend 1019 · frontend 898 · `tsc -b` 0 · `vite build` ✓.
+- [x] `design-token-guard` — ✅ 0 NEW violations (PlazaBanner clean; the 14 NoticeBoard findings are pre-existing world3d toon hexes, established canvas exemption / EM-193 backlog).
+- [~] `nano-banana` — DEFERRED: the empty-banner/NoticeBoard states use a procedural toon fallback (EM-148 invariant, now adversarially tested); seed art adds polish but no functional gap. Re-enter if a designed default banner is wanted.
+- [~] `render-sanity` / `ux-review` — DEFERRED (standing pattern since W11b/Wave-K): a meaningful Atelier walk needs a live run that has generated images (create_image is agent-driven over many ticks) + the full stack up. Substituted with component render tests (898 web), the production build, the token diff, and the adversarially-tested 404 fallback. Run on merged main once a live run has produced gallery art.
+- [ ] `/code-review` (external CLI) — handoff: user-triggered/billed; not auto-run.
