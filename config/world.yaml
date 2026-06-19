@@ -202,6 +202,26 @@ world:
     spontaneity_chance: 0.15   # wildcard P(full LLM turn) on a non-salient due turn
     reflex_streak_limit: 8     # consecutive reflex turns before a forced reassess
 
+  # EM-222 — relevance-scored long-term memory retrieval. Protagonist +
+  # supporting agents recall RELEVANT old events (Smallville recency ×
+  # importance × relevance over the persisted event log, embeddings cached in
+  # event_embeddings) instead of only the last ~12. North-star-aligned: it ADDS
+  # calls (embeddings), never caches-to-mute. The BACKGROUND tier keeps its
+  # blind-recency prompt diet (EM-161) regardless. Any embed/DB failure falls
+  # back to blind recency for that turn (a turn never crashes). enabled:false =
+  # byte-identical pre-EM-222 (blind recency for every tier). The runtime reads
+  # this block via its defensive accessor with defaults identical to these.
+  memory_retrieval:
+    enabled: true
+    embed_model: bge-m3        # the dedicated `embed` profile (profiles.yaml)
+    top_k: 12                  # scored memories surfaced per turn
+    recent_tail: 6             # recent events always merged alongside the top-K
+    candidate_limit: 400       # newest-first corpus cap pulled before scoring
+    w_relevance: 0.5           # weight on normalized cosine(query, memory)
+    w_importance: 0.3          # weight on normalized event importance
+    w_recency: 0.2             # weight on normalized recency decay
+    recency_halflife_ticks: 200  # age (ticks) at which recency decays to 0.5
+
   # W15 / EM-155 — deterministic seed for the generated 3D city ring. The city
   # renders as a pure function f(snapshot, city_seed); the engine persists the
   # seed in every snapshot so live, replay, and fork all draw the SAME city.

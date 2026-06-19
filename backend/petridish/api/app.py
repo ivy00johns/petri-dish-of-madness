@@ -330,6 +330,9 @@ def _spin_up_run_from_world(
         config_json, forked_from=parent_run_id, forked_at_tick=snapshot_tick
     )
     new_loop._run_id = new_run_id
+    # EM-222 — hand the freshly-built runtime the repo + active run so its
+    # relevance-scored memory retrieval reads THIS forked/resumed run's log.
+    new_loop._wire_runtime_run_context()
     _repo.save_places(new_run_id, list(new_world.places.values()))
     for agent in new_world.agents.values():
         _repo.save_agent(new_run_id, agent, new_world.tick)

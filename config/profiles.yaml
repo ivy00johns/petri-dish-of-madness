@@ -121,6 +121,20 @@ profiles:
     temperature: 0.8
     color: "#c8ff00"
 
+  # ── EM-222 — the dedicated embedding lane ──
+  # Relevance-scored memory retrieval embeds each event ONCE (cached in the
+  # event_embeddings table) and the agent's query each turn, routed through this
+  # fixed embedding model — NEVER the agent's chat lane. The Router resolves the
+  # profile literally named `embed` at startup; absent ⇒ retrieval falls back to
+  # blind recency. NOT decision-cached — embeddings ADD calls (north-star).
+
+  - name: embed
+    adapter: openai-compatible
+    model_id: bge-m3            # gating resolved 2026-06-19; gemini-embedding-001 = 3072-dim alt
+    base_url: http://localhost:3001/v1
+    api_key_env: FREELLMAPI_KEY
+    color: "#9b59b6"
+
   # ── Mock profile (no network; deterministic scripted responses) ──
   # Use this for offline development and the test suite.
 

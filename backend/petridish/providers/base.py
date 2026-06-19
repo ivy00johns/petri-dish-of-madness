@@ -38,3 +38,11 @@ class Provider(Protocol):
     ) -> str:
         """Return the assistant message text. Raises ProviderError on failure."""
         ...
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """One vector per input text (same order). Raises ProviderError on failure.
+
+        EM-222 — the embedding seam. Used by the relevance-scored memory
+        retriever (a dedicated `embed` profile, not the agent's chat lane);
+        NOT decision-cached — embeddings ADD calls (north-star)."""
+        ...
