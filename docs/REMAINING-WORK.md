@@ -34,6 +34,13 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 > **W15–W17** (Wave D: D1 city vocabulary+generator · D2 population scaling · D3 life).
 > Direction lock: the art target is Emergence World's dense zoned city, not Stardew-cozy;
 > the Wave C medieval core persists as a historic district (EM-156).
+> **Wave L (Cognition) filed 2026-06-18** via `plan-intake` from
+> `docs/research/smallville-to-sid-2026-06-18.md` (Smallville→Sid research + repo-grounded
+> assessment) — **EM-222–224**, opening **W22**. Three research spikes stripped of the doc's
+> wrong premises (the assumed Phaser/TS stack, rebuild-what's-already-shipped stages, and the
+> cost-minimization program that contradicts the max-call-rate north star): relevance-scored
+> long-term retrieval (the one missing Smallville mechanism), recursive+reactive planning, and
+> PIANO's coherence trick for multi-action turns. Open questions preserved per item.
 
 ## Format & conventions
 
@@ -258,7 +265,7 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-181 | P2 | W15 | frontend | user 2026-06-11 | Spread sooner: `assignBuildingLots` (cityLayout.ts) packed each place's overflow into the single NEAREST block's lots before spilling, so growth piled up center-out. Overflow now ROUND-ROBINS across blocks (lot 0 of every block nearest-first, then lot 1, …) so a place that outgrows its landmark block fans one lot per surrounding block — stays deterministic (EM-155 byte-identical invariant holds, 497 tests green). The dramatic per-district spread the user wants lands with EM-182 (agent choice). Pairs EM-131 slot placement + EM-174 placement tiers | done | fix-batch 2026-06-11 |
 
-| EM-182 | P2 | W14 | backend+frontend | user 2026-06-11 | Agent-chosen placement freedom: agents should pick WHERE/which zone to build (a house in the industrial district, etc.) rather than the renderer auto-assigning the nearest lot — `propose_project` gains a target place/zone arg (backend), CityGenerator/`assignBuildingLots` honor it (frontend), agents grow the city as they see fit. Extends EM-123 zoned districts (deterministic) with agency; pairs EM-181 | open | — |
+| EM-182 | P2 | W21 | backend+frontend | user 2026-06-11 | Agent-chosen placement freedom (re-waved W14→W21, pulled into Wave K 2026-06-18 as the building cousin of EM-218 prop placement): agents should pick WHERE/which zone to build (a house in the industrial district, etc.) rather than the renderer auto-assigning the nearest lot — `propose_project` gains a target place/zone arg (backend), CityGenerator/`assignBuildingLots` honor it (frontend), agents grow the city as they see fit. Extends EM-123 zoned districts (deterministic) with agency; pairs EM-181 | done | wave-K 2026-06-18 |
 
 | EM-183 | P3 | W17 | backend | user 2026-06-11 | Vote to move/expand the town center: a governance proposal type that re-anchors the civic center / designates a new plaza when ratified (~70% threshold), and the city re-centers on the agents' chosen heart — the "they grow the city as they see fit" end-goal the user expected in the plan (not previously tracked). Builds on shipped governance texture (EM-079/087/100/103) + the city-scoped treaty pattern (EM-117) | open | — |
 
@@ -342,7 +349,36 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-215 | P2 | W20 | frontend+backend | user 2026-06-16 | **The Diary — a per-agent inner-life UI** — reflections (EM-080, `reflection {text, importance}`) today only appear as a "Diary" FILTER on the shared event feed (EventFeed.tsx:330). Give each agent a dedicated DIARY view — their private reflections over time, chronologically — the individual cousin to the town-saga Chronicle (EM-201). **Needs deeper exploration first**: is the EM-080 reflection cadence/quality rich enough, or bump the importance triggers? Then a UI (a per-agent diary panel/tab, or a diary lane in the agent panel/inspector). Pairs with pet-grief diary entries (EM-209) + the Chronicle. | open | — |
 
-_Next free ID: EM-216._
+### Wave K — The Builders' City (agents shape & decorate their own town; planned 2026-06-18, from brainstorm)
+
+> Killer-feature arc: agents **pick real building types → place/remove props → demolish →
+> re-skin what they own**, and the **god console** gets parity levers. Built breadth-first
+> (each slice a demo-able PR), **reflex-first** (the kind/type/color rides the agent's
+> existing turn — zero extra invoke-LLM calls), **population-capped**, and **replay-safe**
+> (EM-155 byte-identical snapshots). Design: `docs/superpowers/specs/2026-06-18-builders-city-design.md`.
+> **Decisions locked (user 2026-06-18):** (1) props are a NEW lightweight first-class entity
+> modeled on `Animal` (NOT a flavored Building); (2) building types are a PERMISSIVE catalog —
+> a menu surfaced in the prompt, but off-menu free-text kinds still resolve via the EM-130
+> fuzzy fallback (never a dead turn); (3) K4 recolor stays in-wave. **K0 = the asset enabler;
+> order K0→K1/K2→K3/K4→K5** (K4 may swap ahead of K3). Cross-links (referenced, not re-filed):
+> EM-182 (agent-chosen placement/zone — **pulled into this wave** per resolved decision 3),
+> EM-169/176 (vehicles become a prop category once K2 lands), EM-123/EM-183 (zoning growth +
+> town-center vote benefit).
+> **Open-Q resolutions (2026-06-18):** prop cap starts MODEST (a populated town, not
+> overwhelming; tunable up); demolish = owner-free / public-landmark needs ~70% vote; props
+> AND buildings (via the pulled-in EM-182) honor an agent-chosen target place/district.
+
+| EM-216 | P2 | W21 | frontend | Wave K · K0 | **Asset vocabulary expansion (enabler)** — vendor curated Kenney CC0 3-D kits: Nature Kit (trees/rocks/plants/flowers), expanded Furniture/City props (benches, lamps, planters, statues, market stalls, signage), and more building GLBs for distinct types. Run the EM-152 pipeline (gltfjsx `--transform` atlas/dedupe + per-atlas toon-ramp conversion); add a `PROP_MODELS` registry (prop kind → GLB) + an expanded building catalog in `models.ts`/`cityModels.ts`; every file recorded in `ASSET_LICENSES.md`. Unblocks K1–K5 visually. Deps EM-152 ✅. **2026-06-18: registry side DONE** (`PROP_MODELS` + `propVariant` + build-type palettes wired to existing vendored GLBs); NEW-kit acquisition (Nature Kit etc.) remains — HITL: needs network + the gltfjsx/toon pipeline (the systems consume them with zero further wiring). | in-progress | wave-K 2026-06-18 |
+| EM-217 | P2 | W21 | backend+frontend | Wave K · K1 | **Agent-selectable building-type catalog** — a documented `BUILD_TYPES` catalog (tavern/market/smithy/school/temple/park/clinic/…) surfaced as choices in the turn prompt; each entry → a distinct Kenney GLB + default `function` buff + zone affinity. PERMISSIVE: off-menu/free-text kinds still resolve via today's fuzzy `operationalVariant()`/`buildingStyle()` fallback (EM-130) — never a dead turn. Extends EM-122 ✅/EM-150 ✅ (kind→GLB) without replacing the mapping. Deps EM-216. | done | wave-K 2026-06-18 |
+| EM-218 | P2 | W21 | backend+frontend | Wave K · K2 | **Props as first-class placeable items (keystone)** — a lightweight `Prop {id, kind, place, offset, owner_id?}` entity + `world.props`, modeled on the `Animal` pattern (reflex, population-capped via a MODEST `world.params.max_props` (a populated town, not overwhelming; tunable up from a live run), snapshot-serialized so replay/fork stay byte-identical — EM-155; prop ids from a seeded hash, avoiding the EM-189 uuid trap). Reflex `place_prop(kind, place, offset?)` (zero invoke-LLM; the agent CHOOSES the target place/district, offset positions within it; kind rides the turn), `prop_placed` event, frontend `PROP_MODELS` instanced (`<Instances>`) render path with procedural fallback (EM-148 invariant). The "an agent drops a statue in the plaza and it appears" beat. Deps EM-216; pairs EM-182 (building-placement cousin, pulled into wave). | done | wave-K 2026-06-18 |
+| EM-219 | P2 | W21 | backend+frontend | Wave K · K3 | **Remove & demolish** — reflex `remove_prop(prop_id)` + a clean `demolish(building_id)` (OWNER demolishes their own freely, PUBLIC/landmark needs a ~70% governance vote, distinct from `arson`→destroyed; the freed lot returns to claimable per the EM-174 ✅/EM-181 ✅ lot model). `prop_removed` / `building_demolished` events; renderer clears the mesh + releases the lot. The city visibly *changes* — clear space, tidy up. Deps EM-218. **Public demolish requires a ~70% supermajority (verify-pass fix).** | done | wave-K 2026-06-18 |
+| EM-220 | P2 | W21 | backend+frontend | Wave K · K4 | **Recolor / skin a building** — a data-driven `tint`/`skin` field on `Building` set via a light reflex tool (agent self / owner), serialized; the renderer reads it as a material override layered over (not replacing) the health-soot tint. The "Ada paints her cottage" beat; pairs with the Wave I art-banner path (EM-213). May swap ahead of K3 (lighter). Deps EM-216, EM-217. | done | wave-K 2026-06-18 |
+| EM-221 | P2 | W21 | frontend+backend | Wave K · K5 | **God-console parity** — god-panel controls over the same APIs: place/remove/recolor props, demolish buildings, and a "decorate"/"clear" prop-burst (mirrors the agent reflex tools, like the rewild/zoo-escape buttons). A manual curation + seeding lever; no new engine semantics beyond K2–K4. Deps EM-218, EM-219, EM-220. | done | wave-K 2026-06-18 |
+| EM-222 | P2 | W22 | backend | Sid research 2026-06-18 | **Relevance-scored long-term memory retrieval** (the one missing Smallville mechanism, **highest value of this batch**) — today memory is a recency *window* (`_effective_memory_window`, last-N events); **no embeddings exist**. Add recency×importance×**relevance** retrieval over an embedded memory stream so agents recall *relevant* old events, not just recent ones. Importance scoring (EM-159) + reflection (EM-080) already shipped — this is purely the relevance + long-term-store axis. **North-star-aligned: ADDS calls** (embeddings + richer prompts), not a cost-cut. **OPEN Q (gating): does FreeLLMAPI expose an embeddings endpoint?** If not → lexical/BM25 vs. a dedicated Ollama embed model — that answer decides the approach. Spike first. Source: `docs/research/smallville-to-sid-2026-06-18.md`. | open | — |
+| EM-223 | P2 | W22 | backend | Sid research 2026-06-18 | **Recursive + reactive planning** — agents emit a flat one-line plan ("D1: water seedlings → buy seeds"); Smallville decomposes daily→hourly→5–15-min with re-planning on perception. Deeper plans = more believable routines + more calls (north-star-aligned). **OPEN Q:** decomposition depth for our tick cadence, and how re-planning interacts with salience-gated reflex turns (EM-159/EM-160) — **must not fight the spontaneity floor**. Spike. Source: `docs/research/smallville-to-sid-2026-06-18.md`. | open | — |
+| EM-224 | P2 | W22 | backend | Sid research 2026-06-18 | **PIANO coherence for multi-action turns** — adopt PIANO's bottleneck→single-decision→broadcast trick to keep speech and action aligned across multi-action turns (EM-199), preventing "says 'sure!' while doing something else." **Take ONLY the coherence idea — explicitly reject PIANO's parallelize-to-cut-latency motive** (we want more calls, not fewer-blocking ones). **OPEN Q:** how to structure the bottleneck inside the existing single-LLM-turn → multi-action flow. Spike. Source: `docs/research/smallville-to-sid-2026-06-18.md`. | open | — |
+
+_Next free ID: EM-225._
 
 ## Notes
 

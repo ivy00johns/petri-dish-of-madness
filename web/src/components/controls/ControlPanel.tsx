@@ -19,6 +19,9 @@ import { inspectorApi } from '../../inspector/api';
 import type { PersonaRow, GodMiracleKind } from '../../inspector/api';
 import { AnimalSpawnForm } from './AnimalSpawnForm';
 import type { AnimalSpawnSpec } from './AnimalSpawnForm';
+// Wave K (EM-221): the named building-skin palette (Wave 1) drives the reskin
+// picker's options. SKIN_PALETTES keys are the canonical skin names.
+import { SKIN_PALETTES } from '../world3d/worldSpace';
 // Token sources for the dynamic inline colors below (STATE row reads
 // --rel-ally / --lab-warn / --lab-text; the reassign swatch falls back to the
 // neutral). Imported here so these vars resolve no matter the mount order —
@@ -50,6 +53,15 @@ interface ControlPanelProps {
    * Returns {escaped, zoos} so the panel can flash a confirmation.
    */
   onZooEscape: (zooBuildingId?: string) => Promise<{ escaped: number; zoos: number }>;
+  /**
+   * Wave K (EM-221): BUILDERS god console. Each mirrors the rewild/zoo
+   * flash-confirmation pattern. Optional so callers/tests that predate Wave K
+   * stay valid — the BUILDERS group only renders when onPlaceProp is wired.
+   */
+  onPlaceProp?: (spec: { kind: string; place: string; count?: number }) => Promise<{ placed: number }>;
+  onClearProps?: (place?: string) => Promise<{ cleared: number }>;
+  onDemolish?: (buildingId: string) => Promise<{ demolished: boolean }>;
+  onReskin?: (buildingId: string, skin: string) => Promise<{ reskinned: boolean }>;
   /** W11b (EM-091d): god reply on the billboard (≤280 chars, no local echo). */
   onBillboardReply: (text: string) => void;
   /** W11b (EM-092): mock mode renders the persona picker's no-backend state. */
@@ -681,6 +693,309 @@ function ZooEscapeButton({
 }
 
 /**
+ * BuildersGroup (Wave K / EM-221) — the GOD CONSOLE "BUILDERS" group. Four
+ * controls, each mirroring the rewild/zoo flash-confirmation UX (lab-* tokens
+ * only — the god buttons wear the --lab-god-* ink, no hardcoded hex):
+ *   • PLACE PROP   — kind input + place picker + optional count → onPlaceProp
+ *   • CLEAR PROPS  — place picker (or All) → onClearProps
+ *   • DEMOLISH     — building picker → onDemolish
+ *   • RESKIN       — building picker + skin picker → onReskin
+ *
+ * Pickers read world.places / world.buildings; the skin names come from the
+ * Wave-1 SKIN_PALETTES map. Each flashes a brief, role="status" confirmation.
+ */
+function BuildersGroup({
+  world,
+  onPlaceProp,
+  onClearProps,
+  onDemolish,
+  onReskin,
+}: {
+  world: WorldState | null;
+  onPlaceProp: (spec: { kind: string; place: string; count?: number }) => Promise<{ placed: number }>;
+  onClearProps: (place?: string) => Promise<{ cleared: number }>;
+  onDemolish: (buildingId: string) => Promise<{ demolished: boolean }>;
+  onReskin: (buildingId: string, skin: string) => Promise<{ reskinned: boolean }>;
+}) {
+  const places = world?.places ?? [];
+  const buildings = world?.buildings ?? [];
+  const skinNames = useMemo(() => Object.keys(SKIN_PALETTES), []);
+
+  // PLACE PROP state.
+  const [propKind, setPropKind] = useState('bench');
+  const [propPlace, setPropPlace] = useState('');
+  const [propCount, setPropCount] = useState(1);
+  // CLEAR PROPS state ('' = all places).
+  const [clearPlace, setClearPlace] = useState('');
+  // DEMOLISH / RESKIN building selection.
+  const [demolishId, setDemolishId] = useState('');
+  const [reskinId, setReskinId] = useState('');
+  const [skin, setSkin] = useState(skinNames[0] ?? '');
+
+  const [busy, setBusy] = useState<null | 'place' | 'clear' | 'demolish' | 'reskin'>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+  }, []);
+
+  // Keep the pickers valid once the world arrives after first render.
+  const defaultPlace = places[0]?.id ?? '';
+  const defaultBuilding = buildings[0]?.id ?? '';
+  if (!propPlace && defaultPlace) setPropPlace(defaultPlace);
+  if (!demolishId && defaultBuilding) setDemolishId(defaultBuilding);
+  if (!reskinId && defaultBuilding) setReskinId(defaultBuilding);
+
+  const showFlash = useCallback((msg: string) => {
+    setFlash(msg);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlash(null), 2400);
+  }, []);
+
+  const handlePlace = useCallback(async () => {
+    const kind = propKind.trim();
+    if (busy || !kind || !propPlace) return;
+    setBusy('place');
+    setFlash(null);
+    const result = await onPlaceProp({ kind, place: propPlace, count: propCount });
+    setBusy(null);
+    const placeName = places.find(p => p.id === propPlace)?.name ?? propPlace;
+    showFlash(
+      `${result.placed} ${kind}${result.placed === 1 ? '' : 's'} placed at ${placeName}.`,
+    );
+  }, [busy, propKind, propPlace, propCount, onPlaceProp, places, showFlash]);
+
+  const handleClear = useCallback(async () => {
+    if (busy) return;
+    setBusy('clear');
+    setFlash(null);
+    const result = await onClearProps(clearPlace || undefined);
+    setBusy(null);
+    const where = clearPlace
+      ? (places.find(p => p.id === clearPlace)?.name ?? clearPlace)
+      : 'every place';
+    showFlash(
+      `${result.cleared} prop${result.cleared === 1 ? '' : 's'} cleared from ${where}.`,
+    );
+  }, [busy, clearPlace, onClearProps, places, showFlash]);
+
+  const handleDemolish = useCallback(async () => {
+    if (busy || !demolishId) return;
+    setBusy('demolish');
+    setFlash(null);
+    const result = await onDemolish(demolishId);
+    setBusy(null);
+    const name = buildings.find(b => b.id === demolishId)?.name ?? demolishId;
+    showFlash(result.demolished ? `${name} demolished.` : `Nothing to demolish.`);
+  }, [busy, demolishId, onDemolish, buildings, showFlash]);
+
+  const handleReskin = useCallback(async () => {
+    if (busy || !reskinId || !skin) return;
+    setBusy('reskin');
+    setFlash(null);
+    const result = await onReskin(reskinId, skin);
+    setBusy(null);
+    const name = buildings.find(b => b.id === reskinId)?.name ?? reskinId;
+    showFlash(result.reskinned ? `${name} reskinned ${skin}.` : `Reskin had no effect.`);
+  }, [busy, reskinId, skin, onReskin, buildings, showFlash]);
+
+  const noBuildings = buildings.length === 0;
+
+  return (
+    <div className="p-2 space-y-2">
+      {/* ── PLACE PROP ───────────────────────────────────────────── */}
+      <div className="space-y-1">
+        <label
+          htmlFor="builders-prop-kind"
+          className="block font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          🪑 Place prop
+        </label>
+        <div className="flex items-center gap-1.5">
+          <input
+            id="builders-prop-kind"
+            type="text"
+            value={propKind}
+            onChange={(e) => setPropKind(e.target.value)}
+            placeholder="e.g. bench"
+            maxLength={30}
+            className="lab-input flex-1 text-[11px]"
+            autoComplete="off"
+            aria-label="Prop kind"
+          />
+          <input
+            type="number"
+            min={1}
+            max={8}
+            value={propCount}
+            onChange={(e) => setPropCount(Math.max(1, Math.min(8, Number(e.target.value))))}
+            className="lab-input w-12 text-[11px] text-center tabular-nums"
+            aria-label="Prop count"
+            title="How many to place (1–8)"
+          />
+        </div>
+        <select
+          value={propPlace}
+          onChange={(e) => setPropPlace(e.target.value)}
+          className="lab-select w-full text-[10px]"
+          aria-label="Prop place"
+        >
+          {places.length === 0 && <option value="">—</option>}
+          {places.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="lab-btn w-full"
+          style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+          onClick={() => void handlePlace()}
+          disabled={busy !== null || !propKind.trim() || !propPlace}
+          aria-label={`Place ${propCount} ${propKind || 'prop'}`}
+        >
+          {busy === 'place' ? '…' : '🪑 PLACE PROP'}
+        </button>
+      </div>
+
+      {/* ── CLEAR PROPS ──────────────────────────────────────────── */}
+      <div className="space-y-1 border-t border-lab-border/40 pt-2">
+        <label
+          htmlFor="builders-clear-place"
+          className="block font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          🧹 Clear props
+        </label>
+        <div className="flex items-center gap-1.5">
+          <select
+            id="builders-clear-place"
+            value={clearPlace}
+            onChange={(e) => setClearPlace(e.target.value)}
+            className="lab-select flex-1 text-[10px]"
+            aria-label="Clear props at place"
+          >
+            <option value="">All places</option>
+            {places.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="lab-btn lab-btn-danger px-2"
+            onClick={() => void handleClear()}
+            disabled={busy !== null}
+            aria-label={clearPlace ? 'Clear props at the chosen place' : 'Clear props everywhere'}
+          >
+            {busy === 'clear' ? '…' : '🧹 CLEAR'}
+          </button>
+        </div>
+      </div>
+
+      {/* ── DEMOLISH ─────────────────────────────────────────────── */}
+      <div className="space-y-1 border-t border-lab-border/40 pt-2">
+        <label
+          htmlFor="builders-demolish"
+          className="block font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          🧨 Demolish building
+        </label>
+        {noBuildings ? (
+          <p className="m-0 font-mono text-[9px] text-lab-dim leading-snug">No buildings yet.</p>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <select
+              id="builders-demolish"
+              value={demolishId}
+              onChange={(e) => setDemolishId(e.target.value)}
+              className="lab-select flex-1 text-[10px]"
+              aria-label="Building to demolish"
+            >
+              {buildings.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="lab-btn lab-btn-danger px-2"
+              onClick={() => void handleDemolish()}
+              disabled={busy !== null || !demolishId}
+              aria-label="Demolish the chosen building"
+            >
+              {busy === 'demolish' ? '…' : '🧨 RAZE'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── RESKIN ───────────────────────────────────────────────── */}
+      <div className="space-y-1 border-t border-lab-border/40 pt-2">
+        <label
+          htmlFor="builders-reskin"
+          className="block font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          🎨 Reskin building
+        </label>
+        {noBuildings ? (
+          <p className="m-0 font-mono text-[9px] text-lab-dim leading-snug">No buildings yet.</p>
+        ) : (
+          <>
+            <select
+              id="builders-reskin"
+              value={reskinId}
+              onChange={(e) => setReskinId(e.target.value)}
+              className="lab-select w-full text-[10px]"
+              aria-label="Building to reskin"
+            >
+              {buildings.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+            <div className="flex items-center gap-1.5">
+              <select
+                value={skin}
+                onChange={(e) => setSkin(e.target.value)}
+                className="lab-select flex-1 text-[10px]"
+                aria-label="Skin"
+              >
+                {skinNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name.charAt(0).toUpperCase() + name.slice(1)}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="lab-btn px-2"
+                style={{ color: 'var(--lab-god-bright)', borderColor: 'var(--lab-god)' }}
+                onClick={() => void handleReskin()}
+                disabled={busy !== null || !reskinId || !skin}
+                aria-label="Reskin the chosen building"
+              >
+                {busy === 'reskin' ? '…' : '🎨 RESKIN'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {flash && (
+        <p
+          className="font-mono text-[10px] text-center animate-flash"
+          style={{ color: 'var(--lab-god-bright)' }}
+          role="status"
+          aria-live="polite"
+        >
+          {flash}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
  * GodGroupLabel (Wave A.2 EM-138) — one GOD CONSOLE group heading, in the
  * established god ink (the --lab-god-* tokens BillboardReply already wears).
  */
@@ -1018,6 +1333,10 @@ export function ControlPanel({
   onSpawnAnimal,
   onRewild,
   onZooEscape,
+  onPlaceProp,
+  onClearProps,
+  onDemolish,
+  onReskin,
   onBillboardReply,
   mockMode,
   profiles,
@@ -1220,6 +1539,29 @@ export function ControlPanel({
         <ZooEscapeButton onZooEscape={onZooEscape} />
       </div>
       <AnimalSpawnForm world={world} onSpawn={onSpawnAnimal} />
+
+      {/* ── BUILDERS (Wave K EM-221): place/clear props · demolish · reskin ── */}
+      {onPlaceProp && onClearProps && onDemolish && onReskin && (
+        <>
+          <div
+            className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god"
+            role="heading"
+            aria-level={2}
+          >
+            <span className="font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">
+              🛠 BUILDERS
+            </span>
+            <span className="font-mono text-[9px] text-lab-muted opacity-70">PROPS · DEMOLISH · SKIN</span>
+          </div>
+          <BuildersGroup
+            world={world}
+            onPlaceProp={onPlaceProp}
+            onClearProps={onClearProps}
+            onDemolish={onDemolish}
+            onReskin={onReskin}
+          />
+        </>
+      )}
 
       {/* ── Status ──────────────────────────────────────────────── */}
       {world && (

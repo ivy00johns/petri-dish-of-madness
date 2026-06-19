@@ -91,11 +91,12 @@ Mood: neutral
   steal (target) - steal from: Supporter, Bystander, Filler02, Filler17
   work - earn credits (you are at a work place)
   vote (rule_id, choice) - vote on: id=rule_prop_1 effect=ban_stealing text='No taking what is not yours'
-  propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place
+  propose_project (name, kind, funds_required?, function?, place?) - start a new building/collective project. kind is free-text but pick from this menu when you can: tavern, market, smithy, school, temple, clinic, park, granary, well, workshop, garden, house, library, monument, farm. place? = a place id to build there (else here)
   contribute_funds (building_id, amount) - fund an active project below to push it toward construction
   arson (building_id=b1) - burn this building (a crime; witnesses lose trust)
   build_step (building_id=b6) - add construction progress here
   arson (building_id=b6) - burn this building (a crime; witnesses lose trust)
+  place_prop (kind, place?) - place a decoration (bench, lamp, tree, statue, planter, fountain...) here or at a chosen place
 
 ⚠ SAYING you will do something does NOT do it — words alone change nothing; back your talk with a real action. You have a FULL range: gossip and scheme, trade and give, forage and work, befriend and feud, propose and vote on rules, and propose / fund / BUILD projects that grow the town. Chase what YOUR character wants — and remember the city only rises if someone actually builds and governs it, so turn your ambitions into proposals, funding, build_steps, and votes.
 

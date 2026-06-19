@@ -256,6 +256,13 @@ world:
     work_bonus_pct: 50     # extra work_reward % at an operational workshop's place
     zoo_capacity: 5        # Wave H3 / EM-208: animals a zoo auto-stocks when it opens (capped by animals.max_population)
 
+  # Wave K / EM-218 — placeable PROPS (benches/lamps/trees/statues...). Agents and
+  # the god add/move/remove first-class decoration objects the world remembers
+  # (snapshot-serialized, replay-safe). A modest cap protects free-scale: more
+  # props = more chronicle texture, never more LLM calls. Tunable UP from a live run.
+  props:
+    max_population: 48     # cap on tracked props (place_prop is rejected over this; 0 = unlimited)
+
   # W7 / EM-063 — ad-hoc spawn. god = immediate (default, best for tinkering);
   # governance = spawn enqueues an admit_agent proposal, admitted iff the vote passes.
   spawn:

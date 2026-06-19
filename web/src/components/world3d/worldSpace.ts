@@ -135,11 +135,66 @@ export const BUILDING_STYLES: Record<string, BuildingStyle> = {
   // EM-208 H3: warm habitat palette — earthy tan walls, a terracotta/clay roof,
   // and a leafy green accent (the animal-pen ground and foliage tones).
   zoo:        { body: '#d4b896', roof: '#b5704a', accent: '#6aab5a', tag: 'Zoo' },
+  // ── EM-217 (Wave K) build-type catalog ──────────────────────────────────
+  // Each menu type a propose_project prompt offers gets its OWN distinct
+  // palette + curated label, so a tavern never reads like a generic box (it
+  // still resolves to its best vendored silhouette via EXACT_VARIANTS below).
+  // These are WebGL material colors (THREE.Color), OUTSIDE the CSS token system.
+  // tavern — warm ale-amber walls, deep oak roof, a hearth-orange accent.
+  tavern:     { body: '#e3b86a', roof: '#7a4a2c', accent: '#ff9a4a', tag: 'Tavern' },
+  // market — bright canvas-cream stalls, teal awning, a fresh-produce red accent.
+  market:     { body: '#f4e3b8', roof: '#3a8f8a', accent: '#e8553a', tag: 'Market' },
+  // smithy — sooty slate walls, iron-grey roof, an ember-orange forge accent.
+  smithy:     { body: '#9a8c7e', roof: '#4a4640', accent: '#ff7a3a', tag: 'Smithy' },
+  // school — chalk-cream walls, a slate-blue roof, brass accent (kin to library).
+  school:     { body: '#ece4d2', roof: '#5b6f9c', accent: '#caa472', tag: 'School' },
+  // temple — pale marble walls, a violet roof, a gilded accent (sacred register).
+  temple:     { body: '#efe9dc', roof: '#6a5aa8', accent: '#ffd98a', tag: 'Temple' },
+  // clinic — clean white walls, a soft mint roof, a caduceus-red accent.
+  clinic:     { body: '#f3f1ea', roof: '#7ec8a8', accent: '#e35d5d', tag: 'Clinic' },
+  // park — leafy ground, deep-green canopy roof, a blossom-pink accent.
+  park:       { body: '#bfe39a', roof: '#4f8f4f', accent: '#ff8fb1', tag: 'Park' },
+  // granary — golden-grain walls, a thatch-amber roof, a wheat accent (kin to farm).
+  granary:    { body: '#ecd28a', roof: '#c08a3a', accent: '#e7b84f', tag: 'Granary' },
+  // well — cool stone walls, a slate roof, a water-blue accent.
+  well:       { body: '#cfc8bc', roof: '#7e766a', accent: '#5fa3c0', tag: 'Well' },
   // EM-130: the NEUTRAL fallback — a generic structure, deliberately distinct
   // from monument (cream walls + timber roof, reusing tints already in this
   // palette: clocktower body, workshop accent, clocktower accent).
   building:   { body: '#efe3c4', roof: '#c98b3a', accent: '#ffd27f', tag: 'Building' },
 };
+
+/**
+ * EM-220 (Wave K): named building SKINS — an owner-set color override. A small
+ * curated palette of friendly names → a single body hex. These are WebGL
+ * material colors (THREE.Color), explicitly OUTSIDE the CSS design-token system
+ * (the same convention as BUILDING_STYLES). The Structure renderer uses
+ * skinPalette(building.skin) as the OPERATIONAL body color in place of the
+ * kind palette's body, then composes healthTint on TOP (so soot still shows on
+ * a re-skinned building). An unknown / absent skin is ignored (→ null) and the
+ * kind palette body stands.
+ */
+export const SKIN_PALETTES: Record<string, string> = {
+  rose:  '#e89bb0',
+  sky:   '#9bc7e8',
+  sage:  '#a9c99a',
+  amber: '#e8b96a',
+  slate: '#8a93a0',
+  plum:  '#b08ac0',
+};
+
+/**
+ * EM-220: resolve a building skin name to its body hex, or `null` when the skin
+ * is absent/empty/unknown (caller falls back to the kind palette body). Pure;
+ * own-property check so a model-authored skin string like 'constructor' can't
+ * resolve through the prototype chain.
+ */
+export function skinPalette(skin: string | null | undefined): string | null {
+  if (!skin) return null;
+  return Object.prototype.hasOwnProperty.call(SKIN_PALETTES, skin)
+    ? SKIN_PALETTES[skin]
+    : null;
+}
 
 /**
  * EM-130: keyword → palette mapping for emergent (agent-invented) kinds, tried
@@ -214,7 +269,17 @@ export type VariantKey =
   | 'zoo'
   | 'generic';
 
-/** Exact BUILDING_STYLES keys map straight to their obvious variant. */
+/**
+ * Exact BUILDING_STYLES keys map straight to their obvious variant.
+ *
+ * EM-217 (Wave K): the build-type catalog menu (tavern/market/smithy/school/
+ * temple/clinic/park/granary/well) each pins to the best AVAILABLE vendored
+ * silhouette + GLB — the type carries its OWN distinct palette/label
+ * (BUILDING_STYLES above) while reusing a fitting EM-122 mesh/GLB so it renders
+ * something real today (K0 ships fully distinct per-type GLBs later, wired with
+ * zero further changes here). An off-menu kind still resolves through the
+ * VARIANT_KEYWORDS fuzzy match below (EM-130 permissive fallback intact).
+ */
 const EXACT_VARIANTS: Record<string, VariantKey> = {
   clocktower: 'clocktower',
   garden: 'garden',
@@ -224,6 +289,16 @@ const EXACT_VARIANTS: Record<string, VariantKey> = {
   house: 'house',
   monument: 'monument',
   zoo: 'zoo',
+  // EM-217 build-type catalog → best available vendored variant/GLB
+  tavern: 'house',      // cozy building (suburban GLB)
+  market: 'stall',      // open-air storefront (commercial GLB)
+  smithy: 'workshop',   // forge shed (industrial GLB)
+  school: 'library',    // hall + columns (procedural library)
+  temple: 'monument',   // plinth + spire (fountain/obelisk GLB)
+  clinic: 'generic',    // clean civic block (commercial GLB)
+  park: 'garden',       // planting beds / greenery (procedural)
+  granary: 'farm',      // fenced plot + haystack (warehouse GLB)
+  well: 'well',         // stone ring + roof (fountain GLB)
   building: 'generic',
 };
 
@@ -237,16 +312,22 @@ const EXACT_VARIANTS: Record<string, VariantKey> = {
  *     "watchtower").
  */
 const VARIANT_KEYWORDS: ReadonlyArray<readonly [readonly string[], VariantKey]> = [
-  [['garden', 'orchard', 'grove', 'herb', 'bed'], 'garden'],
-  [['farm', 'field', 'grain', 'crop'], 'farm'],
+  // EM-217: 'park' joins garden (greenery); ordering keeps garden's substrings
+  // ('bed') ahead of house's 'den' exactly as before.
+  [['garden', 'orchard', 'grove', 'herb', 'park', 'bed'], 'garden'],
+  // EM-217: 'granary'/'silo' join farm.
+  [['farm', 'field', 'grain', 'granary', 'silo', 'crop'], 'farm'],
+  // 'smith' already catches 'smithy'; 'forge' covers the EM-217 smithy type.
   [['workshop', 'forge', 'smith', 'tool', 'craft'], 'workshop'],
   [['library', 'school', 'archive', 'book'], 'library'],
   [['zoo', 'menagerie', 'enclosure', 'habitat', 'sanctuary'], 'zoo'],
   [['clock', 'tower', 'watch', 'light'], 'clocktower'],
   [['stall', 'market', 'shop', 'booth', 'stand', 'bazaar'], 'stall'],
   [['well', 'fountain', 'water'], 'well'],
-  [['house', 'home', 'cottage', 'inn', 'shelter', 'cabin'], 'house'],
-  [['monument', 'statue', 'memorial', 'arch', 'shrine', 'obelisk'], 'monument'],
+  // EM-217: 'tavern'/'pub' join house (cozy building); 'inn' already here.
+  [['house', 'home', 'cottage', 'tavern', 'pub', 'inn', 'shelter', 'cabin'], 'house'],
+  // EM-217: 'temple'/'chapel' join monument (sacred landmark); 'shrine' already here.
+  [['monument', 'statue', 'memorial', 'temple', 'chapel', 'arch', 'shrine', 'obelisk'], 'monument'],
 ];
 
 /**

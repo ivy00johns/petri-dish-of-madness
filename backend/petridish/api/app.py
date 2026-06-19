@@ -1247,6 +1247,141 @@ async def god_zoo_escape(body: ZooEscapeBody = ZooEscapeBody()):
     return {"escaped": escaped, "zoos": zoos}
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Wave K / EM-221 — GOD console BUILDERS endpoints (Wave 2). Each mirrors
+# /api/god/rewild + /api/animals exactly: read _world, mutate via the SAME world
+# methods the agents reuse (god_place_prop/god_clear_props/god_demolish/god_reskin
+# all funnel through the Wave-1 internals), stamp the emitted events with
+# actor_type "god" + payload.method, do ONE world_state broadcast at the end.
+# Burst counts are capped (≤8 props/click). Validation rejections are 4xx like the
+# spawn/rewild endpoints (ValueError → 400/404). NO standing LLM calls; god
+# mutations serialize into snapshots like the agent path (EM-155 determinism).
+# ──────────────────────────────────────────────────────────────────────────────
+
+GOD_PLACE_PROP_MAX = 8  # bounded burst — a god click can't flood the prop registry
+
+
+class GodPlacePropBody(BaseModel):
+    kind: str = Field(min_length=1, max_length=30)
+    place: str = Field(min_length=1, max_length=40)
+    count: int = Field(default=1, ge=1, le=GOD_PLACE_PROP_MAX)
+
+
+@app.post("/api/god/place_prop", status_code=201)
+async def god_place_prop_endpoint(body: GodPlacePropBody):
+    """Wave K / EM-221 — place `count` (≤8) god-owned props at `place`. Reuses
+    World.god_place_prop (same seeded-id + ring-offset internals as the agent
+    reflex tool, owner_id None). Stops short at params.props.max_population — the
+    short event list reports it. Each placed prop emits a `prop_placed`
+    (actor_type 'god', payload.method 'god'); one world_state broadcast at the end.
+    Returns {placed: N, cap_reached: bool}. 400 unknown place / empty kind; 503
+    when the world isn't initialized. Mirrors /api/god/rewild."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    try:
+        events = _world.god_place_prop(body.kind, body.place, body.count)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    for evt in events:
+        evt["actor_type"] = "god"
+        evt["payload"]["method"] = "god"
+        _loop._emit_event(evt)
+    if events:
+        _loop._broadcast_world_state()
+    cap_reached = len(events) < body.count
+    return {"placed": len(events), "cap_reached": cap_reached}
+
+
+class GodClearPropsBody(BaseModel):
+    place: str | None = Field(default=None, max_length=40)
+
+
+@app.post("/api/god/clear_props")
+async def god_clear_props_endpoint(body: GodClearPropsBody = GodClearPropsBody()):
+    """Wave K / EM-221 — remove props at `place`, or ALL props when `place` is
+    omitted (god override — no ownership gate). Reuses World.god_clear_props. Each
+    cleared prop emits a `prop_removed` (actor_type 'god', payload.method 'god');
+    one world_state broadcast. Returns {cleared: N, removed: N} (the FE reads
+    `cleared`; `removed` is kept for back-compat). A no-op (nothing to clear)
+    returns {cleared: 0, ...} with no broadcast. 400 unknown place; 503 when the
+    world isn't initialized."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    try:
+        events = _world.god_clear_props(body.place)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    for evt in events:
+        evt["actor_type"] = "god"
+        evt["payload"]["method"] = "god"
+        _loop._emit_event(evt)
+    if events:
+        _loop._broadcast_world_state()
+    # FE (useSimulation.clearProps) reads result.cleared; keep `removed` for
+    # back-compat so existing callers/tests don't break.
+    return {"cleared": len(events), "removed": len(events)}
+
+
+class GodDemolishBody(BaseModel):
+    building_id: str = Field(min_length=1, max_length=120)
+
+
+@app.post("/api/god/demolish")
+async def god_demolish_endpoint(body: GodDemolishBody):
+    """Wave K / EM-221 — demolish a building IMMEDIATELY (god override: regardless
+    of owner / landmark / governance). Reuses World.god_demolish → the shared
+    _demolish_building path (same status flip + lot free as the owner tool and the
+    governance effect, so it round-trips byte-identically). Emits one
+    `building_demolished` (actor_type 'god', payload.method 'god', by 'god'); one
+    world_state broadcast. Returns {demolished: true, status: 'ok', building_id}
+    (the FE reads `demolished`). 404 unknown building; 409 already rubble; 503 when
+    the world isn't initialized."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    try:
+        evt = _world.god_demolish(body.building_id)
+    except ValueError as exc:
+        msg = str(exc)
+        if msg == "already destroyed":
+            raise HTTPException(409, msg)
+        raise HTTPException(404, msg)
+    evt["actor_type"] = "god"
+    evt["payload"]["method"] = "god"
+    _loop._emit_event(evt)
+    _loop._broadcast_world_state()
+    # FE (useSimulation.godDemolish) reads result.demolished; keep status/building_id.
+    return {"demolished": True, "status": "ok", "building_id": body.building_id}
+
+
+class GodReskinBody(BaseModel):
+    building_id: str = Field(min_length=1, max_length=120)
+    # An empty skin CLEARS the override back to the building's default palette.
+    skin: str = Field(default="", max_length=24)
+
+
+@app.post("/api/god/reskin")
+async def god_reskin_endpoint(body: GodReskinBody):
+    """Wave K / EM-221 — set a building's cosmetic skin (god override — no owner
+    gate). Reuses World.god_reskin (same skin field + clamp as the agent tool). An
+    empty skin clears it. Emits one `building_reskinned` (actor_type 'god',
+    payload.method 'god'); one world_state broadcast. Returns {reskinned: true,
+    status: 'ok', building_id, skin} (the FE reads `reskinned`). 404 unknown
+    building; 503 when the world isn't initialized."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    try:
+        evt = _world.god_reskin(body.building_id, body.skin)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    evt["actor_type"] = "god"
+    evt["payload"]["method"] = "god"
+    _loop._emit_event(evt)
+    _loop._broadcast_world_state()
+    # FE (useSimulation.godReskin) reads result.reskinned; keep status/building_id/skin.
+    return {"reskinned": True, "status": "ok", "building_id": body.building_id,
+            "skin": evt["payload"]["skin"]}
+
+
 @app.delete("/api/agents/{agent_id}")
 async def kill_agent(agent_id: str):
     if _world is None:

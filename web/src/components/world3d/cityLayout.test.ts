@@ -641,6 +641,59 @@ describe('EM-174 — real buildings claim real lots', () => {
   });
 });
 
+// ── EM-182 — lot assignment keys off building.location, not the builder ──────
+//
+// Wave K pulls EM-182 in: a building's chosen `location` (a place / district)
+// decides its lot, exactly like a prop's `place`. assignBuildingLots already
+// keys purely off building.location + the place centers (no agent input
+// anywhere), so a building proposed for a district the builder isn't standing
+// in lands in THAT district. This locks that contract.
+
+describe('EM-182 — a building renders at its chosen location, not the agent\'s', () => {
+  const plan = computeCityPlan({ places: TOWN });
+  const centers = new Map(TOWN.map((p) => [p.id, placeToWorld(p)]));
+
+  it('a building at place X lands in X\'s landmark block (regardless of any agent)', () => {
+    // One building each at market and townhall — different districts. Each must
+    // claim its OWN place's first real lot. The agent who proposed it is
+    // irrelevant: assignBuildingLots never sees an agent.
+    const buildings = [
+      { id: 'shop', location: 'market' },
+      { id: 'hall', location: 'townhall' },
+    ];
+    const spots = assignBuildingLots(plan, buildings, centers);
+    expect(spots.get('shop')).toEqual({
+      x: plan.realLots.market[0].x,
+      z: plan.realLots.market[0].z,
+    });
+    expect(spots.get('hall')).toEqual({
+      x: plan.realLots.townhall[0].x,
+      z: plan.realLots.townhall[0].z,
+    });
+    // …and each lot really is inside its own landmark block, not the other's.
+    const near = (pt: { x: number; z: number }, anchor: { x: number; z: number }) =>
+      Math.hypot(pt.x - anchor.x, pt.z - anchor.z);
+    expect(near(spots.get('shop')!, plan.landmarks.market))
+      .toBeLessThan(near(spots.get('shop')!, plan.landmarks.townhall));
+    expect(near(spots.get('hall')!, plan.landmarks.townhall))
+      .toBeLessThan(near(spots.get('hall')!, plan.landmarks.market));
+  });
+
+  it('changing ONLY a building\'s location moves its lot to the new place', () => {
+    const atMarket = assignBuildingLots(plan, [{ id: 'b', location: 'market' }], centers);
+    const atTownhall = assignBuildingLots(plan, [{ id: 'b', location: 'townhall' }], centers);
+    expect(atMarket.get('b')).toEqual({
+      x: plan.realLots.market[0].x,
+      z: plan.realLots.market[0].z,
+    });
+    expect(atTownhall.get('b')).toEqual({
+      x: plan.realLots.townhall[0].x,
+      z: plan.realLots.townhall[0].z,
+    });
+    expect(atMarket.get('b')).not.toEqual(atTownhall.get('b'));
+  });
+});
+
 // ── EM-188: street names ─────────────────────────────────────────────────────
 
 describe('EM-188 — seeded street names on the frozen grid', () => {

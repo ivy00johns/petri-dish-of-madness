@@ -289,6 +289,13 @@ class Building:
     # field), so snapshots and events are unchanged. The sentinel sits far in
     # the past so the FIRST animal hit always lands (keep the chaos).
     last_animal_damage_tick: int = -(10 ** 9)
+    # Wave K / EM-220 — an OWNER-set cosmetic skin (a named palette key, e.g.
+    # "rose" | "sky" | "sage"; ≤24 chars). None for the default health+kind
+    # color. set_building_skin sets it (owner-only); the frontend reads it as a
+    # material override LAYERED over the health-soot tint (Structure.tsx). An
+    # unknown skin is ignored client-side. Serialized in to_dict + restored in
+    # from_snapshot (pre-Wave-K snapshots lack the key → None).
+    skin: str | None = None
 
     @property
     def condition_label(self) -> str:
@@ -315,6 +322,10 @@ class Building:
         }
         if self.commemorates:
             d["commemorates"] = self.commemorates
+        # Wave K / EM-220 — the owner-set skin rides the contract shape only when
+        # set, so pre-Wave-K buildings serialize byte-identically (absent ⇒ None).
+        if self.skin:
+            d["skin"] = self.skin
         return d
 
 
@@ -361,6 +372,79 @@ class Animal:
             "created_tick": self.created_tick,
             "owner_id": self.owner_id,
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wave K / EM-218 — Prop (lightweight placeable decoration; modeled EXACTLY on
+# Animal — the proven "lightweight, reflex-driven, population-capped,
+# snapshot-serialized, replay-safe" template). A prop is NOT a Building: no
+# owner/status/health/funding baggage (Decision 1). It sits at a place, gets a
+# deterministic in-place offset so multiple props don't stack, and is removed
+# cleanly by remove_prop. Ids derive from a SEEDED hash (NEVER uuid4 — EM-189),
+# so a snapshot round-trip / replay reproduces the exact prop registry.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Prop:
+    """A placed decoration the world REMEMBERS (so it persists, replays, forks,
+    and can be removed). Mirrors Animal: a flat, snapshot-serialized lightweight
+    entity living in `world.props`, population-capped by params.props.max_population.
+    The frontend maps `kind` to a prop model/style (propVariant); an unknown kind
+    falls back to a procedural mesh + label (EM-148)."""
+    id: str                       # "prop_" + seeded hash(place, kind, ordinal) — NOT uuid4
+    kind: str                     # free-text, ≤30 chars; FE maps to a prop model/style
+    place: str                    # place id it sits at (must exist; no free-floating props)
+    dx: float = 0.0               # in-place offset, engine-assigned (deterministic ring)
+    dz: float = 0.0
+    owner_id: str | None = None   # agent who placed it; None for god/seeded
+    created_tick: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "place": self.place,
+            "dx": self.dx,
+            "dz": self.dz,
+            "owner_id": self.owner_id,
+        }
+
+
+# Wave K / EM-217 — the build-type CATALOG (the single source of truth shared by
+# the propose_project prompt guidance, the kind→buff mapping, and the frontend
+# renderer). Each entry: {type, function, zone}. `kind` stays PERMISSIVE — an
+# off-menu invention still resolves through the frontend's fuzzy operationalVariant
+# (EM-130), so a turn is never wasted on an "invalid" type. Where a type trivially
+# matches an existing operational buff it is wired into the kind→buff mapping
+# (BUILD_TYPE_BUFF below); the rest are cosmetic+labelled (no buff). v1 menu (≥10):
+BUILD_TYPES: tuple[dict[str, str], ...] = (
+    {"type": "tavern",   "function": "work_reward", "zone": "social"},
+    {"type": "market",   "function": "work_reward", "zone": "commercial"},
+    {"type": "smithy",   "function": "work_reward", "zone": "industrial"},
+    {"type": "school",   "function": "",            "zone": "civic"},
+    {"type": "temple",   "function": "",            "zone": "civic"},
+    {"type": "clinic",   "function": "",            "zone": "civic"},
+    {"type": "park",     "function": "forage",      "zone": "green"},
+    {"type": "granary",  "function": "forage",      "zone": "agricultural"},
+    {"type": "well",     "function": "",            "zone": "civic"},
+    {"type": "workshop", "function": "work_reward", "zone": "industrial"},
+    {"type": "garden",   "function": "forage",      "zone": "green"},
+    {"type": "house",    "function": "",            "zone": "residential"},
+    {"type": "library",  "function": "",            "zone": "civic"},
+    {"type": "monument", "function": "",            "zone": "civic"},
+    {"type": "farm",     "function": "forage",      "zone": "agricultural"},
+)
+
+# Wave K / EM-217 — kind→buff mapping EXTENSION. The shipped W7 buffs are keyed on
+# building.kind via operational_building_at(place, kind): "workshop" grants a
+# work_reward boost, "garden"/"farm" grant a forage boost. The catalog adds
+# trivially-matching types that grant the SAME buffs (a smithy/forge IS a work
+# place; a granary/park IS a forage place). These sets are consulted by
+# action_work / action_forage so the new types are not merely cosmetic where the
+# semantics already exist. Off-list types stay cosmetic+labelled (no buff).
+_WORK_BUFF_KINDS = frozenset({"workshop", "smithy", "forge", "tavern", "market"})
+_FORAGE_BUFF_KINDS = frozenset({"garden", "farm", "granary", "park"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -514,6 +598,12 @@ class World:
         # id. Separate from agents: own persona, own cadence, own (looser) action
         # set, NO credits account (invariant 7). Not in the agent round-robin.
         self.animals: dict[str, Animal] = {}
+        # Wave K / EM-218 — placeable PROPS (decorations/furniture/nature). Keyed
+        # by prop id. A lightweight cousin of self.animals: own population cap
+        # (params.props.max_population), serialized into to_snapshot(), restored in
+        # from_snapshot(). Props attach to an EXISTING place (no free-floating
+        # props) and get a deterministic in-place offset so they don't stack.
+        self.props: dict[str, Prop] = {}
         # W7 / EM-062 — governance-spawn outbox. When an `admit_agent` rule passes,
         # the world spawns the pending agent and parks an `agent_spawned{method:
         # governance}` event here; the runtime/api layer drains it after a vote and
@@ -955,6 +1045,19 @@ class World:
                 return b
         return None
 
+    def _operational_buff_building_at(
+        self, place_id: str, kinds: frozenset[str]
+    ) -> Building | None:
+        """Wave K / EM-217 — the catalog-aware cousin of operational_building_at:
+        return the FIRST operational building at `place_id` whose kind is in
+        `kinds` (the extended kind→buff set, e.g. workshop/smithy/forge for work,
+        garden/farm/granary/park for forage). Returns None when no such building
+        is here, so the caller applies the bonus exactly once (no stacking)."""
+        for b in self.buildings.values():
+            if b.location == place_id and b.kind in kinds and b.status == "operational":
+                return b
+        return None
+
     # ──────────────────────────────────────────────────────────────────────────
     # Energy / death
     # ──────────────────────────────────────────────────────────────────────────
@@ -994,7 +1097,11 @@ class World:
         if self.has_active_rule("work_bonus"):
             reward = int(reward * 1.5)
         # W7: an operational workshop at this place grants +work_bonus_pct%.
-        if self.operational_building_at(agent.location, "workshop") is not None:
+        # Wave K / EM-217: the catalog extends the kind→buff mapping — a smithy /
+        # forge / tavern / market IS a work place too, granting the SAME boost as
+        # a workshop. ANY one operational work-buff building at this place applies
+        # the bonus ONCE (not per-building) so it matches the pre-K single-check.
+        if self._operational_buff_building_at(agent.location, _WORK_BUFF_KINDS) is not None:
             pct = self._bld_param("work_bonus_pct", 0)
             reward = int(reward * (1 + pct / 100.0))
         agent.credits += reward
@@ -1003,10 +1110,11 @@ class World:
     def action_forage(self, agent: AgentState) -> tuple[bool, str, int]:
         reward = self.params.forage_reward
         # W7: an operational garden/farm at this place grants +forage_bonus.
-        if (
-            self.operational_building_at(agent.location, "garden") is not None
-            or self.operational_building_at(agent.location, "farm") is not None
-        ):
+        # Wave K / EM-217: the catalog extends the kind→buff mapping — a granary /
+        # park IS a forage place too, granting the SAME bonus as a garden/farm.
+        # ANY one operational forage-buff building at this place applies the bonus
+        # ONCE so it matches the pre-K behavior (no per-building stacking).
+        if self._operational_buff_building_at(agent.location, _FORAGE_BUFF_KINDS) is not None:
             reward += self._bld_param("forage_bonus", 0)
         # Wave E / EM-184 — while a send_rain miracle is active, every forage
         # yields +rain_forage_bonus ON TOP of the base + garden/farm bonuses.
@@ -1118,6 +1226,361 @@ class World:
         return True, "ok"
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Wave K / EM-218–220 — props, demolish, skin (the builders' city actions).
+    #
+    # place_prop / remove_prop / demolish / set_building_skin are REFLEX tools:
+    # the kind/type/skin rides the agent's existing turn, zero extra invoke-LLM
+    # calls (caps, not muting, hold cost). Each returns a ready-to-emit event dict
+    # / {"_multi":[...]} (mirroring the W7 building actions consumed by
+    # _emit_world_result), or a parse_failure on an illegal id so the loop keeps
+    # turning. Heavy gating front-loads in runtime._validate_world; these stay
+    # safe if called directly.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    PROPS_DEFAULT_MAX_POPULATION = 48  # contract default (a populated town)
+
+    def _props_max_population(self) -> int:
+        """Wave K / EM-218 — the prop population cap, read modestly from config
+        (params.props.max_population), mirroring the animals.max_population read.
+        Defaults to PROPS_DEFAULT_MAX_POPULATION (48) when the block is absent
+        (pre-Wave-K worlds / tests that build WorldParams directly). 0 ⇒ unlimited
+        (mirrors animals: a config can opt out of the cap)."""
+        cfg = getattr(self.params, "props", None)
+        try:
+            return max(0, int(_block_get(cfg, "max_population", self.PROPS_DEFAULT_MAX_POPULATION)))
+        except (TypeError, ValueError):
+            return self.PROPS_DEFAULT_MAX_POPULATION
+
+    @staticmethod
+    def _prop_offset(ordinal: int) -> tuple[float, float]:
+        """Wave K / EM-218 — a PURE, deterministic in-place offset for the `ordinal`-th
+        prop at a place, so multiple props don't stack on the anchor. A small ring
+        (≤ ~3u radius): the angle steps by the golden angle (≈137.5°) and the
+        radius grows gently with the count, both rounded for byte-stable snapshots.
+        No RNG, no wall-clock — replay reproduces the same (dx,dz)."""
+        if ordinal <= 0:
+            return 0.0, 0.0
+        angle = ordinal * 2.399963229728653  # golden angle in radians
+        radius = min(3.0, 0.6 + 0.35 * ordinal)
+        dx = round(radius * math.cos(angle), 4)
+        dz = round(radius * math.sin(angle), 4)
+        return dx, dz
+
+    def _prop_id(self, place: str, kind: str, ordinal: int) -> str:
+        """Wave K / EM-218 — a SEEDED, replay-stable prop id (NEVER uuid4 — EM-189).
+        Derived from a sha256 of (place, kind, ordinal, city_seed) via the same
+        _seed_int idiom the animal layer uses, so a fixed world replays the exact
+        prop registry. Collisions are avoided by bumping the ordinal at the call
+        site until the id is free."""
+        from ..animals.runtime import _seed_int
+        seed = _seed_int("prop", self.city_seed, place, kind, ordinal)
+        return f"prop_{format(seed % (16 ** 10), '010x')}"
+
+    def action_place_prop(
+        self, agent: AgentState, kind: str, place: str | None = None
+    ) -> dict:
+        """Wave K / EM-218 — place a decoration prop at `place` (defaults to the
+        agent's location). The engine assigns a deterministic in-place offset from
+        the count of props already at the place, and a seeded id. Over the cap ⇒
+        a parse_failure with guidance (never a dead turn). Emits prop_placed."""
+        kind = str(kind or "").strip()[:30]
+        if not kind:
+            return self._fail_event(
+                agent.id, "place_prop", "kind required",
+                f"{agent.name} reached for a decoration but named nothing to place.")
+        place = str(place or "").strip() or agent.location
+        if place not in self.places:
+            return self._fail_event(
+                agent.id, "place_prop", f"unknown place {place!r}",
+                f"{agent.name} cannot place a {kind} at an unknown place {place!r}.")
+        cap = self._props_max_population()
+        if cap > 0 and len(self.props) >= cap:
+            return self._fail_event(
+                agent.id, "place_prop", f"prop cap reached: {cap}",
+                f"{agent.name} wanted to add a {kind}, but the town is already "
+                f"decorated to the brim ({cap} props) — remove one first.")
+        ordinal = sum(1 for p in self.props.values() if p.place == place)
+        # Deterministic id; bump the ordinal on the (rare) seeded collision so a
+        # prop id is always unique without ever resorting to uuid4 (EM-189).
+        seed_ord = ordinal
+        prop_id = self._prop_id(place, kind, seed_ord)
+        while prop_id in self.props:
+            seed_ord += 1
+            prop_id = self._prop_id(place, kind, seed_ord)
+        dx, dz = self._prop_offset(ordinal)
+        prop = Prop(
+            id=prop_id, kind=kind, place=place, dx=dx, dz=dz,
+            owner_id=agent.id, created_tick=self.tick,
+        )
+        self.props[prop.id] = prop
+        return {
+            "kind": "prop_placed",
+            "actor_id": agent.id,
+            "text": f"{agent.name} places a {kind} at "
+                    f"{self.places[place].name}.",
+            "payload": {
+                "prop_id": prop.id,
+                "kind": prop.kind,
+                "place": prop.place,
+                "owner_id": prop.owner_id,
+            },
+        }
+
+    def action_remove_prop(self, agent: AgentState, prop_id: str) -> dict:
+        """Wave K / EM-219 — remove a prop the agent OWNS, or any UNOWNED prop the
+        agent is co-located with. A non-owner removing an owned prop, or removing
+        from afar, is rejected with guidance. Emits prop_removed."""
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup so an
+        # object/array prop_id is a clean soft-fail, never an unhashable TypeError.
+        prop_id = str(prop_id or "").strip()
+        prop = self.props.get(prop_id)
+        if prop is None:
+            return self._fail_event(
+                agent.id, "remove_prop", f"unknown prop {prop_id!r}",
+                f"{agent.name} tried to remove a prop that isn't there.")
+        if prop.owner_id:
+            if prop.owner_id != agent.id:
+                return self._fail_event(
+                    agent.id, "remove_prop", "not the owner",
+                    f"{agent.name} cannot remove a {prop.kind} someone else placed.")
+        else:
+            # Unowned (god/seeded) prop: removable only by a co-located agent.
+            if prop.place != agent.location:
+                return self._fail_event(
+                    agent.id, "remove_prop", "not co-located",
+                    f"{agent.name} must be at "
+                    f"{self.places.get(prop.place).name if prop.place in self.places else prop.place} "
+                    f"to clear that {prop.kind}.")
+        del self.props[prop_id]
+        return {
+            "kind": "prop_removed",
+            "actor_id": agent.id,
+            "text": f"{agent.name} removes a {prop.kind}.",
+            "payload": {
+                "prop_id": prop.id,
+                "kind": prop.kind,
+                "place": prop.place,
+            },
+        }
+
+    def _demolish_building(
+        self, building: Building, actor_id: str | None, by: str
+    ) -> dict:
+        """Wave K / EM-219 — the shared clean-demolish path (distinct from arson →
+        health 0 → destroyed). Flips the building to `destroyed` and frees the lot
+        back to claimable (the EM-174/EM-181 lot model keys off status). Used by
+        the owner-immediate tool case AND the governance demolish effect AND the
+        god override. Returns a building_demolished event. `by` records the
+        authority ("owner" | "governance" | "god")."""
+        building.status = "destroyed"
+        building.health = 0
+        building.updated_tick = self.tick
+        return {
+            "kind": "building_demolished",
+            "actor_id": actor_id,
+            "target_id": building.id,
+            "text": f"{building.name} is demolished ({by}).",
+            "payload": {
+                "building_id": building.id,
+                "kind": building.kind,
+                "name": building.name,
+                "place": building.location,
+                "by": by,
+            },
+        }
+
+    def action_demolish(self, agent: AgentState, building_id: str) -> dict:
+        """Wave K / EM-219 — an OWNER cleanly demolishes their OWN building (the
+        orderly/civic counterpart to arson). A NON-owner is rejected with guidance
+        to use governance (a public/landmark demolish goes through propose_rule →
+        vote → the demolish rule effect — see _on_rule_activated). Emits
+        building_demolished."""
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup so an
+        # object/array building_id (from a multi-action turn) is a clean soft-fail,
+        # never an unhashable-type TypeError (mirror place_prop's str()).
+        building_id = str(building_id or "").strip()
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(
+                agent.id, "demolish", "building_not_found",
+                f"{agent.name} tried to demolish an unknown structure.")
+        if building.status == "destroyed":
+            return self._fail_event(
+                agent.id, "demolish", "already destroyed",
+                f"{agent.name} cannot demolish {building.name} (already rubble).")
+        if building.owner_id != agent.id:
+            return self._fail_event(
+                agent.id, "demolish", "not the owner",
+                f"{building.name} isn't yours to demolish — propose a demolish "
+                f"rule and let the town vote (a public structure needs governance).")
+        return self._demolish_building(building, agent.id, "owner")
+
+    def action_set_building_skin(
+        self, agent: AgentState, building_id: str, skin: str
+    ) -> dict:
+        """Wave K / EM-220 — the OWNER re-skins their building (a cosmetic palette
+        override layered over the health-soot tint, FE-side). Owner-only. An empty
+        skin clears it back to the default. Emits building_reskinned."""
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup so an
+        # object/array building_id is a clean soft-fail, never an unhashable
+        # TypeError.
+        building_id = str(building_id or "").strip()
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(
+                agent.id, "set_building_skin", "building_not_found",
+                f"{agent.name} tried to re-skin an unknown structure.")
+        # EM-108 menu/resolution agreement — the menu hides re-skin for a destroyed
+        # building (status != "destroyed" filter); the resolution path must reject
+        # rubble too, never re-skin a stale id.
+        if building.status == "destroyed":
+            return self._fail_event(
+                agent.id, "set_building_skin", "destroyed",
+                f"{building.name} is rubble — nothing to re-skin.")
+        if building.owner_id != agent.id:
+            return self._fail_event(
+                agent.id, "set_building_skin", "not the owner",
+                f"{building.name} isn't yours to re-skin.")
+        skin = str(skin or "").strip()[:24]
+        building.skin = skin or None
+        building.updated_tick = self.tick
+        return {
+            "kind": "building_reskinned",
+            "actor_id": agent.id,
+            "target_id": building.id,
+            "text": f"{agent.name} re-skins {building.name}"
+                    + (f" in {skin}." if skin else " back to its plain finish."),
+            "payload": {
+                "building_id": building.id,
+                "skin": building.skin,
+            },
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave K / EM-221 — GOD console mutations (Wave 2). Thin god-owned twins of the
+    # agent reflex tools above: they REUSE the same internals (_prop_id /
+    # _prop_offset / _props_max_population for placement; _demolish_building for
+    # demolish; building.skin for reskin) so the god path and the agent path stay
+    # byte-identical in snapshots — a god mutation serializes + replays exactly like
+    # an agent one (EM-155 determinism). God-owned ⇒ owner_id is None (so any
+    # co-located agent can later clear a god prop). God demolish/reskin are
+    # OVERRIDES: immediate, regardless of owner/landmark/governance. Each returns
+    # the emitted god-ink event(s); the API layer stamps actor_type "god" +
+    # payload.method and does the single world_state broadcast (mirrors
+    # /api/god/rewild). NO standing LLM calls.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def god_place_prop(self, kind: str, place: str, count: int = 1) -> list[dict]:
+        """Place `count` god-owned props at `place`, reusing the exact placement
+        internals of action_place_prop (seeded id + deterministic ring offset),
+        but owner_id=None (god/seeded — a co-located agent may later clear it).
+        Returns one prop_placed event per prop actually placed; stops short at the
+        population cap (cap_reached is observable by the caller as a short list).
+        Raises ValueError on a bad kind/place so the API can 4xx like the existing
+        endpoints (the god path validates UP FRONT rather than emitting a
+        per-prop parse_failure the way the agent turn does)."""
+        kind = str(kind or "").strip()[:30]
+        if not kind:
+            raise ValueError("kind required")
+        place = str(place or "").strip()
+        if place not in self.places:
+            raise ValueError(f"unknown place {place!r}")
+        cap = self._props_max_population()
+        events: list[dict] = []
+        for _ in range(max(0, int(count))):
+            if cap > 0 and len(self.props) >= cap:
+                break  # cap reached — return what we managed to place
+            ordinal = sum(1 for p in self.props.values() if p.place == place)
+            seed_ord = ordinal
+            prop_id = self._prop_id(place, kind, seed_ord)
+            while prop_id in self.props:
+                seed_ord += 1
+                prop_id = self._prop_id(place, kind, seed_ord)
+            dx, dz = self._prop_offset(ordinal)
+            prop = Prop(
+                id=prop_id, kind=kind, place=place, dx=dx, dz=dz,
+                owner_id=None, created_tick=self.tick,
+            )
+            self.props[prop.id] = prop
+            events.append({
+                "kind": "prop_placed",
+                "actor_id": "god",
+                "text": f"A {kind} appears at {self.places[place].name}.",
+                "payload": {
+                    "prop_id": prop.id,
+                    "kind": prop.kind,
+                    "place": prop.place,
+                    "owner_id": prop.owner_id,
+                },
+            })
+        return events
+
+    def god_clear_props(self, place: str | None = None) -> list[dict]:
+        """Remove props at `place`, or ALL props when `place` is None. Reuses the
+        same registry mutation as action_remove_prop (a plain del) — no ownership
+        gate (god override). Raises ValueError on an unknown `place` so the API can
+        4xx. Returns one prop_removed event per prop cleared."""
+        if place is not None:
+            place = str(place).strip()
+            if place not in self.places:
+                raise ValueError(f"unknown place {place!r}")
+        targets = [
+            p for p in self.props.values()
+            if place is None or p.place == place
+        ]
+        events: list[dict] = []
+        for prop in targets:
+            del self.props[prop.id]
+            events.append({
+                "kind": "prop_removed",
+                "actor_id": "god",
+                "text": f"The {prop.kind} vanishes.",
+                "payload": {
+                    "prop_id": prop.id,
+                    "kind": prop.kind,
+                    "place": prop.place,
+                },
+            })
+        return events
+
+    def god_demolish(self, building_id: str) -> dict:
+        """God OVERRIDE demolish: immediate, regardless of owner/landmark/
+        governance. Reuses the shared _demolish_building path (same status flip +
+        lot free) the owner tool and the governance effect use, so the god demolish
+        is byte-identical in snapshots. Raises ValueError (unknown / already
+        rubble) so the API can 4xx. Returns the building_demolished event (by
+        'god')."""
+        building = self.buildings.get(str(building_id))
+        if building is None:
+            raise ValueError("building_not_found")
+        if building.status == "destroyed":
+            raise ValueError("already destroyed")
+        return self._demolish_building(building, "god", "god")
+
+    def god_reskin(self, building_id: str, skin: str) -> dict:
+        """God re-skins ANY building (override — no owner gate), reusing the exact
+        skin field + clamp of action_set_building_skin. An empty skin clears it
+        back to the default. Raises ValueError (unknown building) so the API can
+        4xx. Returns the building_reskinned event."""
+        building = self.buildings.get(str(building_id))
+        if building is None:
+            raise ValueError("building_not_found")
+        skin = str(skin or "").strip()[:24]
+        building.skin = skin or None
+        building.updated_tick = self.tick
+        return {
+            "kind": "building_reskinned",
+            "actor_id": "god",
+            "target_id": building.id,
+            "text": f"{building.name} is re-skinned"
+                    + (f" in {skin}." if skin else " back to its plain finish."),
+            "payload": {
+                "building_id": building.id,
+                "skin": building.skin,
+            },
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Social actions
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1200,7 +1663,8 @@ class World:
         return not any(pl.kind == "governance" for pl in self.places.values())
 
     def action_propose_rule(
-        self, agent: AgentState, effect: str, text: str, name: str | None = None
+        self, agent: AgentState, effect: str, text: str,
+        name: str | None = None, target: str | None = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -1209,8 +1673,10 @@ class World:
         # W9 / EM-073 B3: ban_arson included so the arson ban is reachable via
         # governance (enforcement already gates arson in the runtime validator).
         # PROTOTYPE (god-channel): name_town — naming the town by consensus vote.
+        # Wave K / EM-219: demolish — a PUBLIC/landmark structure is demolished by
+        # consensus (the orderly civic counterpart to a lone owner's demolish).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town"}
+                         "ban_arson", "name_town", "demolish"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -1226,17 +1692,40 @@ class World:
             if name.lower() == str(self.town_name or "").strip().lower():
                 return False, f"the town is already named {self.town_name!r}", None
             payload = {"name": name}
-        # Duplicate guard: only one OPEN proposal per effect at a time.
+        # Wave K / EM-219 — demolish carries the TARGET building id on the payload
+        # (like admit_agent's spec); a demolish proposal without a real, standing
+        # target is meaningless.
+        if effect == "demolish":
+            target = str(target or "").strip()
+            building = self.buildings.get(target)
+            if building is None:
+                return False, f"demolish requires a real building id (got {target!r})", None
+            if building.status == "destroyed":
+                return False, f"{building.name} is already rubble", None
+            payload = {"target": target}
+        # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
+        # demolish is scoped per TARGET (two distinct buildings may have open
+        # demolish votes at once) — only a duplicate vote for the SAME target is
+        # blocked.
         for rule in self.rules.values():
-            if rule.effect == effect and rule.status == "proposed":
-                return False, f"rule with effect {effect!r} already proposed", None
+            if rule.effect != effect or rule.status != "proposed":
+                continue
+            if effect == "demolish":
+                if (rule.payload or {}).get("target") == payload.get("target"):
+                    return False, f"a demolish vote for {payload.get('target')!r} is already open", None
+                continue
+            return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
         # (civic ritual is the charm) but tagged renewal_of; on passing it
         # refreshes the existing rule instead of activating a duplicate.
-        # EXCEPTION: name_town is a one-shot RENAME, not a stackable law — each
-        # naming is fresh (a new name supersedes the old), never a renewal.
-        active = self._active_rule(effect) if effect != "name_town" else None
+        # EXCEPTION: name_town is a one-shot RENAME, and demolish is a one-shot
+        # ACT (each targets a distinct building) — neither "renews"; each passing
+        # vote is fresh.
+        active = (
+            self._active_rule(effect)
+            if effect not in ("name_town", "demolish") else None
+        )
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
             effect=effect,
@@ -1310,6 +1799,21 @@ class World:
                     "text": f"🏛 By vote, the town is now named {self.town_name}.",
                     "payload": {"name": self.town_name, "proposal_id": rule.id},
                 })
+            return
+        # Wave K / EM-219 — demolish: a passing public-demolish vote tears down the
+        # target building. The building_demolished event is parked in the SAME
+        # outbox name_town/governance-spawn use (drained + emitted by the loop's
+        # _flush_spawn_events). by="governance" records the civic authority; a
+        # missing/already-rubble target is a silent no-op (the vote still applied).
+        if rule.effect == "demolish":
+            rule.applied = True
+            target = (rule.payload or {}).get("target")
+            building = self.buildings.get(target)
+            if building is not None and building.status != "destroyed":
+                evt = self._demolish_building(building, "system", "governance")
+                evt["actor_type"] = "system"
+                evt["payload"]["proposal_id"] = rule.id
+                self.pending_spawn_events.append(evt)
             return
         if rule.effect != "admit_agent":
             return
@@ -1400,6 +1904,26 @@ class World:
         yes_votes = sum(1 for aid, v in rule.votes.items() if v and aid in living_ids)
         no_votes = sum(1 for aid, v in rule.votes.items() if not v and aid in living_ids)
 
+        # Wave K / EM-219 — a public/landmark `demolish` is irreversible (it tears
+        # down a standing structure), so it requires a ~70% SUPERMAJORITY rather
+        # than the simple strict majority ordinary rules pass on (the user's locked
+        # decision + design spec + contract wave-k.md §3). Ordinary effects keep
+        # their existing bar.
+        if rule.effect == "demolish":
+            yes_needed = math.ceil(0.7 * living_count)
+            if yes_votes >= yes_needed:
+                return "active"
+            # The vote fails once a yes-supermajority is mathematically out of reach
+            # (everyone still unvoted couldn't carry it). Handled by the all-voted
+            # fall-through below; here we only ACTIVATE early on a clear pass.
+            no_threshold = living_count // 2
+            if no_votes > no_threshold:
+                return "rejected"
+            voted = sum(1 for aid in rule.votes if aid in living_ids)
+            if voted >= living_count:
+                return "rejected"
+            return None
+
         threshold = living_count // 2  # strict majority: > floor(living/2)
         if yes_votes > threshold:
             return "active"
@@ -1487,9 +2011,16 @@ class World:
         kind: str,
         funds_required: int,
         function: str | None = None,
+        place: str | None = None,
     ) -> dict:
-        """Create a Building status=planned at the agent's place, owner=public.
+        """Create a Building status=planned at owner=public.
         Emits structure_state_changed{to:planned} + project_proposed.
+
+        Wave K / EM-182: an OPTIONAL `place` arg lets the agent build in a CHOSEN
+        district ("build a house in the industrial district"). When `place` is a
+        valid place id the new Building's location is that place; otherwise (absent
+        / unknown) it falls back to the agent's current location (the pre-K
+        behavior) — so a bad place never wastes the turn.
 
         W11b / EM-103: a project whose name fuzzy-matches an active/proposed
         rule's text is a COMMEMORATIVE monument to that rule (tagged
@@ -1522,11 +2053,18 @@ class World:
                     f"{agent.name}'s proposal {display_name!r} honors the law "
                     f"\"{_truncate(rule.text)}\" — but a monument to that rule "
                     f"already stands. One monument per law; propose something new.")
+        # Wave K / EM-182 — honor a valid chosen `place`; else build at the
+        # agent's current location (the pre-K default). An unknown place id is
+        # silently ignored (falls back) so the turn is never wasted.
+        build_location = agent.location
+        chosen = str(place or "").strip()
+        if chosen and chosen in self.places:
+            build_location = chosen
         building = Building(
             id=f"bld_{str(uuid.uuid4())[:8]}",
             name=display_name,
             kind=str(kind)[:30],
-            location=agent.location,
+            location=build_location,
             owner_id="public",
             status="planned",
             funds_required=funds_required,
@@ -3342,6 +3880,10 @@ class World:
             "buildings": [b.to_dict() for b in self.buildings.values()],
             # W8 — chaos-layer animals; the 3D village renders a roaming cat + dog.
             "animals": [a.to_dict() for a in self.animals.values()],
+            # Wave K / EM-218 — placeable props (the builders'-city decorations).
+            # ALWAYS serialized (like animals/buildings) — a snapshot round-trip /
+            # replay / fork reproduces the exact prop registry byte-identically.
+            "props": [p.to_dict() for p in self.props.values()],
             # W11b / EM-091 — the public billboard: list of {tick, actor_id,
             # actor_type, text}, capped 20 newest (oldest → newest). THE seam the
             # frontend's billboard panel/3D board builds against.
@@ -3568,6 +4110,9 @@ class World:
                 created_tick=_int(d.get("created_tick")),
                 updated_tick=_int(d.get("updated_tick")),
                 commemorates=d.get("commemorates"),
+                # Wave K / EM-220 — restore the owner-set skin (pre-Wave-K
+                # snapshots lack the key ⇒ None, byte-identical default).
+                skin=(str(d["skin"]) if d.get("skin") else None),
             )
             world.buildings[b.id] = b
 
@@ -3586,6 +4131,29 @@ class World:
                 owner_id=(str(d["owner_id"]) if d.get("owner_id") else None),
             )
             world.animals[an.id] = an
+
+        # Wave K / EM-218 — restore placeable props (pre-Wave-K snapshots lack the
+        # key ⇒ {} — a back-compat tolerated absence). The seeded id, place, and
+        # engine-assigned offset round-trip byte-identically, so a replay/fork
+        # renders the same decorations.
+        def _flt(v: Any, default: float = 0.0) -> float:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+
+        for d in state.get("props", []) or []:
+            if not isinstance(d, dict) or not d.get("id") or not d.get("place"):
+                continue
+            p = Prop(
+                id=str(d["id"]),
+                kind=str(d.get("kind", "")),
+                place=str(d["place"]),
+                dx=_flt(d.get("dx")),
+                dz=_flt(d.get("dz")),
+                owner_id=(str(d["owner_id"]) if d.get("owner_id") else None),
+            )
+            world.props[p.id] = p
 
         world.billboard = [
             {

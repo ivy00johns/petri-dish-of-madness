@@ -25,7 +25,7 @@ from typing import Any
 
 import jsonschema
 
-from ..engine.world import World, AgentState
+from ..engine.world import World, AgentState, BUILD_TYPES
 from ..providers.base import ProviderError
 from ..providers.router import Router
 
@@ -94,6 +94,10 @@ ACTION_SCHEMA = {
                 # Wave H4 / EM-209 — pets & bonds: adopt a co-located unowned
                 # animal, feed a co-located one (owner sustains a declining pet).
                 "adopt", "feed_pet",
+                # Wave K / EM-218–220 — the builders'-city reflex tools: place /
+                # remove a decoration prop, cleanly demolish a building you own,
+                # re-skin a building you own.
+                "place_prop", "remove_prop", "demolish", "set_building_skin",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -131,6 +135,9 @@ ACTION_SCHEMA = {
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
                             "adopt", "feed_pet",
+                            # Wave K / EM-218–220 — builders'-city reflex tools.
+                            "place_prop", "remove_prop", "demolish",
+                            "set_building_skin",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -149,6 +156,8 @@ ACTION_SCHEMA = {
              "kind": {"type": "string", "maxLength": 30},
              "funds_required": {"type": "integer", "minimum": 1},
              "function": {"type": "string", "maxLength": 40},
+             # Wave K / EM-182 — OPTIONAL chosen build place (a district id).
+             "place": {"type": "string"},
          }}}}},
         {"if": {"required": ["action"], "properties": {"action": {"const": "contribute_funds"}}},
          "then": {"properties": {"args": {"required": ["building_id", "amount"], "properties": {
@@ -187,6 +196,27 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "feed_pet"}}},
          "then": {"properties": {"args": {"required": ["animal_id"], "properties": {
              "animal_id": {"type": "string"},
+         }}}}},
+        # Wave K / EM-218–220 — builders'-city reflex tools. Only the behavioral
+        # args are validated strictly; `place` on place_prop is OPTIONAL (defaults
+        # to the agent's location at resolution), so it is not required here.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "place_prop"}}},
+         "then": {"properties": {"args": {"required": ["kind"], "properties": {
+             "kind": {"type": "string", "maxLength": 30},
+             "place": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "remove_prop"}}},
+         "then": {"properties": {"args": {"required": ["prop_id"], "properties": {
+             "prop_id": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "demolish"}}},
+         "then": {"properties": {"args": {"required": ["building_id"], "properties": {
+             "building_id": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "set_building_skin"}}},
+         "then": {"properties": {"args": {"required": ["building_id", "skin"], "properties": {
+             "building_id": {"type": "string"},
+             "skin": {"type": "string", "maxLength": 24},
          }}}}},
     ],
 }
@@ -249,6 +279,16 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # only when a co-located eligible animal exists (see _assemble_context).
     "adopt":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "feed_pet":         {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
+    # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
+    # co-location gate is prop-specific and enforced in _validate_world). demolish
+    # / set_building_skin gate to the building's OWN place ("@building", resolved
+    # per-turn) and are owner-only (enforced at resolution). All zero extra LLM
+    # calls — the kind/skin rides the agent's existing turn.
+    "place_prop":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "remove_prop":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "demolish":         {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+    "set_building_skin": {"tier": "reflex", "location_gate": "@building",    "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -943,6 +983,24 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
             # literal place 'None' in the validator's feedback.
             args.pop("place", None)
 
+    elif action in ("place_prop", "propose_project"):
+        # Wave K / EM-182+218 — the OPTIONAL chosen build/place id resolves
+        # fuzzily (plaza_bloom→plaza, town_hall→townhall) like move_to, so a
+        # slightly-off district choice lands instead of silently falling back to
+        # the agent's location. A null/None-ish place is dropped (reads as MISSING,
+        # the documented default). Gibberish stays → the world handler falls back.
+        place = args.get("place")
+        if isinstance(place, str):
+            place = place.strip()
+            if place and place not in world.places:
+                place = _resolve_place_fuzzy(place, world) or place
+            if place:
+                args["place"] = place
+            else:
+                args.pop("place", None)
+        elif _noneish(place):
+            args.pop("place", None)
+
     elif action in _TARGETED_ACTIONS:
         target = _first_real_arg(args, _TARGET_ALIAS_KEYS)
         if isinstance(target, str):
@@ -1137,12 +1195,20 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         effect = args.get("effect")
         # W9 / EM-073 B3: ban_arson is proposable (mirrors world.action_propose_rule).
         # PROTOTYPE (god-channel): name_town — name the town by consensus vote.
+        # Wave K / EM-219: demolish — public/landmark demolish by consensus vote.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town"}
+                         "ban_arson", "name_town", "demolish"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         if effect == "name_town" and not str(args.get("name") or "").strip():
             return "name_town requires a name (args.name = the town's new name)"
+        if effect == "demolish":
+            target = str(args.get("target") or args.get("building_id") or "").strip()
+            building = _buildings(world).get(target)
+            if building is None:
+                return "demolish requires args.target = the id of a real building to tear down"
+            if _building_field(building, "status") == "destroyed":
+                return f"building '{target}' is already destroyed"
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -1271,6 +1337,81 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return f"{getattr(animal, 'name', animal_id)} is not alive"
         if getattr(animal, "location", None) != agent.location:
             return f"{getattr(animal, 'name', animal_id)} is not here — you must be at the same place to feed it"
+
+    # ── Wave K / EM-218–220 — builders'-city reflex tools ─────────────────────
+    elif action == "place_prop":
+        kind = str(args.get("kind") or "").strip()
+        if not kind:
+            return "place_prop requires a kind (e.g. bench, lamp, tree, statue)"
+        # `place` defaults to the agent's location (the menu and the world handler
+        # agree); a provided place must exist.
+        place = str(args.get("place") or "").strip() or agent.location
+        if place not in world.places:
+            return f"unknown place '{place}'. Known: {list(world.places.keys())}"
+        # Cap gate (menu and resolution agree): over the prop cap is rejected with
+        # guidance, never a dead turn.
+        cap = world._props_max_population()
+        if cap > 0 and len(getattr(world, "props", {}) or {}) >= cap:
+            return (f"the town is decorated to the brim ({cap} props) — "
+                    f"remove one before placing another")
+
+    elif action == "remove_prop":
+        # EM-199 defense-in-depth — a multi-action turn can hand us an object/array
+        # id; coerce to str BEFORE the dict lookup so an unhashable id is a clean
+        # rejection, never a loop-killing TypeError (mirror the place_prop str()).
+        prop_id = str(args.get("prop_id") or "").strip()
+        prop = (getattr(world, "props", {}) or {}).get(prop_id)
+        if prop is None:
+            return f"unknown prop '{prop_id}'"
+        owner_id = getattr(prop, "owner_id", None)
+        if owner_id:
+            if owner_id != agent.id:
+                return f"prop '{prop_id}' was placed by someone else — only its owner can remove it"
+        elif getattr(prop, "place", None) != agent.location:
+            return (f"prop '{prop_id}' is at '{getattr(prop, 'place', '?')}' — "
+                    f"you must be there to clear an unowned prop")
+
+    elif action == "demolish":
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup (an
+        # object/array building_id from a multi-action turn would otherwise raise
+        # an unhashable-type TypeError and kill the loop).
+        building_id = str(args.get("building_id") or "").strip()
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status == "destroyed":
+            return f"building '{building_id}' is already destroyed"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to demolish it"
+        # EM-219 — the TOOL handles only the owner-immediate case; a public /
+        # landmark (non-owner) demolish must go through governance (propose_rule
+        # effect=demolish → vote), so reject here WITH that guidance.
+        if _building_field(building, "owner_id") != agent.id:
+            return (f"'{_building_field(building, 'name')}' isn't yours to demolish — "
+                    f"propose a demolish rule at the town hall and let the town vote")
+
+    elif action == "set_building_skin":
+        # EM-199 defense-in-depth — coerce to str BEFORE the dict lookup (an
+        # object/array building_id from a multi-action turn would otherwise raise
+        # an unhashable-type TypeError and kill the loop).
+        building_id = str(args.get("building_id") or "").strip()
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        # EM-108 menu/resolution agreement — the menu only offers set_building_skin
+        # for a building with status != "destroyed" (_assemble_context filter); the
+        # resolution gate must reject rubble too, or a stale id re-skins thin air.
+        if _building_field(building, "status") == "destroyed":
+            return f"{_building_field(building, 'name', building_id)} is rubble — nothing to re-skin"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to re-skin it"
+        if _building_field(building, "owner_id") != agent.id:
+            return f"only the owner can re-skin building '{building_id}'"
+        if not str(args.get("skin") or "").strip():
+            return "set_building_skin requires a skin (a color name, e.g. rose|sky|sage|amber|slate|plum)"
 
     return None
 
@@ -1434,14 +1575,23 @@ def _assemble_context(
     # Governance actions are gated to a governance place. EM-163: PROPOSING is
     # tier-gated off the background menu (_tier_ok); voting stays for everyone.
     if _gate_ok("propose_rule") and _tier_ok("propose_rule"):
-        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town (name_town also needs name=<the town's new name>; it is decided by majority vote)")
+        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town|demolish (name_town also needs name=<the town's new name>; demolish needs target=<a public building's id> to tear it down by vote; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
 
     # ── W7 construction actions (offered per gates; EM-163 tier gate) ──────────
     if _tier_ok("propose_project"):
-        valid_actions.append("propose_project (name, kind, funds_required?, function?) - start a new building/collective project at this place")
+        # Wave K / EM-217 — surface the build-type CATALOG in the prompt guidance
+        # so the model picks from a real menu (kind stays PERMISSIVE — an off-menu
+        # invention still resolves via the FE fuzzy match, never a dead turn).
+        # EM-182 — the optional `place` arg lets it build in a chosen district.
+        _build_menu = ", ".join(t["type"] for t in BUILD_TYPES)
+        valid_actions.append(
+            "propose_project (name, kind, funds_required?, function?, place?) - "
+            "start a new building/collective project. kind is free-text but pick "
+            f"from this menu when you can: {_build_menu}. "
+            "place? = a place id to build there (else here)")
     if open_projects and _tier_ok("contribute_funds"):
         valid_actions.append("contribute_funds (building_id, amount) - fund an active project below to push it toward construction")
     for b in here_buildings:
@@ -1461,6 +1611,37 @@ def _assemble_context(
             valid_actions.append(f"arson (building_id={bid}) - burn this building (a crime; witnesses lose trust)")
         if status == "operational" and _building_field(b, "owner_id") == agent.id and _gate_ok("take_offline"):
             valid_actions.append(f"take_offline (building_id={bid}) - you own this; take it offline")
+        # Wave K / EM-219+220 — demolish / re-skin are OWNER-ONLY at resolution, so
+        # offer them only for a co-located building this agent OWNS (a public
+        # demolish is reached via propose_rule effect=demolish, surfaced above).
+        # Menu and resolution agree (EM-108's lesson).
+        if status != "destroyed" and _building_field(b, "owner_id") == agent.id:
+            valid_actions.append(f"demolish (building_id={bid}) - cleanly tear down this building you own")
+            valid_actions.append(f"set_building_skin (building_id={bid}, skin) - recolor this building you own (e.g. rose|sky|sage|amber|slate|plum)")
+
+    # ── Wave K / EM-218 — place / remove decoration props ─────────────────────
+    # place_prop is offered anywhere (it takes a target place arg, defaulting here)
+    # while under the cap; remove_prop is offered when the agent owns a prop OR is
+    # standing among unowned props (the same co-location gate _validate_world uses).
+    _props = getattr(world, "props", {}) or {}
+    _prop_cap = world._props_max_population()
+    if _prop_cap == 0 or len(_props) < _prop_cap:
+        valid_actions.append(
+            "place_prop (kind, place?) - place a decoration (bench, lamp, tree, "
+            "statue, planter, fountain...) here or at a chosen place")
+    _removable = [
+        p for p in _props.values()
+        if getattr(p, "owner_id", None) == agent.id
+        or (not getattr(p, "owner_id", None) and getattr(p, "place", None) == agent.location)
+    ]
+    if background:
+        _removable.sort(key=lambda p: str(getattr(p, "id", "")))
+    if _removable:
+        rm_list = ", ".join(
+            f"{getattr(p, 'kind', '?')} (prop_id={getattr(p, 'id', '?')})"
+            for p in _removable)
+        valid_actions.append(
+            f"remove_prop (prop_id) - remove a prop you placed or a stray here: {rm_list}")
 
     # ── W11b / EM-091 billboard reflex tools (offered at plaza/townhall) ───────
     if _gate_ok("post_billboard"):
@@ -3250,7 +3431,25 @@ class AgentRuntime:
             _normalize_args(step, agent, self.world)
             action = step.get("action")
             args = step.get("args") or {}
-            gate_error = _validate_world(step, agent, self.world)
+            # EM-199 defense-in-depth — the gate itself runs under a guard so a
+            # raising gate (e.g. an object/array id reaching a dict lookup as an
+            # unhashable key) becomes a parse_failure step, never a loop-killing
+            # raise. _apply_action_inner below is guarded the same way.
+            try:
+                gate_error = _validate_world(step, agent, self.world)
+            except Exception as exc:
+                chain.append({
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "tick": self.world.tick,
+                    "kind": "parse_failure",
+                    "text": f"{agent.name}'s {action} was rejected: {exc}",
+                    "payload": {"action": action, "error": str(exc),
+                                "rejected": True},
+                })
+                step_results.append({"action": action, "args": args, "ok": False})
+                continue
             if gate_error:
                 # A world-rejected step: surface the reason and move on. No
                 # inner dispatch, so nothing was parked to drain.
@@ -3576,7 +3775,10 @@ class AgentRuntime:
             text = args.get("text", "")
             # PROTOTYPE (god-channel) — name_town carries the proposed name.
             name = args.get("name")
-            ok, reason, rule = self.world.action_propose_rule(agent, effect, text, name)
+            # Wave K / EM-219 — demolish carries the target building id.
+            target = args.get("target") or args.get("building_id")
+            ok, reason, rule = self.world.action_propose_rule(
+                agent, effect, text, name, target)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)
@@ -3651,8 +3853,10 @@ class AgentRuntime:
             kind = args.get("kind", "")
             funds_required = args.get("funds_required")
             function = args.get("function")
+            # Wave K / EM-182 — optional chosen build place (a district id).
+            place = args.get("place")
             result = self.world.action_propose_project(
-                agent, name, kind, funds_required, function
+                agent, name, kind, funds_required, function, place
             )
             return _emit_world_result(result, base, thought)
 
@@ -3711,6 +3915,27 @@ class AgentRuntime:
             return {**base, "kind": "parse_failure",
                     "text": f"{agent.name} tried to feed {pet_name} but: {reason}",
                     "payload": {"action": "feed_pet", "error": reason}}
+
+        # ── Wave K / EM-218–220 — builders'-city reflex tools (dispatch to the
+        # world-core action_*; each returns a ready-to-emit event dict consumed by
+        # _emit_world_result, exactly like the W7 building actions). ────────────
+        elif action == "place_prop":
+            result = self.world.action_place_prop(
+                agent, args.get("kind", ""), args.get("place"))
+            return _emit_world_result(result, base, thought)
+
+        elif action == "remove_prop":
+            result = self.world.action_remove_prop(agent, args.get("prop_id", ""))
+            return _emit_world_result(result, base, thought)
+
+        elif action == "demolish":
+            result = self.world.action_demolish(agent, args.get("building_id", ""))
+            return _emit_world_result(result, base, thought)
+
+        elif action == "set_building_skin":
+            result = self.world.action_set_building_skin(
+                agent, args.get("building_id", ""), args.get("skin", ""))
+            return _emit_world_result(result, base, thought)
 
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────
         elif action == "post_billboard":

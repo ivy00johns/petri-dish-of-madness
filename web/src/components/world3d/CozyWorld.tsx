@@ -35,6 +35,7 @@ import { Foliage } from './Foliage';
 import { TownProps } from './Props';
 import { Building } from './Building';
 import { Structure } from './Structure';
+import { PlacedProps } from './PlacedProps';
 import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
@@ -43,6 +44,7 @@ import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, resolveLivingO
 import { GOLDEN_HOUR } from './toon';
 import { preloadHeroModels } from './assets/Model';
 import { allCityModelSpecs } from './assets/cityModels';
+import { allPropModelSpecs } from './assets/propModels';
 import { CityScape, useCityPlan } from './CityScape';
 import { assignBuildingLots } from './cityLayout';
 import { StreetLabels } from './StreetLabels';
@@ -75,6 +77,25 @@ function preloadCityModels(): void {
   }
 }
 preloadCityModels();
+
+/**
+ * Wave K (EM-218): warm the prop GLBs (bench/lamp/tree/fence/bin/hydrant/
+ * fountain) the same way. Most share URLs with the city kit (already warmed
+ * above) — useGLTF.preload de-dupes by url, so this is cheap belt-and-braces
+ * that keeps the prop set correct even if the city registry ever drops one.
+ * Rejections are handled exactly like the city preload (PlacedProps'
+ * per-prop ModelBoundary owns the render-time procedural fallback).
+ */
+function preloadPropModels(): void {
+  for (const spec of allPropModelSpecs()) {
+    try {
+      useGLTF.preload(spec.url);
+    } catch {
+      // skip — PlacedProps' ModelBoundary owns the render-time fallback
+    }
+  }
+}
+preloadPropModels();
 
 // How recent an animal's last chaotic event must be (in seq distance from the
 // newest event) for the critter to still wear its magenta chaos accent. This
@@ -677,6 +698,14 @@ function Scene({
           the whole compact grid (roads, zoned blocks, props, parked cars);
           the places' own anchors render via <Building> below. */}
       <CityScape world={world} />
+
+      {/* Wave K (EM-218): agent/god-PLACED props — benches, lamps, trees,
+          fences, bins, hydrants, fountains the agents put down. Distinct from
+          the deterministic CityScape scatter above: these are first-class
+          `Prop` entities the world tracks, positioned at their place center +
+          the engine-assigned (dx,dz). Each renders its GLB with a procedural
+          fallback (never a hole). */}
+      <PlacedProps places={places} props={world.props} />
 
       {places.map((p) => (
         <Building

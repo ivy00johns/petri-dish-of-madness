@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Agent } from '../../types';
 import {
   BUILDING_STYLES,
+  SKIN_PALETTES,
   SLOT_BASE_RADIUS,
   SOOT_HEX,
   buildingStyle,
@@ -15,6 +16,7 @@ import {
   humanizeKind,
   operationalVariant,
   resolveLivingOwner,
+  skinPalette,
   slotLayout,
   type VariantKey,
   type WorldPoint,
@@ -222,6 +224,142 @@ describe('operationalVariant("zoo") (EM-208 H3)', () => {
   it('unknown kind still falls back to generic (fallback guarantee)', () => {
     expect(operationalVariant('xyzzy')).toBe('generic');
     expect(operationalVariant('')).toBe('generic');
+  });
+});
+
+// ── EM-217 (Wave K): build-type catalog ──────────────────────────────────────
+//
+// Each menu type the propose_project prompt surfaces (tavern/market/smithy/
+// school/temple/clinic/park/granary/well, plus the existing kinds) resolves to
+// a DISTINCT palette + curated label AND its best-available vendored silhouette
+// — while an off-menu kind still resolves to the neutral fallback (no dead
+// turn), and the EM-130 humanizeKind tag behavior stays intact.
+
+const CATALOG_TYPES = [
+  'tavern', 'market', 'smithy', 'school', 'temple',
+  'clinic', 'park', 'granary', 'well',
+] as const;
+
+describe('build-type catalog — buildingStyle (EM-217)', () => {
+  it('gives every catalog type its own curated tag', () => {
+    const tags: Record<(typeof CATALOG_TYPES)[number], string> = {
+      tavern: 'Tavern', market: 'Market', smithy: 'Smithy', school: 'School',
+      temple: 'Temple', clinic: 'Clinic', park: 'Park', granary: 'Granary',
+      well: 'Well',
+    };
+    for (const t of CATALOG_TYPES) {
+      expect(buildingStyle(t).tag, t).toBe(tags[t]);
+    }
+  });
+
+  it('gives every catalog type a DISTINCT body palette (no two collide)', () => {
+    const bodies = CATALOG_TYPES.map((t) => buildingStyle(t).body);
+    expect(new Set(bodies).size).toBe(CATALOG_TYPES.length);
+    // …and none is the neutral fallback body (each is its own thing).
+    for (const t of CATALOG_TYPES) {
+      expect(buildingStyle(t).body, t).not.toBe(BUILDING_STYLES.building.body);
+    }
+  });
+
+  it('every catalog type is a well-formed BuildingStyle (valid hexes)', () => {
+    for (const t of CATALOG_TYPES) {
+      const s = buildingStyle(t);
+      for (const c of [s.body, s.roof, s.accent]) {
+        expect(c, `${t}:${c}`).toMatch(/^#[0-9a-f]{6}$/i);
+      }
+    }
+  });
+
+  it('keeps the existing curated kinds intact (no regression)', () => {
+    expect(buildingStyle('clocktower').tag).toBe('Clock Tower');
+    expect(buildingStyle('garden').tag).toBe('Garden');
+    expect(buildingStyle('zoo').tag).toBe('Zoo');
+  });
+});
+
+describe('build-type catalog — operationalVariant (EM-217)', () => {
+  it('pins every catalog type to its best-available vendored silhouette', () => {
+    const variants: Record<(typeof CATALOG_TYPES)[number], VariantKey> = {
+      tavern: 'house', market: 'stall', smithy: 'workshop', school: 'library',
+      temple: 'monument', clinic: 'generic', park: 'garden', granary: 'farm',
+      well: 'well',
+    };
+    for (const t of CATALOG_TYPES) {
+      expect(operationalVariant(t), t).toBe(variants[t]);
+    }
+  });
+
+  it('off-menu / emergent forms of the new types still resolve sensibly (no dead turn)', () => {
+    const cases: Array<[string, VariantKey]> = [
+      ['old_tavern', 'house'],
+      ['village_pub', 'house'],
+      ['night_market', 'stall'],
+      ['blacksmith_smithy', 'workshop'],
+      ['grand_temple', 'monument'],
+      ['stone_chapel', 'monument'],
+      ['riverside_park', 'garden'],
+      ['stone_granary', 'farm'],
+      ['grain_silo', 'farm'],
+    ];
+    for (const [kind, variant] of cases) {
+      expect(operationalVariant(kind), kind).toBe(variant);
+    }
+  });
+
+  it('a truly off-menu kind still falls back to generic (EM-130 permissive)', () => {
+    expect(operationalVariant('moon_temple_of_xyzzy')).toBe('monument'); // 'temple' substring
+    expect(operationalVariant('xyzzy_thing')).toBe('generic');
+    expect(buildingStyle('xyzzy_thing').tag).toBe('Xyzzy Thing'); // humanized, intact
+  });
+
+  it('preserves the EM-122/EM-130 substring-trap ordering', () => {
+    // 'archive' (library) must still beat 'arch' (monument).
+    expect(operationalVariant('town_archive')).toBe('library');
+    // 'lighthouse' (clocktower) must still beat 'house'.
+    expect(operationalVariant('old_lighthouse')).toBe('clocktower');
+    // night_market keeps its EM-130 palette (workshop), unchanged by EM-217.
+    expect(buildingStyle('night_market').roof).toBe(BUILDING_STYLES.workshop.roof);
+  });
+});
+
+// ── EM-220 (Wave K): skinPalette ──────────────────────────────────────────────
+//
+// An owner-set named skin overrides the operational BODY color; an unknown /
+// absent skin is ignored (→ null) so the kind palette body stands. Pure +
+// own-property hardened against model-authored skin strings.
+
+describe('skinPalette (EM-220)', () => {
+  it('resolves every named skin to a valid #rrggbb body hex', () => {
+    for (const name of Object.keys(SKIN_PALETTES)) {
+      const hex = skinPalette(name);
+      expect(hex, name).toBe(SKIN_PALETTES[name]);
+      expect(hex!).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+  });
+
+  it('ships the documented friendly names (rose/sky/sage/amber/slate/plum)', () => {
+    for (const name of ['rose', 'sky', 'sage', 'amber', 'slate', 'plum']) {
+      expect(skinPalette(name), name).not.toBeNull();
+    }
+  });
+
+  it('every skin is a DISTINCT color', () => {
+    const hexes = Object.values(SKIN_PALETTES);
+    expect(new Set(hexes).size).toBe(hexes.length);
+  });
+
+  it('returns null for an absent skin (unknown → kind palette body stands)', () => {
+    expect(skinPalette(null)).toBeNull();
+    expect(skinPalette(undefined)).toBeNull();
+    expect(skinPalette('')).toBeNull();
+    expect(skinPalette('chartreuse')).toBeNull();
+    expect(skinPalette('ROSE')).toBeNull(); // case-sensitive, exact names only
+  });
+
+  it('never resolves a prototype-member skin through the prototype chain', () => {
+    for (const evil of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(skinPalette(evil), evil).toBeNull();
+    }
   });
 });
 

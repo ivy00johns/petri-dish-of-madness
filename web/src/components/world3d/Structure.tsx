@@ -41,6 +41,7 @@ import type { Building } from '../../types';
 import {
   buildingStyle,
   healthTint,
+  skinPalette,
   type BuildingStyle,
   type VariantKey,
 } from './worldSpace';
@@ -1049,6 +1050,7 @@ function OperationalStructure({
   spec,
   offline,
   health,
+  skinTint,
 }: {
   style: BuildingStyle;
   /** EM-122 silhouette — the render when spec is null AND the Suspense fallback. */
@@ -1057,6 +1059,13 @@ function OperationalStructure({
   spec: ModelSpec | null;
   offline: boolean;
   health: number;
+  /**
+   * EM-220: the resolved skin body hex (or null). On the procedural path the
+   * skin is already baked into `style.body`; on the GLB path it becomes the
+   * Model tint (preferred over the offline dim when set) so a re-skinned GLB
+   * still reads its color. `health` composes the soot on top either way.
+   */
+  skinTint: string | null;
 }) {
   const Variant = VARIANT_COMPONENTS[variant];
   const procedural = (
@@ -1077,7 +1086,7 @@ function OperationalStructure({
       <Model
         spec={spec}
         health={health}
-        tint={structureModelTint(offline)}
+        tint={skinTint ?? structureModelTint(offline)}
         rotation-y={modelRotationY(variant)}
       />
     </ModelBoundary>
@@ -1268,6 +1277,13 @@ function FundStructure({ building }: { building: Building }) {
 
 export function Structure({ building, x, z, focusedId, onPick }: StructureProps) {
   const style = useMemo(() => buildingStyle(building.kind), [building.kind]);
+  // EM-220: an owner-set skin overrides the OPERATIONAL body color only. The
+  // override layers UNDER healthTint (applied inside OperationalStructure), so
+  // soot still composes on top; an unknown/absent skin is ignored (→ kind body).
+  const operationalStyle = useMemo<BuildingStyle>(() => {
+    const skinBody = skinPalette(building.skin);
+    return skinBody ? { ...style, body: skinBody } : style;
+  }, [style, building.skin]);
   const { variant, spec } = useMemo(
     () => resolveStructureModel(building.kind),
     [building.kind],
@@ -1345,11 +1361,12 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
 
         {(building.status === 'operational' || building.status === 'offline') && (
           <OperationalStructure
-            style={style}
+            style={operationalStyle}
             variant={variant}
             spec={spec}
             offline={building.status === 'offline'}
             health={building.health}
+            skinTint={skinPalette(building.skin)}
           />
         )}
 
