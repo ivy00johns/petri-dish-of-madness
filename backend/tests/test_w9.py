@@ -399,12 +399,18 @@ async def test_animal_turns_ignore_inflight_agent_turn_id_sentinel():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _replay_materials(repo: SQLiteRepository, run_id: int, tick: int) -> dict:
-    """Repository-equivalent of GET /api/replay (api.openapi.yaml v1.2.0)."""
+    """Repository-equivalent of GET /api/replay (api.openapi.yaml v1.2.0).
+
+    Mirrors the handler's profile_color enrichment (derived from `profile` at the
+    backfill boundary so chips render on history) — the module `_loop` is the
+    monkeypatched loop at call time, so the colors match the handler's output."""
+    from petridish.api.app import _enrich_profile_colors
     base = repo.nearest_snapshot(run_id, tick)
     from_tick = (base["tick"] + 1) if base is not None else 0
     return {"base": base,
-            "events": repo.get_events(run_id, from_tick=from_tick,
-                                      to_tick=tick, order="asc")}
+            "events": _enrich_profile_colors(
+                repo.get_events(run_id, from_tick=from_tick,
+                                to_tick=tick, order="asc"))}
 
 
 def _fold_agent_state(
