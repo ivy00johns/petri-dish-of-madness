@@ -194,6 +194,22 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
   ],
 };
 
+/**
+ * EM-216b — VILLAGER variety pool. Every agent picks one of these distinct CC0
+ * humanoid meshes by agent id (characterAnim.villagerModelFor) so the cast
+ * isn't all the same Rogue — deterministic + replay-safe (EM-155). Slot 0 is
+ * the KayKit Rogue (= the CHARACTER_MODELS.villager default). The Quaternius
+ * civilians carry their OWN rig; clip names were normalized to Idle/Walk at
+ * vendor time and are read per-model (`spec.clips`), so the mixed rigs coexist.
+ */
+export const VILLAGER_POOL: ModelSpec[] = [
+  { url: `${KAYKIT_ADVENTURERS}/villager.glb`, scale: 0.5, yOffset: 0, clips: { idle: 'Idle', walk: 'Walking_A' } },
+  { url: `${QUATERNIUS}/villager-human.glb`, scale: 0.2, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  { url: `${QUATERNIUS}/villager-man.glb`, scale: 0.227, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  { url: `${QUATERNIUS}/villager-woman.glb`, scale: 0.236, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  { url: `${QUATERNIUS}/villager-woman2.glb`, scale: 0.235, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+];
+
 /** Every non-null spec across all registries + variety pools (preload + tests). */
 export function allModelSpecs(): ModelSpec[] {
   const specs = [
@@ -201,6 +217,7 @@ export function allModelSpecs(): ModelSpec[] {
     ...Object.values(PLACE_MODELS),
     ...Object.values(CHARACTER_MODELS),
     ...Object.values(MODEL_POOLS).flat(),
+    ...VILLAGER_POOL,
   ].filter((s): s is ModelSpec => s != null);
   // De-dupe by url (a model may serve several keys / pools).
   const seen = new Set<string>();

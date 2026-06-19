@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   clipFor,
   critterModelFor,
+  villagerModelFor,
   nextMoving,
   stepYaw,
   wrapAngle,
@@ -14,7 +15,7 @@ import {
   CRITTER_MOVE,
   VILLAGER_MOVE,
 } from './characterAnim';
-import { CHARACTER_MODELS } from './assets/models';
+import { CHARACTER_MODELS, VILLAGER_POOL } from './assets/models';
 
 describe('nextMoving (hysteresis)', () => {
   const T = { start: 0.05, stop: 0.02 };
@@ -160,5 +161,21 @@ describe('critterModelFor (species → GLB)', () => {
     expect(critterModelFor('')).toBeNull();
     expect(critterModelFor('CAT')).toBeNull(); // species ids are lowercase
     expect(critterModelFor('dragon')).toBeNull(); // a god-spawned exotic
+  });
+});
+
+describe('villagerModelFor (EM-216b per-agent mesh)', () => {
+  it('picks a stable, distributed villager from the agent id', () => {
+    const ids = Array.from({ length: 30 }, (_, i) => `agent_${i}`);
+    const picks = ids.map((id) => villagerModelFor(id));
+    for (const p of picks) expect(VILLAGER_POOL).toContain(p); // always a pool member
+    expect(villagerModelFor('agent_0')).toBe(villagerModelFor('agent_0')); // deterministic
+    expect(new Set(picks.map((s) => s.url)).size).toBeGreaterThan(1); // distributes
+  });
+
+  it('falls back to slot 0 (the default villager) for a missing id', () => {
+    expect(villagerModelFor('')).toBe(VILLAGER_POOL[0]);
+    expect(villagerModelFor(null)).toBe(VILLAGER_POOL[0]);
+    expect(VILLAGER_POOL[0].url).toBe(CHARACTER_MODELS.villager!.url);
   });
 });

@@ -35,6 +35,7 @@ import {
   MODEL_REGISTRY,
   MODEL_POOLS,
   PLACE_MODELS,
+  VILLAGER_POOL,
   allModelSpecs,
   type ModelSpec,
 } from './models';
@@ -268,6 +269,29 @@ describe('MODEL_POOLS (EM-216b variety)', () => {
       }
     }
   });
+});
+
+// ── EM-216b: villager variety pool ───────────────────────────────────────────
+
+describe('VILLAGER_POOL (EM-216b variety)', () => {
+  it('has ≥2 distinct meshes; slot 0 is the KayKit villager default', () => {
+    expect(VILLAGER_POOL.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(VILLAGER_POOL.map((s) => s.url)).size).toBe(VILLAGER_POOL.length);
+    expect(VILLAGER_POOL[0].url).toBe(CHARACTER_MODELS.villager!.url);
+  });
+
+  it.each(VILLAGER_POOL.map((s) => [s.url, s] as const))(
+    '%s declares idle/walk clips that exist in the GLB and scales ~human height',
+    (_url, spec) => {
+      const json = readGlbJson(diskPath(spec));
+      const names = (json.animations ?? []).map((a) => a.name);
+      expect(names, `${spec.url} idle`).toContain(spec.clips!.idle);
+      expect(names, `${spec.url} walk`).toContain(spec.clips!.walk);
+      const h = glbBounds(json).size.y * spec.scale;
+      expect(h, `${spec.url} height`).toBeGreaterThanOrEqual(0.8);
+      expect(h, `${spec.url} height`).toBeLessThanOrEqual(1.6);
+    },
+  );
 });
 
 // ── Declared clips exist in the GLBs ─────────────────────────────────────────
