@@ -128,3 +128,16 @@ Source: user /orchestrator request ("review plan and workflow ultracode them") �
 - [x] QE agent — coordination/qa-report.json (wave-E, proceed=true); MAJOR fixed same-wave (d13a63c).
 - [ ] `frontend-design` / `ui-ux-pro-max` — offered to B6/B7; not invoked: both batches extend an established token/design system with no novel styling decisions (documented in B6 report).
 - [ ] `render-sanity` / `ux-review` — deferred: feed/console/graph changes are component-tested (579 web tests) and the 3-D label work is proximity-gated; a browser pass rides the next UX review on merged main (standing deferral, see ledger).
+
+## Wave K — The Builders' City (2026-06-18)
+Source: docs/superpowers/specs/2026-06-18-builders-city-design.md · contracts/wave-k.md · EM-216–221 + EM-182
+
+- [x] `brainstorming` — ✅ produced the spec + locked decisions (props=Animal-pattern, permissive catalog, ~70% demolish, modest cap, district placement).
+- [x] `orchestrator` — ✅ ultracode Workflow mode: 3 workflows (implement-core, implement-god, verify); contracts + gates + commits inline.
+- [x] `contract-author` — ✅ `contracts/wave-k.md` + action-protocol/events schema updates; response shapes pinned after the verify pass.
+- [x] QE agent — ✅ `backend/tests/test_wave_k_integration.py` + qa-report (914, proceed); + 2 adversarial reviewers found 4 real bugs, all fixed (+8 regression tests).
+- [x] `design-token-guard` — ✅ new god-console DOM uses existing lab tokens; diff check shows zero new inline-style/hex violations.
+- [x] production build — ✅ `tsc -b` exit 0 + `vite build` ✓ (caught + fixed 2 test-stub type errors the agents' `tsc --noEmit` missed). Backend 922 / web 803.
+- [ ] `render-sanity` / `ux-review` — deferred: full live walk needs the whole stack up (uvicorn + vite dev + live MockProvider run); substituted with component render tests + production build + token diff. See BUILD_RESULTS_WAVE_K.md §Deferred.
+- [ ] `nano-banana` / `ui-ux-pro-max` / `frontend-design` — N/A: no new UI screens/imagery; god UI reuses existing ControlPanel tokens, 3-D uses existing CC0 GLBs.
+- [~] EM-216 new-kit acquisition — HITL follow-on: registry side done (wired to vendored GLBs); new Kenney kits need network + gltfjsx/toon pipeline.
