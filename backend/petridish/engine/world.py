@@ -1439,6 +1439,130 @@ class World:
         }
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Wave K / EM-221 — GOD console mutations (Wave 2). Thin god-owned twins of the
+    # agent reflex tools above: they REUSE the same internals (_prop_id /
+    # _prop_offset / _props_max_population for placement; _demolish_building for
+    # demolish; building.skin for reskin) so the god path and the agent path stay
+    # byte-identical in snapshots — a god mutation serializes + replays exactly like
+    # an agent one (EM-155 determinism). God-owned ⇒ owner_id is None (so any
+    # co-located agent can later clear a god prop). God demolish/reskin are
+    # OVERRIDES: immediate, regardless of owner/landmark/governance. Each returns
+    # the emitted god-ink event(s); the API layer stamps actor_type "god" +
+    # payload.method and does the single world_state broadcast (mirrors
+    # /api/god/rewild). NO standing LLM calls.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def god_place_prop(self, kind: str, place: str, count: int = 1) -> list[dict]:
+        """Place `count` god-owned props at `place`, reusing the exact placement
+        internals of action_place_prop (seeded id + deterministic ring offset),
+        but owner_id=None (god/seeded — a co-located agent may later clear it).
+        Returns one prop_placed event per prop actually placed; stops short at the
+        population cap (cap_reached is observable by the caller as a short list).
+        Raises ValueError on a bad kind/place so the API can 4xx like the existing
+        endpoints (the god path validates UP FRONT rather than emitting a
+        per-prop parse_failure the way the agent turn does)."""
+        kind = str(kind or "").strip()[:30]
+        if not kind:
+            raise ValueError("kind required")
+        place = str(place or "").strip()
+        if place not in self.places:
+            raise ValueError(f"unknown place {place!r}")
+        cap = self._props_max_population()
+        events: list[dict] = []
+        for _ in range(max(0, int(count))):
+            if cap > 0 and len(self.props) >= cap:
+                break  # cap reached — return what we managed to place
+            ordinal = sum(1 for p in self.props.values() if p.place == place)
+            seed_ord = ordinal
+            prop_id = self._prop_id(place, kind, seed_ord)
+            while prop_id in self.props:
+                seed_ord += 1
+                prop_id = self._prop_id(place, kind, seed_ord)
+            dx, dz = self._prop_offset(ordinal)
+            prop = Prop(
+                id=prop_id, kind=kind, place=place, dx=dx, dz=dz,
+                owner_id=None, created_tick=self.tick,
+            )
+            self.props[prop.id] = prop
+            events.append({
+                "kind": "prop_placed",
+                "actor_id": "god",
+                "text": f"A {kind} appears at {self.places[place].name}.",
+                "payload": {
+                    "prop_id": prop.id,
+                    "kind": prop.kind,
+                    "place": prop.place,
+                    "owner_id": prop.owner_id,
+                },
+            })
+        return events
+
+    def god_clear_props(self, place: str | None = None) -> list[dict]:
+        """Remove props at `place`, or ALL props when `place` is None. Reuses the
+        same registry mutation as action_remove_prop (a plain del) — no ownership
+        gate (god override). Raises ValueError on an unknown `place` so the API can
+        4xx. Returns one prop_removed event per prop cleared."""
+        if place is not None:
+            place = str(place).strip()
+            if place not in self.places:
+                raise ValueError(f"unknown place {place!r}")
+        targets = [
+            p for p in self.props.values()
+            if place is None or p.place == place
+        ]
+        events: list[dict] = []
+        for prop in targets:
+            del self.props[prop.id]
+            events.append({
+                "kind": "prop_removed",
+                "actor_id": "god",
+                "text": f"The {prop.kind} vanishes.",
+                "payload": {
+                    "prop_id": prop.id,
+                    "kind": prop.kind,
+                    "place": prop.place,
+                },
+            })
+        return events
+
+    def god_demolish(self, building_id: str) -> dict:
+        """God OVERRIDE demolish: immediate, regardless of owner/landmark/
+        governance. Reuses the shared _demolish_building path (same status flip +
+        lot free) the owner tool and the governance effect use, so the god demolish
+        is byte-identical in snapshots. Raises ValueError (unknown / already
+        rubble) so the API can 4xx. Returns the building_demolished event (by
+        'god')."""
+        building = self.buildings.get(str(building_id))
+        if building is None:
+            raise ValueError("building_not_found")
+        if building.status == "destroyed":
+            raise ValueError("already destroyed")
+        return self._demolish_building(building, "god", "god")
+
+    def god_reskin(self, building_id: str, skin: str) -> dict:
+        """God re-skins ANY building (override — no owner gate), reusing the exact
+        skin field + clamp of action_set_building_skin. An empty skin clears it
+        back to the default. Raises ValueError (unknown building) so the API can
+        4xx. Returns the building_reskinned event."""
+        building = self.buildings.get(str(building_id))
+        if building is None:
+            raise ValueError("building_not_found")
+        skin = str(skin or "").strip()[:24]
+        building.skin = skin or None
+        building.updated_tick = self.tick
+        return {
+            "kind": "building_reskinned",
+            "actor_id": "god",
+            "target_id": building.id,
+            "text": f"{building.name} is re-skinned"
+                    + (f" in {skin}." if skin else " back to its plain finish."),
+            "payload": {
+                "building_id": building.id,
+                "skin": building.skin,
+            },
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Social actions
     # ──────────────────────────────────────────────────────────────────────────
 

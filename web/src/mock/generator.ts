@@ -153,6 +153,10 @@ function seedProps(): Prop[] {
   ];
 }
 let props: Prop[] = seedProps();
+// Wave K (EM-221): monotonic counter for god-placed mock prop ids. The live
+// backend derives prop ids from a seeded hash; the mock just hand-stamps them
+// so they stay stable + collision-free within a session.
+let propCounter = 0;
 
 // A small library of buildable projects (kind + funds + function + cost).
 const PROJECT_BLUEPRINTS: Array<{ name: string; kind: string; funds: number; fn: string }> = [
@@ -1430,6 +1434,190 @@ function postBillboardMock(text: string, inReplyTo?: string): { state: WorldStat
   return { state, events: [evt] };
 }
 
+// ── Builders (Wave K / EM-221) — god-console BUILDERS mock fallbacks ─────────
+// Mirror the live god endpoints (contract §5) against the mock world state, and
+// emit the contract §4 events (prop_placed / prop_removed / building_demolished
+// / building_reskinned) — the same events the live backend broadcasts. Each
+// returns the fresh world_state + events so the 3D PlacedProps/Structure
+// renderers update offline too.
+
+/** A consistent world_state snapshot (mirrors the spawn helpers' tail). */
+function snapshotState(): WorldState {
+  return {
+    type: 'world_state',
+    seq: nextSeq(),
+    tick, day, running,
+    tick_interval_seconds: tickIntervalSeconds,
+    places: PLACES,
+    agents: agents.map(a => ({ ...a })),
+    rules: rules.map(r => ({ ...r })),
+    profiles: PROFILES,
+    buildings: buildings.map(b => ({ ...b, contributors: [...b.contributors] })),
+    animals: animals.map(a => ({ ...a })),
+    billboard: billboard.map(p => ({ ...p })),
+    props: props.map(p => ({ ...p })),
+  };
+}
+
+/**
+ * POST /api/god/place_prop {kind, place, count?} — place `count` props at a
+ * place. Deterministic small-ring (dx,dz) offset from the running count at the
+ * place (mirrors the engine), so co-located props fan out. Emits one
+ * prop_placed per prop. Returns {placed}.
+ */
+export function placePropMock(spec: { kind: string; place: string; count?: number }): {
+  state: WorldState;
+  events: WorldEvent[];
+  placed: number;
+} {
+  const kind = spec.kind.trim().slice(0, 30) || 'prop';
+  const place = PLACES.some(p => p.id === spec.place) ? spec.place : 'plaza';
+  const count = Math.max(1, Math.min(8, Math.floor(spec.count ?? 1)));
+  const placeName = PLACES.find(p => p.id === place)?.name ?? place;
+  const events: WorldEvent[] = [];
+  for (let i = 0; i < count; i++) {
+    propCounter += 1;
+    // Deterministic ring offset keyed off how many props already sit here.
+    const ordinal = props.filter(p => p.place === place).length;
+    const angle = ordinal * 2.399963; // golden-angle spread (radians)
+    const radius = 1.2 + (ordinal % 3) * 0.6; // ≤ ~3u, mirrors the engine
+    const id = `prop-god-${propCounter}`;
+    const newProp: Prop = {
+      id,
+      kind,
+      place,
+      dx: Math.round(Math.cos(angle) * radius * 100) / 100,
+      dz: Math.round(Math.sin(angle) * radius * 100) / 100,
+      owner_id: null,
+    };
+    props.push(newProp);
+    events.push({
+      type: 'event',
+      seq: nextSeq(),
+      tick,
+      kind: 'prop_placed',
+      actor_id: 'god',
+      target_id: null,
+      profile: null,
+      profile_color: null,
+      text: `✦ A ${kind} appears at ${placeName}.`,
+      payload: { prop_id: id, kind, place, owner_id: null },
+      ts: new Date().toISOString(),
+      turn_id: null,
+      actor_type: 'god',
+      sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+    });
+  }
+  return { state: snapshotState(), events, placed: count };
+}
+
+/**
+ * POST /api/god/clear_props {place?} — remove every prop at `place` (or ALL
+ * props when place is omitted). Emits one prop_removed per removed prop.
+ * Returns {cleared}.
+ */
+export function clearPropsMock(spec: { place?: string } = {}): {
+  state: WorldState;
+  events: WorldEvent[];
+  cleared: number;
+} {
+  const place = spec.place;
+  const removed = place ? props.filter(p => p.place === place) : props.slice();
+  props = place ? props.filter(p => p.place !== place) : [];
+  const events: WorldEvent[] = removed.map(p => ({
+    type: 'event' as const,
+    seq: nextSeq(),
+    tick,
+    kind: 'prop_removed',
+    actor_id: 'god',
+    target_id: null,
+    profile: null,
+    profile_color: null,
+    text: `✦ The ${p.kind} is cleared away.`,
+    payload: { prop_id: p.id, kind: p.kind, place: p.place },
+    ts: new Date().toISOString(),
+    turn_id: null,
+    actor_type: 'god' as const,
+    sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+  }));
+  return { state: snapshotState(), events, cleared: removed.length };
+}
+
+/**
+ * POST /api/god/demolish {building_id} — god override demolish. Emits
+ * building_demolished and drops the building from the world. Returns
+ * {demolished} (false when the id is unknown).
+ */
+export function demolishMock(spec: { building_id: string }): {
+  state: WorldState;
+  events: WorldEvent[];
+  demolished: boolean;
+} {
+  const target = buildings.find(b => b.id === spec.building_id);
+  if (!target) {
+    return { state: snapshotState(), events: [], demolished: false };
+  }
+  buildings = buildings.filter(b => b.id !== spec.building_id);
+  const placeName = PLACES.find(p => p.id === target.location)?.name ?? target.location;
+  const evt: WorldEvent = {
+    type: 'event',
+    seq: nextSeq(),
+    tick,
+    kind: 'building_demolished',
+    actor_id: 'god',
+    target_id: target.id,
+    profile: null,
+    profile_color: null,
+    text: `✦ The ${target.name} is demolished at ${placeName}.`,
+    payload: {
+      building_id: target.id,
+      kind: target.kind,
+      name: target.name,
+      place: target.location,
+      by: 'god',
+    },
+    ts: new Date().toISOString(),
+    turn_id: null,
+    actor_type: 'god',
+    sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+  };
+  return { state: snapshotState(), events: [evt], demolished: true };
+}
+
+/**
+ * POST /api/god/reskin {building_id, skin} — set a building's color skin. Emits
+ * building_reskinned. Returns {reskinned} (false when the id is unknown).
+ */
+export function reskinMock(spec: { building_id: string; skin: string }): {
+  state: WorldState;
+  events: WorldEvent[];
+  reskinned: boolean;
+} {
+  const target = buildings.find(b => b.id === spec.building_id);
+  if (!target) {
+    return { state: snapshotState(), events: [], reskinned: false };
+  }
+  const skin = spec.skin.trim().slice(0, 24);
+  target.skin = skin || null;
+  const evt: WorldEvent = {
+    type: 'event',
+    seq: nextSeq(),
+    tick,
+    kind: 'building_reskinned',
+    actor_id: 'god',
+    target_id: target.id,
+    profile: null,
+    profile_color: null,
+    text: `✦ The ${target.name} is reskinned ${skin || 'plain'}.`,
+    payload: { building_id: target.id, skin: target.skin },
+    ts: new Date().toISOString(),
+    turn_id: null,
+    actor_type: 'god',
+    sim_time: Math.round(tick * TICK_INTERVAL * 1000) / 1000,
+  };
+  return { state: snapshotState(), events: [evt], reskinned: true };
+}
+
 // External controls for mock mode
 export const mockControls = {
   start: () => { running = true; },
@@ -1447,6 +1635,11 @@ export const mockControls = {
   spawnAnimal: (spec: { species: string; name?: string; location?: string }) => spawnAnimalMock(spec),
   /** W11b (EM-091d): god reply on the billboard — mirrors POST /api/billboard. */
   postBillboard: (text: string, inReplyTo?: string) => postBillboardMock(text, inReplyTo),
+  /** Wave K (EM-221): BUILDERS god console — mirror the §5 god endpoints. */
+  placeProp: (spec: { kind: string; place: string; count?: number }) => placePropMock(spec),
+  clearProps: (spec: { place?: string } = {}) => clearPropsMock(spec),
+  demolish: (spec: { building_id: string }) => demolishMock(spec),
+  reskin: (spec: { building_id: string; skin: string }) => reskinMock(spec),
   isRunning: () => running,
   getProfiles: () => PROFILES,
   /** W10/D5: mirror the live backend — speed changes land in world_state. */
@@ -1473,6 +1666,7 @@ export const mockControls = {
     lastActivityTick.clear();
     animals = seedAnimals();
     props = seedProps();
+    propCounter = 0;
     billboard = [];
     openCommitments = [];
     commitmentCounter = 0;

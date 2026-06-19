@@ -98,6 +98,30 @@ export interface SimulationControls {
    */
   triggerZooEscape: (zooBuildingId?: string) => Promise<{ escaped: number; zoos: number }>;
   /**
+   * Wave K (EM-221): BUILDERS god console — place `count` props of `kind` at a
+   * place. Live: POST /api/god/place_prop {kind, place, count?}; mock:
+   * synthesize prop_placed events. Returns {placed}.
+   */
+  placeProp: (spec: { kind: string; place: string; count?: number }) => Promise<{ placed: number }>;
+  /**
+   * Wave K (EM-221): clear props at a place (or ALL when place is omitted).
+   * Live: POST /api/god/clear_props {place?}; mock: synthesize prop_removed
+   * events. Returns {cleared}.
+   */
+  clearProps: (place?: string) => Promise<{ cleared: number }>;
+  /**
+   * Wave K (EM-221): god-override demolish a building. Live: POST
+   * /api/god/demolish {building_id}; mock: synthesize building_demolished.
+   * Returns {demolished}.
+   */
+  godDemolish: (buildingId: string) => Promise<{ demolished: boolean }>;
+  /**
+   * Wave K (EM-221): set a building's color skin. Live: POST /api/god/reskin
+   * {building_id, skin}; mock: synthesize building_reskinned. Returns
+   * {reskinned}.
+   */
+  godReskin: (buildingId: string, skin: string) => Promise<{ reskinned: boolean }>;
+  /**
    * W11b (EM-091d): god reply on the village billboard. Live: POST
    * /api/billboard {text, in_reply_to?} with NO optimistic echo — the backend
    * emits billboard_posted (actor_type:"god") over the WS and the feed/panel
@@ -693,6 +717,117 @@ export function useSimulation(): SimulationState & SimulationControls {
     }
   }, [mockMode, world, pushHistory, nextSyntheticSeq]);
 
+  // Wave K (EM-221): BUILDERS god console. Each mirrors the rewild/zooEscape
+  // shape — mock synthesizes the contract §4 events (and mutates the mock world
+  // so the 3D renderers update); live POSTs the §5 endpoint and returns its
+  // JSON, degrading to a no-op result on a network error.
+  const placeProp = useCallback(
+    async (spec: { kind: string; place: string; count?: number }): Promise<{ placed: number }> => {
+      if (mockMode) {
+        const { state, events: newEvents, placed } = mockControls.placeProp(spec);
+        setWorld(state);
+        setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+        pushHistory(newEvents);
+        return { placed };
+      }
+      try {
+        const res = await fetch('/api/god/place_prop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind: spec.kind,
+            place: spec.place,
+            ...(spec.count !== undefined ? { count: spec.count } : {}),
+          }),
+        });
+        if (res.ok) return (await res.json()) as { placed: number };
+      } catch {
+        // network error — fall through
+      }
+      return { placed: 0 };
+    },
+    [mockMode, pushHistory],
+  );
+
+  const clearProps = useCallback(
+    async (place?: string): Promise<{ cleared: number }> => {
+      if (mockMode) {
+        const { state, events: newEvents, cleared } = mockControls.clearProps(
+          place ? { place } : {},
+        );
+        setWorld(state);
+        setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+        pushHistory(newEvents);
+        return { cleared };
+      }
+      try {
+        const res = await fetch('/api/god/clear_props', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(place ? { place } : {}),
+        });
+        if (res.ok) return (await res.json()) as { cleared: number };
+      } catch {
+        // network error — fall through
+      }
+      return { cleared: 0 };
+    },
+    [mockMode, pushHistory],
+  );
+
+  const godDemolish = useCallback(
+    async (buildingId: string): Promise<{ demolished: boolean }> => {
+      if (mockMode) {
+        const { state, events: newEvents, demolished } = mockControls.demolish({
+          building_id: buildingId,
+        });
+        setWorld(state);
+        setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+        pushHistory(newEvents);
+        return { demolished };
+      }
+      try {
+        const res = await fetch('/api/god/demolish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ building_id: buildingId }),
+        });
+        if (res.ok) return (await res.json()) as { demolished: boolean };
+      } catch {
+        // network error — fall through
+      }
+      return { demolished: false };
+    },
+    [mockMode, pushHistory],
+  );
+
+  const godReskin = useCallback(
+    async (buildingId: string, skin: string): Promise<{ reskinned: boolean }> => {
+      if (mockMode) {
+        const { state, events: newEvents, reskinned } = mockControls.reskin({
+          building_id: buildingId,
+          skin,
+        });
+        setWorld(state);
+        setEvents(prev => [...newEvents, ...prev].slice(0, MAX_EVENTS));
+        pushHistory(newEvents);
+        return { reskinned };
+      }
+      try {
+        const res = await fetch('/api/god/reskin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ building_id: buildingId, skin }),
+        });
+        if (res.ok) return (await res.json()) as { reskinned: boolean };
+      } catch {
+        // network error — fall through
+      }
+      return { reskinned: false };
+    },
+    [mockMode, pushHistory],
+  );
+
   // W11b (EM-091d): god reply on the billboard. Live mode is optimistic-FREE
   // by contract — we wait for the WS billboard_posted event rather than
   // synthesizing a local echo (a failed POST must not leave a ghost post).
@@ -760,6 +895,10 @@ export function useSimulation(): SimulationState & SimulationControls {
     spawnAnimal,
     rewild,
     triggerZooEscape,
+    placeProp,
+    clearProps,
+    godDemolish,
+    godReskin,
     postBillboard,
     getProfiles,
     seekTick,
