@@ -141,3 +141,17 @@ Source: docs/superpowers/specs/2026-06-18-builders-city-design.md · contracts/w
 - [ ] `render-sanity` / `ux-review` — deferred: full live walk needs the whole stack up (uvicorn + vite dev + live MockProvider run); substituted with component render tests + production build + token diff. See BUILD_RESULTS_WAVE_K.md §Deferred.
 - [ ] `nano-banana` / `ui-ux-pro-max` / `frontend-design` — N/A: no new UI screens/imagery; god UI reuses existing ControlPanel tokens, 3-D uses existing CC0 GLBs.
 - [~] EM-216 new-kit acquisition — HITL follow-on: registry side done (wired to vendored GLBs); new Kenney kits need network + gltfjsx/toon pipeline.
+
+## Wave I — The Atelier (2026-06-19)
+Source: docs/REMAINING-WORK.md Wave I (EM-210→213) · contracts/wave-i-atelier.md v1.0.0 · branch build/wave-i-atelier
+Runtime: Workflow mode (ultracode). Design/contracts inline; implement + verify via Workflow scripts. Scope: full arc I1→I4, defer I5 audio (EM-214); Pollinations-default provider, replay-safe seeded IDs (user-approved 2026-06-19).
+
+- [x] `orchestrator` — ✅ driving this build.
+- [x] seam mapping — ✅ 3 parallel `Explore` agents (backend reflex/scheduler/billboard · governance/replay · API/static/frontend).
+- [x] `contract-author` — ✅ authored inline: `contracts/wave-i-atelier.md` v1.0.0.
+- [ ] QE agent — MANDATORY; `coordination/qa-report.json` per slice, hermetic (`EM_IMAGEGEN_MOCK`).
+- [ ] wave gate — `pytest` + `npm test` + `tsc -b` + `vite build` green between every wave.
+- [ ] `design-token-guard` — UI waves (I1/I4); zero NEW violations (EM-193 ratchet).
+- [ ] `nano-banana` — build-time seed art for the default/empty banner + NoticeBoard state (named in the Wave I research; build-time only, NOT a runtime call).
+- [ ] `render-sanity` / `ux-review` — post-build browser pass IF the full stack is up (uvicorn + vite + live Mock run); else record a deferral reason (standing pattern since W11b).
+- [ ] `/code-review` (external CLI) — Phase-4 diff review is user-triggered/billed; note as a handoff, do not auto-run.
