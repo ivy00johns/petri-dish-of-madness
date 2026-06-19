@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..config.loader import load_config, load_personas, WorldConfig
@@ -544,6 +545,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Wave I / EM-210 — serve the Atelier's generated PNGs. The loop writes them to
+# data/assets/images/<image_id>.png (an external side-artifact, off the replay
+# surface); the frontend reads the relative /assets/images/<id>.png url straight
+# from the gallery/event payload. The dir is created on boot if missing (so the
+# StaticFiles mount + the test client never error on a fresh checkout).
+try:
+    from pathlib import Path as _AssetsPath
+    _assets_dir = _AssetsPath(__file__).resolve().parents[3] / "data" / "assets"
+    _assets_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+except Exception as _assets_exc:  # pragma: no cover - defensive (read-only FS etc.)
+    log.warning("static /assets mount failed: %s", _assets_exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

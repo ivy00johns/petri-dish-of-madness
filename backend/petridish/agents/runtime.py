@@ -97,6 +97,9 @@ ACTION_SCHEMA = {
                 "repair", "arson", "take_offline",
                 # W11b / EM-091 — billboard reflex tools (plaza/townhall only).
                 "post_billboard", "read_billboard",
+                # Wave I / EM-210+211 — The Atelier reflex tools: generate art
+                # anywhere; share an existing gallery image on the billboard.
+                "create_image", "post_image",
                 # Wave H4 / EM-209 — pets & bonds: adopt a co-located unowned
                 # animal, feed a co-located one (owner sustains a declining pet).
                 "adopt", "feed_pet",
@@ -140,6 +143,8 @@ ACTION_SCHEMA = {
                             "propose_project", "contribute_funds", "build_step",
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
+                            # Wave I / EM-210+211 — The Atelier reflex tools.
+                            "create_image", "post_image",
                             "adopt", "feed_pet",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
@@ -193,6 +198,16 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
+         }}}}},
+        # Wave I / EM-210+211 — The Atelier: create_image REQUIRES a prompt (≤240);
+        # post_image takes an OPTIONAL image_id (defaults to the agent's newest).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "create_image"}}},
+         "then": {"properties": {"args": {"required": ["prompt"], "properties": {
+             "prompt": {"type": "string", "maxLength": 240},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "post_image"}}},
+         "then": {"properties": {"args": {"properties": {
+             "image_id": {"type": "string"},
          }}}}},
         # Wave H4 / EM-209 — pets & bonds: both reflex tools require an animal_id.
         {"if": {"required": ["action"], "properties": {"action": {"const": "adopt"}}},
@@ -278,6 +293,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # turn's response args (zero extra LLM calls).
     "post_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
     "read_billboard":   {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
+    # Wave I / EM-210+211 — The Atelier reflex tools 🟢: create_image is UNGATED
+    # (make art anywhere); post_image is @billboard-gated (share it where the board
+    # stands). Both zero extra LLM calls — the prompt/choice rides the agent's
+    # existing turn; the PNG bytes come from a free endpoint OFF the critical path.
+    "create_image":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "post_image":       {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
     # Wave H4 / EM-209 — pets & bonds reflex tools 🟢: no location_gate (the
     # CO-LOCATION gate is animal-specific and enforced in _validate_world), no
     # agreement_gate. adopt claims a co-located unowned animal; feed_pet restores
@@ -1202,8 +1223,12 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # W9 / EM-073 B3: ban_arson is proposable (mirrors world.action_propose_rule).
         # PROTOTYPE (god-channel): name_town — name the town by consensus vote.
         # Wave K / EM-219: demolish — public/landmark demolish by consensus vote.
+        # Wave I / EM-212: promote_image — vote a gallery image onto the plaza banner.
+        # FINDING 1 — promote_image MUST be in this set, else a valid proposal is
+        # rejected at the runtime gate BEFORE it reaches world.action_propose_rule
+        # (the gate is the agent's only path; QA passed only by bypassing it).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town", "demolish"}
+                         "ban_arson", "name_town", "demolish", "promote_image"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         if effect == "name_town" and not str(args.get("name") or "").strip():
@@ -1215,6 +1240,16 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                 return "demolish requires args.target = the id of a real building to tear down"
             if _building_field(building, "status") == "destroyed":
                 return f"building '{target}' is already destroyed"
+        if effect == "promote_image":
+            # Mirror demolish's target existence check: the proposed image must be
+            # a real gallery record (the id may arrive via image_id OR the generic
+            # target arg — the world handler maps either key).
+            image_id = str(args.get("image_id") or args.get("target") or "").strip()
+            gallery = getattr(world, "gallery", []) or []
+            if not image_id:
+                return "promote_image requires args.image_id = the id of a gallery image to hang over the plaza"
+            if not any(g.get("image_id") == image_id for g in gallery):
+                return f"promote_image requires args.image_id of a real gallery image (got '{image_id}')"
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -1309,6 +1344,30 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return "the billboard stands at the plaza / town hall — move there first"
         if action == "post_billboard" and not str(args.get("text") or "").strip():
             return "post_billboard requires text"
+
+    # ── Wave I / EM-210+211 — The Atelier reflex tools ─────────────────────────
+    elif action == "create_image":
+        # Ungated (create art anywhere) — only a non-empty prompt is required.
+        if not str(args.get("prompt") or "").strip():
+            return "create_image requires a prompt describing the art to paint"
+
+    elif action == "post_image":
+        # @billboard-gated (mirror post_billboard). The image must exist + be the
+        # agent's (or public/promoted); an absent id defaults to the agent's newest.
+        billboard_here = getattr(world, "billboard_here", None)
+        if not (callable(billboard_here) and billboard_here(agent.location)):
+            return "the billboard stands at the plaza / town hall — move there first"
+        gallery = getattr(world, "gallery", []) or []
+        image_id = str(args.get("image_id") or "").strip()
+        if image_id:
+            record = next(
+                (g for g in gallery if g.get("image_id") == image_id), None)
+            if record is None:
+                return f"unknown image '{image_id}'"
+            if record.get("proposer_id") != agent.id and not record.get("promoted"):
+                return f"image '{image_id}' is not yours to post"
+        elif not any(g.get("proposer_id") == agent.id for g in gallery):
+            return "you have not painted anything to post — create_image first"
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation ───────────────
     elif action == "answer_proclamation":
@@ -1594,7 +1653,26 @@ def _assemble_context(
     # Governance actions are gated to a governance place. EM-163: PROPOSING is
     # tier-gated off the background menu (_tier_ok); voting stays for everyone.
     if _gate_ok("propose_rule") and _tier_ok("propose_rule"):
-        valid_actions.append("propose_rule (effect, text) - effect: ban_stealing|ubi|recharge_subsidy|work_bonus|ban_arson|name_town|demolish (name_town also needs name=<the town's new name>; demolish needs target=<a public building's id> to tear it down by vote; it is decided by majority vote)")
+        propose_line = ("propose_rule (effect, text) - effect: ban_stealing|ubi|"
+                        "recharge_subsidy|work_bonus|ban_arson|name_town|demolish")
+        propose_tail = ("name_town also needs name=<the town's new name>; demolish "
+                        "needs target=<a public building's id> to tear it down by vote")
+        # Wave I / EM-212 — FINDING 1(b): offer promote_image with a CONCRETE,
+        # promotable image_id so the model is actually offered the effect (and the
+        # menu/resolution agree — EM-108). The newest gallery image NOT already on
+        # the banner is promotable; if there is none, the effect is omitted (so the
+        # menu never names an image that would be rejected as a no-op re-promotion).
+        _gallery_now = getattr(world, "gallery", []) or []
+        _banner_ref = getattr(world, "plaza_banner_ref", "") or ""
+        _promotable = next(
+            (g.get("image_id") for g in reversed(_gallery_now)
+             if g.get("image_id") and g.get("image_id") != _banner_ref),
+            None)
+        if _promotable:
+            propose_line += "|promote_image"
+            propose_tail += (f"; promote_image needs image_id=<a gallery image's id, "
+                             f"e.g. {_promotable}> to hang it over the plaza by vote")
+        valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
@@ -1670,6 +1748,19 @@ def _assemble_context(
             "(everyone, and the watchers, can read it)")
         valid_actions.append(
             f"read_billboard - read the latest billboard posts ({len(board)} on the board)")
+
+    # ── Wave I / EM-210+211 — The Atelier (create art anywhere; post it at the
+    # board). create_image is always offered (reflex, ungated); post_image only at
+    # the board AND once the agent has painted something (menu/resolution agree —
+    # EM-108). The lines are short (prompt-diet aware — EM-161).
+    valid_actions.append(
+        "create_image (prompt) - paint art from a short text prompt for your town")
+    _gallery = getattr(world, "gallery", []) or []
+    _has_own_image = any(g.get("proposer_id") == agent.id for g in _gallery)
+    if _gate_ok("post_image") and _has_own_image:
+        valid_actions.append(
+            "post_image (image_id?) - hang one of your paintings on the billboard "
+            "(defaults to your newest)")
 
     # ── Wave H4 / EM-209 — pets & bonds (offered only when an eligible co-located
     # animal exists, so the menu stays small). adopt: a co-located UNOWNED animal;
@@ -4030,8 +4121,10 @@ class AgentRuntime:
             name = args.get("name")
             # Wave K / EM-219 — demolish carries the target building id.
             target = args.get("target") or args.get("building_id")
+            # Wave I / EM-212 — promote_image carries the gallery image id.
+            image_id = args.get("image_id")
             ok, reason, rule = self.world.action_propose_rule(
-                agent, effect, text, name, target)
+                agent, effect, text, name, target, image_id)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)
@@ -4193,6 +4286,15 @@ class AgentRuntime:
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────
         elif action == "post_billboard":
             result = self.world.action_post_billboard(agent, args.get("text", ""))
+            return _emit_world_result(result, base, thought)
+
+        # ── Wave I / EM-210+211 — The Atelier reflex tools ──────────────────────
+        elif action == "create_image":
+            result = self.world.action_create_image(agent, args.get("prompt", ""))
+            return _emit_world_result(result, base, thought)
+
+        elif action == "post_image":
+            result = self.world.action_post_image(agent, args.get("image_id"))
             return _emit_world_result(result, base, thought)
 
         elif action == "read_billboard":

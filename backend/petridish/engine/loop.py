@@ -10,6 +10,7 @@ import logging
 import random
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Any
 
 from dataclasses import asdict, is_dataclass
@@ -20,6 +21,7 @@ from ..animals.runtime import AnimalRuntime, _seed_int
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
 from ..config.loader import WorldConfig
+from ..imagegen import build_provider
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +173,18 @@ class TickLoop:
         # chapters). One at a time; cancelled on reset like the narrator task.
         self._chronicle_backfill_task: asyncio.Task | None = None
 
+        # Wave I / EM-210 — The Atelier: a bounded pool of best-effort PNG-fetch
+        # tasks drained from world.pending_image_fetches each turn. The provider is
+        # lazy (built on first use; honors EM_IMAGEGEN_MOCK in tests). The semaphore
+        # caps in-flight fetches at params.image_gen.max_concurrent — at cap we SKIP
+        # (skip-under-load), never queue. In-flight tasks are tracked so reset can
+        # cancel them alongside the narrator/animal tasks. The async task EMITS
+        # NOTHING (the gallery entry + image_posted are recorded synchronously at
+        # turn time); a failed fetch is swallowed and never stalls a tick.
+        self._image_provider = None
+        self._image_semaphore: asyncio.Semaphore | None = None
+        self._image_fetch_tasks: set[asyncio.Task] = set()
+
         # Wave E / EM-114 — seed the world's birth casting pool (the persona
         # library + the non-mock profile roster). The world has no view of
         # config-side casting state, so the loop — which owns every per-round
@@ -320,6 +334,22 @@ class TickLoop:
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("chronicle backfill raised during reset: %s", exc)
         self._chronicle_backfill_task = None
+        # Wave I / EM-210 — cancel any in-flight image fetches (they write the OLD
+        # run's side-artifacts; best-effort, so just cancel + await, swallowing).
+        if self._image_fetch_tasks:
+            for task in list(self._image_fetch_tasks):
+                if not task.done():
+                    task.cancel()
+            for task in list(self._image_fetch_tasks):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.debug("image fetch raised during reset: %s", exc)
+            self._image_fetch_tasks.clear()
+        # The semaphore is rebuilt lazily on next drain so a reset honors a new cap.
+        self._image_semaphore = None
         # W9 / EM-073 B2: properly await the cancelled tick task. A tick mid-LLM
         # call (30s timeout) could otherwise keep running and mutate the world we
         # are about to rebuild. (The old `asyncio.shield(asyncio.sleep(0.1))` was
@@ -682,6 +712,12 @@ class TickLoop:
             # Push events to agent memories
             for evt in events_to_emit:
                 self._runtime.push_event({**evt, "tick": tick})
+
+            # Wave I / EM-210 — drain any image-fetch requests this turn parked
+            # (create_image already recorded the gallery entry + emitted
+            # image_posted synchronously above; this only starts the best-effort
+            # PNG fetches). Bounded + skip-under-load; emits NOTHING.
+            self._drain_image_fetches()
 
             # Periodic snapshot to bound replay cost (EM-054 §5). W9 / EM-073 B8:
             # saved BEFORE the tick advances and labeled with the CURRENT tick, so
@@ -1509,6 +1545,85 @@ class TickLoop:
             evt.setdefault("turn_id", None)
             self._emit_event(evt)
         self._broadcast_world_state()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Wave I / EM-210 — The Atelier: drain the transient image-fetch outbox into
+    # bounded, fire-and-forget PNG fetches (semaphore, skip-under-load, swallow
+    # all errors). The async task EMITS NOTHING — off the replay surface.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _image_gen_cfg(self) -> Any:
+        return getattr(self._world.params, "image_gen", None)
+
+    def _image_max_concurrent(self) -> int:
+        cfg = self._image_gen_cfg()
+        try:
+            return max(1, int(getattr(cfg, "max_concurrent", 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    def _assets_images_dir(self) -> Path:
+        """data/assets/images at the repo root (parents[3] from this module),
+        matching the StaticFiles mount in api/app.py."""
+        return Path(__file__).resolve().parents[3] / "data" / "assets" / "images"
+
+    def _drain_image_fetches(self) -> None:
+        """Pop world.pending_image_fetches (transient outbox) and start a bounded,
+        best-effort PNG fetch per entry. NEVER raises (callable from the hot path);
+        an absent attribute (older world) is a no-op."""
+        pending = getattr(self._world, "pending_image_fetches", None)
+        if not pending:
+            return
+        # Drain the outbox now (transient by design — not snapshotted).
+        entries = list(pending)
+        pending.clear()
+        if self._image_provider is None:
+            try:
+                self._image_provider = build_provider()
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("image provider build failed: %s", exc)
+                return
+        if self._image_semaphore is None:
+            self._image_semaphore = asyncio.Semaphore(self._image_max_concurrent())
+        for entry in entries:
+            # Skip-under-load: at cap, drop the fetch (the gallery entry + event
+            # already exist; the PNG is simply absent → frontend fallback). Never
+            # an unbounded queue.
+            if self._image_semaphore.locked():
+                continue
+            try:
+                task = asyncio.create_task(self._spawn_image_fetch(entry))
+            except RuntimeError:  # pragma: no cover - no running loop (sync tests)
+                continue
+            self._image_fetch_tasks.add(task)
+            task.add_done_callback(self._image_fetch_tasks.discard)
+
+    async def _spawn_image_fetch(self, entry: dict) -> None:
+        """Best-effort: fetch PNG bytes and write them to the contract-derived path.
+        Emits NOTHING; swallows ALL exceptions (a failed fetch must never surface
+        or stall a tick). Bounded by the semaphore (acquired only if free)."""
+        sem = self._image_semaphore
+        if sem is None or sem.locked():
+            return
+        image_id = str(entry.get("image_id") or "").strip()
+        prompt = str(entry.get("prompt") or "")
+        if not image_id:
+            return
+        try:
+            async with sem:
+                png = await self._image_provider.fetch_png(prompt)
+                if not png:
+                    return
+                target = self._assets_images_dir()
+                target.mkdir(parents=True, exist_ok=True)
+                # Write atomically-ish so a partial file can't be served.
+                tmp = target / f".{image_id}.png.tmp"
+                tmp.write_bytes(png)
+                tmp.replace(target / f"{image_id}.png")
+        except asyncio.CancelledError:  # reset / shutdown — re-raise so await sees it
+            raise
+        except Exception as exc:  # pragma: no cover - best-effort, swallow all
+            log.debug("image fetch failed for %s: %s", image_id, exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # W9 / EM-070+071 — survival pressure + extinction

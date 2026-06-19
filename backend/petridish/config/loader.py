@@ -398,6 +398,22 @@ class PropsParams:
 
 
 @dataclass
+class ImageGenParams:
+    """Wave I / EM-210 — image generation (config `world.image_gen`, The Atelier).
+    Additive with engine-matching defaults: the engine reads both via defensive
+    _block_get accessors (World._image_gen_max_gallery + the loop's semaphore),
+    so an absent `image_gen` block behaves exactly as these values.
+
+      max_concurrent — in-flight PNG fetches; the loop SKIPS a fetch above this
+                       (skip-under-load, never an unbounded queue). Default 2.
+      max_gallery    — newest images retained in world.gallery (pop-oldest on
+                       append, mirror the billboard cap). Default 30.
+    """
+    max_concurrent: int = 2
+    max_gallery: int = 30
+
+
+@dataclass
 class NarratorParams:
     """W11a / EM-094 — Narrator mode (config `world.narrator`).
 
@@ -762,6 +778,10 @@ class WorldParams:
     # Wave K / EM-218 — placeable props cap. Additive; an absent `props` block
     # uses the default max_population (48), mirroring the animals cap pattern.
     props: PropsParams = field(default_factory=PropsParams)
+    # Wave I / EM-210 — image generation (The Atelier). Additive; an absent
+    # `image_gen` block uses the engine-matching defaults (max_concurrent 2,
+    # max_gallery 30), so a pre-Wave-I world.yaml behaves exactly as before.
+    image_gen: ImageGenParams = field(default_factory=ImageGenParams)
     # W11a / EM-094 — Narrator mode. Additive; default-disabled (zero LLM calls)
     # so a world.yaml without a `narrator` block behaves exactly as before.
     narrator: NarratorParams = field(default_factory=NarratorParams)
@@ -1022,6 +1042,25 @@ def _parse_props(raw: dict | None) -> PropsParams:
     except (TypeError, ValueError):
         max_population = d.max_population
     return PropsParams(max_population=max_population)
+
+
+def _parse_image_gen(raw: dict | None) -> ImageGenParams:
+    """Parse the optional `world.image_gen` block (Wave I / EM-210). Absent/empty
+    -> engine-matching defaults (max_concurrent 2, max_gallery 30), mirroring
+    _parse_props' guarded-int handling. max_concurrent floors at 1 (a 0 would
+    deadlock the semaphore); max_gallery floors at 1 (a 0 cap would drop every image)."""
+    if not isinstance(raw, dict):
+        return ImageGenParams()
+    d = ImageGenParams()
+    try:
+        max_concurrent = max(1, int(raw.get("max_concurrent", d.max_concurrent)))
+    except (TypeError, ValueError):
+        max_concurrent = d.max_concurrent
+    try:
+        max_gallery = max(1, int(raw.get("max_gallery", d.max_gallery)))
+    except (TypeError, ValueError):
+        max_gallery = d.max_gallery
+    return ImageGenParams(max_concurrent=max_concurrent, max_gallery=max_gallery)
 
 
 def _parse_narrator(raw: dict | None) -> NarratorParams:
@@ -1379,6 +1418,7 @@ def _parse_world(
         cache=_parse_cache(w.get("cache")),
         animals=_parse_animals(w.get("animals")),
         props=_parse_props(w.get("props")),
+        image_gen=_parse_image_gen(w.get("image_gen")),
         narrator=_parse_narrator(w.get("narrator")),
         blackout_ticks=int(w.get("blackout_ticks", 10)),
         commitments=_parse_commitments(w.get("commitments")),

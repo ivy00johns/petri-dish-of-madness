@@ -194,6 +194,31 @@ export interface BillboardPost {
   actor_id: string;
   actor_type: ActorType | string;
   text: string;
+  // Wave I (EM-211, I2): a billboard post may carry an image — the RELATIVE
+  // url of the gallery image being shared (`/assets/images/<id>.png`). Optional
+  // so a pre-Wave-I post (or any non-image note) stays valid; the 3D notice
+  // board threads it onto the paper-plane mesh when present (texture, else the
+  // procedural PAPER fallback).
+  image_ref?: string | null;
+}
+
+// ============================================================
+// Gallery image (Wave I / EM-210) — an agent-generated artwork the world
+// REMEMBERS. The bytes are an external side-artifact under /assets/images/;
+// only these metadata strings flow through the sim (replay-safe, EM-155). The
+// `url` is RELATIVE and derived from `image_id` — fed straight to drei
+// useTexture (no host hardcoded). `promoted` flips true when a governance vote
+// hangs it over the plaza (plaza_banner_ref). Rides the per-tick world_state
+// snapshot (world.gallery), capped newest at the backend's max_gallery.
+// ============================================================
+
+export interface GalleryImage {
+  image_id: string;
+  prompt: string;
+  proposer_id: string;
+  created_tick: number;
+  url: string;            // relative, e.g. /assets/images/<id>.png
+  promoted: boolean;
 }
 
 // ============================================================
@@ -240,6 +265,13 @@ export interface WorldState {
   // renders as f(snapshot, city_seed). Optional/additive (pre-W15 backends and
   // snapshots lack it); consumers default with `city_seed ?? 1337`.
   city_seed?: number | null;
+  // Wave I (EM-210/213): the image gallery (agent-generated art) and the id of
+  // the image currently promoted over the plaza. Both optional/additive so a
+  // pre-Wave-I backend (or a snapshot predating the atelier) stays valid; the
+  // 3D notice board textures the newest gallery image and PlazaBanner resolves
+  // `plaza_banner_ref` → its gallery url (procedural fallback when absent).
+  gallery?: GalleryImage[];
+  plaza_banner_ref?: string;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -288,6 +320,13 @@ export type EventKind =
   // usage_alert {provider, metric:"rpd"|"tpd", pct, limit}, plus the EM-101
   // run-fork lineage event.
   | 'billboard_posted'
+  // Wave I (EM-210/213, contract §5) — the atelier kinds, all reflex/free-scale:
+  // image_posted {image_id, prompt, url, place} (I1, actor = the painting agent);
+  // image_promoted {image_id, url, proposal_id} (I4, actor_type:"system" — a
+  // governance vote hung the image over the plaza). billboard_posted carries the
+  // optional additive payload.image_ref (the shared image's url) for I2.
+  | 'image_posted'
+  | 'image_promoted'
   | 'reflection'
   | 'commitment_made'
   | 'commitment_lapsed'

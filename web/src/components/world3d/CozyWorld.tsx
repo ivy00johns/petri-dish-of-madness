@@ -37,6 +37,7 @@ import { Building } from './Building';
 import { Structure } from './Structure';
 import { PlacedProps } from './PlacedProps';
 import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
+import { PlazaBanner } from './PlazaBanner';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
@@ -490,6 +491,26 @@ export function CozyWorld({
     return { text: top.text, author, god };
   }, [world]);
 
+  // Wave I (EM-211, I1): the NEWEST gallery image's RELATIVE url for the notice
+  // board's front note (textured, else the procedural PAPER fallback). The
+  // gallery rides the per-tick world_state snapshot; entries are appended newest-
+  // last (mirror the backend cap), so the newest is the tail. null ⇒ no art yet.
+  const newestImageUrl = useMemo<string | null>(() => {
+    const gallery = world?.gallery ?? [];
+    if (gallery.length === 0) return null;
+    return gallery[gallery.length - 1].url || null;
+  }, [world]);
+
+  // Wave I (EM-213, I4): resolve world.plaza_banner_ref (a gallery image_id) to
+  // its RELATIVE url for the PlazaBanner texture. Unset ref OR an id missing
+  // from the gallery ⇒ null (PlazaBanner shows its procedural civic fallback).
+  const plazaBannerUrl = useMemo<string | null>(() => {
+    const ref = world?.plaza_banner_ref;
+    if (!ref) return null;
+    const img = (world?.gallery ?? []).find((g) => g.image_id === ref);
+    return img?.url || null;
+  }, [world]);
+
   // EM-095: where is the focus target RIGHT NOW. Agents/animals read the live
   // animated positions (the same refs the renderer lerps), so a follow tracks
   // the walking villager, not its last place center. 'place' ids may be a
@@ -549,6 +570,8 @@ export function CozyWorld({
           buildingSpots={buildingSpots}
           noticeSpot={noticeSpot}
           newestPost={newestPost}
+          newestImageUrl={newestImageUrl}
+          plazaBannerUrl={plazaBannerUrl}
           focus={focus}
           onPick={onPick}
         />
@@ -590,6 +613,8 @@ function Scene({
   buildingSpots,
   noticeSpot,
   newestPost,
+  newestImageUrl,
+  plazaBannerUrl,
   focus,
   onPick,
 }: {
@@ -606,6 +631,10 @@ function Scene({
   noticeSpot: { plazaId: string; x: number; z: number } | null;
   /** Newest billboard post for the board's label (null = bare board). */
   newestPost: NoticeBoardPost | null;
+  /** Wave I (EM-211, I1): newest gallery image url for the board texture (null = none). */
+  newestImageUrl: string | null;
+  /** Wave I (EM-213, I4): the promoted plaza-banner image url (null = none/unset). */
+  plazaBannerUrl: string | null;
   focus: FocusTarget | null;
   onPick?: (target: FocusTarget) => void;
 }) {
@@ -613,6 +642,17 @@ function Scene({
   const animals = world.animals ?? [];
 
   const focusedPlaceId = focus?.type === 'place' ? focus.id : null;
+
+  // Wave I (EM-213, I4): the plaza banner's world spot — a stable satellite of
+  // the plaza anchor (a DIFFERENT buildingSpot seed than the notice board so the
+  // two don't overlap). Derived from the same plaza the notice board resolved
+  // (null = no plaza → no banner, exactly like the board).
+  const plazaSpot = useMemo(() => {
+    if (!noticeSpot) return null;
+    const c = placeCenters.get(noticeSpot.plazaId);
+    if (!c) return null;
+    return buildingSpot(c, 'plaza-banner', 5.2);
+  }, [noticeSpot, placeCenters]);
 
   const targets = useMemo(() => {
     const byPlace = new Map<string, string[]>();
@@ -717,14 +757,24 @@ function Scene({
       ))}
 
       {/* W11b (EM-091a): the village notice board at the plaza — its label
-          shows the newest post (proximity-gated like every other label). */}
+          shows the newest post (proximity-gated like every other label).
+          Wave I (EM-211): the newest gallery image textures its front note. */}
       {noticeSpot && (
         <NoticeBoard
           x={noticeSpot.x}
           z={noticeSpot.z}
           newest={newestPost}
+          imageUrl={newestImageUrl}
           onPick={onPick ? () => onPick({ type: 'place', id: noticeSpot.plazaId }) : undefined}
         />
+      )}
+
+      {/* Wave I (EM-213, I4): the civic banner the town voted over the plaza. It
+          stands on its own satellite spot beside the plaza anchor (a distinct
+          buildingSpot angle from the notice board) and textures the promoted
+          image; a procedural civic canvas stands in until a vote passes. */}
+      {plazaSpot && (
+        <PlazaBanner x={plazaSpot.x} z={plazaSpot.z} url={plazaBannerUrl} />
       )}
 
       {/* W7: living structures/projects, rendered by status near their place. */}
