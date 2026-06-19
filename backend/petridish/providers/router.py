@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections import OrderedDict, deque
 from typing import Any
 
@@ -55,6 +56,13 @@ _LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home la
 # stays the true last resort). Total adapter calls per chat(): home + 1 backup.
 _AUTO_BACKUP_PROFILE = "auto"
 
+# ── EM-222 — relevance-scored memory retrieval ────────────────────────────────
+# Embeddings route through ONE dedicated profile (a fixed embedding model, NOT
+# the agent's chat lane). Resolved once at init from the profile literally named
+# `embed`; absent ⇒ has_embeddings is False and embed() raises (the retriever
+# falls back to blind recency). NOT decision-cached — embeddings ADD calls.
+_EMBED_PROFILE = "embed"
+
 
 def _cache_key(profile_name: str, messages: list[dict]) -> str:
     """sha1(profile_name + json(messages, sort_keys=True)).
@@ -72,6 +80,17 @@ def _build_adapter(profile: ModelProfile) -> Provider:
     name = profile.name
     color = profile.color
 
+    # EM-222 — hermetic/offline switch for the embedding lane. The shipped
+    # `embed` profile points at the FreeLLMAPI proxy; under EM_EMBED_MOCK (set by
+    # the test conftest, or for offline dev) the embed lane is a deterministic
+    # MockProvider so turns never make real embedding network calls (the suite
+    # stays hermetic + fast; only the embed profile is affected, chat is not).
+    if name == _EMBED_PROFILE and os.environ.get("EM_EMBED_MOCK"):
+        p = MockProvider()
+        p.name = name  # type: ignore[attr-defined]
+        p.color = color  # type: ignore[attr-defined]
+        return p  # type: ignore[return-value]
+
     if adapter == "mock":
         p = MockProvider()
         p.name = name  # type: ignore[attr-defined]
@@ -80,7 +99,10 @@ def _build_adapter(profile: ModelProfile) -> Provider:
 
     api_key = profile.api_key() or ""
 
-    if adapter == "openai":
+    # EM-222 — `openai-compatible` is an accepted alias for `openai` (the
+    # contract's embed profile spells the adapter out in full); both build the
+    # OpenAICompatibleAdapter.
+    if adapter in ("openai", "openai-compatible"):
         return OpenAICompatibleAdapter(
             profile=name,
             base_url=profile.base_url or "http://localhost:3001/v1",
@@ -206,6 +228,13 @@ class Router:
         self._auto_backup: str | None = (
             _AUTO_BACKUP_PROFILE if _AUTO_BACKUP_PROFILE in self._adapters else None
         )
+
+        # ── EM-222 — the dedicated embedding lane ──────────────────────────────
+        # The adapter for the profile literally named `embed`, resolved once.
+        # adapter_overrides already merged into self._adapters above, so a test
+        # MockProvider injected under "embed" wins here. None ⇒ no embed profile
+        # configured: has_embeddings is False and embed() raises a clear error.
+        self._embed_adapter: Provider | None = self._adapters.get(_EMBED_PROFILE)
 
     def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
         """Register the callback that receives `usage_alert` payloads
@@ -400,6 +429,30 @@ class Router:
             home, (first_exc.detail or "")[:120],
         )
         return text, backup
+
+    # ── EM-222 — relevance-scored memory retrieval ─────────────────────────────
+
+    @property
+    def has_embeddings(self) -> bool:
+        """True iff a dedicated `embed` profile is configured (the retriever
+        gates on this: no embed lane ⇒ blind-recency memory, unchanged today)."""
+        return self._embed_adapter is not None
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """EM-222 — route to the dedicated embed adapter (the `embed` profile).
+
+        One vector per input text, same order. Raises ProviderError when no
+        `embed` profile is configured (the caller falls back to blind recency).
+        NOT decision-cached — embeddings ADD calls (north-star); a clean
+        passthrough to the embed lane's adapter."""
+        adapter = self._embed_adapter
+        if adapter is None:
+            raise ProviderError(
+                _EMBED_PROFILE, None,
+                "no embed profile configured (add an `embed` profile to enable "
+                "relevance-scored memory retrieval)",
+            )
+        return await adapter.embed(texts)
 
     def forget(self, profile_name: str, messages: list[dict]) -> None:
         """Evict the decision-cache entry for this exact (profile, messages),

@@ -183,6 +183,16 @@ class TickLoop:
         self._seq += 1
         return self._seq
 
+    def _wire_runtime_run_context(self) -> None:
+        """EM-222 — push the persisted-event-log repo + active run id into the
+        AgentRuntime so its relevance-scored memory retrieval can read full run
+        history. Called whenever the loop (re)establishes a run (init_run /
+        reset). Guarded getattr: a duck-typed runtime without the seam is left
+        untouched (it then degrades to blind recency)."""
+        setter = getattr(self._runtime, "set_run_context", None)
+        if callable(setter):
+            setter(self._repo, self._run_id)
+
     def _seed_birth_casting(self) -> None:
         """Wave E / EM-114 — inject the birth casting pool into the world:
         the EM-092 persona library (config/personas.yaml, fail-soft []) and
@@ -412,6 +422,9 @@ class TickLoop:
             except Exception:
                 pass
         self._run_id = self._repo.start_run(cfg_json)
+        # EM-222 — hand the runtime the repo + active run so relevance-scored
+        # memory retrieval can read the persisted event log of THIS run.
+        self._wire_runtime_run_context()
         self._repo.save_places(self._run_id, places)
         for agent in agents:
             self._repo.save_agent(self._run_id, agent, 0)
@@ -431,6 +444,9 @@ class TickLoop:
         """One-time initialization (called at startup, not async)."""
         cfg_json = _run_config_json(config)
         self._run_id = self._repo.start_run(cfg_json)
+        # EM-222 — hand the runtime the repo + active run so relevance-scored
+        # memory retrieval can read the persisted event log of THIS run.
+        self._wire_runtime_run_context()
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)

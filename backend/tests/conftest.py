@@ -13,3 +13,11 @@ the developer's shell must not route pytest writes at a real DB.
 import os
 
 os.environ["EM_DB_PATH"] = ":memory:"
+
+# EM-222 — the shipped `embed` profile points at the FreeLLMAPI proxy (:3001).
+# The suite must be hermetic: never make real embedding network calls (they add
+# non-deterministic per-turn latency that races the synchronous step endpoint).
+# This forces the embed lane to a deterministic MockProvider for ALL tests, so
+# the relevance-retrieval path is still exercised end-to-end, just offline.
+# Set before any test imports the app / builds a Router.
+os.environ["EM_EMBED_MOCK"] = "1"

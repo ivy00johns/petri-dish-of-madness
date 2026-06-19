@@ -4,8 +4,10 @@ The engine depends on the interface; SQL is here.
 """
 from __future__ import annotations
 
+import array
 import json
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -104,6 +106,17 @@ CREATE TABLE IF NOT EXISTS snapshots (
   tick          INTEGER NOT NULL,
   state_json    TEXT NOT NULL,
   PRIMARY KEY (run_id, tick)
+);
+
+-- EM-222 — relevance-scored memory retrieval. One cached embedding per event,
+-- embedded once and reused (seq cache hit on the second turn). Orthogonal to
+-- the world snapshot, so EM-155 byte-equality is unaffected. vec is the raw
+-- vector packed little-endian float32 * dim (see _pack_vec/_unpack_vec).
+CREATE TABLE IF NOT EXISTS event_embeddings (
+  seq   INTEGER PRIMARY KEY REFERENCES events(seq) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  dim   INTEGER NOT NULL,
+  vec   BLOB NOT NULL            -- little-endian float32 * dim
 );
 """
 
@@ -300,6 +313,81 @@ class SQLiteRepository:
             (run_id, tick, state_json),
         )
         self._conn.commit()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-222 — relevance-scored memory retrieval (embedding cache + candidates).
+    # vec packs as little-endian float32 * dim; see _pack_vec/_unpack_vec.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_event_embeddings(
+        self, run_id: int, seqs: list[int]
+    ) -> dict[int, list[float]]:
+        """seq -> vector, for the subset of `seqs` that has a cached embedding.
+
+        Misses are simply absent from the returned dict (the retriever embeds +
+        persists those). Empty `seqs` ⇒ empty dict (no query). `run_id` scopes
+        nothing extra here — seq is global + monotonic — but is kept in the
+        signature for symmetry with the rest of the read interface."""
+        if not seqs:
+            return {}
+        placeholders = ",".join("?" for _ in seqs)
+        cur = self._conn.execute(
+            f"SELECT seq, dim, vec FROM event_embeddings WHERE seq IN ({placeholders})",
+            list(seqs),
+        )
+        out: dict[int, list[float]] = {}
+        for seq, dim, vec in cur.fetchall():
+            out[seq] = _unpack_vec(vec, dim)
+        return out
+
+    def put_event_embeddings(
+        self, rows: list[tuple[int, str, int, list[float]]]
+    ) -> None:
+        """(seq, model, dim, vec) -> upsert; pack vec as little-endian float32
+        BLOB. INSERT OR REPLACE keeps one row per seq (embedded once, reused);
+        a re-embed (e.g. model change) overwrites in place. Empty rows ⇒ no-op."""
+        if not rows:
+            return
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO event_embeddings (seq, model, dim, vec) "
+            "VALUES (?,?,?,?)",
+            [(seq, model, dim, _pack_vec(vec)) for (seq, model, dim, vec) in rows],
+        )
+        self._conn.commit()
+
+    def fetch_memory_candidates(
+        self,
+        run_id: int,
+        agent_id: str,
+        broadcast_kinds: tuple[str, ...],
+        limit: int,
+    ) -> list[dict]:
+        """Newest-first candidate corpus for one agent's retrieval (EM-222).
+
+        Events WHERE run_id=? AND (actor_id=? OR target_id=? OR kind IN
+        broadcast_kinds) ORDER BY seq DESC LIMIT ?. This is the agent's
+        autobiographical + globally-salient memory: its own actions/reflections
+        (actor), events targeting it (target), and broadcast-salient world
+        events (kind). Each dict: {seq, tick, kind, text} (text may be '').
+        Empty broadcast_kinds is tolerated (the kind clause is dropped)."""
+        # The OR group: actor OR target OR (broadcast kind, when any are given).
+        or_parts = ["actor_id = ?", "target_id = ?"]
+        params: list = [run_id, agent_id, agent_id]
+        if broadcast_kinds:
+            placeholders = ",".join("?" for _ in broadcast_kinds)
+            or_parts.append(f"kind IN ({placeholders})")
+            params.extend(broadcast_kinds)
+        params.append(limit)
+        sql = (
+            "SELECT seq, tick, kind, text FROM events "
+            "WHERE run_id = ? AND (" + " OR ".join(or_parts) + ") "
+            "ORDER BY seq DESC LIMIT ?"
+        )
+        cur = self._conn.execute(sql, params)
+        return [
+            {"seq": seq, "tick": tick, "kind": kind, "text": text or ""}
+            for (seq, tick, kind, text) in cur.fetchall()
+        ]
 
     def recent_events(self, run_id: int, limit: int = 50) -> list[dict]:
         cur = self._conn.execute(
@@ -1009,6 +1097,31 @@ class SQLiteRepository:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def _pack_vec(vec: list[float]) -> bytes:
+    """EM-222 — pack a vector as a little-endian float32 BLOB.
+
+    `array('f')` is the platform's native byte order, so we byteswap on a
+    big-endian host to keep the on-disk format little-endian regardless of
+    where the DB was written (the contract pins little-endian)."""
+    arr = array.array("f", vec)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return arr.tobytes()
+
+
+def _unpack_vec(blob: bytes, dim: int) -> list[float]:
+    """EM-222 — unpack a little-endian float32 BLOB back to a float list.
+
+    Mirror of _pack_vec: byteswap on a big-endian host before reading so the
+    round-trip is host-independent. `dim` is informational — array sizing comes
+    from the blob length — but the round-trip is exact for the packed dim."""
+    arr = array.array("f")
+    arr.frombytes(blob)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return list(arr)
 
 
 def _gini(values: list) -> float | None:

@@ -148,6 +148,20 @@ world:
   cadence:
     spontaneity_chance: 0.15
     reflex_streak_limit: 8
+  # EM-222 — relevance-scored long-term memory retrieval (protagonist +
+  # supporting tiers; background keeps blind recency). MUST stay in sync with
+  # config/world.yaml. enabled:false = byte-identical pre-EM-222 (blind
+  # recency for every tier).
+  memory_retrieval:
+    enabled: true
+    embed_model: bge-m3
+    top_k: 12
+    recent_tail: 6
+    candidate_limit: 400
+    w_relevance: 0.5
+    w_importance: 0.3
+    w_recency: 0.2
+    recency_halflife_ticks: 200
   # W15 / EM-155 — deterministic seed for the generated 3D city ring.
   # MUST stay in sync with config/world.yaml.
   city_seed: 1337
@@ -608,6 +622,43 @@ class MiracleParams:
 
 
 @dataclass
+class MemoryRetrievalParams:
+    """EM-222 — relevance-scored long-term memory retrieval (config
+    `world.memory_retrieval`). Protagonist/supporting agents recall RELEVANT old
+    events (Smallville recency × importance × relevance over the persisted event
+    log + cached embeddings), not just the last ~12. The runtime reads this block
+    via its defensive _world_block_get accessor with IDENTICAL defaults, so an
+    absent block behaves exactly like these values. The BACKGROUND tier keeps its
+    blind-recency prompt diet (EM-161) regardless of this block.
+
+      enabled                — master toggle (default ON). `false` ⇒ every tier
+                               keeps blind recency: byte-identical pre-EM-222.
+      embed_model            — the dedicated embedding model id (the `embed`
+                               profile, bge-m3); embeddings use this fixed model,
+                               not the agent's chat profile.
+      top_k                  — how many scored memories to surface per turn.
+      recent_tail            — recent events always merged in alongside the
+                               retrieved top-K (the immediate context never
+                               drops out, however the scoring ranks it).
+      candidate_limit        — newest-first candidate corpus cap pulled from the
+                               DB before scoring (bounds the per-turn embed cost).
+      w_relevance/w_importance/w_recency — blend weights for the three
+                               (each-normalized-to-[0,1]) signals.
+      recency_halflife_ticks — age (ticks) at which the recency signal decays to
+                               0.5.
+    """
+    enabled: bool = True
+    embed_model: str = "bge-m3"
+    top_k: int = 12
+    recent_tail: int = 6
+    candidate_limit: int = 400
+    w_relevance: float = 0.5
+    w_importance: float = 0.3
+    w_recency: float = 0.2
+    recency_halflife_ticks: int = 200
+
+
+@dataclass
 class CadenceParams:
     """Wave D2 / EM-159+160 — background-tier salience gating + the spontaneity
     floor (config `world.cadence`). ADDITIVE: an absent block behaves exactly
@@ -726,6 +777,12 @@ class WorldParams:
     # floor. Additive with engine-matching defaults, so a world.yaml without
     # the `cadence` block behaves exactly as the shipped defaults.
     cadence: CadenceParams = field(default_factory=CadenceParams)
+    # EM-222 — relevance-scored long-term memory retrieval. Additive with
+    # runtime-matching defaults (default ON); an absent `memory_retrieval`
+    # block behaves exactly as these values. Background tier is untouched
+    # either way (it keeps its blind-recency diet).
+    memory_retrieval: MemoryRetrievalParams = field(
+        default_factory=MemoryRetrievalParams)
     # Wave D3 / EM-177 — lane failover with recovery probes. Additive with
     # router-matching defaults (default ON); `enabled: false` restores the
     # byte-identical pre-D3 routing.
@@ -1068,6 +1125,43 @@ def _parse_cadence(raw: dict | None) -> CadenceParams:
     )
 
 
+def _parse_memory_retrieval(raw: dict | None) -> MemoryRetrievalParams:
+    """Parse the optional `world.memory_retrieval` block (EM-222).
+    Absent/empty/malformed -> runtime-matching defaults (retrieval ON). Each key
+    falls back to its default individually; counts clamp to >= 1 (a 0 candidate
+    limit / top_k would starve the retriever), weights to >= 0, and the recency
+    half-life to >= 1 tick (a 0/negative half-life would divide by zero) — a
+    malformed value never breaks the block."""
+    if not isinstance(raw, dict):
+        return MemoryRetrievalParams()
+    d = MemoryRetrievalParams()
+
+    def _pos_int(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _nonneg_float(key: str, default: float) -> float:
+        try:
+            return max(0.0, float(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return MemoryRetrievalParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        embed_model=str(raw.get("embed_model", d.embed_model) or d.embed_model),
+        top_k=_pos_int("top_k", d.top_k),
+        recent_tail=_pos_int("recent_tail", d.recent_tail),
+        candidate_limit=_pos_int("candidate_limit", d.candidate_limit),
+        w_relevance=_nonneg_float("w_relevance", d.w_relevance),
+        w_importance=_nonneg_float("w_importance", d.w_importance),
+        w_recency=_nonneg_float("w_recency", d.w_recency),
+        recency_halflife_ticks=_pos_int(
+            "recency_halflife_ticks", d.recency_halflife_ticks),
+    )
+
+
 def _parse_lane_failover(raw: dict | None) -> LaneFailoverParams:
     """Parse the optional `world.lane_failover` block (Wave D3 / EM-177).
     Absent/empty/malformed -> router-matching defaults (failover ON).
@@ -1291,6 +1385,7 @@ def _parse_world(
         reflection=_parse_reflection(w.get("reflection")),
         procgen=_parse_procgen(w.get("procgen")),
         cadence=_parse_cadence(w.get("cadence")),
+        memory_retrieval=_parse_memory_retrieval(w.get("memory_retrieval")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),

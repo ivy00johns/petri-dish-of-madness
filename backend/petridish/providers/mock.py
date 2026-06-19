@@ -18,9 +18,17 @@ The default script is designed so that in 40 ticks:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import re
+import struct
 from itertools import cycle
 from typing import Iterator
+
+# EM-222 — word-token splitter for the deterministic embed() seam. Alphanumeric
+# runs only, so punctuation never creates phantom tokens ("market." -> "market").
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 class MockProvider:
@@ -31,9 +39,12 @@ class MockProvider:
     # llm_call OTel keys present-but-null when last_usage is None (W6 / EM-067).
     last_usage = None
 
-    def __init__(self, script: list | None = None):
+    def __init__(self, script: list | None = None, embed_dim: int = 1024):
         self._script = script          # if set, all agents cycle this same list
         self._iters: dict[str, Iterator] = {}  # per-agent iterators (instance-level)
+        # EM-222 — embedding dimensionality for the deterministic embed() seam
+        # (default 1024 = bge-m3's width; the live embed profile's real model).
+        self._embed_dim = max(1, int(embed_dim))
 
     async def chat(
         self,
@@ -45,6 +56,31 @@ class MockProvider:
         agent_id, tick = self._extract_context(messages)
         action = self._next_action(agent_id, tick)
         return json.dumps(action)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """EM-222 — deterministic, network-free embeddings for tests/offline runs.
+
+        Each text's tokens are hashed into buckets of a fixed-dim vector, which
+        is then L2-normalized. Properties the retriever's scoring relies on:
+        same text ⇒ identical vector; texts sharing tokens land weight in the
+        SAME buckets ⇒ higher cosine. No randomness, no clock, no network."""
+        return [self._embed_one(t) for t in texts]
+
+    def _embed_one(self, text: str) -> list[float]:
+        vec = [0.0] * self._embed_dim
+        # Lowercased word tokens; punctuation split out so "market." == "market".
+        tokens = [t for t in _TOKEN_RE.findall(text.lower())] if text else []
+        for tok in tokens:
+            # Stable per-token bucket + sign from a sha1 digest (no PYTHONHASHSEED
+            # dependence, unlike the builtin hash()).
+            digest = hashlib.sha1(tok.encode("utf-8")).digest()
+            bucket = struct.unpack("<I", digest[:4])[0] % self._embed_dim
+            sign = 1.0 if digest[4] & 1 else -1.0
+            vec[bucket] += sign
+        norm = math.sqrt(sum(v * v for v in vec))
+        if norm == 0.0:
+            return vec  # empty/all-cancelled text ⇒ zero vector (cosine 0)
+        return [v / norm for v in vec]
 
     # ──────────────────────────────────────────────────────────────────────────
     # Context extraction (best-effort)

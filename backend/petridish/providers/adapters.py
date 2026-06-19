@@ -167,6 +167,34 @@ class OpenAICompatibleAdapter:
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(self.name, None, f"unexpected response shape: {exc}") from exc
 
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """EM-222 — one vector per input text via POST {base_url}/embeddings.
+
+        OpenAI embeddings shape: body {"model", "input": [...]}; response
+        {"data": [{"index": int, "embedding": [...]}, ...]}. The proxy may
+        return the data list out of order, so we sort by `index` to keep the
+        vectors aligned with `texts`. Same httpx client + ProviderError
+        semantics as chat(); NO decision-cache (embeddings ADD calls)."""
+        url = f"{self._base_url}/embeddings"
+        headers = {"Content-Type": "application/json"}
+        # Same keyless-server tolerance as chat(): only send the bearer when we
+        # actually have one (an empty "Authorization: Bearer " trips httpx).
+        api_key = (self._api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        payload = {"model": self._model_id, "input": texts}
+        async with httpx.AsyncClient() as client:
+            data, _routed_via = await _post_with_retry(
+                client, url, headers, payload, self.name
+            )
+        try:
+            items = sorted(data["data"], key=lambda d: d["index"])
+            return [list(item["embedding"]) for item in items]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError(
+                self.name, None, f"unexpected embeddings response shape: {exc}"
+            ) from exc
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Anthropic
