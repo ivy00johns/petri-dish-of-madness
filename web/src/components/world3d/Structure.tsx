@@ -1042,6 +1042,16 @@ const VARIANT_COMPONENTS: Record<VariantKey, ComponentType<VariantProps>> = {
   well: WellStructure,
   zoo: ZooStructure,
   generic: GenericStructure,
+  // EM-216/EM-217: build-type variants render their own GLB (MODEL_REGISTRY);
+  // the procedural fallback (while the GLB streams or if it fails) aliases the
+  // closest existing silhouette so there's never a hole.
+  tavern: HouseStructure,
+  market: StallStructure,
+  smithy: WorkshopStructure,
+  temple: MonumentStructure,
+  school: LibraryStructure,
+  clinic: GenericStructure,
+  granary: FarmStructure,
 };
 
 function OperationalStructure({
@@ -1190,6 +1200,15 @@ const OPERATIONAL_LABEL_Y: Record<VariantKey, number> = {
   zoo: 3.8,
   farm: 2.4,
   garden: 2.6,
+  // EM-216/EM-217 build-types — clearance for the procedural fallback silhouette
+  // (the GLB heights are handled by GLB_LABEL_Y where they stand taller).
+  tavern: 3.8,
+  market: 3.2,
+  smithy: 3.6,
+  temple: 5.0,
+  school: 4.2,
+  clinic: 4.0,
+  granary: 2.4,
 };
 
 /**
@@ -1201,6 +1220,8 @@ const OPERATIONAL_LABEL_Y: Record<VariantKey, number> = {
 const GLB_LABEL_Y: Partial<Record<VariantKey, number>> = {
   farm: 4.4,
   stall: 3.9,
+  // EM-216: the Silo House GLB stands ~4.08u tall — clear its label above the silo.
+  granary: 4.6,
 };
 
 // ── EM-180: a fund is a shared treasury, not a house. Render it as a small

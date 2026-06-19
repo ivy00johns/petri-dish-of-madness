@@ -29,6 +29,8 @@ const REPO_ROOT = resolve(process.cwd(), '..');
 
 const ALL_PROP_KINDS: PropKind[] = [
   'bench', 'lamp', 'tree', 'fence', 'bin', 'hydrant', 'fountain',
+  // EM-216 new-kit props (poly.pizza CC0)
+  'statue', 'planter', 'flower', 'rock', 'bush', 'crate', 'barrel', 'sign', 'stall',
 ];
 
 describe('PROP_MODELS registry', () => {
@@ -50,11 +52,11 @@ describe('PROP_MODELS registry', () => {
     }
   });
 
-  it('wires only ALREADY-VENDORED kits (Kenney city/furniture + fantasy-town fountain + kaykit hydrant)', () => {
+  it('wires vendored kits (reused Kenney/KayKit + EM-216 poly.pizza CC0 props)', () => {
     const urls = allPropModelSpecs().map((s) => s.url);
     for (const u of urls) {
       expect(
-        /^\/models\/(kenney-city|kenney-fantasy-town|kaykit-city)\//.test(u),
+        /^\/models\/(kenney-city|kenney-fantasy-town|kaykit-city|poly-props)\//.test(u),
         u,
       ).toBe(true);
     }
@@ -84,6 +86,18 @@ describe('propVariant (EM-218 resolver)', () => {
       ['fire_hydrant', 'hydrant'],
       ['stone_fountain', 'fountain'],
       ['village_birdbath', 'fountain'],
+      // EM-216 new-kit props — ordering dodges substring traps:
+      ['marble_statue', 'statue'],
+      ['flower_planter', 'planter'],
+      ['potted_fern', 'planter'],
+      ['rose_blossom', 'flower'],
+      ['garden_boulder', 'rock'],
+      ['cobblestone', 'rock'],
+      ['rose_bush', 'bush'],
+      ['supply_crate', 'crate'],
+      ['wine_barrel', 'barrel'],
+      ['wooden_signpost', 'sign'],
+      ['market_stall', 'stall'],
     ];
     for (const [kind, want] of cases) {
       expect(propVariant(kind), kind).toBe(want);

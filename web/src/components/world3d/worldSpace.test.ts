@@ -277,11 +277,13 @@ describe('build-type catalog — buildingStyle (EM-217)', () => {
   });
 });
 
-describe('build-type catalog — operationalVariant (EM-217)', () => {
-  it('pins every catalog type to its best-available vendored silhouette', () => {
+describe('build-type catalog — operationalVariant (EM-217/EM-216)', () => {
+  it('pins every catalog type to its own distinct variant (EM-216 GLBs)', () => {
+    // EM-216 gave the build-types their OWN variant + GLB (was a shared
+    // silhouette pre-acquisition). park/well keep their shared greenery/fountain.
     const variants: Record<(typeof CATALOG_TYPES)[number], VariantKey> = {
-      tavern: 'house', market: 'stall', smithy: 'workshop', school: 'library',
-      temple: 'monument', clinic: 'generic', park: 'garden', granary: 'farm',
+      tavern: 'tavern', market: 'market', smithy: 'smithy', school: 'school',
+      temple: 'temple', clinic: 'clinic', park: 'garden', granary: 'granary',
       well: 'well',
     };
     for (const t of CATALOG_TYPES) {

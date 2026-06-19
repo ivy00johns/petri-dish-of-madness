@@ -267,7 +267,16 @@ export type VariantKey =
   | 'monument'
   | 'well'
   | 'zoo'
-  | 'generic';
+  | 'generic'
+  // ── EM-216/EM-217: distinct build-type silhouettes (own GLB in MODEL_REGISTRY,
+  //    own procedural fallback in Structure.tsx VARIANT_COMPONENTS) ──
+  | 'tavern'
+  | 'market'
+  | 'smithy'
+  | 'temple'
+  | 'school'
+  | 'clinic'
+  | 'granary';
 
 /**
  * Exact BUILDING_STYLES keys map straight to their obvious variant.
@@ -289,15 +298,17 @@ const EXACT_VARIANTS: Record<string, VariantKey> = {
   house: 'house',
   monument: 'monument',
   zoo: 'zoo',
-  // EM-217 build-type catalog → best available vendored variant/GLB
-  tavern: 'house',      // cozy building (suburban GLB)
-  market: 'stall',      // open-air storefront (commercial GLB)
-  smithy: 'workshop',   // forge shed (industrial GLB)
-  school: 'library',    // hall + columns (procedural library)
-  temple: 'monument',   // plinth + spire (fountain/obelisk GLB)
-  clinic: 'generic',    // clean civic block (commercial GLB)
-  park: 'garden',       // planting beds / greenery (procedural)
-  granary: 'farm',      // fenced plot + haystack (warehouse GLB)
+  // EM-216/EM-217 build-type catalog → its OWN distinct variant + GLB (each has
+  // a dedicated poly.pizza CC0 model in MODEL_REGISTRY; the procedural fallback
+  // aliases a fitting existing silhouette in Structure.tsx VARIANT_COMPONENTS).
+  tavern: 'tavern',     // Fantasy Inn GLB (fallback: house silhouette)
+  market: 'market',     // Village Market stalls GLB (fallback: stall silhouette)
+  smithy: 'smithy',     // Blacksmith forge GLB (fallback: workshop silhouette)
+  school: 'school',     // Kenney Small Building GLB (fallback: library silhouette)
+  temple: 'temple',     // columned Temple GLB (fallback: monument silhouette)
+  clinic: 'clinic',     // Kenney Large Building GLB (fallback: generic silhouette)
+  park: 'garden',       // greenery — shares the garden bed GLB
+  granary: 'granary',   // Silo House GLB (fallback: farm silhouette)
   well: 'well',         // stone ring + roof (fountain GLB)
   building: 'generic',
 };

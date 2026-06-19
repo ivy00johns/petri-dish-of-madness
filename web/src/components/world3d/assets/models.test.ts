@@ -55,6 +55,8 @@ const REPO_ROOT = resolve(process.cwd(), '..');
 const ALL_VARIANTS: VariantKey[] = [
   'garden', 'farm', 'workshop', 'library', 'clocktower',
   'house', 'stall', 'monument', 'well', 'zoo', 'generic',
+  // EM-216/EM-217 distinct build-type variants
+  'tavern', 'market', 'smithy', 'temple', 'school', 'clinic', 'granary',
 ];
 const ALL_PLACE_KINDS: PlaceKind[] = ['work', 'home', 'social', 'governance', 'wild'];
 
@@ -135,10 +137,11 @@ describe('MODEL_REGISTRY', () => {
     expect(Object.keys(MODEL_REGISTRY).sort()).toEqual([...ALL_VARIANTS].sort());
   });
 
-  it('keeps garden, library, and zoo procedural (recorded nulls)', () => {
-    expect(MODEL_REGISTRY.garden).toBeNull();
-    expect(MODEL_REGISTRY.library).toBeNull();
-    expect(MODEL_REGISTRY.zoo).toBeNull();
+  it('wires garden, library, and zoo to EM-216 GLBs (were recorded nulls)', () => {
+    for (const v of ['garden', 'library', 'zoo'] as const) {
+      expect(MODEL_REGISTRY[v], v).not.toBeNull();
+      expect(MODEL_REGISTRY[v]!.url, v).toContain('/models/poly/');
+    }
   });
 });
 
@@ -259,7 +262,7 @@ describe('ASSET_LICENSES.md', () => {
 
   /** The hero-kit dirs THIS registry owns rows for (kenney-city is shared
    *  with cityModels.ts, whose test runs the same checks for that dir). */
-  const HERO_DIRS = ['kaykit-adventurers', 'kenney-fantasy-town', 'quaternius'] as const;
+  const HERO_DIRS = ['kaykit-adventurers', 'kenney-fantasy-town', 'quaternius', 'poly'] as const;
 
   it('records every vendored model file', () => {
     for (const spec of allModelSpecs()) {
@@ -273,7 +276,7 @@ describe('ASSET_LICENSES.md', () => {
     const registryRepoPaths = new Set(allModelSpecs().map((s) => `web/public${s.url}`));
     const rows =
       doc.match(
-        /web\/public\/models\/(?:kaykit-adventurers|kenney-fantasy-town|quaternius|kaykit-medieval-hexagon)\/[\w.-]+\.glb/g,
+        /web\/public\/models\/(?:kaykit-adventurers|kenney-fantasy-town|quaternius|poly|kaykit-medieval-hexagon)\/[\w.-]+\.glb/g,
       ) ?? [];
     expect(rows.length).toBeGreaterThan(0);
     for (const repoPath of new Set<string>(rows)) {

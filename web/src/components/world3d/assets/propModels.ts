@@ -29,10 +29,17 @@ import type { ModelSpec } from './models';
 const KENNEY_CITY = '/models/kenney-city';
 const KAYKIT_CITY = '/models/kaykit-city';
 const KENNEY_FANTASY_TOWN = '/models/kenney-fantasy-town';
+// EM-216 new-kit acquisition: CC0 props vendored from poly.pizza (Quaternius /
+// Kenney / Isa Lousberg mirrors — every file recorded in ASSET_LICENSES.md).
+const POLY_PROPS = '/models/poly-props';
 
 /**
  * The KNOWN prop kinds. Every entry resolves to a vendored GLB; emergent /
  * off-menu kinds resolve to `null` (procedural fallback) via {@link propVariant}.
+ *
+ * EM-216 expanded the original 7 reused-GLB kinds with 9 net-new CC0 props
+ * (statue, planter, flower, rock, bush, crate, barrel, sign, stall) so an agent
+ * dropping a "statue" or "market stall" in the plaza renders real distinct art.
  */
 export type PropKind =
   | 'bench'
@@ -41,12 +48,24 @@ export type PropKind =
   | 'fence'
   | 'bin'
   | 'hydrant'
-  | 'fountain';
+  | 'fountain'
+  // ── EM-216 new-kit props (poly.pizza CC0) ──
+  | 'statue'
+  | 'planter'
+  | 'flower'
+  | 'rock'
+  | 'bush'
+  | 'crate'
+  | 'barrel'
+  | 'sign'
+  | 'stall';
 
 /**
- * Prop kind → GLB. Wired to already-vendored furniture/nature/fountain GLBs
- * (shared BY URL with cityModels.ts where applicable — one download, one
- * toonified scene). All seven keys are non-null.
+ * Prop kind → GLB. The first seven reuse already-vendored Kenney/KayKit GLBs
+ * (shared BY URL with cityModels.ts — one download, one toonified scene); the
+ * rest are EM-216's net-new CC0 poly.pizza props. Every key is non-null;
+ * scales fit street-furniture size (largest dim ~0.5–1.5u), yOffsets seat
+ * origin-centered models (crate/bush) on the ground.
  */
 export const PROP_MODELS: Record<PropKind, ModelSpec> = {
   // park bench (Kenney Furniture Kit): 0.47 tall / 0.40 long → ~0.75u / 0.64u.
@@ -63,23 +82,55 @@ export const PROP_MODELS: Record<PropKind, ModelSpec> = {
   hydrant: { url: `${KAYKIT_CITY}/firehydrant.glb`, scale: 2.4, yOffset: 0 },
   // round fountain (Kenney Fantasy Town kit): 2.0 raw → ~3.2u as a plaza piece.
   fountain: { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.6, yOffset: 0 },
+  // ── EM-216 new-kit props (poly.pizza CC0; measured longest dim in comments) ──
+  // Quaternius Fox Statue: 3.752 tall → ~1.6u plaza statue.
+  statue: { url: `${POLY_PROPS}/statue.glb`, scale: 0.43, yOffset: 0 },
+  // Isa Lousberg Medium Pot: 1.0 → ~0.7u planter.
+  planter: { url: `${POLY_PROPS}/planter.glb`, scale: 0.7, yOffset: 0 },
+  // Quaternius Flowers (patch of 7): 3.594 wide → ~1.1u flower bed.
+  flower: { url: `${POLY_PROPS}/flower.glb`, scale: 0.31, yOffset: 0 },
+  // Quaternius Rocks: 0.304 → ~0.6u rock cluster.
+  rock: { url: `${POLY_PROPS}/rock.glb`, scale: 2.0, yOffset: 0 },
+  // Quaternius Bush (origin-centered, min.y -0.289): 2.069 → ~0.9u; lift to ground.
+  bush: { url: `${POLY_PROPS}/bush.glb`, scale: 0.44, yOffset: 0.13 },
+  // Quaternius Cube Crate (origin-centered, min.y -1.01): 2.021 → ~0.6u; lift to ground.
+  crate: { url: `${POLY_PROPS}/crate.glb`, scale: 0.3, yOffset: 0.3 },
+  // Kenney Barrel: 0.76 → ~0.65u.
+  barrel: { url: `${POLY_PROPS}/barrel.glb`, scale: 0.85, yOffset: 0 },
+  // Kenney Signpost Single: 0.46 tall → ~0.92u signpost.
+  sign: { url: `${POLY_PROPS}/sign.glb`, scale: 2.0, yOffset: 0 },
+  // Quaternius Market Stand: 1.154 → ~1.4u vendor stall.
+  stall: { url: `${POLY_PROPS}/stall.glb`, scale: 1.2, yOffset: 0 },
 };
 
 /**
  * EM-218: keyword → known prop kind, tried in order with case-insensitive
  * SUBSTRING match on the raw kind (mirrors worldSpace.operationalVariant /
- * VARIANT_KEYWORDS). Order is load-bearing: a substring trap must be resolved
- * by the EARLIER row. (Currently no two prop keywords are substrings of one
- * another, so the order is just stable/intentional.)
+ * VARIANT_KEYWORDS). Order is LOAD-BEARING — substring traps are resolved by
+ * the EARLIER row:
+ *   - 'sign'/'signpost' beats lamp's 'post' ("signpost" ⊃ "post");
+ *   - 'barrel' beats bin (a barrel is its own prop, not a bin);
+ *   - tree keeps 'shrub' so "flowering_shrub" → tree, while 'flower' sits AFTER
+ *     tree so "flowering_shrub" never grabs the flower row;
+ *   - 'fountain' beats rock's 'stone' so "stone_fountain" → fountain.
  */
 const PROP_KEYWORDS: ReadonlyArray<readonly [readonly string[], PropKind]> = [
   [['bench', 'seat', 'pew'], 'bench'],
-  [['lamp', 'light', 'streetlight', 'lantern', 'post'], 'lamp'],
-  [['tree', 'oak', 'pine', 'shrub', 'bush', 'plant', 'sapling'], 'tree'],
+  [['sign', 'signpost', 'placard', 'noticeboard'], 'sign'],
+  [['lamp', 'streetlight', 'lantern', 'light', 'post'], 'lamp'],
+  [['planter', 'potted', 'flowerpot'], 'planter'],
+  [['bush', 'shrubbery'], 'bush'],
+  [['tree', 'oak', 'pine', 'shrub', 'sapling', 'plant'], 'tree'],
+  [['flower', 'blossom', 'tulip', 'petal', 'bloom'], 'flower'],
   [['fence', 'railing', 'hedge', 'gate'], 'fence'],
-  [['bin', 'trash', 'can', 'bucket', 'barrel'], 'bin'],
+  [['barrel', 'keg', 'cask'], 'barrel'],
+  [['crate', 'box', 'chest', 'pallet'], 'crate'],
+  [['bin', 'trash', 'rubbish', 'can', 'bucket'], 'bin'],
   [['hydrant', 'pump'], 'hydrant'],
+  [['stall', 'stand', 'kiosk', 'booth', 'market'], 'stall'],
+  [['statue', 'sculpture', 'bust', 'effigy'], 'statue'],
   [['fountain', 'well', 'water', 'birdbath'], 'fountain'],
+  [['rock', 'boulder', 'pebble', 'stone'], 'rock'],
 ];
 
 /**

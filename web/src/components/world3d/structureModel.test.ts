@@ -32,7 +32,9 @@ import {
 
 const ALL_VARIANTS: VariantKey[] = [
   'garden', 'farm', 'workshop', 'library', 'clocktower',
-  'house', 'stall', 'monument', 'well', 'generic',
+  'house', 'stall', 'monument', 'well', 'zoo', 'generic',
+  // EM-216/EM-217 distinct build-type variants
+  'tavern', 'market', 'smithy', 'temple', 'school', 'clinic', 'granary',
 ];
 const ALL_PLACE_KINDS: PlaceKind[] = ['social', 'work', 'governance', 'home', 'wild'];
 
@@ -54,9 +56,10 @@ describe('resolveStructureModel', () => {
     },
   );
 
-  it('null registry entries stay procedural (garden/library)', () => {
-    expect(resolveStructureModel('garden').spec).toBeNull();
-    expect(resolveStructureModel('library').spec).toBeNull();
+  it('wires garden/library/zoo to GLBs (EM-216 new kits, were null)', () => {
+    expect(resolveStructureModel('garden').spec).not.toBeNull();
+    expect(resolveStructureModel('library').spec).not.toBeNull();
+    expect(resolveStructureModel('zoo').spec).not.toBeNull();
   });
 
   it('emergent kinds resolve through the keyword table to a wired spec', () => {
@@ -95,8 +98,9 @@ describe('resolvePlaceModel', () => {
     },
   );
 
-  it('wild stays procedural (recorded null); social wears the city fountain (D1.5)', () => {
-    expect(resolvePlaceModel('wild')).toBeNull();
+  it('wild wears the EM-216 park gazebo; social wears the city fountain (D1.5)', () => {
+    expect(resolvePlaceModel('wild')).not.toBeNull();
+    expect(resolvePlaceModel('wild')!.url).toContain('/models/poly/park.glb');
     expect(resolvePlaceModel('social')).not.toBeNull();
     expect(resolvePlaceModel('social')!.url).toContain('fountain');
   });
