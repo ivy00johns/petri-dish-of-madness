@@ -434,6 +434,13 @@ BUILD_TYPES: tuple[dict[str, str], ...] = (
     {"type": "library",  "function": "",            "zone": "civic"},
     {"type": "monument", "function": "",            "zone": "civic"},
     {"type": "farm",     "function": "forage",      "zone": "agricultural"},
+    # EM-216b — catalog expansion (distinct CC0 GLBs vendored frontend-side).
+    {"type": "bakery",     "function": "work_reward", "zone": "commercial"},
+    {"type": "bank",       "function": "",            "zone": "commercial"},
+    {"type": "theater",    "function": "",            "zone": "civic"},
+    {"type": "lighthouse", "function": "",            "zone": "civic"},
+    {"type": "bathhouse",  "function": "",            "zone": "social"},
+    {"type": "dock",       "function": "work_reward", "zone": "industrial"},
 )
 
 # Wave K / EM-217 — kind→buff mapping EXTENSION. The shipped W7 buffs are keyed on
@@ -443,7 +450,7 @@ BUILD_TYPES: tuple[dict[str, str], ...] = (
 # place; a granary/park IS a forage place). These sets are consulted by
 # action_work / action_forage so the new types are not merely cosmetic where the
 # semantics already exist. Off-list types stay cosmetic+labelled (no buff).
-_WORK_BUFF_KINDS = frozenset({"workshop", "smithy", "forge", "tavern", "market"})
+_WORK_BUFF_KINDS = frozenset({"workshop", "smithy", "forge", "tavern", "market", "bakery", "dock"})
 _FORAGE_BUFF_KINDS = frozenset({"garden", "farm", "granary", "park"})
 
 

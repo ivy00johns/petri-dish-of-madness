@@ -89,6 +89,14 @@ export const MODEL_REGISTRY: Record<VariantKey, ModelSpec | null> = {
   school: { url: `${POLY}/school.glb`, scale: 1.65, yOffset: 0 }, // Kenney Small Building → 2.71u
   clinic: { url: `${POLY}/clinic.glb`, scale: 1.45, yOffset: 0 }, // Kenney Large Building → 2.96u
   granary: { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 }, // Silo House → 2.40u, 4.08u tall
+  // ── EM-216b catalog expansion (poly.pizza CC0). yOffset seats origin-centered
+  //    models (bank/bathhouse/dock) on the ground; lighthouse is the tall one. ──
+  bakery: { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },       // shopfront → 2.90u
+  bank: { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },        // Colosseum → 3.30u
+  theater: { url: `${POLY}/theater.glb`, scale: 0.099, yOffset: 0 },    // Concert Stage → 3.29u
+  lighthouse: { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 }, // Tower → 2.64u, 4.09u tall
+  bathhouse: { url: `${POLY}/bathhouse.glb`, scale: 0.32, yOffset: 0.32 },   // Public Pool → 3.20u
+  dock: { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },         // Shipping Port → 2.50u
 };
 
 /**
