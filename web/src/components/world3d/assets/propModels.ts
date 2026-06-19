@@ -25,6 +25,7 @@
  */
 
 import type { ModelSpec } from './models';
+import { hashUnit } from '../worldSpace';
 
 const KENNEY_CITY = '/models/kenney-city';
 const KAYKIT_CITY = '/models/kaykit-city';
@@ -152,18 +153,53 @@ export function propVariant(kind: string): PropKind | null {
 }
 
 /**
- * Resolve a prop kind to its GLB spec, or `null` (unknown → procedural
- * fallback). Thin convenience over {@link propVariant} + {@link PROP_MODELS}.
+ * EM-216b — per-slot VARIETY pools for greenery props. A prop kind with a pool
+ * renders one of several distinct GLBs, picked deterministically from the prop
+ * id ({@link propModel}) so scattered trees/rocks/bushes/flowers aren't clones —
+ * stable across frame/reload/fork (EM-155). First member = the PROP_MODELS
+ * default (slot 0), so the no-id path and the pool agree.
  */
-export function propModel(kind: string): ModelSpec | null {
+export const PROP_POOLS: Partial<Record<PropKind, ModelSpec[]>> = {
+  tree: [
+    PROP_MODELS.tree, // Kenney city tree
+    { url: `${POLY_PROPS}/tree-pine.glb`, scale: 0.73, yOffset: 0 },   // Quaternius Pine cluster
+    { url: `${POLY_PROPS}/tree-birch.glb`, scale: 0.56, yOffset: 0 },  // Quaternius Birch
+    { url: `${POLY_PROPS}/tree-willow.glb`, scale: 0.66, yOffset: 0.04 }, // Quaternius Willow
+  ],
+  rock: [
+    PROP_MODELS.rock, // Quaternius Rocks cluster
+    { url: `${POLY_PROPS}/rock-tall.glb`, scale: 1.0, yOffset: 0 },  // Quaternius Rock
+    { url: `${POLY_PROPS}/rock-flat.glb`, scale: 0.5, yOffset: 0 },  // Kenney Rock Flat
+  ],
+  bush: [
+    PROP_MODELS.bush, // Quaternius Bush
+    { url: `${POLY_PROPS}/bush-berry.glb`, scale: 0.67, yOffset: 0.04 }, // Quaternius Bush with Berries
+  ],
+  flower: [
+    PROP_MODELS.flower, // Quaternius Flowers patch
+    { url: `${POLY_PROPS}/flower-cluster.glb`, scale: 1.26, yOffset: 0 }, // CreativeTrio Flowers
+    { url: `${POLY_PROPS}/plant-small.glb`, scale: 0.68, yOffset: 0 },    // Quaternius Small Plant
+  ],
+};
+
+/**
+ * Resolve a prop kind to its GLB spec, or `null` (unknown → procedural
+ * fallback). With a variety pool AND an `id`, the GLB is picked deterministically
+ * from the id; otherwise the single {@link PROP_MODELS} spec (pool slot 0).
+ */
+export function propModel(kind: string, id?: string): ModelSpec | null {
   const v = propVariant(kind);
-  return v ? PROP_MODELS[v] : null;
+  if (!v) return null;
+  const pool = Object.prototype.hasOwnProperty.call(PROP_POOLS, v) ? PROP_POOLS[v] : undefined;
+  if (pool && pool.length > 0 && id) {
+    return pool[Math.floor(hashUnit(id) * pool.length) % pool.length];
+  }
+  return PROP_MODELS[v];
 }
 
-/** Every prop GLB spec, de-duped by url (preload + tests). */
+/** Every prop GLB spec across registry + variety pools, de-duped by url. */
 export function allPropModelSpecs(): ModelSpec[] {
   const seen = new Set<string>();
-  return Object.values(PROP_MODELS).filter((s) =>
-    seen.has(s.url) ? false : (seen.add(s.url), true),
-  );
+  const all = [...Object.values(PROP_MODELS), ...Object.values(PROP_POOLS).flat()];
+  return all.filter((s) => (seen.has(s.url) ? false : (seen.add(s.url), true)));
 }

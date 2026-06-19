@@ -1306,8 +1306,9 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
     return skinBody ? { ...style, body: skinBody } : style;
   }, [style, building.skin]);
   const { variant, spec } = useMemo(
-    () => resolveStructureModel(building.kind),
-    [building.kind],
+    // EM-216b: building.id drives the variety-pool pick (deterministic, replay-safe).
+    () => resolveStructureModel(building.kind, building.id),
+    [building.kind, building.id],
   );
   // EM-180: funds render as a treasury object, never a building shell.
   const fund = isFundBuilding(building);

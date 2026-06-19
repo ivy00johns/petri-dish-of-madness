@@ -140,14 +140,45 @@ export const CHARACTER_MODELS: {
   },
 };
 
-/** Every non-null spec across the three registries (preload + tests). */
+/**
+ * EM-216b — per-slot VARIETY pools. A variant with a pool renders one of
+ * SEVERAL distinct GLBs, picked deterministically from the building id
+ * (structureModel.resolveStructureModel) so agent-built houses/shops stop
+ * looking cloned — and the pick is stable across frame/reload/fork (the same
+ * id always lands on the same mesh, so EM-155 replay byte-equality holds).
+ * A variant absent here keeps its single MODEL_REGISTRY spec. Every pool
+ * member's footprint respects the city convention (≤3.4u long, ≤4.2u tall) —
+ * models.test re-measures them. The first member of each pool is the kit's
+ * MODEL_REGISTRY default so the no-id path and the pool agree on slot 0.
+ */
+export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
+  // Residences — the most-repeated structures. 3 coherent Kenney suburban
+  // houses + 3 new CC0 poly.pizza homes (modern / storybook cottage / fantasy).
+  house: [
+    { url: `${KENNEY_CITY}/suburban-a.glb`, scale: 2.3, yOffset: 0 },  // 2.99u
+    { url: `${KENNEY_CITY}/suburban-b.glb`, scale: 1.65, yOffset: 0 }, // 3.02u
+    { url: `${KENNEY_CITY}/suburban-q.glb`, scale: 2.4, yOffset: 0 },  // 2.98u
+    { url: `${POLY}/house-modern.glb`, scale: 3.3, yOffset: 0 },       // Quaternius House 2.94u
+    { url: `${POLY}/house-cottage.glb`, scale: 6.0, yOffset: 0 },      // CreativeTrio Cottage 2.80u
+    { url: `${POLY}/house-fantasy.glb`, scale: 1.1, yOffset: 0 },      // Quaternius Fantasy House 2.93u, 3.73u tall
+  ],
+  // Storefronts — three Kenney commercial blocks (already vendored).
+  stall: [
+    { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // 2.44u
+    { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 1.8, yOffset: 0 }, // 2.95u
+    { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // 2.33u, 4.06u tall
+  ],
+};
+
+/** Every non-null spec across all registries + variety pools (preload + tests). */
 export function allModelSpecs(): ModelSpec[] {
   const specs = [
     ...Object.values(MODEL_REGISTRY),
     ...Object.values(PLACE_MODELS),
     ...Object.values(CHARACTER_MODELS),
-  ].filter((s): s is ModelSpec => s !== null);
-  // De-dupe by url (a model may serve several keys).
+    ...Object.values(MODEL_POOLS).flat(),
+  ].filter((s): s is ModelSpec => s != null);
+  // De-dupe by url (a model may serve several keys / pools).
   const seen = new Set<string>();
   return specs.filter((s) => (seen.has(s.url) ? false : (seen.add(s.url), true)));
 }
