@@ -118,6 +118,11 @@ export const CHARACTER_MODELS: {
   villager: ModelSpec | null;
   cat: ModelSpec | null;
   dog: ModelSpec | null;
+  squirrel: ModelSpec | null;
+  raccoon: ModelSpec | null;
+  goat: ModelSpec | null;
+  fox: ModelSpec | null;
+  crow: ModelSpec | null;
 } = {
   // 2.19u tall at scale 1 → ~1.1u, matching the Wave B capsule.
   villager: {
@@ -138,6 +143,17 @@ export const CHARACTER_MODELS: {
     yOffset: 0,
     clips: { idle: 'Idle', walk: 'Walk' },
   },
+  // EM-216b: 5 distinct rigged CC0 critter meshes (Quaternius animated, clips
+  // pruned to Idle/Walk like cat/dog). No CC0 squirrel/goat/crow exist on
+  // poly.pizza, so the closest CC0 rigs stand in (rat / alpaca / pigeon),
+  // tinted per species via ANIMAL_STYLES and labeled by speciesEmoji. Scales
+  // keep them critter-small (~0.3–0.85u). Filenames name the ACTUAL animal so
+  // the substitution is explicit; swap a url here to upgrade any slot later.
+  squirrel: { url: `${QUATERNIUS}/rat.glb`, scale: 0.11, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  raccoon: { url: `${QUATERNIUS}/raccoon.glb`, scale: 0.23, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  goat: { url: `${QUATERNIUS}/alpaca.glb`, scale: 0.16, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  fox: { url: `${QUATERNIUS}/fox.glb`, scale: 0.15, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
+  crow: { url: `${QUATERNIUS}/pigeon.glb`, scale: 0.26, yOffset: 0, clips: { idle: 'Idle', walk: 'Walk' } },
 };
 
 /**
