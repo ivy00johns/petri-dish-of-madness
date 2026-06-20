@@ -16,6 +16,7 @@ vi.mock('../../inspector/api', () => ({
     personas: vi.fn(async () => []),
     godIntervene: vi.fn(),
     godWhisper: vi.fn(),
+    proclaim: vi.fn(),
   },
 }));
 
@@ -25,6 +26,7 @@ import { agent, profile, world } from '../../test-utils/fixtures';
 
 const interveneMock = inspectorApi.godIntervene as Mock;
 const whisperMock = inspectorApi.godWhisper as Mock;
+const proclaimMock = inspectorApi.proclaim as Mock;
 
 const AGENTS = [
   agent({ id: 'bram', name: 'Bram', energy: 12, credits: 3 }),
@@ -60,8 +62,10 @@ function renderPanel() {
 beforeEach(() => {
   interveneMock.mockReset();
   whisperMock.mockReset();
+  proclaimMock.mockReset();
   interveneMock.mockResolvedValue({ ok: true });
   whisperMock.mockResolvedValue({ ok: true });
+  proclaimMock.mockResolvedValue({ ok: true });
 });
 
 describe('GOD CONSOLE — the three labeled groups (EM-138)', () => {
@@ -87,6 +91,42 @@ describe('GOD CONSOLE — the three labeled groups (EM-138)', () => {
     await user.type(screen.getByLabelText(/Reply on billboard/i), 'be kind');
     await user.click(screen.getByRole('button', { name: 'Post the god reply to the billboard' }));
     expect(onBillboardReply).toHaveBeenCalledWith('be kind');
+  });
+});
+
+describe('GOD CONSOLE — VOICE proclamation (EM-137 sibling)', () => {
+  it('PROCLAIM posts the text via inspectorApi.proclaim and clears the input on ok', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const input = screen.getByLabelText('📣 Proclaim');
+    await user.type(input, 'New skills day! Make art.');
+    await user.click(screen.getByRole('button', { name: 'Proclaim to the whole town' }));
+    expect(proclaimMock).toHaveBeenCalledWith('New skills day! Make art.');
+    await waitFor(() => expect(input).toHaveValue(''));
+    expect(screen.getByRole('status')).toHaveTextContent(/proclaimed/);
+  });
+
+  it('the proclaim button enforces the 280 cap and stays disabled while empty', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const input = screen.getByLabelText('📣 Proclaim');
+    expect(input).toHaveAttribute('maxlength', '280');
+    expect(screen.getByRole('button', { name: 'Proclaim to the whole town' })).toBeDisabled();
+    await user.type(input, 'hear ye');
+    expect(screen.getByRole('button', { name: 'Proclaim to the whole town' })).toBeEnabled();
+  });
+
+  it('renders a 4xx/5xx proclaim failure inline via the labeled error treatment', async () => {
+    const user = userEvent.setup();
+    proclaimMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      message: 'the world is not initialized yet (HTTP 503)',
+    });
+    renderPanel();
+    await user.type(screen.getByLabelText('📣 Proclaim'), 'hear me');
+    await user.click(screen.getByRole('button', { name: 'Proclaim to the whole town' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/HTTP 503/);
   });
 });
 
