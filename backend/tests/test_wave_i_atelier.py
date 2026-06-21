@@ -605,6 +605,49 @@ def test_menu_post_image_not_offered_off_billboard():
     assert "post_image" not in ctx     # gate + resolution agree
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-210 credit kill switch — image_gen.enabled=False (out-of-credits mitigation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _world_image_disabled() -> World:
+    params = WorldParams(
+        energy_decay_per_turn=0.0, death_after_zero_turns=99, turns_per_day=999,
+        image_gen=ImageGenParams(enabled=False),
+    )
+    agents = [AgentState(id="agent_a", name="Ada", personality="", profile="mock",
+                         location="plaza", energy=100, credits=100)]
+    return World(params, _places(), agents)
+
+
+def test_image_gen_disabled_rejects_create_image_and_parks_no_fetch():
+    """The credit-safe kill switch: create_image is rejected BEFORE any fetch is
+    parked, so the loop makes ZERO image-API calls (no PNG fetch to drain)."""
+    world = _world_image_disabled()
+    ada = world.agents["agent_a"]
+    evt = world.action_create_image(ada, "a sunset over the plaza")
+    assert evt["kind"] == "parse_failure"
+    assert evt["payload"]["error"] == "image_gen_disabled"
+    assert world.gallery == []                 # nothing recorded
+    assert world.pending_image_fetches == []   # NO image-API fetch parked
+
+
+def test_image_gen_disabled_drops_create_image_from_menu():
+    world = _world_image_disabled()
+    ada = world.agents["agent_a"]
+    ctx = _prompt_text(_assemble_context(ada, world, [], world.params))
+    assert "create_image" not in ctx           # menu + resolution agree (EM-108)
+
+
+def test_image_gen_enabled_by_default_is_unchanged():
+    world = _world()                           # default ImageGenParams ⇒ enabled
+    ada = world.agents["agent_a"]
+    evt = world.action_create_image(ada, "a fountain")
+    assert evt["kind"] == "image_posted"
+    assert len(world.pending_image_fetches) == 1
+    ctx = _prompt_text(_assemble_context(ada, world, [], world.params))
+    assert "create_image" in ctx
+
+
 def test_menu_offers_promote_image_with_a_concrete_promotable_id():
     """FINDING 1(b) — agents must be OFFERED promote_image (menu/resolution agree,
     EM-108): at the town hall the propose_rule menu names the effect with a CONCRETE

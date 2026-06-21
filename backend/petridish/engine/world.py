@@ -2722,6 +2722,13 @@ class World:
     IMAGEGEN_DEFAULT_MAX_GALLERY = 30   # newest images retained in self.gallery
     IMAGE_PROMPT_CAP = 240              # prompt chars kept (and the schema maxLength)
 
+    def _image_gen_enabled(self) -> bool:
+        """Wave I / EM-210 — config gate `world.image_gen.enabled` (default True).
+        Disabled ⇒ create_image is dropped from the menu and rejected here at
+        resolution (no PNG fetch parked), so the Atelier makes ZERO image-API
+        calls — the credit-safe kill switch. post_image/promote_image stay."""
+        return bool(_block_get(getattr(self.params, "image_gen", None), "enabled", True))
+
     def _image_gen_max_gallery(self) -> int:
         """The gallery cap, read modestly from config (params.image_gen.max_gallery),
         mirroring the props/animals max_population reads. Defaults to 30 when the
@@ -2788,6 +2795,12 @@ class World:
         a deterministic gallery entry + parks a transient fetch + emits image_posted,
         ALL synchronously at turn time (no LLM, no network here). The async PNG fetch
         is drained by the loop and emits NOTHING (off the replay surface)."""
+        # Wave I / EM-210 — credit-safe kill switch: when image_gen is disabled,
+        # reject BEFORE parking any fetch, so the loop never calls the image API.
+        if not self._image_gen_enabled():
+            return self._fail_event(
+                agent.id, "create_image", "image_gen_disabled",
+                f"{agent.name} reached for the brushes, but the atelier is closed today.")
         prompt = str(prompt or "").strip()[: self.IMAGE_PROMPT_CAP]
         if not prompt:
             return self._fail_event(

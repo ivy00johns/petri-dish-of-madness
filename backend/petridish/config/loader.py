@@ -404,11 +404,17 @@ class ImageGenParams:
     _block_get accessors (World._image_gen_max_gallery + the loop's semaphore),
     so an absent `image_gen` block behaves exactly as these values.
 
+      enabled        — master toggle (default True). False ⇒ create_image is
+                       dropped from the menu and rejected at resolution (no PNG
+                       fetch is parked), so the Atelier makes ZERO image-API
+                       calls — the credit-safe kill switch. post_image /
+                       promote_image (free, no network) stay available.
       max_concurrent — in-flight PNG fetches; the loop SKIPS a fetch above this
                        (skip-under-load, never an unbounded queue). Default 2.
       max_gallery    — newest images retained in world.gallery (pop-oldest on
                        append, mirror the billboard cap). Default 30.
     """
+    enabled: bool = True
     max_concurrent: int = 2
     max_gallery: int = 30
 
@@ -1087,7 +1093,11 @@ def _parse_image_gen(raw: dict | None) -> ImageGenParams:
         max_gallery = max(1, int(raw.get("max_gallery", d.max_gallery)))
     except (TypeError, ValueError):
         max_gallery = d.max_gallery
-    return ImageGenParams(max_concurrent=max_concurrent, max_gallery=max_gallery)
+    return ImageGenParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_concurrent=max_concurrent,
+        max_gallery=max_gallery,
+    )
 
 
 def _parse_narrator(raw: dict | None) -> NarratorParams:
