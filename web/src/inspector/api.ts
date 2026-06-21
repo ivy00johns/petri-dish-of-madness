@@ -30,6 +30,10 @@ export interface EventRow {
   actor_type: ActorType | string;
   target_id: string | null;
   profile: string | null;
+  /** Hex profile color the backend derives at the /api/events + /api/replay
+   *  backfill boundary (EM-187 fix #28; NOT a stored column). The model chip
+   *  needs it, so the row → WorldEvent bridge MUST carry it through. */
+  profile_color?: string | null;
   turn_id: string | null;
   text: string | null;
   /** Parsed kind-specific payload (event-log.md §2). */
@@ -178,6 +182,11 @@ export function eventRowToWorldEvent(row: EventRow): WorldEvent {
     actor_id: row.actor_id,
     target_id: row.target_id,
     profile: row.profile,
+    // EM-187 fix #28 — the backfill bridge MUST carry profile_color through, or
+    // the model chip renders ONLY on live WS events and vanishes for all
+    // backfilled/replayed history on refresh (the live path stores rows raw; this
+    // bridge is the one that previously dropped it).
+    profile_color: row.profile_color ?? null,
     text: row.text,
     payload: row.payload ?? {},
     ts: row.ts,
