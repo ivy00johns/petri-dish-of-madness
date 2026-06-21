@@ -473,3 +473,56 @@ def test_loop_drain_with_nothing_pending_is_a_safe_noop(tmp_path):
     loop._drain_image_fetches()
     assert loop._image_fetch_tasks == set()
     assert not images_dir.exists()  # no side-artifact dir created on a no-op
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# API — GET /api/gallery: the disk-aware viewer surface. Returns ONLY records
+# whose PNG actually exists, so phantom entries (a create_image whose best-effort
+# PNG fetch 402'd or was load-skipped, per the drain tests above) never reach the
+# viewer. world_state.gallery stays the replay-pure sim record; this is the live
+# display view (the test_god_console TestClient idiom).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_api_gallery_returns_only_records_with_a_png_on_disk(tmp_path, monkeypatch):
+    import sys
+    from fastapi.testclient import TestClient
+    from petridish.api.app import app
+    appmod = sys.modules["petridish.api.app"]
+
+    img_dir = tmp_path / "images"
+    img_dir.mkdir(parents=True)
+    # Only the "real" piece is materialized on disk; "phantom" never rendered.
+    (img_dir / "img_real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(appmod, "_gallery_images_dir", lambda: img_dir)
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        appmod._world.gallery = [
+            {"image_id": "img_real", "prompt": "real art", "proposer_id": "a1",
+             "created_tick": 5, "url": "/assets/images/img_real.png", "promoted": True},
+            {"image_id": "img_phantom", "prompt": "lost art", "proposer_id": "a1",
+             "created_tick": 6, "url": "/assets/images/img_phantom.png", "promoted": False},
+        ]
+        appmod._world.plaza_banner_ref = "img_real"
+
+        resp = client.get("/api/gallery")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2
+        assert body["materialized"] == 1
+        ids = [g["image_id"] for g in body["images"]]
+        assert ids == ["img_real"]          # the phantom is filtered out
+        assert body["plaza_banner_ref"] == "img_real"
+
+
+def test_api_gallery_empty_when_no_records(tmp_path, monkeypatch):
+    import sys
+    from fastapi.testclient import TestClient
+    from petridish.api.app import app
+    appmod = sys.modules["petridish.api.app"]
+    monkeypatch.setattr(appmod, "_gallery_images_dir", lambda: tmp_path / "images")
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        appmod._world.gallery = []
+        appmod._world.plaza_banner_ref = ""
+        body = client.get("/api/gallery").json()
+        assert body == {"images": [], "plaza_banner_ref": "", "total": 0, "materialized": 0}

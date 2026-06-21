@@ -14,11 +14,20 @@ Deferred from the design spec (§1 non-goals) and brainstorming:
 
 ## Atelier follow-ups (image generation shipped as EM-210 / Wave I)
 
-- **Gallery / artwork admin viewer** — a read-only panel to browse `world.gallery`
-  (prompt, painter, promoted-state, thumbnail) and what's hung on the plaza banner, so
-  the operator can actually *see* the art agents make and vote up. The backend already
-  persists `world.gallery` + serves PNGs at `/assets/images/<id>.png`, so this is mostly
-  a frontend job — no new storage. Requested 2026-06-21 ("very interested" in the art).
+- ~~**Gallery / artwork admin viewer**~~ — **SHIPPED 2026-06-21.** A read-only
+  `GalleryPanel` (collapsible thumbnail grid + lightbox) rides under the billboard in the
+  feed column, badges the plaza piece with ★ PLAZA, and resolves attribution to the
+  painter + model chip. Its source of truth is a new **`GET /api/gallery`** that returns
+  only records whose PNG actually exists on disk — because the gallery record is written
+  synchronously at `create_image` time while the PNG fetch is best-effort (a 402'd or
+  load-skipped fetch leaves a *phantom* record). `world_state.gallery` stays the
+  replay-pure sim record; the endpoint is the live disk-aware display view, so the viewer
+  never points an `<img>` at a missing file (no 404 spam, no gray tiles); the header notes
+  the unrendered count. Falls back to `world.gallery`/`image_posted` history with a
+  per-thumb placeholder when the endpoint is absent. Also added the missing `/assets` dev
+  proxy in `vite.config.ts` so PNG urls resolve to the backend on :5173 (this likewise
+  fixes the 3D PlazaBanner texture falling back to procedural in dev). 12 tests
+  (`GalleryPanel.test.tsx` + `/api/gallery` in `test_wave_i_integration.py`).
 - **Credit-gated re-enables (parked 2026-06-21):** image generation is currently **OFF**
   (`world.image_gen.enabled: false`, the EM-210 kill switch) and EM-222 embeddings are on
   blind-recency fallback — the HF inference credit pool depleted (402). Flip

@@ -607,6 +607,44 @@ async def get_state():
     return _loop.current_snapshot()
 
 
+def _gallery_images_dir() -> "_Path":
+    """Where the Atelier's PNGs land (mirrors the /assets StaticFiles mount).
+    A module-level seam so tests can point it at a tmp dir."""
+    return _Path(__file__).resolve().parents[3] / "data" / "assets" / "images"
+
+
+@app.get("/api/gallery")
+async def get_gallery():
+    """The Atelier viewer's read surface (Wave I / EM-210).
+
+    Returns the live world's gallery records FILTERED to those whose PNG
+    actually exists on disk. The gallery record + image_posted are written
+    synchronously at create_image time, but the PNG fetch is best-effort
+    (bounded, skip-under-load, swallows 402s) — so a record can outlive an
+    image that never materialized (a credit-exhausted or load-skipped fetch).
+
+    world_state.gallery stays the replay-pure sim record (what agents intended
+    and reacted to); THIS endpoint is the live, disk-aware DISPLAY view, so the
+    viewer never points an <img> at a missing file (no 404 spam, no phantom
+    'art unavailable' tiles). `total` vs `materialized` lets the panel note how
+    many pieces are still un-rendered."""
+    if _world is None:
+        raise HTTPException(503, "Not initialized")
+    gallery = list(getattr(_world, "gallery", []) or [])
+    images_dir = _gallery_images_dir()
+    materialized = [
+        dict(g)
+        for g in gallery
+        if g.get("image_id") and (images_dir / f"{g['image_id']}.png").is_file()
+    ]
+    return {
+        "images": materialized,
+        "plaza_banner_ref": getattr(_world, "plaza_banner_ref", "") or "",
+        "total": len(gallery),
+        "materialized": len(materialized),
+    }
+
+
 @app.get("/api/config")
 async def get_config():
     if _config is None:

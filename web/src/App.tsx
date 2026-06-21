@@ -30,6 +30,7 @@ import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
 import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
+import { GalleryPanel } from './components/feed/GalleryPanel';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
@@ -248,6 +249,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
           {/* W11b (EM-091c): the notice-board panel rides under the digest —
               collapsible so the feed keeps its vertical budget. */}
           <BillboardPanel world={world} history={sim.history} />
+          {/* Atelier (EM-210): the read-only artwork viewer — browse the art the
+              villagers paint + vote onto the plaza. Collapsible so the feed keeps
+              its vertical budget. */}
+          <GalleryPanel world={world} history={sim.history} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}
