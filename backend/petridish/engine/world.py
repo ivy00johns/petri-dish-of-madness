@@ -89,6 +89,58 @@ class RelationshipState:
     since_tick: int = 0
 
 
+# Wave L / EM-223 — recursive+reactive plan bounds (the believable-routine layer).
+PLAN_GOAL_CAP = 200
+PLAN_STEP_CAP = 120
+PLAN_MAX_STEPS = 8
+
+
+def normalize_plan(raw: Any) -> dict | None:
+    """Wave L / EM-223 — coerce a raw plan into the canonical, bounded shape, or
+    None if it lacks a usable goal + steps. Pure/total: never raises, no clock
+    reads, no RNG (the runtime supplies plan_id/made_tick at creation; restore
+    preserves them). Used on BOTH the create path (runtime plan_revision) and the
+    restore path (World.from_snapshot), so a plan round-trips byte-stably
+    (fork/replay, EM-155).
+
+    Shape: {plan_id, goal, steps:[str], current_step:int, made_tick:int, stale:bool}.
+    Returns None for anything without a non-empty goal and ≥1 non-empty step."""
+    if not isinstance(raw, dict):
+        return None
+    goal = raw.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        return None
+    steps_raw = raw.get("steps")
+    if not isinstance(steps_raw, list):
+        return None
+    steps = [
+        str(s).strip()[:PLAN_STEP_CAP]
+        for s in steps_raw
+        if isinstance(s, str) and s.strip()
+    ][:PLAN_MAX_STEPS]
+    if not steps:
+        return None
+    try:
+        cur = int(raw.get("current_step", 0))
+    except (TypeError, ValueError):
+        cur = 0
+    cur = max(0, min(cur, len(steps) - 1))
+    try:
+        made_tick = int(raw.get("made_tick", 0))
+    except (TypeError, ValueError):
+        made_tick = 0
+    pid = raw.get("plan_id")
+    pid = pid if isinstance(pid, str) and pid else None
+    return {
+        "plan_id": pid,
+        "goal": goal.strip()[:PLAN_GOAL_CAP],
+        "steps": steps,
+        "current_step": cur,
+        "made_tick": made_tick,
+        "stale": bool(raw.get("stale", False)),
+    }
+
+
 @dataclass
 class AgentState:
     id: str
@@ -125,6 +177,13 @@ class AgentState:
     # cooldown is DERIVED from this field + the child's family-tie
     # since_tick — no extra clock state (EM-126 generations hook).
     parents: list[str] = field(default_factory=list)
+    # Wave L / EM-223 — recursive+reactive plan: a persistent goal + ordered NL
+    # steps + current_step pointer the agent pursues across turns and revises on
+    # perception change. ADDITIVE: None until the agent emits a plan_revision
+    # (gated on world.planning.enabled); serialized only when set, so plan-free
+    # worlds — and every pre-EM-223 snapshot — keep the exact prior dict shape
+    # (the byte-identical guarantee). Canonical shape via normalize_plan().
+    plan: dict | None = None
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -160,6 +219,17 @@ class AgentState:
         # every pre-E world) keep the exact pre-E dict shape.
         if self.parents:
             d["parents"] = list(self.parents)
+        # Wave L / EM-223 — only for agents with an active plan, so plan-free
+        # worlds (and every pre-EM-223 world) keep the exact prior dict shape.
+        if self.plan is not None:
+            d["plan"] = {
+                "plan_id": self.plan.get("plan_id"),
+                "goal": self.plan.get("goal", ""),
+                "steps": list(self.plan.get("steps", [])),
+                "current_step": int(self.plan.get("current_step", 0)),
+                "made_tick": int(self.plan.get("made_tick", 0)),
+                "stale": bool(self.plan.get("stale", False)),
+            }
         return d
 
 
@@ -4277,6 +4347,10 @@ class World:
                 # restore [] (the pair birth cooldown derives from this field,
                 # so a restored world never re-births inside the window).
                 parents=[str(p) for p in (d.get("parents") or [])],
+                # Wave L / EM-223 — additive: pre-EM-223 snapshots lack the key
+                # and restore None; a malformed stored plan coerces to None
+                # (normalize_plan is total). Byte-stable round-trip (EM-155).
+                plan=normalize_plan(d.get("plan")),
             )
             a.relationships = {
                 str(aid): RelationshipState(

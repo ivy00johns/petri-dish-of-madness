@@ -78,6 +78,8 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   reflection:        '✎',
   commitment_made:   '⚑',
   commitment_lapsed: '⌛',
+  // Wave L / EM-223 — an agent set/revised its recursive plan (inner-life channel).
+  plan_revised:      '🗺',
   usage_alert:       '⚠',
   run_forked:        '⑂',
   // Wave E (contracts/wave-e.md B6) — the social-city kinds. ♥ a typed bond
@@ -327,7 +329,7 @@ export const CATEGORIES: FeedCategory[] = [
   { key: 'board',   label: 'Board',   icon: '📌', kinds: ['billboard_posted'] },
   // W11b (EM-079/080): the inner-life channel — diary reflections + spoken
   // commitments (made / kept / 👻 phantom-lapsed).
-  { key: 'diary',   label: 'Diary',   icon: '✎', kinds: ['reflection', 'commitment_made', 'commitment_lapsed'] },
+  { key: 'diary',   label: 'Diary',   icon: '✎', kinds: ['reflection', 'commitment_made', 'commitment_lapsed', 'plan_revised'] },
   // Wave E: god miracles live with the other world-scale levers (random_event
   // is the closest sibling — god_intervention itself is uncategorized ON
   // PURPOSE, but miracles are filterable world events, not feedback receipts).

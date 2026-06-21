@@ -462,6 +462,28 @@ class ReflectionParams:
 
 
 @dataclass
+class PlanningParams:
+    """Wave L / EM-223 — recursive+reactive planning (config `world.planning`).
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-223 — no plan block,
+    no plan invite, `plan_revision` ignored, `AgentState.plan` never set, so the
+    protagonist prompt golden file and snapshot key set are unchanged. Flip on
+    for the live tuning run the spike calls for. Engine reads via defensive
+    accessors with IDENTICAL defaults, so an absent block behaves the same.
+
+      enabled     — master toggle (default False = zero behavioral change).
+      max_steps   — soft prompt hint for steps-per-plan (the spike's 3–5); the
+                    hard schema cap is engine PLAN_MAX_STEPS (8).
+      reflex_bias — plan-aware reflex bias (unit 4): bias a background agent's
+                    deterministic reflex toward its current step's place. Only
+                    re-orders already-valid reflex actions; zero extra calls.
+    """
+    enabled: bool = False
+    max_steps: int = 5
+    reflex_bias: bool = True
+
+
+@dataclass
 class ProcgenParams:
     """W11b / EM-098 — procedural town generation (config `world.procgen`).
     DEFAULT OFF: the hand-authored town stays byte-identical. When enabled, the
@@ -828,6 +850,11 @@ class WorldParams:
     # engine-matching defaults (default ON); `enabled: false` skips the
     # round-boundary recompute entirely (byte-identical pre-E behavior).
     factions: FactionParams = field(default_factory=FactionParams)
+    # Wave L / EM-223 — recursive+reactive planning. Additive with
+    # engine-matching defaults; DEFAULT OFF, so a world.yaml without the
+    # `planning` block is byte-identical to pre-EM-223 (prompt golden +
+    # snapshot key set). `enabled: true` activates the plan layer.
+    planning: PlanningParams = field(default_factory=PlanningParams)
 
 
 @dataclass
@@ -1108,6 +1135,24 @@ def _parse_reflection(raw: dict | None) -> ReflectionParams:
     except (TypeError, ValueError):
         threshold = d.importance_threshold
     return ReflectionParams(importance_threshold=threshold)
+
+
+def _parse_planning(raw: dict | None) -> PlanningParams:
+    """Parse the optional `world.planning` block (Wave L / EM-223).
+    Absent/empty/malformed -> engine-matching defaults (DEFAULT OFF), so a
+    world.yaml without the block is byte-identical to pre-EM-223."""
+    if not isinstance(raw, dict):
+        return PlanningParams()
+    d = PlanningParams()
+    try:
+        max_steps = max(1, int(raw.get("max_steps", d.max_steps)))
+    except (TypeError, ValueError):
+        max_steps = d.max_steps
+    return PlanningParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_steps=max_steps,
+        reflex_bias=bool(raw.get("reflex_bias", d.reflex_bias)),
+    )
 
 
 def _parse_procgen(raw: dict | None) -> ProcgenParams:
@@ -1431,6 +1476,7 @@ def _parse_world(
         relationships=_parse_relationships(w.get("relationships")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
+        planning=_parse_planning(w.get("planning")),
         miracles=_parse_miracles(w.get("miracles")),
     )
 
