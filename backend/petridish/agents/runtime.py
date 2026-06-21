@@ -1818,11 +1818,13 @@ def _assemble_context(
             f"read_billboard - read the latest billboard posts ({len(board)} on the board)")
 
     # ── Wave I / EM-210+211 — The Atelier (create art anywhere; post it at the
-    # board). create_image is always offered (reflex, ungated); post_image only at
-    # the board AND once the agent has painted something (menu/resolution agree —
-    # EM-108). The lines are short (prompt-diet aware — EM-161).
-    valid_actions.append(
-        "create_image (prompt) - paint art from a short text prompt for your town")
+    # board). create_image is offered (reflex, ungated) UNLESS image_gen is
+    # disabled (EM-210 credit kill switch — menu/resolution agree, EM-108);
+    # post_image only at the board AND once the agent has painted something. The
+    # lines are short (prompt-diet aware — EM-161).
+    if _world_block_get(params, "image_gen", "enabled", True):
+        valid_actions.append(
+            "create_image (prompt) - paint art from a short text prompt for your town")
     _gallery = getattr(world, "gallery", []) or []
     _has_own_image = any(g.get("proposer_id") == agent.id for g in _gallery)
     if _gate_ok("post_image") and _has_own_image:
