@@ -19,6 +19,15 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      // Wave I / EM-210 — the Atelier's generated PNGs are served by the backend
+      // StaticFiles mount at /assets/images/<id>.png (an external side-artifact,
+      // off the replay surface). Proxy it in dev so the relative gallery urls
+      // resolve to real art on :5173 — without this the GalleryPanel thumbnails
+      // and the 3D PlazaBanner texture both fall back to placeholders locally.
+      '/assets': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

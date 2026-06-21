@@ -14,11 +14,14 @@ Deferred from the design spec (§1 non-goals) and brainstorming:
 
 ## Atelier follow-ups (image generation shipped as EM-210 / Wave I)
 
-- **Gallery / artwork admin viewer** — a read-only panel to browse `world.gallery`
-  (prompt, painter, promoted-state, thumbnail) and what's hung on the plaza banner, so
-  the operator can actually *see* the art agents make and vote up. The backend already
-  persists `world.gallery` + serves PNGs at `/assets/images/<id>.png`, so this is mostly
-  a frontend job — no new storage. Requested 2026-06-21 ("very interested" in the art).
+- ~~**Gallery / artwork admin viewer**~~ — **SHIPPED 2026-06-21.** A read-only
+  `GalleryPanel` (collapsible thumbnail grid + lightbox) rides under the billboard in the
+  feed column: reads `world.gallery` (newest-first, degrades to deriving from
+  `image_posted`/`image_promoted` history), badges the piece on `plaza_banner_ref` with
+  ★ PLAZA, and degrades a 404'd PNG to a labeled placeholder. Also added the missing
+  `/assets` dev proxy in `vite.config.ts` so the relative PNG urls resolve to the backend
+  on :5173 (this also fixes the 3D PlazaBanner texture falling back to procedural in dev).
+  Frontend-only, no new storage. 9 tests in `GalleryPanel.test.tsx`.
 - **Credit-gated re-enables (parked 2026-06-21):** image generation is currently **OFF**
   (`world.image_gen.enabled: false`, the EM-210 kill switch) and EM-222 embeddings are on
   blind-recency fallback — the HF inference credit pool depleted (402). Flip
