@@ -16,12 +16,18 @@ Deferred from the design spec (§1 non-goals) and brainstorming:
 
 - ~~**Gallery / artwork admin viewer**~~ — **SHIPPED 2026-06-21.** A read-only
   `GalleryPanel` (collapsible thumbnail grid + lightbox) rides under the billboard in the
-  feed column: reads `world.gallery` (newest-first, degrades to deriving from
-  `image_posted`/`image_promoted` history), badges the piece on `plaza_banner_ref` with
-  ★ PLAZA, and degrades a 404'd PNG to a labeled placeholder. Also added the missing
-  `/assets` dev proxy in `vite.config.ts` so the relative PNG urls resolve to the backend
-  on :5173 (this also fixes the 3D PlazaBanner texture falling back to procedural in dev).
-  Frontend-only, no new storage. 9 tests in `GalleryPanel.test.tsx`.
+  feed column, badges the plaza piece with ★ PLAZA, and resolves attribution to the
+  painter + model chip. Its source of truth is a new **`GET /api/gallery`** that returns
+  only records whose PNG actually exists on disk — because the gallery record is written
+  synchronously at `create_image` time while the PNG fetch is best-effort (a 402'd or
+  load-skipped fetch leaves a *phantom* record). `world_state.gallery` stays the
+  replay-pure sim record; the endpoint is the live disk-aware display view, so the viewer
+  never points an `<img>` at a missing file (no 404 spam, no gray tiles); the header notes
+  the unrendered count. Falls back to `world.gallery`/`image_posted` history with a
+  per-thumb placeholder when the endpoint is absent. Also added the missing `/assets` dev
+  proxy in `vite.config.ts` so PNG urls resolve to the backend on :5173 (this likewise
+  fixes the 3D PlazaBanner texture falling back to procedural in dev). 12 tests
+  (`GalleryPanel.test.tsx` + `/api/gallery` in `test_wave_i_integration.py`).
 - **Credit-gated re-enables (parked 2026-06-21):** image generation is currently **OFF**
   (`world.image_gen.enabled: false`, the EM-210 kill switch) and EM-222 embeddings are on
   blind-recency fallback — the HF inference credit pool depleted (402). Flip

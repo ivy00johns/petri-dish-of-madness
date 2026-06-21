@@ -1,21 +1,23 @@
 /**
  * GalleryPanel (Atelier follow-up — Wave I / EM-210) — the read-only artwork
  * viewer. A collapsible thumbnail grid of the agent-generated images the world
- * REMEMBERS (`world.gallery`), so the operator can actually SEE the art the
- * villagers paint and vote onto the plaza.
+ * REMEMBERS, so the operator can actually SEE the art the villagers paint and
+ * vote onto the plaza.
  *
- * Images come from `world.gallery` (the engine's capped-newest state, serialized
- * into every world_state broadcast). When a backend predates the gallery (or an
- * old snapshot omits it) the panel degrades to deriving records from
- * `image_posted` / `image_promoted` events in the rolling history — and when
- * neither source has anything it renders a labeled empty state (§7 rule), never
- * a blank.
+ * Source of truth: the live `GET /api/gallery` endpoint, which returns only the
+ * records whose PNG actually exists on disk. The gallery record + image_posted
+ * are written synchronously at create_image time, but the PNG fetch is
+ * best-effort (bounded, skip-under-load, swallows 402s) — so `world.gallery`
+ * (the replay-pure sim record) can list pieces whose image never materialized.
+ * Reading the disk-aware endpoint keeps the viewer from pointing an <img> at a
+ * missing file (no 404 spam, no phantom "art unavailable" tiles). When the
+ * endpoint is unavailable (a backend predating it, or offline) the panel
+ * degrades to `world.gallery` / image_posted history with a per-thumb
+ * placeholder as the final safety net.
  *
  * The PNG bytes are an external side-artifact under /assets/images/<id>.png; the
- * panel reads each gallery entry's RELATIVE `url` straight (the same path the 3D
- * PlazaBanner textures — proxied to the backend in dev via vite.config). A
- * thumbnail that fails to load (image gen off, file pruned) degrades to a
- * labeled placeholder, never a broken-image glyph.
+ * panel reads each record's RELATIVE `url` straight (the same path the 3D
+ * PlazaBanner textures — proxied to the backend in dev via vite.config).
  *
  * Clicking a thumbnail opens a lightbox with the full image + the painter's
  * prompt + attribution. The one currently hung over the plaza (matching
@@ -32,6 +34,16 @@ interface GalleryPanelProps {
   world: WorldState | null;
   /** Rolling history (newest-first) — the fallback record source. */
   history: WorldEvent[];
+}
+
+/** The `/api/gallery` payload — records filtered to those with a real PNG. */
+interface GalleryFeed {
+  images: GalleryImage[];
+  plaza_banner_ref: string;
+  /** Records in the sim's gallery, including ones whose PNG never materialized. */
+  total: number;
+  /** Records actually backed by a PNG on disk (= images.length). */
+  materialized: number;
 }
 
 const COLLAPSE_KEY = 'em.gallery.collapsed';
@@ -93,24 +105,86 @@ export function galleryImages(
 }
 
 /**
- * The id currently hung over the plaza: `world.plaza_banner_ref` when present,
+ * The id currently hung over the plaza: an explicit banner ref when present,
  * else the newest promoted record (the derive path has no banner field).
  */
-function currentPlazaRef(world: WorldState | null, images: GalleryImage[]): string {
-  if (world?.plaza_banner_ref) return world.plaza_banner_ref;
+function currentPlazaRef(bannerRef: string, images: GalleryImage[]): string {
+  if (bannerRef) return bannerRef;
   return images.find((g) => g.promoted)?.image_id ?? '';
+}
+
+/** A stable key over the sim's gallery id-set — refetch the disk view when it changes. */
+function gallerySig(world: WorldState | null): string {
+  const g = world?.gallery ?? [];
+  return `${g.length}:${g[0]?.image_id ?? ''}:${g[g.length - 1]?.image_id ?? ''}`;
 }
 
 export function GalleryPanel({ world, history }: GalleryPanelProps) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [selected, setSelected] = useState<GalleryImage | null>(null);
+  // undefined = the disk-aware fetch is in flight (don't flash phantom tiles);
+  // null     = the endpoint is unavailable (old backend / offline) → use props;
+  // GalleryFeed = the materialized records straight from the backend.
+  const [feed, setFeed] = useState<GalleryFeed | null | undefined>(undefined);
 
   useEffect(() => {
     try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
   }, [collapsed]);
 
-  const images = useMemo(() => galleryImages(world, history), [world, history]);
-  const plazaRef = useMemo(() => currentPlazaRef(world, images), [world, images]);
+  const sig = gallerySig(world);
+  useEffect(() => {
+    let ignore = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/gallery');
+        if (!res.ok) throw new Error(String(res.status));
+        const data = await res.json();
+        if (ignore) return;
+        if (Array.isArray(data?.images)) {
+          setFeed({
+            images: data.images as GalleryImage[],
+            plaza_banner_ref: typeof data.plaza_banner_ref === 'string' ? data.plaza_banner_ref : '',
+            total: typeof data.total === 'number' ? data.total : data.images.length,
+            materialized: typeof data.materialized === 'number' ? data.materialized : data.images.length,
+          });
+        } else {
+          setFeed(null);
+        }
+      } catch {
+        if (!ignore) setFeed(null); // fall back to props (old backend / offline)
+      }
+    })();
+    return () => { ignore = true; };
+  }, [sig]);
+
+  // Prop-derived list — the fallback when the endpoint is unavailable.
+  const fallback = useMemo(() => galleryImages(world, history), [world, history]);
+
+  // Resolve the display list + plaza ref + the unmaterialized count.
+  const { images, plazaRef, unrendered, loading } = useMemo(() => {
+    if (feed) {
+      const imgs = [...feed.images].sort((a, b) => b.created_tick - a.created_tick);
+      return {
+        images: imgs,
+        plazaRef: currentPlazaRef(feed.plaza_banner_ref, imgs),
+        unrendered: Math.max(0, feed.total - feed.materialized),
+        loading: false,
+      };
+    }
+    if (feed === null) {
+      // Endpoint unavailable — degrade to the sim record (with the per-thumb
+      // placeholder as the final safety net for any missing PNG).
+      return {
+        images: fallback,
+        plazaRef: currentPlazaRef(world?.plaza_banner_ref ?? '', fallback),
+        unrendered: 0,
+        loading: false,
+      };
+    }
+    // feed === undefined: the disk view is still loading. Don't render the
+    // unfiltered prop list (it would flash phantom tiles + their 404s).
+    return { images: [] as GalleryImage[], plazaRef: '', unrendered: 0, loading: fallback.length > 0 };
+  }, [feed, fallback, world]);
 
   // actor_id → {name, profile, color} for painter attribution + model chips.
   const painterOf = useMemo(() => {
@@ -134,6 +208,11 @@ export function GalleryPanel({ world, history }: GalleryPanelProps) {
           {images.length > 0 && (
             <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">
               {images.length} piece{images.length === 1 ? '' : 's'}
+              {unrendered > 0 && (
+                <span title={`${unrendered} piece(s) the agents 'painted' but whose image never rendered (a credit-exhausted or load-skipped fetch)`}>
+                  {' '}· +{unrendered} unrendered
+                </span>
+              )}
             </span>
           )}
           <button
@@ -152,7 +231,11 @@ export function GalleryPanel({ world, history }: GalleryPanelProps) {
       </div>
 
       {!collapsed && (
-        images.length === 0 ? (
+        loading ? (
+          <p className="m-0 px-3 py-2 font-mono text-[10px] text-lab-dim leading-relaxed">
+            Loading the gallery…
+          </p>
+        ) : images.length === 0 ? (
           // §7: labeled empty state — explain where the art comes from.
           <p className="m-0 px-3 py-2 font-mono text-[10px] text-lab-dim leading-relaxed">
             The gallery is empty. Villagers paint at the Atelier (create_image) and
