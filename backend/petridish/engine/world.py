@@ -2151,6 +2151,13 @@ class World:
             if rule.status not in ("active", "proposed"):
                 continue
             norm_rule = re.sub(r"[^a-z0-9]+", " ", rule.text.lower()).strip()
+            # A rule with NO law text (name_town / promote_image are action-rules
+            # with empty text) has nothing to commemorate — skip it. Otherwise
+            # `norm_rule in norm_name` is `"" in <name>` == True for EVERY project
+            # ≥4 chars, so all proposals match the blank rule and get rejected as
+            # duplicate monuments to a blank law "" (observed live, run 1050).
+            if not norm_rule:
+                continue
             if len(norm_name) >= 4 and (norm_name in norm_rule or norm_rule in norm_name):
                 return rule
             if len(name_tokens & self._significant_tokens(rule.text)) >= 2:

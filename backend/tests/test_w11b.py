@@ -32,7 +32,7 @@ import sys
 import pytest
 
 from petridish.engine.world import (
-    World, AgentState, Building, PlaceState, RelationshipState,
+    World, AgentState, Building, PlaceState, RelationshipState, RuleState,
     generate_procgen_places,
 )
 from petridish.config.loader import (
@@ -609,6 +609,33 @@ def test_unrelated_project_is_not_commemorative():
                     if e["kind"] == "project_proposed")
     assert "commemorative" not in proposed["payload"]
     assert world.buildings[result["_building_id"]].commemorates is None
+
+
+def test_blank_text_rule_is_never_commemorable():
+    """Regression (observed live, run 1050): a name_town / promote_image rule is
+    an ACTION rule with EMPTY text by design. _commemorated_rule must skip it —
+    otherwise `"" in <project name>` is always True, so EVERY project proposal
+    matches the blank rule and (once one monument stands) is rejected as a
+    duplicate monument to a blank law "". This silently broke ALL proposals."""
+    params = _params()
+    ada = _agent("agent_ada", "Ada", "townhall")
+    world = World(params=params, places=_default_places(), agents=[ada])
+    # a consensus town-naming rule: an action-rule with NO law text.
+    world.rules["r_blank"] = RuleState(
+        id="r_blank", effect="name_town", text="", proposer_id=ada.id,
+        status="active")
+    # the matcher must NOT match an unrelated project to the blank rule
+    assert world._commemorated_rule("Flash Market") is None
+    # and the proposal proceeds normally — not a phantom commemorative duplicate
+    result = world.action_propose_project(ada, "Flash Market", "market", 10)
+    assert "_multi" in result, "proposal must not reject against a blank law"
+    proposed = next(e for e in result["_multi"]
+                    if e["kind"] == "project_proposed")
+    assert "commemorative" not in proposed["payload"]
+    # a REAL text rule alongside the blank one still commemorates correctly
+    ok, _, real = world.action_propose_rule(ada, "ubi", "basic income for all")
+    real.status = "active"
+    assert world._commemorated_rule("Basic Income Monument") is real
 
 
 # ──────────────────────────────────────────────────────────────────────────────
