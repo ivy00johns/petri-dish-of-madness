@@ -25,6 +25,19 @@ Deferred from the design spec (§1 non-goals) and brainstorming:
   `image_gen.enabled: true` and embeddings auto-recover once credits return. Per the
   subscription-only billing rule, do **not** buy credits to restore them early.
 
+## Dev infra (low priority)
+
+- **Don't fork an empty run on every hot-reload.** With `uvicorn --reload`, each backend
+  edit restarts the worker and resume-on-boot (EM-187) forks a NEW run from the latest
+  snapshot. The existing "skip tick-0 snapshots" guard misses the common case: the fork
+  **inherits the parent's tick** (e.g. 4475) and never advances, leaving a 1-event
+  `run_resumed` shell. Streaks of edits chain these, cluttering the run browser and
+  needing periodic manual pruning (the `fork-cleanup-procedure` runbook: re-point kept
+  children → delete `events==1` runs). Fix options: extend the resume guard to also skip
+  a fork whose parent has only the boot event (no advanced turn), reuse the parent run
+  instead of forking when nothing changed, or ship a prune endpoint/tool. **Low priority**
+  — only bites during dev hot-reload streaks; cleanup is a known, quick procedure.
+
 Promoted to `docs/REMAINING-WORK.md` (and removed above per the convention):
 replay viewer → EM-055 (shipped, W6) · head-to-head analytics dashboard → EM-059
 (shipped, W6) · reactive overhearing chains → EM-081 (shipped, W11b) · image generation
