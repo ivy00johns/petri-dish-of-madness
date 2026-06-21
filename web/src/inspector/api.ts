@@ -518,6 +518,19 @@ export const inspectorApi = {
   },
 
   /**
+   * POST /api/proclaim {text} (wave-a2 EM-137 sibling) — the LOUD god voice: a
+   * proclamation heard by the WHOLE town. Unlike the opt-in billboard (agents
+   * must choose to read the board), the active proclamation rides EVERY agent's
+   * next prompt, so the word is guaranteed to reach them. Capped at 280 chars
+   * (the backend ProclaimBody cap). Optimistic-free: the proclamation_posted
+   * event arrives via the WS feed; this returns only the labeled ok/failure
+   * (422 = empty/too-long; 503 = world not initialized; never throws).
+   */
+  async proclaim(text: string): Promise<GodActionResult> {
+    return postGodAction('/api/proclaim', { text: text.trim().slice(0, 280) }, 'proclamation');
+  },
+
+  /**
    * Failure-aware GET /api/analytics scoped to ONE run (EM-086 cross-run
    * comparison): `null` = fetch failed, so the compare panel can label
    * "couldn't load run #N" instead of rendering an all-zero summary.

@@ -86,3 +86,34 @@ describe('inspectorApi.godWhisper — POST /api/god/whisper', () => {
     expect((rejected as { message: string }).message).toMatch(/whisper rejected/);
   });
 });
+
+describe('inspectorApi.proclaim — POST /api/proclaim', () => {
+  it('posts {text} trimmed to the whole-town endpoint', async () => {
+    const result = await inspectorApi.proclaim('  New skills day! Make art.  ');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/proclaim');
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('POST');
+    expect(requestBody()).toEqual({ text: 'New skills day! Make art.' });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('caps the proclamation at 280 chars (the ProclaimBody cap)', async () => {
+    await inspectorApi.proclaim('x'.repeat(400));
+    expect((requestBody().text as string).length).toBe(280);
+  });
+
+  it('maps a 503 (world not initialized) to the labeled failure — never throws', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
+    const uninit = await inspectorApi.proclaim('hear me');
+    expect(uninit).toMatchObject({ ok: false, status: 503 });
+    expect((uninit as { message: string }).message).toMatch(/not initialized/);
+  });
+
+  it('a network failure resolves to the labeled unreachable result', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('offline'));
+    expect(await inspectorApi.proclaim('hello')).toEqual({
+      ok: false,
+      status: null,
+      message: 'backend unreachable — proclamation not sent',
+    });
+  });
+});

@@ -9,7 +9,8 @@
  *
  * Wave A.2 (EM-138): the god section reorganizes into the GOD CONSOLE — three
  * labeled groups: WORLD EVENTS (the inject controls), INTERVENE (bless/grant/
- * whisper on one living agent), and VOICE (the billboard reply).
+ * whisper on one living agent), and VOICE (the billboard reply + the LOUD
+ * proclamation — a decree that rides every agent's next prompt).
  */
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
@@ -553,6 +554,99 @@ function BillboardReply({ onPost }: { onPost: (text: string) => void }) {
       ) : (
         <p className="m-0 font-mono text-[9px] text-lab-dim leading-snug">
           Agents read the board at the plaza &amp; town hall; your ink shows as ✦ god.
+        </p>
+      )}
+    </form>
+  );
+}
+
+/**
+ * Proclaim (Wave A.2 EM-137 sibling) — the GOD CONSOLE's LOUD voice. Unlike the
+ * billboard reply (opt-in — an agent only sees it if it reads the board), the
+ * active proclamation rides EVERY agent's next prompt, so the god's word is
+ * guaranteed to reach the whole town (the "I asked them to name the town and
+ * nobody heard" fix). Self-contained like GodIntervene — calls
+ * `inspectorApi.proclaim` directly and is OPTIMISTIC-FREE: no local echo, the
+ * proclamation_posted event arrives via the WS feed. ≤280 (the backend
+ * ProclaimBody cap); failures render inline via the labeled-result idiom
+ * (proclaim never throws).
+ */
+function Proclaim() {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const sentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+  }, []);
+
+  const trimmed = text.trim();
+  const canSend = trimmed.length > 0 && !busy;
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!canSend) return;
+      setBusy(true);
+      setError(null);
+      setSent(false);
+      const result = await inspectorApi.proclaim(trimmed);
+      setBusy(false);
+      if (result.ok) {
+        setText('');
+        setSent(true);
+        if (sentTimerRef.current) clearTimeout(sentTimerRef.current);
+        sentTimerRef.current = setTimeout(() => setSent(false), 3000);
+      } else {
+        setError(result.message);
+      }
+    },
+    [canSend, trimmed],
+  );
+
+  return (
+    <form className="p-2 space-y-1.5" onSubmit={handleSubmit} aria-label="Send a god proclamation">
+      <div className="flex items-baseline justify-between">
+        <label
+          htmlFor="god-proclaim"
+          className="font-mono text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--lab-god-bright)' }}
+        >
+          📣 Proclaim
+        </label>
+        <span className="font-mono text-[9px] text-lab-dim tabular-nums" aria-hidden="true">
+          {text.length}/280
+        </span>
+      </div>
+      <textarea
+        id="god-proclaim"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="A decree the whole town hears…"
+        maxLength={280}
+        rows={2}
+        className="lab-input w-full text-[11px] resize-none leading-snug"
+      />
+      <button
+        type="submit"
+        className="lab-btn lab-btn-secondary w-full"
+        disabled={!canSend}
+        aria-label="Proclaim to the whole town"
+      >
+        {busy ? '…' : '📣 PROCLAIM'}
+      </button>
+      {error ? (
+        <p role="alert" className="m-0 font-mono text-[9px] text-lab-warn leading-snug">
+          ⚠ {error}
+        </p>
+      ) : sent ? (
+        <p className="m-0 font-mono text-[9px] text-lab-acid leading-snug" role="status" aria-live="polite">
+          proclaimed — every agent hears it next turn (no local echo).
+        </p>
+      ) : (
+        <p className="m-0 font-mono text-[9px] text-lab-dim leading-snug">
+          Heard by the whole town — louder than the opt-in billboard.
         </p>
       )}
     </form>
@@ -1509,10 +1603,13 @@ export function ControlPanel({
       <GodIntervene agents={liveAgents} />
       <GodMiracles />
 
-      {/* Group 3 — VOICE: the billboard reply (W11b EM-091d), behavior unchanged. */}
+      {/* Group 3 — VOICE: the billboard reply (W11b EM-091d, opt-in) plus the
+          LOUD proclamation (EM-137 sibling) — a decree that rides every agent's
+          next prompt, guaranteed to reach the whole town. */}
       <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
       <GodGroupLabel>VOICE</GodGroupLabel>
       <BillboardReply onPost={onBillboardReply} />
+      <Proclaim />
 
       {/* ── God Panel: spawn a villager (W7 EM-063) ──────────────── */}
       <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god">
