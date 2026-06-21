@@ -25,7 +25,7 @@ from typing import Any
 
 import jsonschema
 
-from ..engine.world import World, AgentState, BUILD_TYPES
+from ..engine.world import World, AgentState, BUILD_TYPES, normalize_plan
 from ..providers.base import ProviderError
 from ..providers.router import Router
 from .memory_retrieval import (
@@ -70,6 +70,25 @@ ACTION_SCHEMA = {
         # W11b / EM-080 — OPTIONAL reflection/diary entry, requested in-prompt
         # only when the importance accumulator trips; same single response.
         "reflection": {"type": "string", "maxLength": 400},
+        # Wave L / EM-223 — OPTIONAL plan creation/revision, parsed from the SAME
+        # single response (zero extra calls). Malformed revisions are normalized
+        # or stripped BEFORE validation (_sanitize_plan_revision) so a bad plan
+        # can never fail the turn. Honored only when world.planning.enabled.
+        "plan_revision": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["goal", "steps"],
+            "properties": {
+                "goal": {"type": "string", "maxLength": 200},
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {"type": "string", "maxLength": 120},
+                },
+                "reason": {"type": "string", "maxLength": 200},
+            },
+        },
         # Wave E / EM-125 — OPTIONAL reflection-declared bond, offered in-prompt
         # ONLY alongside a reflection request; rides the SAME single response
         # (zero extra calls). Malformed/disallowed bonds are stripped BEFORE
@@ -498,6 +517,13 @@ def _world_block_get(params: Any, block: str, key: str, default: Any) -> Any:
     return getattr(blk, key, default)
 
 
+def _planning_enabled(params: Any) -> bool:
+    """Wave L / EM-223 — config gate `world.planning.enabled` (default False).
+    Disabled ⇒ no plan block, no plan invite, plan_revision ignored: the prompt
+    and snapshot are byte-identical to pre-EM-223."""
+    return bool(_world_block_get(params, "planning", "enabled", False))
+
+
 def _rule_label(text: str, limit: int = 60) -> str:
     """EM-100 — the human-readable rule label for feed text (quoted by callers,
     truncated to ~60 chars). Never the bare uuid."""
@@ -857,6 +883,45 @@ def _sanitize_bond(action_dict: dict) -> str | None:
     return None
 
 
+# Wave L / EM-223 — plan_revision field caps (mirror engine PLAN_* bounds so the
+# normalized revision always passes ACTION_SCHEMA's plan_revision sub-schema).
+_PLAN_GOAL_CAP = 200
+_PLAN_STEP_CAP = 120
+_PLAN_MAX_STEPS = 8
+
+
+def _sanitize_plan_revision(action_dict: dict) -> str | None:
+    """Wave L / EM-223 — pre-validate the optional `plan_revision` IN PLACE so a
+    malformed one can never fail the turn (the _sanitize_bond leniency rule). A
+    usable revision (non-empty goal + ≥1 non-empty step) is rewritten to a clean,
+    bounded {goal, steps, reason?} that passes the schema; anything else is
+    POPPED before validation and the reason returned for the decision trace."""
+    if "plan_revision" not in action_dict:
+        return None
+    rev = action_dict.pop("plan_revision")
+    if not isinstance(rev, dict):
+        return "malformed plan_revision object"
+    goal = rev.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        return "plan_revision missing a goal"
+    steps_raw = rev.get("steps")
+    if not isinstance(steps_raw, list):
+        return "plan_revision missing steps"
+    steps = [
+        s.strip()[:_PLAN_STEP_CAP]
+        for s in steps_raw
+        if isinstance(s, str) and s.strip()
+    ][:_PLAN_MAX_STEPS]
+    if not steps:
+        return "plan_revision has no usable steps"
+    clean = {"goal": goal.strip()[:_PLAN_GOAL_CAP], "steps": steps}
+    reason = rev.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        clean["reason"] = reason.strip()[:_PLAN_GOAL_CAP]
+    action_dict["plan_revision"] = clean
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Behavioral-arg normalization (EM-140) — meet the models where they are.
 #
@@ -937,6 +1002,9 @@ def _resolve_agent_target(raw: str, agent: AgentState, world: World) -> str | No
 _HOISTABLE_COGNITION = (
     "thought", "mood", "perceived_summary", "memories_used",
     "reasoning", "commitment", "reflection", "bond",
+    # Wave L / EM-223 — a model told to return an `actions` sequence routinely
+    # nests a plan_revision in actions[0]; hoist it so the plan still updates.
+    "plan_revision",
 )
 
 
@@ -1900,6 +1968,48 @@ def _assemble_context(
   Follow through with real tool calls or these lapse publicly as broken promises.
 """
 
+    # ── Wave L / EM-223 — the agent's current plan (read-only intention). ─────
+    # Gated on planning.enabled (off/absent ⇒ byte-identical pre-EM-223). When a
+    # plan is set: goal + steps with a ▶ pointer at current_step (BACKGROUND
+    # renders goal + current step only — the EM-161 diet). Absolute made-tick
+    # stamp ⇒ cache-stable (EM-171). When enabled but NO plan, a one-line
+    # creation invite (non-background only). ALWAYS invites abandonment so the
+    # plan can never override the EM-159/160 spontaneity floor — it is context,
+    # never a directive.
+    plan_block = ""
+    if _planning_enabled(params):
+        plan = getattr(agent, "plan", None)
+        if isinstance(plan, dict) and plan.get("steps"):
+            steps = list(plan["steps"])
+            cur = max(0, min(int(plan.get("current_step", 0)), len(steps) - 1))
+            if background:
+                body = (f"  Goal: {plan.get('goal', '')}\n"
+                        f"  ▶ now: {steps[cur]}")
+            else:
+                step_lines = "\n".join(
+                    f"  {'▶' if i == cur else ' '} {i + 1}. {s}"
+                    for i, s in enumerate(steps)
+                )
+                body = f"  Goal: {plan.get('goal', '')}\n{step_lines}"
+            stale_note = (
+                "\n  (marked STALE — revise it if it no longer fits)"
+                if plan.get("stale") else ""
+            )
+            plan_block = f"""
+=== YOUR CURRENT PLAN (set at tick {int(plan.get('made_tick', 0))}) ===
+{body}{stale_note}
+  This is YOUR intention, not an order — if circumstances changed, act freely.
+  To change it, add "plan_revision": {{"goal": "...", "steps": ["...", "..."], "reason": "..."}} this turn.
+"""
+        elif not background:
+            plan_block = (
+                '\nYou have no plan yet. You MAY set one by adding '
+                '"plan_revision": {"goal": "<your aim>", "steps": ["<step>", '
+                '"<step>", "..."], "reason": "..."} to this turn\'s JSON — a few '
+                "ordered steps you will pursue and revise as things change. "
+                "Optional; act freely regardless."
+            )
+
     # ── W11b / EM-081 — overheard speech (context injection only, no calls) ───
     overheard_block = ""
     if overheard:
@@ -2124,7 +2234,7 @@ Mood: {agent.mood}{faction_line}
 
 === RECENT EVENTS ===
 {chr(10).join(event_lines) or "  (none)"}
-{overheard_block}{commitments_block}
+{overheard_block}{commitments_block}{plan_block}
 === YOUR BELIEFS ===
 {belief_lines}
 
@@ -2676,6 +2786,28 @@ class AgentRuntime:
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Wave L / EM-223 — deterministic plan-step pointer (zero LLM calls)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _advance_plan_step(
+        self, agent: AgentState, action: str | None, outcome_ok: bool
+    ) -> None:
+        """EM-223 — nudge the agent's plan `current_step` forward by one when a
+        non-talk action resolved successfully, capped at the last step. A v1
+        heuristic (the spike flags ticks-per-step for live tuning). Zero-call,
+        plan-state ONLY: it never touches reflex_streak / salience / spontaneity,
+        so the EM-159/160 floor is provably untouched."""
+        plan = agent.plan
+        if not isinstance(plan, dict) or not plan.get("steps"):
+            return
+        if not outcome_ok or action is None or action in _TALK_ACTIONS:
+            return
+        last = len(plan["steps"]) - 1
+        cur = int(plan.get("current_step", 0))
+        if cur < last:
+            plan["current_step"] = cur + 1
+
+    # ──────────────────────────────────────────────────────────────────────────
     # W11b / EM-081 — overhearing (context injection only; zero LLM calls)
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -2862,6 +2994,32 @@ class AgentRuntime:
         self._energy_band_seen[agent.id] = _energy_band(agent.energy)
         self._last_llm_tick[agent.id] = self.world.tick
 
+    def _plan_step_place(self, agent: AgentState) -> str | None:
+        """EM-223 — the world place id named by the agent's CURRENT plan step, or
+        None. Gated on planning.enabled + planning.reflex_bias + an active,
+        non-stale plan. Deterministic: case-insensitive substring match of a
+        place id or name (≥3 chars to avoid spurious hits), first by sorted id.
+        Zero-call, read-only — the bias lever for _reflex_pick."""
+        params = self.world.params
+        if not _planning_enabled(params):
+            return None
+        if not bool(_world_block_get(params, "planning", "reflex_bias", True)):
+            return None
+        plan = agent.plan
+        if not isinstance(plan, dict) or plan.get("stale") or not plan.get("steps"):
+            return None
+        steps = plan["steps"]
+        cur = max(0, min(int(plan.get("current_step", 0)), len(steps) - 1))
+        text = str(steps[cur]).lower()
+        if not text:
+            return None
+        for pid in sorted(self.world.places):
+            p = self.world.places[pid]
+            cands = [pid.lower()] + ([p.name.lower()] if getattr(p, "name", "") else [])
+            if any(len(c) >= 3 and c in text for c in cands):
+                return pid
+        return None
+
     def _reflex_pick(self, agent: AgentState) -> dict:
         """The deterministic reflex routine for a non-salient background turn
         (EM-159, the animals' seeded-picker pattern — ZERO router calls):
@@ -2893,6 +3051,15 @@ class AgentRuntime:
         place = world.places.get(agent.location)
         if place is not None and place.kind == "work":
             return {"action": "work", "args": {}}
+
+        # EM-223 — plan-aware bias (zero-call, deterministic): when the agent has
+        # an active non-stale plan whose CURRENT step names a reachable place it
+        # is not already at, prefer move_to(that place) over the seeded rotation.
+        # Pure re-ordering of an already-valid reflex action (move_to) — never
+        # adds an action; the survival/work picks above are never overridden.
+        biased_place = self._plan_step_place(agent)
+        if biased_place is not None and biased_place != agent.location:
+            return {"action": "move_to", "args": {"place": biased_place}}
 
         seed = _seed_int("cadence-reflex", agent.id, world.tick)
         homes = sorted(p.id for p in world.places.values() if p.kind == "home")
@@ -2957,6 +3124,9 @@ class AgentRuntime:
             agent, action_dict["action"], outcome == "ok", None,
             profile_name, profile_color,
         )
+        # EM-223 — a successful non-talk reflex resolution advances the plan
+        # pointer exactly as an LLM turn would (zero-call, plan-state only).
+        self._advance_plan_step(agent, action_dict["action"], outcome == "ok")
         if lapsed:
             if "_multi" in result_event:
                 result_event["_multi"].extend(lapsed)
@@ -3458,6 +3628,52 @@ class AgentRuntime:
                 "payload": reflection_payload,
             })
 
+        # ── Wave L / EM-223 — plan creation/revision, parsed from the SAME single
+        # response (zero extra calls). Honored only when planning is enabled; the
+        # normalized revision becomes the agent's new plan and emits ONE
+        # plan_revised event (mirrors commitment_made — rides _multi, the loop
+        # tick-stamps + persists + broadcasts). The plan is read-only context: it
+        # NEVER touches reflex_streak / salience / the spontaneity roll, so the
+        # EM-159/160 floor stays fully in charge. A rejected revision is recorded
+        # in the trace, never failing the turn.
+        plan_rev_rejected = action_dict.pop("_plan_revision_rejected", None)
+        plan_revision = action_dict.get("plan_revision")
+        plan_created = False
+        if _planning_enabled(self.world.params) and isinstance(plan_revision, dict):
+            old_plan = agent.plan if isinstance(agent.plan, dict) else None
+            new_plan = normalize_plan({
+                "plan_id": uuid.uuid4().hex,
+                "goal": plan_revision.get("goal", ""),
+                "steps": plan_revision.get("steps", []),
+                "current_step": 0,
+                "made_tick": self.world.tick,
+                "stale": False,
+            })
+            if new_plan is not None:
+                agent.plan = new_plan
+                plan_created = True
+                extra_events.append({
+                    "kind": "plan_revised",
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "text": f"{agent.name} plans: {new_plan['goal']}",
+                    "payload": {
+                        "plan_id": new_plan["plan_id"],
+                        "goal": new_plan["goal"],
+                        "steps": list(new_plan["steps"]),
+                        "reason": plan_revision.get("reason", ""),
+                        "old_plan_id": old_plan.get("plan_id") if old_plan else None,
+                    },
+                })
+        if plan_rev_rejected is not None:
+            trace["plan_revision_rejected"] = plan_rev_rejected
+        # EM-223 — deterministic v1 step pointer: a turn that resolved its plan's
+        # work (not a fresh revision) nudges current_step forward. Zero-call,
+        # plan-state only (the floor is untouched).
+        if not plan_created:
+            self._advance_plan_step(agent, commit_action, commit_ok)
+
         # EM-081/EM-199 — distribute EACH successful speech step to co-located
         # overhearers (not just the first action), so a `say` that rode along
         # with a move/work still reaches the room.
@@ -3646,6 +3862,9 @@ class AgentRuntime:
         # whole turn over an optional field); the reason is stamped back on
         # AFTER validation so run_turn can surface it as trace bond_rejected.
         bond_rejected = _sanitize_bond(action_dict)
+        # EM-223 — a malformed plan_revision is normalized or popped HERE (same
+        # rule as the bond): a bad plan can never fail the turn.
+        plan_rev_rejected = _sanitize_plan_revision(action_dict)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
@@ -3667,6 +3886,9 @@ class AgentRuntime:
             # EM-125 — stamped after validation (the underscore key would fail
             # additionalProperties=False); run_turn pops it into the trace.
             action_dict["_bond_rejected"] = bond_rejected
+        if plan_rev_rejected is not None:
+            # EM-223 — same after-validation stamping as the bond rejection.
+            action_dict["_plan_revision_rejected"] = plan_rev_rejected
         return action_dict, None, meta
 
     def _forget_response(self, profile_name: str, messages: list[dict]) -> None:

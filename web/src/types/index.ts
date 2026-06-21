@@ -330,6 +330,10 @@ export type EventKind =
   | 'reflection'
   | 'commitment_made'
   | 'commitment_lapsed'
+  // Wave L (EM-223) — an agent created/revised its recursive plan. payload
+  // {plan_id, goal, steps[], reason, old_plan_id}; actor = the planning agent.
+  // Only emitted when world.planning.enabled — absent histories are normal.
+  | 'plan_revised'
   | 'usage_alert'
   | 'run_forked'
   // EM-145 — god-voice delivery made legible: emitted when a god whisper or a
