@@ -139,6 +139,20 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
 // alpha-append profile-badge path below.
 const ANIMAL_MAGENTA = 'var(--marker-animal)';
 
+/**
+ * True for a benign action-rejection — an agent tried something the resolver
+ * wouldn't allow (e.g. funding a building that rotted to `abandoned`, recalled
+ * from memory), which the backend stamps with `payload.rejected`. These are
+ * valid-parse, valid-LLM "no, you can't do that" receipts, NOT the
+ * truncated-JSON / provider-error failures the ⚠ errors channel exists for, so
+ * the live feed drops them as non-actionable clutter. They still persist in
+ * history/DB for forensics; genuine parse_failures (no `rejected` flag) keep
+ * their place in the errors channel.
+ */
+function isBenignRejection(e: WorldEvent): boolean {
+  return e.kind === 'parse_failure' && e.payload?.rejected === true;
+}
+
 /** True when an event belongs to the animal chaos channel (W8). */
 function isAnimalEvent(e: WorldEvent): boolean {
   return (
@@ -646,11 +660,16 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
   const animalModels = useMemo(() => animalModelByTurn(events), [events]);
 
   // Inclusion filter: with categories focused, show ONLY those; with none
-  // focused, show everything except the default-muted trace chain.
+  // focused, show everything except the default-muted trace chain. Benign
+  // action-rejections are dropped first — they're non-actionable clutter, not
+  // real errors, so they never appear (even when the errors channel is focused).
   const visibleEvents = useMemo(
-    () => (focus.size === 0
-      ? events.filter((e) => !DEFAULT_MUTED.includes(KIND_TO_CATEGORY[e.kind] ?? ''))
-      : events.filter((e) => focus.has(KIND_TO_CATEGORY[e.kind] ?? ''))),
+    () => {
+      const base = events.filter((e) => !isBenignRejection(e));
+      return focus.size === 0
+        ? base.filter((e) => !DEFAULT_MUTED.includes(KIND_TO_CATEGORY[e.kind] ?? ''))
+        : base.filter((e) => focus.has(KIND_TO_CATEGORY[e.kind] ?? ''));
+    },
     [events, focus],
   );
 
