@@ -287,6 +287,7 @@ world:
   # (reflex-first, zero critical-path LLM calls; the PNG is an external
   # side-artifact off the replay surface). More art = more chronicle texture.
   image_gen:
+    enabled: false         # OFF 2026-06-21 — HF inference credits depleted (402); create_image is dropped from the menu + rejected (zero image-API calls). Re-enable when credits return.
     max_concurrent: 2      # in-flight PNG fetches; the loop skips a fetch above this (skip-under-load)
     max_gallery: 30        # newest images retained in world.gallery (pop-oldest on append)
 
@@ -393,7 +394,7 @@ world:
   # tuning run (the spike's open Qs: steps-per-plan, ticks-per-step). reflex_bias
   # nudges a background agent's zero-call reflex toward its current step's place.
   planning:
-    enabled: false               # master toggle — off = no plan block, no plan invite, plan_revision ignored
+    enabled: true                # EM-223 live tuning run (2026-06-21) — agents emit/revise plans; rides the same turn (zero extra calls)
     max_steps: 5                 # soft prompt hint (the spike's 3–5); hard schema cap is 8
     reflex_bias: true            # plan-aware reflex bias (only re-orders valid reflex actions; zero calls)
 
