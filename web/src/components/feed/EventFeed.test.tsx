@@ -72,3 +72,48 @@ describe('EventFeed — inline model chip on every model-decided line', () => {
     expect(screen.getByText('⟳ reflex')).toBeInTheDocument();
   });
 });
+
+describe('EventFeed — benign action-rejections are not feed clutter', () => {
+  it('hides a parse_failure stamped rejected:true (e.g. funding an abandoned building)', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'agent_speech', actor_id: 'a1', text: 'Ada says: "let us rebuild the garden"' }),
+      ev({
+        kind: 'parse_failure', actor_id: 'a1',
+        text: "Ada's contribute_funds was rejected: building 'bld_x' is abandoned — cannot fund",
+        payload: { action: 'contribute_funds', error: "building 'bld_x' is abandoned — cannot fund", rejected: true },
+      }),
+    ]} />);
+    // the benign rejection is gone; the real chatter stays
+    expect(screen.queryByText(/was rejected/)).not.toBeInTheDocument();
+    expect(screen.getByText(/let us rebuild the garden/)).toBeInTheDocument();
+  });
+
+  it('still shows a GENUINE parse_failure (truncated JSON / provider error — no rejected flag)', () => {
+    render(<EventFeed events={[
+      ev({
+        kind: 'parse_failure', actor_id: 'a1',
+        text: "Ada's turn produced no valid JSON (finish_reason='length')",
+        payload: { reason: "no valid JSON object (finish_reason='length')" },
+      }),
+    ]} />);
+    expect(screen.getByText(/no valid JSON/)).toBeInTheDocument();
+  });
+
+  it('hides benign rejections even when the Errors channel is focused', () => {
+    render(<EventFeed events={[
+      ev({
+        kind: 'parse_failure', actor_id: 'a1',
+        text: "Cleo's build_step was rejected: building 'bld_x' is abandoned, not under_construction",
+        payload: { action: 'build_step', error: 'abandoned', rejected: true },
+      }),
+      ev({
+        kind: 'parse_failure', actor_id: 'a2',
+        text: 'real provider_error: rate limit',
+        payload: { reason: 'provider_error: rate limit' },
+      }),
+    ]} />);
+    // Default view: the benign one is hidden, the real one shows.
+    expect(screen.queryByText(/build_step was rejected/)).not.toBeInTheDocument();
+    expect(screen.getByText(/provider_error/)).toBeInTheDocument();
+  });
+});
