@@ -2,6 +2,7 @@
 
 # ── Claude ────────────────────────────────────────────────────────────────────
 !CLAUDE.md
+.claude/          # local Claude Code session/workflow artifacts — not shared
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
