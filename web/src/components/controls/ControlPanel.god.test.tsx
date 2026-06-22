@@ -23,6 +23,7 @@ vi.mock('../../inspector/api', () => ({
 import { inspectorApi } from '../../inspector/api';
 import { ControlPanel } from './ControlPanel';
 import { agent, profile, world } from '../../test-utils/fixtures';
+import { expandSection } from '../../test-utils/expandSection';
 
 const interveneMock = inspectorApi.godIntervene as Mock;
 const whisperMock = inspectorApi.godWhisper as Mock;
@@ -56,6 +57,7 @@ function renderPanel() {
       profiles={[profile({ name: 'model-a' })]}
     />,
   );
+  expandSection(/GOD CONSOLE/i);
   return { onInject, onBillboardReply };
 }
 

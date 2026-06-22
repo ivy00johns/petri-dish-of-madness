@@ -17,6 +17,7 @@ vi.mock('../../inspector/api', () => ({
 import { inspectorApi } from '../../inspector/api';
 import { ControlPanel } from './ControlPanel';
 import { profile, world } from '../../test-utils/fixtures';
+import { expandSection } from '../../test-utils/expandSection';
 
 const personasMock = inspectorApi.personas as Mock;
 
@@ -57,6 +58,7 @@ function renderPanel() {
       profiles={PROFILES}
     />,
   );
+  expandSection(/GOD PANEL/i);
   return { onSpawn };
 }
 
