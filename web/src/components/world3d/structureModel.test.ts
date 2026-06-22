@@ -100,6 +100,21 @@ describe('resolveStructureModel', () => {
     }
   });
 
+  it('EM-216c: abstract agent kinds (generic) draw from a variety pool, not one cloned tower', () => {
+    // The kinds agents actually author in live runs are abstract civic/economic
+    // strings ('social', 'commerce', 'governance', 'guild', 'rule', 'decor', …)
+    // that match no physical-building keyword and collapse to `generic` — in a
+    // long run ~86% of all buildings. Without a pool that's a skyline of
+    // identical commercial-g towers. `generic` MUST be pooled so those spread.
+    expect(MODEL_POOLS.generic, 'generic needs a variety pool').toBeDefined();
+    for (const kind of ['social', 'commerce', 'rule', 'decor', 'guild', 'governance']) {
+      expect(resolveStructureModel(kind).variant, kind).toBe('generic');
+    }
+    const ids = Array.from({ length: 40 }, (_, i) => `bld_social_${i}`);
+    const urls = new Set(ids.map((id) => resolveStructureModel('social', id).spec!.url));
+    expect(urls.size, 'generic buildings spread across ≥3 meshes').toBeGreaterThanOrEqual(3);
+  });
+
   it('EM-216b: no id keeps the single MODEL_REGISTRY default (pool slot 0)', () => {
     for (const variant of Object.keys(MODEL_POOLS)) {
       expect(resolveStructureModel(variant).spec, variant).toBe(
