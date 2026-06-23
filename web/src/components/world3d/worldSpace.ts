@@ -210,6 +210,57 @@ export function skinPalette(skin: string | null | undefined): string | null {
 }
 
 /**
+ * EM-225: exact census kind → BUILDING_STYLES palette-key alias. The parallel
+ * of EXACT_VARIANTS for the COLOR resolver: each frequent agent-authored kind
+ * borrows a fitting variant's EXISTING palette (no new hexes) while carrying
+ * the humanized RAW kind as its tag (applied in buildingStyle). Exact-only on
+ * purpose — the short/dangerous tokens (rule/law/hall/lab/audit/…) must NOT
+ * substring-match here either, exactly as in EXACT_VARIANTS. Kept in lockstep
+ * with EXACT_VARIANTS so mesh and color always agree. No fund/treasury words.
+ *
+ * `stall` has no own BUILDING_STYLES palette — its silhouette is the market
+ * stall, so commerce/commercial borrow the workshop palette (market kin), the
+ * same pairing the existing 'stall'/'market' keyword styles already use.
+ */
+const KIND_STYLE_ALIASES: Record<string, string> = {
+  collective: 'workshop',
+  guild: 'workshop',
+  repair: 'smithy',
+  rebuild: 'smithy',
+  maintenance: 'smithy',
+  commerce: 'workshop', // stall silhouette ⇒ workshop palette (market kin)
+  commercial: 'workshop',
+  governance: 'clocktower',
+  hall: 'clocktower',
+  council: 'clocktower',
+  security: 'clocktower',
+  rule: 'temple',
+  policy: 'temple',
+  charter: 'temple',
+  law: 'temple',
+  decor: 'monument',
+  plaza: 'monument',
+  ornament: 'monument',
+  infrastructure: 'dock',
+  terminal: 'dock',
+  depot: 'dock',
+  audit: 'bank',
+  ledger: 'bank',
+  finance: 'bank',
+  exchange: 'bank',
+  event: 'theater',
+  festival: 'theater',
+  culture: 'theater',
+  lab: 'clinic',
+  research: 'clinic',
+  investigation: 'clinic',
+  amenity: 'bathhouse',
+  wellness: 'bathhouse',
+  record: 'library',
+  registry: 'library',
+};
+
+/**
  * EM-130: keyword → palette mapping for emergent (agent-invented) kinds, tried
  * in order with case-insensitive SUBSTRING match on the raw kind. Order is
  * load-bearing: garden's `bed` must beat house's `den` (both ⊂ "garden…"), and
@@ -224,6 +275,13 @@ const KIND_KEYWORD_STYLES: ReadonlyArray<readonly [readonly string[], string]> =
   [['hall', 'civic', 'center', 'centre', 'fair', 'pavilion'], 'clocktower'],
   [['house', 'home', 'inn', 'shelter', 'den'], 'house'],
   [['monument', 'statue', 'arch'], 'monument'],
+  // ── EM-225: compound census kinds (mirror VARIANT_KEYWORDS). Appended LAST
+  // so they never shadow an earlier trap-sensitive row. '_event' (leading
+  // underscore, NOT bare 'event') → 'community_event' only, so the 'prevent'/
+  // 'eventual' word families never match; 'exchange' → 'exchange_board' (bank).
+  // The bare 'event' kind itself is handled by exact BUILDING_STYLES/aliases.
+  [['_event'], 'theater'],
+  [['exchange'], 'bank'],
 ];
 
 /**
@@ -255,6 +313,13 @@ export function buildingStyle(kind: string): BuildingStyle {
   if (exact) return exact;
   const lower = kind.toLowerCase();
   const tag = humanizeKind(kind);
+  // EM-225: exact census-kind alias onto an existing variant's palette (parallel
+  // of EXACT_VARIANTS). Own-property guarded so a model-authored 'constructor'
+  // can't resolve through the prototype chain.
+  const aliasKey = Object.prototype.hasOwnProperty.call(KIND_STYLE_ALIASES, kind)
+    ? KIND_STYLE_ALIASES[kind]
+    : undefined;
+  if (aliasKey) return { ...BUILDING_STYLES[aliasKey], tag };
   for (const [keywords, styleKey] of KIND_KEYWORD_STYLES) {
     if (keywords.some((k) => lower.includes(k))) {
       return { ...BUILDING_STYLES[styleKey], tag };
@@ -337,6 +402,51 @@ const EXACT_VARIANTS: Record<string, VariantKey> = {
   lighthouse: 'lighthouse', // tall slender tower (fallback: clocktower)
   bathhouse: 'bathhouse',   // open water venue (fallback: generic)
   dock: 'dock',         // waterside port/warehouse (fallback: workshop)
+  // ── EM-225: agent-authored census kinds → distinct silhouettes ───────────
+  // The high-frequency emergent `kind` vocabulary was collapsing ~86% of
+  // buildings onto `generic`. These pin each frequent kind to a fitting EM-122
+  // variant; the parallel BUILDING_STYLES entries below reuse that variant's
+  // OWN palette so mesh + color agree. SHORT/DANGEROUS tokens (rule/law/hall/
+  // lab/audit/…) are EXACT-only here — a substring rule would mis-catch words
+  // like 'collaborative' or 'lawn'. Compounds that need a substring match
+  // ('community_event', 'exchange_board') live in VARIANT_KEYWORDS instead.
+  // None of these is a fund/treasury word (those render as treasury objects
+  // via isFundBuilding — never remapped to a building variant).
+  collective: 'workshop',
+  guild: 'workshop',
+  repair: 'smithy',
+  rebuild: 'smithy',
+  maintenance: 'smithy',
+  commerce: 'stall',
+  commercial: 'stall',
+  governance: 'clocktower',
+  hall: 'clocktower',
+  council: 'clocktower',
+  security: 'clocktower',
+  rule: 'temple',
+  policy: 'temple',
+  charter: 'temple',
+  law: 'temple',
+  decor: 'monument',
+  plaza: 'monument',
+  ornament: 'monument',
+  infrastructure: 'dock',
+  terminal: 'dock',
+  depot: 'dock',
+  audit: 'bank',
+  ledger: 'bank',
+  finance: 'bank',
+  exchange: 'bank',
+  event: 'theater',
+  festival: 'theater',
+  culture: 'theater',
+  lab: 'clinic',
+  research: 'clinic',
+  investigation: 'clinic',
+  amenity: 'bathhouse',
+  wellness: 'bathhouse',
+  record: 'library',
+  registry: 'library',
   building: 'generic',
 };
 
@@ -366,6 +476,16 @@ const VARIANT_KEYWORDS: ReadonlyArray<readonly [readonly string[], VariantKey]> 
   [['house', 'home', 'cottage', 'tavern', 'pub', 'inn', 'shelter', 'cabin'], 'house'],
   // EM-217: 'temple'/'chapel' join monument (sacred landmark); 'shrine' already here.
   [['monument', 'statue', 'memorial', 'temple', 'chapel', 'arch', 'shrine', 'obelisk'], 'monument'],
+  // ── EM-225: compound census kinds that the EXACT table can't catch ─────────
+  // Appended LAST so they never shadow any earlier trap-sensitive row. Use
+  // '_event' WITH the leading underscore (not bare 'event') so it matches only
+  // the 'community_event' compound — bare 'event' is substring of the common
+  // 'prevent'/'prevention'/'preventive'/'eventual' families, which would mis-
+  // route a 'preventive_clinic' to a theater. 'exchange' catches 'exchange_board'
+  // (bank); it has no leading-underscore form and no false-friend word family.
+  // The bare 'event' kind itself is handled by EXACT_VARIANTS.
+  [['_event'], 'theater'],
+  [['exchange'], 'bank'],
 ];
 
 /**

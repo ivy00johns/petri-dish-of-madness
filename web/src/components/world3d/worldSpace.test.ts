@@ -324,6 +324,192 @@ describe('build-type catalog — operationalVariant (EM-217/EM-216)', () => {
   });
 });
 
+// ── EM-225: census kind → variant mapping (stop the generic collapse) ─────────
+//
+// The agent-authored `kind` vocabulary (frequency across 1064 snapshots) was
+// collapsing ~86% of buildings onto the neutral `generic` silhouette. This maps
+// the high-frequency emergent kinds onto real, distinct silhouettes AND keeps
+// their buildingStyle palette in lockstep with that variant. Each pair below is
+// [kind, intendedVariant] — operationalVariant() must hit the variant, and
+// buildingStyle() must use that variant's OWN palette (non-neutral) with the
+// humanized raw kind as the tag.
+
+describe('census kind → variant mapping (EM-225)', () => {
+  // kind → (variant, paletteKey used by buildingStyle). For these the variant
+  // name and the BUILDING_STYLES palette key coincide.
+  const MAPPED: Array<[kind: string, variant: VariantKey]> = [
+    // workshop ⇐ collective, guild
+    ['collective', 'workshop'],
+    ['guild', 'workshop'],
+    // smithy ⇐ repair, rebuild, maintenance
+    ['repair', 'smithy'],
+    ['rebuild', 'smithy'],
+    ['maintenance', 'smithy'],
+    // stall ⇐ commerce, commercial
+    ['commerce', 'stall'],
+    ['commercial', 'stall'],
+    // clocktower ⇐ governance, hall, council, security
+    ['governance', 'clocktower'],
+    ['hall', 'clocktower'],
+    ['council', 'clocktower'],
+    ['security', 'clocktower'],
+    // temple ⇐ rule, policy, charter, law
+    ['rule', 'temple'],
+    ['policy', 'temple'],
+    ['charter', 'temple'],
+    ['law', 'temple'],
+    // monument ⇐ decor, plaza, ornament
+    ['decor', 'monument'],
+    ['plaza', 'monument'],
+    ['ornament', 'monument'],
+    // dock ⇐ infrastructure, terminal, depot
+    ['infrastructure', 'dock'],
+    ['terminal', 'dock'],
+    ['depot', 'dock'],
+    // bank ⇐ audit, ledger, finance, exchange
+    ['audit', 'bank'],
+    ['ledger', 'bank'],
+    ['finance', 'bank'],
+    ['exchange', 'bank'],
+    // theater ⇐ event, festival, culture
+    ['event', 'theater'],
+    ['festival', 'theater'],
+    ['culture', 'theater'],
+    // clinic ⇐ lab, research, investigation
+    ['lab', 'clinic'],
+    ['research', 'clinic'],
+    ['investigation', 'clinic'],
+    // bathhouse ⇐ amenity, wellness
+    ['amenity', 'bathhouse'],
+    ['wellness', 'bathhouse'],
+    // library ⇐ record, registry
+    ['record', 'library'],
+    ['registry', 'library'],
+  ];
+
+  // The variant a buildingStyle palette key is keyed by (variant === paletteKey
+  // for every target above — stall maps to the 'stall'… wait: stall has no own
+  // BUILDING_STYLES palette, it shares 'workshop'. Map variant → palette key.)
+  const PALETTE_FOR_VARIANT: Partial<Record<VariantKey, string>> = {
+    workshop: 'workshop',
+    smithy: 'smithy',
+    stall: 'workshop', // stall silhouette shares the workshop palette (market kin)
+    clocktower: 'clocktower',
+    temple: 'temple',
+    monument: 'monument',
+    dock: 'dock',
+    bank: 'bank',
+    theater: 'theater',
+    clinic: 'clinic',
+    bathhouse: 'bathhouse',
+    library: 'library',
+  };
+
+  it('resolves each census kind to its intended distinct variant', () => {
+    for (const [kind, variant] of MAPPED) {
+      expect(operationalVariant(kind), kind).toBe(variant);
+    }
+  });
+
+  it('gives each census kind a NON-neutral palette matching its variant', () => {
+    for (const [kind, variant] of MAPPED) {
+      const paletteKey = PALETTE_FOR_VARIANT[variant]!;
+      const style = buildingStyle(kind);
+      expect(style.body, `${kind} body`).toBe(BUILDING_STYLES[paletteKey].body);
+      expect(style.roof, `${kind} roof`).toBe(BUILDING_STYLES[paletteKey].roof);
+      // never the neutral generic palette. (The clocktower BODY happens to share
+      // the neutral cream body hex, so assert on the ROOF — which is distinct for
+      // every mapped variant — to prove the style is non-neutral.)
+      expect(style.roof, `${kind} not-neutral roof`).not.toBe(BUILDING_STYLES.building.roof);
+    }
+  });
+
+  it('tags each census kind with the humanized raw kind, not the style name', () => {
+    expect(buildingStyle('collective').tag).toBe('Collective');
+    expect(buildingStyle('governance').tag).toBe('Governance');
+    expect(buildingStyle('infrastructure').tag).toBe('Infrastructure');
+    expect(buildingStyle('exchange_board').tag).toBe('Exchange Board');
+    expect(buildingStyle('community_event').tag).toBe('Community Event');
+  });
+
+  it('catches the observed COMPOUND kinds via substring rows', () => {
+    // 'community_event' → theater (via 'event'); NOT generic, NOT house.
+    expect(operationalVariant('community_event')).toBe('theater');
+    expect(buildingStyle('community_event').roof).toBe(BUILDING_STYLES.theater.roof);
+    // 'exchange_board' → bank (via 'exchange').
+    expect(operationalVariant('exchange_board')).toBe('bank');
+    expect(buildingStyle('exchange_board').roof).toBe(BUILDING_STYLES.bank.roof);
+  });
+
+  it('KEEPS social / community / commons on the generic silhouette', () => {
+    for (const kind of ['social', 'community', 'commons']) {
+      expect(operationalVariant(kind), kind).toBe('generic');
+      expect(buildingStyle(kind).body, kind).toBe(BUILDING_STYLES.building.body);
+    }
+  });
+
+  // ── adversarial near-misses: the substring traps must still hold ───────────
+  it('preserves every documented substring trap against the new tokens', () => {
+    // 'archive' (library) must still beat monument's 'arch'.
+    expect(operationalVariant('town_archive')).toBe('library');
+    expect(buildingStyle('town_archive').roof).toBe(BUILDING_STYLES.library.roof);
+    // 'watchtower' / 'lighthouse' → clocktower, never house.
+    expect(operationalVariant('watchtower')).toBe('clocktower');
+    expect(operationalVariant('old_lighthouse')).toBe('clocktower');
+    // 'workshop' contains 'shop' → workshop, not stall.
+    expect(operationalVariant('repair_workshop')).toBe('workshop');
+    // garden's 'bed' beats house's 'den'.
+    expect(operationalVariant('herb_garden')).toBe('garden');
+  });
+
+  it('the short/dangerous tokens (lab/law/rule/hall) do NOT match as substrings', () => {
+    // 'lab' must NOT catch 'collaborative' / 'available' (clinic is EXACT-only).
+    expect(operationalVariant('collaborative')).toBe('generic');
+    expect(operationalVariant('available_space')).toBe('generic');
+    expect(operationalVariant('collaborative_studio')).toBe('generic');
+    // 'law' must NOT catch 'lawn' (temple is EXACT-only for 'law').
+    expect(operationalVariant('lawn')).toBe('generic');
+    // 'rule' must NOT catch 'ruler_shop' style words via substring (EXACT-only).
+    expect(operationalVariant('overruled_thing')).toBe('generic');
+    // 'hall' must NOT catch 'shallow' / 'marshall' (clocktower is EXACT-only).
+    expect(operationalVariant('shallow_pool')).toBe('generic');
+    // 'commerc' keyword is fine (no false friends), but verify it stays scoped.
+    expect(operationalVariant('commercial')).toBe('stall');
+  });
+
+  it("the '_event' compound row does NOT leak into the prevent / eventual families", () => {
+    // The bare 'event' kind is handled by EXACT_VARIANTS; the substring row uses
+    // '_event' (leading underscore) so it catches ONLY 'community_event'-style
+    // compounds — never 'event' ⊂ 'prevent'/'prevention'/'preventive'/'eventual'.
+    expect(operationalVariant('event')).toBe('theater'); // exact
+    expect(operationalVariant('community_event')).toBe('theater'); // _event compound
+    for (const kind of [
+      'preventive_clinic', 'prevention_office', 'crime_prevention_unit',
+      'eventual_plan', 'uneventful_office', 'health_prevention_center',
+    ]) {
+      expect(operationalVariant(kind), kind).not.toBe('theater');
+    }
+    // The sharpest case: a 'preventive_clinic' is neutral generic, never a pink
+    // theater (clinic is EXACT-only, so it cannot fall back to clinic either).
+    expect(operationalVariant('preventive_clinic')).toBe('generic');
+    expect(buildingStyle('preventive_clinic').roof).not.toBe(BUILDING_STYLES.theater.roof);
+  });
+
+  it('NEVER captures fund / treasury kinds (those render as treasury objects)', () => {
+    // These must fall through to generic here — isFundBuilding owns them.
+    for (const kind of ['town_fund', 'treasury', 'shared_treasury', 'reserve_fund']) {
+      expect(operationalVariant(kind), kind).toBe('generic');
+    }
+  });
+
+  it('stays pure / deterministic for the new kinds (EM-155 replay invariant)', () => {
+    for (const [kind] of MAPPED) {
+      expect(operationalVariant(kind)).toBe(operationalVariant(kind));
+      expect(buildingStyle(kind).body).toBe(buildingStyle(kind).body);
+    }
+  });
+});
+
 // ── EM-220 (Wave K): skinPalette ──────────────────────────────────────────────
 //
 // An owner-set named skin overrides the operational BODY color; an unknown /

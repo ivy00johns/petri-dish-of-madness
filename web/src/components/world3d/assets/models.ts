@@ -192,6 +192,27 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 1.8, yOffset: 0 }, // 2.95u
     { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // 2.33u, 4.06u tall
   ],
+  // EM-216c — the GENERIC catch-all is the MOST-repeated structure in practice:
+  // agents author abstract civic/economic kinds ('social', 'commerce', 'rule',
+  // 'governance', 'guild', 'decor', 'hall', …) that match no physical-building
+  // keyword and collapse here (operationalVariant ⇒ 'generic'). In a long run
+  // ~86% of all buildings landed on the single commercial-g tower below, which
+  // is exactly the "row of identical dark towers" look. Give it a pool so those
+  // spread across distinct silhouettes. Every member reuses a (url, scale,
+  // yOffset) tuple already footprint-validated as a MODEL_REGISTRY building, so
+  // the city footprint (≤3.4u long / ≤4.2u tall / grounded) holds by
+  // construction. Slot 0 stays commercial-g = MODEL_REGISTRY.generic so the
+  // no-id path agrees with the pool, and the id-hash pick is replay-stable
+  // (EM-155). The set leans civic/commercial/public-venue to fit the abstract
+  // community kinds that dominate this bucket.
+  generic: [
+    { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 },  // tall commercial (default, slot 0)
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 },      // civic hall — 3.36u, 3.60u tall
+    { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },             // grand columned facade — 3.30u
+    { url: `${POLY}/theater.glb`, scale: 0.099, yOffset: 0 },            // open proscenium stage — 3.29u
+    { url: `${POLY}/bathhouse.glb`, scale: 0.32, yOffset: 0.32 },        // public water venue — 3.20u
+    { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 },  // works/depot block — 3.36u
+  ],
 };
 
 /**
