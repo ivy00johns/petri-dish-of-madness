@@ -578,6 +578,109 @@ def test_provider_precedence_mock_over_cloudflare(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Gemini image provider (GEMINI_API_KEY) — hermetic via a fake httpx.AsyncClient.
+# The provider does `import httpx` then `httpx.AsyncClient(...)`, so patching the
+# attribute on the module intercepts every call (no network in the suite).
+# ──────────────────────────────────────────────────────────────────────────────
+
+import base64 as _base64
+
+_GEMINI_IMG_BYTES = b"\x89PNG\r\n\x1a\ngemini-art"
+
+
+class _FakeResp:
+    def __init__(self, status_code, *, json_data=None, content=b"", text=""):
+        self.status_code = status_code
+        self._json = json_data
+        self.content = content
+        self.text = text
+
+    def json(self):
+        return self._json
+
+
+class _FakeAsyncClient:
+    """Stands in for httpx.AsyncClient — returns a canned response per method."""
+
+    def __init__(self, *, post=None, get=None, **_kw):
+        self._post, self._get = post, get
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_a):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        return self._post
+
+    async def get(self, url):
+        return self._get
+
+
+def _patch_httpx(monkeypatch, *, post=None, get=None):
+    import httpx
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(post=post, get=get)
+    )
+
+
+def test_provider_precedence_gemini_over_cloudflare(monkeypatch):
+    # Gemini wins over Cloudflare when keyed (mock still trumps both, so drop it).
+    monkeypatch.delenv("EM_IMAGEGEN_MOCK", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CF_API_TOKEN", "tok")
+    from petridish.imagegen import build_provider
+    from petridish.imagegen.provider import GeminiImageProvider
+    assert isinstance(build_provider(), GeminiImageProvider)
+
+
+def test_provider_precedence_mock_over_gemini(monkeypatch):
+    # EM_IMAGEGEN_MOCK (set by conftest) wins even when GEMINI_API_KEY is present.
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from petridish.imagegen import build_provider
+    from petridish.imagegen.provider import MockImageProvider
+    assert isinstance(build_provider(), MockImageProvider)
+
+
+def test_gemini_decodes_inline_image_part(monkeypatch):
+    # A TEXT+IMAGE response: the provider scans every part for inlineData.
+    from petridish.imagegen.provider import GeminiImageProvider
+    b64 = _base64.b64encode(_GEMINI_IMG_BYTES).decode()
+    resp = _FakeResp(200, json_data={
+        "candidates": [{"content": {"parts": [
+            {"text": "here is your art"},
+            {"inlineData": {"mimeType": "image/png", "data": b64}},
+        ]}}]
+    })
+    _patch_httpx(monkeypatch, post=resp)
+    out = asyncio.run(GeminiImageProvider("fake-key").fetch_png("a cozy house"))
+    assert out == _GEMINI_IMG_BYTES
+
+
+def test_gemini_falls_back_to_pollinations_on_429(monkeypatch):
+    # Unbilled key 429s (free-tier quota is 0) → fall through to the free GET provider.
+    from petridish.imagegen.provider import GeminiImageProvider
+    poll_bytes = b"\x89PNG\r\n\x1a\npollinations"
+    _patch_httpx(
+        monkeypatch,
+        post=_FakeResp(429, text="quota exceeded"),
+        get=_FakeResp(200, content=poll_bytes),
+    )
+    out = asyncio.run(GeminiImageProvider("fake-key").fetch_png("a cozy house"))
+    assert out == poll_bytes
+
+
+def test_gemini_model_override_via_env(monkeypatch):
+    from petridish.imagegen.provider import GeminiImageProvider
+    monkeypatch.setenv("EM_IMAGEGEN_GEMINI_MODEL", "imagen-4.0-generate-001")
+    assert GeminiImageProvider("k")._model == "imagen-4.0-generate-001"
+    # An explicit constructor arg beats the env override.
+    assert GeminiImageProvider("k", "gemini-2.5-flash-image")._model == "gemini-2.5-flash-image"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Menu / resolution agreement (EM-108)
 # ──────────────────────────────────────────────────────────────────────────────
 

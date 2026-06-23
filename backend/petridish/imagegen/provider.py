@@ -4,10 +4,14 @@ Contract (contracts/wave-i-atelier.md §1):
   - Protocol: `async def fetch_png(prompt: str) -> bytes | None` — PNG bytes or
     None on ANY failure (never raises into the loop).
   - Default = Pollinations (zero-config, no key).
+  - Env opt-in = Gemini (GEMINI_API_KEY) — gemini-2.5-flash-image via
+    generateContent; a PAID model (free-tier quota is 0), so an unbilled key
+    429s and we fall back to Pollinations. Model override: EM_IMAGEGEN_GEMINI_MODEL.
   - Env opt-in = Cloudflare Workers AI (CF_ACCOUNT_ID + CF_API_TOKEN), falling
     back to Pollinations on any failure.
   - Mock lane = EM_IMAGEGEN_MOCK: returns a fixed minimal valid PNG, no network.
-  - Selection precedence: EM_IMAGEGEN_MOCK > Cloudflare (if env present) > Pollinations.
+  - Selection precedence:
+    EM_IMAGEGEN_MOCK > Gemini (if GEMINI_API_KEY) > Cloudflare (if env) > Pollinations.
 
 The provider does NOT decide paths or ids — the loop hands it a prompt and writes
 the bytes to the contract-derived path itself (replay-safety keystone: the PNG is
@@ -36,6 +40,10 @@ _CLOUDFLARE_URL = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}"
     "/ai/run/@cf/black-forest-labs/flux-1-schnell"
 )
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-image"
 
 
 @runtime_checkable
@@ -111,11 +119,77 @@ class CloudflareProvider:
         return await self._fallback.fetch_png(prompt)
 
 
+class GeminiImageProvider:
+    """Env opt-in (GEMINI_API_KEY) — POST to Gemini generateContent and decode
+    the inline base64 PNG from the first image part. Falls back to Pollinations
+    on ANY failure (never raises).
+
+    Model defaults to gemini-2.5-flash-image (override via EM_IMAGEGEN_GEMINI_MODEL).
+    Note: that model is PAID — its free-tier request quota is 0, so an unbilled
+    key returns HTTP 429 and every call falls through to the no-key provider."""
+
+    def __init__(self, api_key: str, model: str | None = None) -> None:
+        self._api_key = api_key
+        self._model = (
+            model
+            or os.environ.get("EM_IMAGEGEN_GEMINI_MODEL")
+            or _GEMINI_DEFAULT_MODEL
+        ).strip()
+        self._fallback = PollinationsProvider()
+
+    async def fetch_png(self, prompt: str) -> bytes | None:
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            return None
+        png = await self._fetch_gemini(prompt)
+        if png is not None:
+            return png
+        # On any failure (429 / quota / network / unexpected shape), fall back to
+        # the free no-key provider so art keeps flowing.
+        return await self._fallback.fetch_png(prompt)
+
+    async def _fetch_gemini(self, prompt: str) -> bytes | None:
+        url = _GEMINI_URL.format(model=self._model)
+        # Key travels in the x-goog-api-key header, never the URL query string
+        # (parity with the text GeminiAdapter — query params leak into logs).
+        headers = {"x-goog-api-key": self._api_key}
+        # TEXT+IMAGE is the broadly-accepted modality combo; the response may
+        # interleave a text part, so we scan every part for the image below.
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        }
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                log.debug("gemini image http %s: %s", resp.status_code, resp.text[:200])
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            parts = (
+                (candidates[0].get("content") or {}).get("parts") or []
+                if candidates
+                else []
+            )
+            for part in parts:
+                inline = part.get("inlineData") or part.get("inline_data") or {}
+                if inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        except Exception as exc:  # pragma: no cover - network defensive
+            log.debug("gemini image fetch failed, falling back: %s", exc)
+        return None
+
+
 def build_provider() -> ImageProvider:
-    """Factory honoring the selection precedence (§1):
-    EM_IMAGEGEN_MOCK > Cloudflare (if env present) > Pollinations."""
+    """Factory honoring the selection precedence (§1, extended for Gemini):
+    EM_IMAGEGEN_MOCK > Gemini (if GEMINI_API_KEY) > Cloudflare (if env) > Pollinations."""
     if os.environ.get("EM_IMAGEGEN_MOCK"):
         return MockImageProvider()
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        return GeminiImageProvider(gemini_key)
     account_id = os.environ.get("CF_ACCOUNT_ID")
     api_token = os.environ.get("CF_API_TOKEN")
     if account_id and api_token:

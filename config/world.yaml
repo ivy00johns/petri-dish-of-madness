@@ -283,11 +283,11 @@ world:
   props:
     max_population: 48     # cap on tracked props (place_prop is rejected over this; 0 = unlimited)
 
-  # Wave I / EM-210 — The Atelier: agents generate ART on a FREE image endpoint
+  # Wave I / EM-210 — The Atelier: agents generate ART via an image provider
   # (reflex-first, zero critical-path LLM calls; the PNG is an external
   # side-artifact off the replay surface). More art = more chronicle texture.
   image_gen:
-    enabled: false         # OFF 2026-06-21 — HF inference credits depleted (402); create_image is dropped from the menu + rejected (zero image-API calls). Re-enable when credits return.
+    enabled: true          # ON 2026-06-23 — artwork via Gemini (gemini-2.5-flash-image; set GEMINI_API_KEY) with free Pollinations fallback. Provider seam: backend/petridish/imagegen/provider.py.
     max_concurrent: 2      # in-flight PNG fetches; the loop skips a fetch above this (skip-under-load)
     max_gallery: 30        # newest images retained in world.gallery (pop-oldest on append)
 
