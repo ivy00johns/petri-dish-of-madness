@@ -5,13 +5,19 @@ Contract (contracts/wave-i-atelier.md §1):
     None on ANY failure (never raises into the loop).
   - Default = Pollinations (zero-config, no key).
   - Env opt-in = Gemini (GEMINI_API_KEY) — gemini-2.5-flash-image via
-    generateContent; a PAID model (free-tier quota is 0), so an unbilled key
-    429s and we fall back to Pollinations. Model override: EM_IMAGEGEN_GEMINI_MODEL.
+    generateContent. A PAID model billed a FLAT ~1290 tokens (~$0.039) per image
+    regardless of size, so it's the PAID BACKSTOP, not the default: when a key is
+    set the factory builds a FREE-FIRST chain (Pollinations → Gemini), so the
+    world paints for $0 whenever Pollinations is up and only spends Gemini's
+    per-image cost on the overflow Pollinations can't serve (which is what used
+    to error out and force the image_gen kill switch). Model override:
+    EM_IMAGEGEN_GEMINI_MODEL.
   - Env opt-in = Cloudflare Workers AI (CF_ACCOUNT_ID + CF_API_TOKEN), falling
     back to Pollinations on any failure.
   - Mock lane = EM_IMAGEGEN_MOCK: returns a fixed minimal valid PNG, no network.
   - Selection precedence:
-    EM_IMAGEGEN_MOCK > Gemini (if GEMINI_API_KEY) > Cloudflare (if env) > Pollinations.
+    EM_IMAGEGEN_MOCK > Pollinations→Gemini chain (if GEMINI_API_KEY)
+    > Cloudflare (if env) > Pollinations.
 
 The provider does NOT decide paths or ids — the loop hands it a prompt and writes
 the bytes to the contract-derived path itself (replay-safety keystone: the PNG is
@@ -121,21 +127,25 @@ class CloudflareProvider:
 
 class GeminiImageProvider:
     """Env opt-in (GEMINI_API_KEY) — POST to Gemini generateContent and decode
-    the inline base64 PNG from the first image part. Falls back to Pollinations
-    on ANY failure (never raises).
+    the inline base64 PNG from the first image part. Never raises.
 
     Model defaults to gemini-2.5-flash-image (override via EM_IMAGEGEN_GEMINI_MODEL).
-    Note: that model is PAID — its free-tier request quota is 0, so an unbilled
-    key returns HTTP 429 and every call falls through to the no-key provider."""
+    The model is PAID and billed a FLAT per-image rate, so the factory wires it as
+    the paid BACKSTOP of a free-first chain (Pollinations → Gemini). An optional
+    `fallback` lets a standalone instance chain further; the factory leaves it
+    None (Pollinations already ran first — looping back would be redundant)."""
 
-    def __init__(self, api_key: str, model: str | None = None) -> None:
+    def __init__(
+        self, api_key: str, model: str | None = None,
+        fallback: "ImageProvider | None" = None,
+    ) -> None:
         self._api_key = api_key
         self._model = (
             model
             or os.environ.get("EM_IMAGEGEN_GEMINI_MODEL")
             or _GEMINI_DEFAULT_MODEL
         ).strip()
-        self._fallback = PollinationsProvider()
+        self._fallback = fallback
 
     async def fetch_png(self, prompt: str) -> bytes | None:
         prompt = str(prompt or "").strip()
@@ -144,9 +154,11 @@ class GeminiImageProvider:
         png = await self._fetch_gemini(prompt)
         if png is not None:
             return png
-        # On any failure (429 / quota / network / unexpected shape), fall back to
-        # the free no-key provider so art keeps flowing.
-        return await self._fallback.fetch_png(prompt)
+        # On any failure (429 / quota / network / unexpected shape), optionally
+        # chain to a fallback provider (None ⇒ just report the miss).
+        if self._fallback is not None:
+            return await self._fallback.fetch_png(prompt)
+        return None
 
     async def _fetch_gemini(self, prompt: str) -> bytes | None:
         url = _GEMINI_URL.format(model=self._model)
@@ -178,18 +190,46 @@ class GeminiImageProvider:
                 if inline.get("data"):
                     return base64.b64decode(inline["data"])
         except Exception as exc:  # pragma: no cover - network defensive
-            log.debug("gemini image fetch failed, falling back: %s", exc)
+            log.debug("gemini image fetch failed: %s", exc)
+        return None
+
+
+class ChainProvider:
+    """Try each provider in order; return the FIRST PNG bytes produced, or None
+    if every provider misses. Never raises — each provider already swallows its
+    own errors, and we guard once more. This is how the free-first art chain
+    (Pollinations → Gemini) spends $0 whenever the free lane is up and only pays
+    for the overflow it can't serve."""
+
+    def __init__(self, providers: list[ImageProvider]) -> None:
+        self._providers = [p for p in providers if p is not None]
+
+    async def fetch_png(self, prompt: str) -> bytes | None:
+        for provider in self._providers:
+            try:
+                png = await provider.fetch_png(prompt)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("chain provider errored, trying next: %s", exc)
+                png = None
+            if png:
+                return png
         return None
 
 
 def build_provider() -> ImageProvider:
-    """Factory honoring the selection precedence (§1, extended for Gemini):
-    EM_IMAGEGEN_MOCK > Gemini (if GEMINI_API_KEY) > Cloudflare (if env) > Pollinations."""
+    """Factory (selection precedence, §1 extended):
+    EM_IMAGEGEN_MOCK > Pollinations→Gemini chain (if GEMINI_API_KEY)
+    > Cloudflare (if env) > Pollinations.
+
+    With a Gemini key set, art is a FREE-FIRST chain: Pollinations runs first
+    ($0) and Gemini is the paid backstop for whatever Pollinations can't serve —
+    so a busy world keeps painting instead of erroring (the old kill-switch path)
+    while only spending Gemini's flat per-image cost on the overflow."""
     if os.environ.get("EM_IMAGEGEN_MOCK"):
         return MockImageProvider()
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
-        return GeminiImageProvider(gemini_key)
+        return ChainProvider([PollinationsProvider(), GeminiImageProvider(gemini_key)])
     account_id = os.environ.get("CF_ACCOUNT_ID")
     api_token = os.environ.get("CF_API_TOKEN")
     if account_id and api_token:

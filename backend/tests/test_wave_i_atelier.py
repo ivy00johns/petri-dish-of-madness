@@ -625,15 +625,21 @@ def _patch_httpx(monkeypatch, *, post=None, get=None):
     )
 
 
-def test_provider_precedence_gemini_over_cloudflare(monkeypatch):
-    # Gemini wins over Cloudflare when keyed (mock still trumps both, so drop it).
+def test_gemini_key_builds_free_first_chain(monkeypatch):
+    # A Gemini key builds a Pollinations→Gemini chain (free first, paid backstop);
+    # it wins over Cloudflare, and the mock still trumps it (so drop the mock).
     monkeypatch.delenv("EM_IMAGEGEN_MOCK", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
     monkeypatch.setenv("CF_API_TOKEN", "tok")
     from petridish.imagegen import build_provider
-    from petridish.imagegen.provider import GeminiImageProvider
-    assert isinstance(build_provider(), GeminiImageProvider)
+    from petridish.imagegen.provider import (
+        ChainProvider, PollinationsProvider, GeminiImageProvider,
+    )
+    chain = build_provider()
+    assert isinstance(chain, ChainProvider)
+    # Order matters: free Pollinations first, paid Gemini as the backstop.
+    assert [type(p) for p in chain._providers] == [PollinationsProvider, GeminiImageProvider]
 
 
 def test_provider_precedence_mock_over_gemini(monkeypatch):
@@ -659,17 +665,38 @@ def test_gemini_decodes_inline_image_part(monkeypatch):
     assert out == _GEMINI_IMG_BYTES
 
 
-def test_gemini_falls_back_to_pollinations_on_429(monkeypatch):
-    # Unbilled key 429s (free-tier quota is 0) → fall through to the free GET provider.
-    from petridish.imagegen.provider import GeminiImageProvider
-    poll_bytes = b"\x89PNG\r\n\x1a\npollinations"
-    _patch_httpx(
-        monkeypatch,
-        post=_FakeResp(429, text="quota exceeded"),
-        get=_FakeResp(200, content=poll_bytes),
+_POLL_BYTES = b"\x89PNG\r\n\x1a\npollinations"
+
+
+def _gemini_ok_resp():
+    b64 = _base64.b64encode(_GEMINI_IMG_BYTES).decode()
+    return _FakeResp(200, json_data={
+        "candidates": [{"content": {"parts": [
+            {"inlineData": {"mimeType": "image/png", "data": b64}},
+        ]}}]
+    })
+
+
+def test_chain_prefers_free_pollinations(monkeypatch):
+    # When Pollinations (the free GET lane) succeeds, Gemini is never spent.
+    from petridish.imagegen.provider import (
+        ChainProvider, PollinationsProvider, GeminiImageProvider,
     )
-    out = asyncio.run(GeminiImageProvider("fake-key").fetch_png("a cozy house"))
-    assert out == poll_bytes
+    _patch_httpx(monkeypatch, get=_FakeResp(200, content=_POLL_BYTES), post=_gemini_ok_resp())
+    chain = ChainProvider([PollinationsProvider(), GeminiImageProvider("fake-key")])
+    out = asyncio.run(chain.fetch_png("a cozy house"))
+    assert out == _POLL_BYTES  # free lane won; the paid POST result is ignored
+
+
+def test_chain_falls_back_to_gemini_when_pollinations_runs_out(monkeypatch):
+    # Pollinations errors (502 — "ran out") → the chain pays Gemini as the backstop.
+    from petridish.imagegen.provider import (
+        ChainProvider, PollinationsProvider, GeminiImageProvider,
+    )
+    _patch_httpx(monkeypatch, get=_FakeResp(502, text="bad gateway"), post=_gemini_ok_resp())
+    chain = ChainProvider([PollinationsProvider(), GeminiImageProvider("fake-key")])
+    out = asyncio.run(chain.fetch_png("a cozy house"))
+    assert out == _GEMINI_IMG_BYTES  # free lane missed → Gemini backstop served it
 
 
 def test_gemini_model_override_via_env(monkeypatch):
