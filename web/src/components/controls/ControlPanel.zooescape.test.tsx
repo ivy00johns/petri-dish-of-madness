@@ -27,6 +27,7 @@ vi.mock('../../inspector/api', () => ({
 
 import { ControlPanel } from './ControlPanel';
 import { agent, profile, world } from '../../test-utils/fixtures';
+import { expandSection } from '../../test-utils/expandSection';
 
 const PLACES = [
   { id: 'plaza', name: 'Central Plaza', x: 100, y: 100, kind: 'social' as const, description: '' },
@@ -54,6 +55,7 @@ function renderPanel(
       profiles={[profile({ name: 'model-a' })]}
     />,
   );
+  expandSection(/MENAGERIE/i);
   return { onZooEscape };
 }
 

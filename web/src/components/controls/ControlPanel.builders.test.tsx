@@ -37,6 +37,7 @@ vi.mock('../../inspector/api', () => ({
 import { ControlPanel } from './ControlPanel';
 import { mockControls } from '../../mock/generator';
 import { agent, building, profile, world } from '../../test-utils/fixtures';
+import { expandSection } from '../../test-utils/expandSection';
 
 const PLACES = [
   { id: 'plaza', name: 'Central Plaza', x: 100, y: 100, kind: 'social' as const, description: '' },
@@ -81,6 +82,7 @@ function renderPanel(h = handlers()) {
       profiles={[profile({ name: 'model-a' })]}
     />,
   );
+  expandSection(/BUILDERS/i);
   return h;
 }
 

@@ -403,7 +403,7 @@ function SpawnForm({
             id="spawn-profile"
             value={profile}
             onChange={(e) => { setProfile(e.target.value); touch(); }}
-            className={`lab-select flex-1 text-[10px] ${swatch ? '' : 'text-lab-text'}`}
+            className={`lab-select flex-1 min-w-0 text-[10px] ${swatch ? '' : 'text-lab-text'}`}
             style={swatch ? { color: swatch } : undefined}
           >
             {profiles.map((p) => (
@@ -914,7 +914,7 @@ function BuildersGroup({
             onChange={(e) => setPropKind(e.target.value)}
             placeholder="e.g. bench"
             maxLength={30}
-            className="lab-input flex-1 text-[11px]"
+            className="lab-input flex-1 min-w-0 text-[11px]"
             autoComplete="off"
             aria-label="Prop kind"
           />
@@ -966,7 +966,7 @@ function BuildersGroup({
             id="builders-clear-place"
             value={clearPlace}
             onChange={(e) => setClearPlace(e.target.value)}
-            className="lab-select flex-1 text-[10px]"
+            className="lab-select flex-1 min-w-0 text-[10px]"
             aria-label="Clear props at place"
           >
             <option value="">All places</option>
@@ -1003,7 +1003,7 @@ function BuildersGroup({
               id="builders-demolish"
               value={demolishId}
               onChange={(e) => setDemolishId(e.target.value)}
-              className="lab-select flex-1 text-[10px]"
+              className="lab-select flex-1 min-w-0 text-[10px]"
               aria-label="Building to demolish"
             >
               {buildings.map((b) => (
@@ -1051,7 +1051,7 @@ function BuildersGroup({
               <select
                 value={skin}
                 onChange={(e) => setSkin(e.target.value)}
-                className="lab-select flex-1 text-[10px]"
+                className="lab-select flex-1 min-w-0 text-[10px]"
                 aria-label="Skin"
               >
                 {skinNames.map((name) => (
@@ -1307,7 +1307,7 @@ function GodMiracles() {
         <select
           value={kind}
           onChange={(e) => setKind(e.target.value as GodMiracleKind)}
-          className="lab-select flex-1 text-[10px]"
+          className="lab-select flex-1 min-w-0 text-[10px]"
           aria-label="Miracle to cast"
         >
           {MIRACLE_KINDS.map((m) => (
@@ -1414,6 +1414,143 @@ function GroupedActiveRules({ rules, world }: { rules: Rule[]; world: WorldState
   );
 }
 
+/**
+ * StatusStrip — the compact, always-visible live readout pinned under PLAYBACK
+ * (replaces the old scroll-away STATUS section). The active-rule DETAIL lives in
+ * the ACTIVE RULES section; this is the at-a-glance line. Token-only colors —
+ * the STATE chip reads --rel-ally (running) / --lab-warn (paused).
+ */
+function StatusStrip({ world, liveCount }: { world: WorldState; liveCount: number }) {
+  const activeRules = world.rules.filter((r) => r.status === 'active').length;
+  const running = world.running;
+  return (
+    <div className="px-3 py-1.5 font-mono text-[10px] tabular-nums border-t border-lab-border/40 space-y-0.5">
+      <div className="flex items-center gap-x-2.5">
+        <span className="flex items-baseline gap-1">
+          <span className="text-lab-muted">TICK</span>
+          <span className="text-lab-text">{world.tick}</span>
+        </span>
+        <span className="flex items-baseline gap-1">
+          <span className="text-lab-muted">DAY</span>
+          <span className="text-lab-text">{world.day}</span>
+        </span>
+        <span
+          className="ml-auto font-semibold"
+          style={{ color: running ? 'var(--rel-ally)' : 'var(--lab-warn)' }}
+        >
+          {running ? '▶ RUNNING' : '⏸ PAUSED'}
+        </span>
+      </div>
+      <div className="flex items-center gap-x-2.5">
+        <span className="flex items-baseline gap-1">
+          <span className="text-lab-muted">ALIVE</span>
+          <span className="text-lab-text">{liveCount}/{world.agents.length}</span>
+        </span>
+        <span className="flex items-baseline gap-1">
+          <span className="text-lab-muted">RULES</span>
+          <span className="text-lab-text">{activeRules}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Per-section disclosure state, persisted so the operator's layout sticks. */
+function loadSectionOpen(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === '1';
+  } catch {
+    return fallback;
+  }
+}
+
+type SectionAccent = 'acid' | 'god' | 'neutral';
+
+const SECTION_TITLE_COLOR: Record<SectionAccent, string> = {
+  acid: 'text-lab-acid',
+  god: 'text-lab-god-bright',
+  neutral: 'text-lab-text',
+};
+
+const SECTION_STRIPE: Record<SectionAccent, string> = {
+  acid: 'border-l-2 border-lab-acid',
+  god: 'border-l-2 border-lab-god',
+  neutral: 'border-l-2 border-transparent',
+};
+
+/**
+ * Section — one collapsible god-control group. A single disclosure header
+ * (chevron + accent title + muted hint) is wrapped in an <h2> so the heading
+ * semantics the tests assert survive; the chevron/hint are aria-hidden, so the
+ * accessible name is exactly the title (e.g. "✦ GOD CONSOLE"). Open/closed
+ * persists to localStorage per id; collapsed bodies unmount (lazy + light DOM,
+ * matching ModelLegend). This ONE disclosure header replaces the old grab-bag
+ * of colored top-borders — the consistent separator the panel was missing.
+ */
+function Section({
+  id,
+  title,
+  tag,
+  accent = 'neutral',
+  defaultOpen = false,
+  children,
+}: {
+  id: string;
+  title: string;
+  tag?: string;
+  accent?: SectionAccent;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const storageKey = `em.controls.${id}.open`;
+  const [open, setOpen] = useState(() => loadSectionOpen(storageKey, defaultOpen));
+  useEffect(() => {
+    try {
+      localStorage.setItem(storageKey, open ? '1' : '0');
+    } catch {
+      /* ignore — private mode / no storage */
+    }
+  }, [storageKey, open]);
+
+  const panelId = `controls-section-${id}`;
+
+  return (
+    <section>
+      <h2 className="m-0">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={open ? panelId : undefined}
+          className={`lab-header ${SECTION_STRIPE[accent]} w-full flex items-center justify-between gap-2
+                      cursor-pointer text-left transition-colors duration-100
+                      hover:bg-lab-chrome/40
+                      focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-lab-acid`}
+        >
+          {/* Title never shrinks (it's the point); the decorative hint yields
+              and truncates first — critical in the 224px-wide controls aside. */}
+          <span className="flex items-center gap-1.5 shrink-0">
+            <span aria-hidden="true" className="shrink-0 text-[10px] text-lab-muted">
+              {open ? '▾' : '▸'}
+            </span>
+            <span className={SECTION_TITLE_COLOR[accent]}>{title}</span>
+          </span>
+          {tag && (
+            <span
+              aria-hidden="true"
+              className="min-w-0 truncate text-right font-mono text-[9px] normal-case tracking-normal text-lab-muted opacity-70"
+            >
+              {tag}
+            </span>
+          )}
+        </button>
+      </h2>
+      {open && <div id={panelId}>{children}</div>}
+    </section>
+  );
+}
+
 export function ControlPanel({
   world,
   onStart,
@@ -1481,64 +1618,70 @@ export function ControlPanel({
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
-      {/* ── Playback Controls ───────────────────────────────────── */}
-      <div className="lab-header">PLAYBACK</div>
-      <div className="p-2 space-y-2">
-        <div className="flex gap-1.5">
+      {/* ── Pinned operator strip: transport + live status. Sticky on scroll,
+          so START/PAUSE and the tick readout never leave view even when the
+          sections below are expanded. ─────────────────────────────────────── */}
+      <div className="sticky top-0 z-20 bg-lab-surface border-b border-lab-border shadow-lg">
+        <div className="lab-header">PLAYBACK</div>
+        <div className="p-2 space-y-2">
+          <div className="flex gap-1.5">
+            <button
+              className={`lab-btn flex-1 ${running ? 'lab-btn-secondary' : 'lab-btn-primary'}`}
+              onClick={onStart}
+              disabled={running}
+              aria-label="Start simulation"
+            >
+              ▶ START
+            </button>
+            <button
+              className={`lab-btn flex-1 ${!running ? 'lab-btn-secondary' : 'lab-btn-secondary'}`}
+              onClick={onPause}
+              disabled={!running}
+              aria-label="Pause simulation"
+            >
+              ⏸ PAUSE
+            </button>
+          </div>
           <button
-            className={`lab-btn flex-1 ${running ? 'lab-btn-secondary' : 'lab-btn-primary'}`}
-            onClick={onStart}
-            disabled={running}
-            aria-label="Start simulation"
+            className="lab-btn lab-btn-secondary w-full"
+            onClick={onStep}
+            aria-label="Step one tick"
           >
-            ▶ START
+            ⏭ STEP ONE TICK
           </button>
+
+          {/* Speed */}
+          <div className="pt-1">
+            <SpeedSlider
+              value={speed}
+              onChange={handleSpeed}
+              onDragStart={() => { draggingRef.current = true; }}
+              onDragEnd={() => { draggingRef.current = false; }}
+            />
+          </div>
+
+          {/* EM-084: NEW RUN — destructive, two-click confirm (auto-cancels). */}
           <button
-            className={`lab-btn flex-1 ${!running ? 'lab-btn-secondary' : 'lab-btn-secondary'}`}
-            onClick={onPause}
-            disabled={!running}
-            aria-label="Pause simulation"
+            className={`lab-btn lab-btn-danger w-full ${confirmingReset ? 'bg-lab-danger/20' : ''}`}
+            onClick={handleReset}
+            aria-label={confirmingReset ? 'Confirm: reset the world' : 'Reset the world (new run)'}
+            title="Rebuild the world from config — current run ends. Click twice to confirm."
           >
-            ⏸ PAUSE
+            {confirmingReset ? '⚠ CONFIRM RESET' : '⟲ RESET WORLD'}
           </button>
         </div>
-        <button
-          className="lab-btn lab-btn-secondary w-full"
-          onClick={onStep}
-          aria-label="Step one tick"
-        >
-          ⏭ STEP ONE TICK
-        </button>
 
-        {/* Speed */}
-        <div className="pt-1">
-          <SpeedSlider
-            value={speed}
-            onChange={handleSpeed}
-            onDragStart={() => { draggingRef.current = true; }}
-            onDragEnd={() => { draggingRef.current = false; }}
-          />
-        </div>
-
-        {/* EM-084: NEW RUN — destructive, two-click confirm (auto-cancels). */}
-        <button
-          className={`lab-btn lab-btn-danger w-full ${confirmingReset ? 'bg-lab-danger/20' : ''}`}
-          onClick={handleReset}
-          aria-label={confirmingReset ? 'Confirm: reset the world' : 'Reset the world (new run)'}
-          title="Rebuild the world from config — current run ends. Click twice to confirm."
-        >
-          {confirmingReset ? '⚠ CONFIRM RESET' : '⟲ RESET WORLD'}
-        </button>
+        {/* Live status — compact, always visible (the rule DETAIL lives in the
+            ACTIVE RULES section below). */}
+        {world && <StatusStrip world={world} liveCount={liveAgents.length} />}
       </div>
 
-      {/* ── Model Reassign — THE MARQUEE FEATURE ─────────────── */}
-      <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-acid">
-        <span className="text-lab-acid">⇄ MODEL REASSIGN</span>
-        <span className="font-mono text-[9px] text-lab-acid opacity-70">LIVE SWAP</span>
-      </div>
+      {/* ── Collapsible sections — ONE consistent disclosure header each;
+          open/closed persists per section (em.controls.<id>.open). Ordered by
+          operator intent: agents → god powers → world → laws. ──────────────── */}
 
-      {/* Prominent section — acid green border accent */}
-      <div className="border border-lab-acid/20 mx-1 mb-1">
+      {/* MODEL REASSIGN — the marquee live-swap; open by default. */}
+      <Section id="reassign" title="⇄ MODEL REASSIGN" tag="LIVE SWAP" accent="acid" defaultOpen>
         {liveAgents.length === 0 ? (
           <div className="font-mono text-xs text-lab-dim py-3 text-center">
             NO LIVE AGENTS
@@ -1556,100 +1699,78 @@ export function ControlPanel({
             />
           ))
         )}
-      </div>
+      </Section>
 
-      {/* ── GOD CONSOLE (Wave A.2 EM-138): three labeled groups ──── */}
-      <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god">
-        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">✦ GOD CONSOLE</h2>
-        <span className="font-mono text-[9px] text-lab-muted opacity-70">WORLD · INTERVENE · VOICE</span>
-      </div>
-
-      {/* Group 1 — WORLD EVENTS: the inject controls, unchanged behavior. */}
-      <GodGroupLabel>WORLD EVENTS</GodGroupLabel>
-      <div className="p-2 space-y-1.5">
-        <div className="flex gap-1.5">
-          <select
-            value={injectKind}
-            onChange={e => setInjectKind(e.target.value)}
-            className="lab-select flex-1 text-[10px]"
-            aria-label="Event type to inject"
-          >
-            <option value="">Random event</option>
-            {INJECT_KINDS.map(k => (
-              <option key={k} value={k}>{k.charAt(0).toUpperCase() + k.slice(1)}</option>
-            ))}
-          </select>
+      {/* GOD CONSOLE (Wave A.2 EM-138): WORLD EVENTS / INTERVENE / VOICE. */}
+      <Section id="god-console" title="✦ GOD CONSOLE" tag="EVENTS·ACT·VOICE" accent="god">
+        {/* Group 1 — WORLD EVENTS: the inject controls, unchanged behavior. */}
+        <GodGroupLabel>WORLD EVENTS</GodGroupLabel>
+        <div className="p-2 space-y-1.5">
+          <div className="flex gap-1.5">
+            <select
+              value={injectKind}
+              onChange={e => setInjectKind(e.target.value)}
+              className="lab-select flex-1 min-w-0 text-[10px]"
+              aria-label="Event type to inject"
+            >
+              <option value="">Random event</option>
+              {INJECT_KINDS.map(k => (
+                <option key={k} value={k}>{k.charAt(0).toUpperCase() + k.slice(1)}</option>
+              ))}
+            </select>
+            <button
+              className="lab-btn lab-btn-danger px-2"
+              onClick={() => onInject(injectKind || undefined)}
+              aria-label="Inject random event"
+              title="Inject a world event"
+            >
+              ⊕
+            </button>
+          </div>
           <button
-            className="lab-btn lab-btn-danger px-2"
+            className="lab-btn lab-btn-danger w-full"
             onClick={() => onInject(injectKind || undefined)}
-            aria-label="Inject random event"
-            title="Inject a world event"
           >
-            ⊕
+            INJECT EVENT
           </button>
         </div>
-        <button
-          className="lab-btn lab-btn-danger w-full"
-          onClick={() => onInject(injectKind || undefined)}
-        >
-          INJECT EVENT
-        </button>
-      </div>
 
-      {/* Group 2 — INTERVENE: bless/grant/whisper one living agent (EM-136/137),
-          plus the Wave-E MIRACLES row (EM-184: world-scale, no target). */}
-      <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
-      <GodGroupLabel>INTERVENE</GodGroupLabel>
-      <GodIntervene agents={liveAgents} />
-      <GodMiracles />
+        {/* Group 2 — INTERVENE: bless/grant/whisper one living agent (EM-136/137),
+            plus the Wave-E MIRACLES row (EM-184: world-scale, no target). */}
+        <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
+        <GodGroupLabel>INTERVENE</GodGroupLabel>
+        <GodIntervene agents={liveAgents} />
+        <GodMiracles />
 
-      {/* Group 3 — VOICE: the billboard reply (W11b EM-091d, opt-in) plus the
-          LOUD proclamation (EM-137 sibling) — a decree that rides every agent's
-          next prompt, guaranteed to reach the whole town. */}
-      <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
-      <GodGroupLabel>VOICE</GodGroupLabel>
-      <BillboardReply onPost={onBillboardReply} />
-      <Proclaim />
+        {/* Group 3 — VOICE: the billboard reply (W11b EM-091d, opt-in) plus the
+            LOUD proclamation (EM-137 sibling) — a decree that rides every agent's
+            next prompt, guaranteed to reach the whole town. */}
+        <div className="border-t border-lab-border/60 mx-1" aria-hidden="true" />
+        <GodGroupLabel>VOICE</GodGroupLabel>
+        <BillboardReply onPost={onBillboardReply} />
+        <Proclaim />
+      </Section>
 
-      {/* ── God Panel: spawn a villager (W7 EM-063) ──────────────── */}
-      <div className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god">
-        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">✦ GOD PANEL</h2>
-        <span className="font-mono text-[9px] text-lab-muted opacity-70">SPAWN</span>
-      </div>
-      <SpawnForm world={world} profiles={profiles} mockMode={mockMode} onSpawn={onSpawn} />
+      {/* GOD PANEL — spawn a villager (W7 EM-063). */}
+      <Section id="god-panel" title="✦ GOD PANEL" tag="SPAWN" accent="god">
+        <SpawnForm world={world} profiles={profiles} mockMode={mockMode} onSpawn={onSpawn} />
+      </Section>
 
-      {/* ── MENAGERIE: add an animal (EM-143) + rewild burst (EM-207) ─ */}
-      <div
-        className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god"
-        role="heading"
-        aria-level={2}
-      >
-        <span className="font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">
-          🐾 MENAGERIE
-        </span>
-        <span className="font-mono text-[9px] text-lab-muted opacity-70">ADD ANIMAL</span>
-      </div>
-      {/* EM-207 H2: REWILD burst — above the manual spawn form */}
-      <div className="border-b border-lab-border/40 mx-1 pb-1">
-        <RewildButton onRewild={onRewild} />
-        {/* EM-208 H3: ZOO ESCAPE — scatter housed animals into the city */}
-        <ZooEscapeButton onZooEscape={onZooEscape} />
-      </div>
-      <AnimalSpawnForm world={world} onSpawn={onSpawnAnimal} />
+      {/* MENAGERIE — add an animal (EM-143) + rewild burst (EM-207). */}
+      <Section id="menagerie" title="🐾 MENAGERIE" tag="ANIMALS" accent="god">
+        {/* EM-207 H2: REWILD burst — above the manual spawn form */}
+        <div className="border-b border-lab-border/40 mx-1 pb-1">
+          <RewildButton onRewild={onRewild} />
+          {/* EM-208 H3: ZOO ESCAPE — scatter housed animals into the city */}
+          <ZooEscapeButton onZooEscape={onZooEscape} />
+        </div>
+        <AnimalSpawnForm world={world} onSpawn={onSpawnAnimal} />
+      </Section>
 
-      {/* ── BUILDERS (Wave K EM-221): place/clear props · demolish · reskin ── */}
+      {/* BUILDERS (Wave K EM-221): place/clear props · demolish · reskin.
+          Only rendered when the build callbacks are wired. */}
       {onPlaceProp && onClearProps && onDemolish && onReskin && (
-        <>
-          <div
-            className="lab-header mt-0.5 flex items-center justify-between border-t-2 border-t-lab-god"
-            role="heading"
-            aria-level={2}
-          >
-            <span className="font-mono text-xs font-semibold tracking-widest uppercase text-lab-god-bright">
-              🛠 BUILDERS
-            </span>
-            <span className="font-mono text-[9px] text-lab-muted opacity-70">PROPS · DEMOLISH · SKIN</span>
-          </div>
+        <Section id="builders" title="🛠 BUILDERS" tag="PROPS·RAZE·SKIN" accent="god">
           <BuildersGroup
             world={world}
             onPlaceProp={onPlaceProp}
@@ -1657,44 +1778,17 @@ export function ControlPanel({
             onDemolish={onDemolish}
             onReskin={onReskin}
           />
-        </>
+        </Section>
       )}
 
-      {/* ── Status ──────────────────────────────────────────────── */}
-      {world && (
-        <>
-          <div className="lab-header mt-0.5">STATUS</div>
-          <div className="p-2 space-y-1">
-            {[
-              ['TICK',  String(world.tick)],
-              ['DAY',   String(world.day)],
-              ['STATE', world.running ? 'RUNNING' : 'PAUSED'],
-              ['ALIVE', `${liveAgents.length}/${world.agents.length}`],
-              ['RULES', `${world.rules.filter(r => r.status === 'active').length} ACTIVE`],
-            ].map(([label, value]) => (
-              <div key={label} className="flex items-center justify-between">
-                <span className="font-mono text-[10px] text-lab-muted">{label}</span>
-                <span
-                  className="font-mono text-[10px] tabular-nums"
-                  style={{
-                    color:
-                      label === 'STATE'
-                        ? world.running ? 'var(--rel-ally)' : 'var(--lab-warn)'
-                        : 'var(--lab-text)',
-                  }}
-                >
-                  {value}
-                </span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* ── Active Rules — identical-effect laws group into ×N (EM-087) ── */}
+      {/* ACTIVE RULES — identical-effect laws group into ×N (EM-087). */}
       {world && world.rules.length > 0 && (
-        <>
-          <div className="lab-header mt-0.5">ACTIVE RULES</div>
+        <Section
+          id="rules"
+          title="ACTIVE RULES"
+          tag={`${world.rules.filter(r => r.status === 'active').length} ACTIVE`}
+          accent="neutral"
+        >
           <div className="p-2 space-y-1">
             <GroupedActiveRules
               rules={world.rules.filter(r => r.status === 'active')}
@@ -1713,7 +1807,7 @@ export function ControlPanel({
               </div>
             ))}
           </div>
-        </>
+        </Section>
       )}
     </div>
   );

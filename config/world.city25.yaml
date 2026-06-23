@@ -185,6 +185,7 @@ world:
   # (reflex-first, zero critical-path LLM calls; the PNG is an external
   # side-artifact off the replay surface). More art = more chronicle texture.
   image_gen:
+    enabled: false         # OFF 2026-06-21 — HF inference credits depleted (402); create_image is dropped from the menu + rejected (zero image-API calls). Re-enable when credits return.
     max_concurrent: 2      # in-flight PNG fetches; the loop skips a fetch above this (skip-under-load)
     max_gallery: 30        # newest images retained in world.gallery (pop-oldest on append)
 
@@ -276,6 +277,13 @@ world:
     enabled: true                # EM-201: the Chronicle — narrated chapters of the emergent saga
     every_n_ticks: 100           # EM-201: bigger window → meatier chapters (was 50)
     model_profile: auto          # EM-205: the proxy router lane — never hammers a single rpd-capped free tier. Reasoning-leak guard still rejects rerouted CoT.
+
+  # Wave L / EM-223 — recursive + reactive planning. MUST stay byte-equal to the
+  # world.yaml planning block (the city25 variant changes only the cast).
+  planning:
+    enabled: true                # EM-223 live tuning run (2026-06-21)
+    max_steps: 5
+    reflex_bias: true
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
