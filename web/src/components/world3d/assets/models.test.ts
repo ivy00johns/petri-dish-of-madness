@@ -184,12 +184,17 @@ describe('every non-null ModelSpec', () => {
     },
   );
 
-  it('total vendored payload stays within the 15 MB budget', () => {
+  it('total vendored payload stays within the 28 MB budget', () => {
+    // Budget raised 15→28 MB at EM-216e (wide-ranging asset expansion toward the
+    // EW-grade dense city). These GLBs are LAZY-loaded via drei useGLTF/preload —
+    // they are NOT eager bundle weight that blocks first paint. The guard still
+    // catches a runaway doubling; selective extraction + per-file footprint
+    // validation + url dedup keep individual additions honest.
     const total = specs.reduce(
       (sum, s) => sum + readFileSync(diskPath(s)).byteLength,
       0,
     );
-    expect(total).toBeLessThanOrEqual(15 * 1024 * 1024);
+    expect(total).toBeLessThanOrEqual(28 * 1024 * 1024);
   });
 });
 

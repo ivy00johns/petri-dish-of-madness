@@ -170,15 +170,42 @@ export const PROP_POOLS: Partial<Record<PropKind, ModelSpec[]>> = {
     PROP_MODELS.rock, // Quaternius Rocks cluster
     { url: `${POLY_PROPS}/rock-tall.glb`, scale: 1.0, yOffset: 0 },  // Quaternius Rock
     { url: `${POLY_PROPS}/rock-flat.glb`, scale: 0.5, yOffset: 0 },  // Kenney Rock Flat
+    { url: `${POLY_PROPS}/rock-round.glb`, scale: 3.427, yOffset: 0.008 }, // EM-216e Quaternius rock
   ],
   bush: [
     PROP_MODELS.bush, // Quaternius Bush
     { url: `${POLY_PROPS}/bush-berry.glb`, scale: 0.67, yOffset: 0.04 }, // Quaternius Bush with Berries
+    // EM-216e — more CC0 greenery variety
+    { url: `${POLY_PROPS}/bush-hedge.glb`, scale: 0.527, yOffset: 0.092 },     // Quaternius hedge
+    { url: `${POLY_PROPS}/bush-cluster.glb`, scale: 0.137, yOffset: 0.078 },   // Quaternius bushes
+    { url: `${POLY_PROPS}/bush-flowering.glb`, scale: 0.458, yOffset: 0.107 }, // Quaternius bush with flowers
   ],
   flower: [
     PROP_MODELS.flower, // Quaternius Flowers patch
     { url: `${POLY_PROPS}/flower-cluster.glb`, scale: 1.26, yOffset: 0 }, // CreativeTrio Flowers
     { url: `${POLY_PROPS}/plant-small.glb`, scale: 0.68, yOffset: 0 },    // Quaternius Small Plant
+  ],
+  // EM-216e — NEW street-furniture variety pools: kinds that were single-model
+  // now spread across distinct CC0 GLBs (slot 0 stays the PROP_MODELS default).
+  bench: [
+    PROP_MODELS.bench, // Kenney furniture bench (slot 0)
+    { url: `${POLY_PROPS}/bench-wood.glb`, scale: 1.429, yOffset: 0.002 }, // Quaternius bench
+  ],
+  lamp: [
+    PROP_MODELS.lamp, // Kenney curved streetlight (slot 0)
+    { url: `${POLY_PROPS}/lamp-street.glb`, scale: 0.213, yOffset: 0.002 }, // Quaternius street light
+    { url: `${POLY_PROPS}/lamp-kl.glb`, scale: 1.25, yOffset: 0 },          // Kay Lousberg streetlight
+    { url: `${POLY_PROPS}/lamp-lantern.glb`, scale: 0.318, yOffset: 0 },    // Kay Lousberg post lantern
+  ],
+  statue: [
+    PROP_MODELS.statue, // Quaternius fox statue (slot 0)
+    { url: `${POLY_PROPS}/statue-horse.glb`, scale: 0.256, yOffset: -0.004 }, // Quaternius horse statue
+    { url: `${POLY_PROPS}/statue-stag.glb`, scale: 0.324, yOffset: 0 },       // Quaternius stag statue
+  ],
+  planter: [
+    PROP_MODELS.planter, // Isa Lousberg medium pot (slot 0)
+    { url: `${POLY_PROPS}/planter-houseplant.glb`, scale: 0.574, yOffset: -0.001 }, // Quaternius houseplant
+    { url: `${POLY_PROPS}/planter-fern.glb`, scale: 0.083, yOffset: 0.021 },        // Quaternius fern
   ],
 };
 
