@@ -186,11 +186,16 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/house-cottage.glb`, scale: 6.0, yOffset: 0 },      // CreativeTrio Cottage 2.80u
     { url: `${POLY}/house-fantasy.glb`, scale: 1.1, yOffset: 0 },      // Quaternius Fantasy House 2.93u, 3.73u tall
   ],
-  // Storefronts — three Kenney commercial blocks (already vendored).
+  // Storefronts — three Kenney commercial blocks + two literal shop GLBs
+  // (EM-216d) so shops vary beyond the city-kit blocks. Slot 0 stays
+  // commercial-a = MODEL_REGISTRY.stall; the poly shops are footprint-validated
+  // MODEL_REGISTRY rows reused verbatim.
   stall: [
-    { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // 2.44u
+    { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 }, // 2.44u (default, slot 0)
     { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 1.8, yOffset: 0 }, // 2.95u
     { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // 2.33u, 4.06u tall
+    { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },             // shopfront — 2.90u
+    { url: `${POLY}/market.glb`, scale: 1.4, yOffset: 0 },              // market stalls — 2.95u
   ],
   // EM-216c — the GENERIC catch-all is the MOST-repeated structure in practice:
   // agents author abstract civic/economic kinds ('social', 'commerce', 'rule',
@@ -212,6 +217,26 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/theater.glb`, scale: 0.099, yOffset: 0 },            // open proscenium stage — 3.29u
     { url: `${POLY}/bathhouse.glb`, scale: 0.32, yOffset: 0.32 },        // public water venue — 3.20u
     { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 },  // works/depot block — 3.36u
+    // EM-216d — fold the EM-217 build-type GLBs into the generic catch-all.
+    // Agents rarely author the exact keywords (tavern/market/temple/…) that
+    // reach those VariantKeys, so ~86% of buildings collapse here while that
+    // vendored art goes unseen — routing it through generic both deepens the
+    // dominant bucket and surfaces models already paid for. Each tuple is copied
+    // verbatim from its MODEL_REGISTRY row (already footprint-validated ≤3.4u
+    // long / ≤4.2u tall / grounded), so the city convention holds by
+    // construction. All read as civic/commercial/community structures that fit
+    // the abstract kinds dominating this bucket.
+    { url: `${POLY}/tavern.glb`, scale: 0.78, yOffset: 0 },   // gabled inn — 3.14u
+    { url: `${POLY}/market.glb`, scale: 1.4, yOffset: 0 },    // open market stalls — 2.95u
+    { url: `${POLY}/temple.glb`, scale: 0.92, yOffset: 0 },   // columned temple — 2.02u, 3.98u tall
+    { url: `${POLY}/library.glb`, scale: 2.35, yOffset: 0 },  // town-center hall — 2.97u
+    { url: `${POLY}/school.glb`, scale: 1.65, yOffset: 0 },   // civic block — 2.71u
+    { url: `${POLY}/clinic.glb`, scale: 1.45, yOffset: 0 },   // modern civic block — 2.96u
+    { url: `${POLY}/smithy.glb`, scale: 0.8, yOffset: 0 },    // workshop/forge — 3.11u
+    { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 },  // tall silo — 2.40u, 4.08u tall
+    { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },   // shopfront — 2.90u
+    { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },   // shipping port — 2.50u
+    { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 }, // tower beacon — 2.64u, 4.09u tall
   ],
 };
 
