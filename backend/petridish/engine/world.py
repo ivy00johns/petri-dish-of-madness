@@ -1482,6 +1482,9 @@ class World:
             else:
                 rel.type = "rival"
             rel.since_tick = self.tick  # EM-113 — type changed here
+        # EM-240 — witnessed-crime notoriety bookkeeping (folded into existing steal).
+        self._register_crime(agent, "steal", target.id,
+                             int(self._crime_param("steal_notoriety", 6)))
         return True, "ok", amount
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -2788,6 +2791,11 @@ class World:
                 continue
             self._update_trust(witness, agent, -12)
 
+        # EM-240 — witnessed-crime notoriety bookkeeping. Arson has no single
+        # victim, so victim_id=None (every co-located non-actor is a witness).
+        self._register_crime(agent, "arson", None,
+                             int(self._crime_param("arson_notoriety", 22)))
+
         return {"_multi": [
             {
                 "kind": "conflict",
@@ -3663,6 +3671,71 @@ class World:
 
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 — Crime & Justice bookkeeping. Witnessed crime accrues notoriety;
+    # a per-round advance decays it, clears stale `wanted`, and frees the jailed.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _register_crime(
+        self, actor: AgentState, crime: str, victim_id: str | None, notoriety_base: int
+    ) -> bool:
+        """EM-240 — shared crime bookkeeping. Witnesses = co-located living agents
+        OTHER than the actor and the direct victim. Bumps notoriety only when
+        witnessed; always records the rap sheet; flips `wanted` at threshold.
+        Does NOT touch trust — each action keeps its own witness-trust deltas."""
+        witnesses = [
+            a for a in self.agents_at(actor.location)
+            if a.id != actor.id and a.id != victim_id
+        ]
+        witnessed = len(witnesses) > 0
+        if witnessed:
+            per = int(self._crime_param("notoriety_per_extra_witness", 3))
+            gain = int(notoriety_base) + per * (len(witnesses) - 1)
+            actor.notoriety = max(0, min(100, actor.notoriety + gain))
+        actor.rap_sheet.append({
+            "tick": self.tick, "crime": crime,
+            "victim_id": victim_id, "witnessed": witnessed,
+        })
+        cap = int(self._crime_param("rap_sheet_cap", 10))
+        if len(actor.rap_sheet) > cap:
+            del actor.rap_sheet[: len(actor.rap_sheet) - cap]
+        threshold = int(self._crime_param("wanted_threshold", 40))
+        if actor.crime_status is None and actor.notoriety >= threshold:
+            actor.crime_status = "wanted"
+        return witnessed
+
+    def advance_crime(self) -> list[dict]:
+        """EM-240 — per-round crime status maintenance (called from the loop beside
+        advance_buildings). Decays notoriety while free, clears stale `wanted`, and
+        releases detained/jailed agents at expiry. Deterministic; no RNG/clock."""
+        events: list[dict] = []
+        decay = int(self._crime_param("notoriety_decay", 2))
+        threshold = int(self._crime_param("wanted_threshold", 40))
+        relief = int(self._crime_param("released_notoriety_relief", 10))
+        for agent in self.living_agents():
+            # Release at expiry: burn the release relief once. A just-released
+            # agent does NOT also decay this round (release relief IS the round's
+            # notoriety drop) — it decays normally on subsequent free rounds.
+            if agent.crime_status in ("detained", "jailed") and \
+                    self.tick >= agent.crime_status_until_tick:
+                agent.crime_status = None
+                agent.crime_status_until_tick = 0
+                agent.notoriety = max(0, agent.notoriety - relief)
+                events.append({
+                    "kind": "released",
+                    "actor_id": agent.id,
+                    "text": f"{agent.name} is released back into the town.",
+                    "payload": {"notoriety": agent.notoriety},
+                })
+                continue
+            # Decay only while free (jail is its own cool-off).
+            if agent.crime_status in (None, "wanted") and agent.notoriety > 0:
+                agent.notoriety = max(0, agent.notoriety - decay)
+            # Clear a `wanted` flag that has cooled below threshold.
+            if agent.crime_status == "wanted" and agent.notoriety < threshold:
+                agent.crime_status = None
+        return events
 
     # ──────────────────────────────────────────────────────────────────────────
     # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2)
