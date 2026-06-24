@@ -784,6 +784,13 @@ class WorldParams:
     # (after emitting + broadcasting `world_extinct`). Animals alone do not keep
     # the run "alive".
     auto_pause_on_extinction: bool = True
+    # EM-226 — pause the tick loop when EVERY agent turn fails to reach a model
+    # for `provider_error_pause_threshold` turns in a row (connection down, or all
+    # lanes rate-limited/exhausted) instead of burning ticks on idle fallbacks.
+    # The streak resets on any turn that DOES reach a model (success or a content
+    # parse failure), so a transient blip never trips it.
+    auto_pause_on_provider_errors: bool = True
+    provider_error_pause_threshold: int = 8
     # W5 / EM-054: snapshot cadence + DB destination (additive, backward-compatible).
     # snapshot_interval_ticks bounds replay cost. The DATACLASS default for
     # db_path stays ':memory:' (tests build WorldParams directly), but the
@@ -1465,6 +1472,8 @@ def _parse_world(
         city_seed=int(w.get("city_seed", 1337)),
         starving_warn_threshold=float(w.get("starving_warn_threshold", 25)),
         auto_pause_on_extinction=bool(w.get("auto_pause_on_extinction", True)),
+        auto_pause_on_provider_errors=bool(w.get("auto_pause_on_provider_errors", True)),
+        provider_error_pause_threshold=int(w.get("provider_error_pause_threshold", 8)),
         snapshot_interval_ticks=int(w.get("snapshot_interval_ticks", 25)),
         db_path=_resolve_db_path(_interpolate(w.get("db_path", ":memory:")), config_dir),
         usage_caps=_parse_usage_caps(w.get("usage_caps")),

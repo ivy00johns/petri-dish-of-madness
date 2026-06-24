@@ -49,6 +49,7 @@ import { allPropModelSpecs } from './assets/propModels';
 import { CityScape, useCityPlan } from './CityScape';
 import { assignBuildingLots, DEFAULT_CITY_SEED } from './cityLayout';
 import { Ambiance } from './Ambiance';
+import { Traffic } from './Traffic';
 import { StreetLabels } from './StreetLabels';
 import { CityNameChip } from './CityNameChip';
 import type { AnimalModelId } from '../../lib/animalIdentity';
@@ -581,6 +582,10 @@ export function CozyWorld({
             floating place/structure labels. Lives here (not CityScape):
             useProximity needs the R3F frame loop. */}
         <StreetLabels streets={cityPlan.streets} />
+        {/* EM-169: ambient moving traffic on the road grid (deterministic
+            fleet, clock-driven sweep, reduced-motion-safe). Sibling of the
+            scene so it shares the frame loop + world space; no handlers. */}
+        <Traffic seed={world?.city_seed ?? DEFAULT_CITY_SEED} streets={cityPlan.streets} />
         {/* EM-127 (partial): golden-hour dust motes — additive set dressing,
             reduced-motion-safe, off the replay surface. Sibling of the scene so
             it shares the frame loop + world space. */}

@@ -52,6 +52,7 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   // alarms, extinction as the run's full stop.
   agent_starving:   '⚠',
   world_extinct:    '☠',
+  world_paused:     '⏸',
   rule_proposed:    '⚖',
   rule_vote:        '☑',
   rule_passed:      '★',
@@ -347,7 +348,7 @@ export const CATEGORIES: FeedCategory[] = [
   // Wave E: god miracles live with the other world-scale levers (random_event
   // is the closest sibling — god_intervention itself is uncategorized ON
   // PURPOSE, but miracles are filterable world events, not feedback receipts).
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked', 'world_paused'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
