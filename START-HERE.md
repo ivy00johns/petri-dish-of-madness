@@ -1,7 +1,7 @@
 # PetriDishOfMadness — Start Here
 
 > The one place to land. If you're lost, read this first.
-> **Last updated:** 2026-06-10
+> **Last updated:** 2026-06-24
 
 A tiny, fast, cheap multi-agent world whose marquee feature is **per-agent model
 control** — drop different LLMs (Gemini-Flash, Groq-Llama, Cerebras-Qwen, Mistral,
@@ -28,7 +28,14 @@ district street network past real buildings under golden-hour light — the proc
 the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minute live demo" in
 `README.md`. Per-wave end-state reports live in `docs/build-results/`.
 
-**Open P1:** EM-151 — the `/inspector` archive blanks on very large (~40k-event) runs.
+**Open P1:** none. EM-151 (inspector blank on ~40k-event runs) shipped in Wave F.
+
+**In flight (2026-06-24, PRs open):** a wide-ranging asset-library expansion toward the
+EW-grade dense city — building-pool variety (#41, generic 6→17 by reusing already-vendored
+build-type GLBs), **+14 new CC0 buildings** (#42, towers/church/windmill/townhouses) and
+**+12 new CC0 props** (#43, street-furniture + greenery pools), plus **ambient moving
+traffic + parked cars** (#44, EM-169/176). All CC0-enforced + recorded in `ASSET_LICENSES.md`;
+the poly.pizza vendoring runbook is `docs/em216-kit-acquisition-plan.md`.
 
 ## Which doc is which (ownership map)
 
