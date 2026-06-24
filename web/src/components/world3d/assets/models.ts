@@ -235,6 +235,8 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/smithy.glb`, scale: 0.8, yOffset: 0 },    // workshop/forge — 3.11u
     { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 },  // tall silo — 2.40u, 4.08u tall
     { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },   // shopfront — 2.90u
+    { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },   // shipping port — 2.50u
+    { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 }, // tower beacon — 2.64u, 4.09u tall
   ],
 };
 
