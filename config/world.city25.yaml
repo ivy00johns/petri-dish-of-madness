@@ -291,6 +291,10 @@ world:
     enabled: true                # EM-223 live tuning run (2026-06-21)
     max_steps: 5
     reflex_bias: true
+  district_growth:               # EM-123 — zoned districts deepen as megaprojects complete (zero LLM calls; EM-174-safe)
+    enabled: true                # off ⇒ every district stays tier 1 (byte-identical pre-EM-123)
+    completions_per_tier: 2      # completed collective buildings in a district per +1 tier
+    max_tier: 4                  # maturity ceiling; the 3-D city adds deterministic street life per tier above 1
 
 animals:                       # seed critters (the cat & dog). Spawned at world init when animals.enabled.
   - { species: cat, name: Mochi, location: plaza, personality: "Aloof, curious, territorial; naps in sunbeams, knocks things off ledges, utterly indifferent to human laws and money." }
