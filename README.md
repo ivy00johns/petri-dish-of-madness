@@ -9,7 +9,7 @@
 **Drop a different LLM into every villager, then watch a society cooperate, betray, hoard, legislate, fall in love, and die.** Groq-Llama runs one agent, Gemini-Flash another, a local Ollama model a third — all in one world, color-coded, hot-swappable live. Designed to run on **free model tiers**.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-1%2C284%20passing-success" alt="1,284 tests passing" />
+  <img src="https://img.shields.io/badge/tests-2%2C008%20passing-success" alt="2,008 tests passing" />
   <img src="https://img.shields.io/badge/runs%20on-free%20tiers-brightgreen" alt="Runs on free tiers" />
   <a href="https://github.com/ivy00johns/petri-dish-of-madness/stargazers"><img src="https://img.shields.io/github/stars/ivy00johns/petri-dish-of-madness?style=social" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/PRs-welcome-ff69b4" alt="PRs welcome" />
@@ -76,7 +76,7 @@ If PetriDishOfMadness made you smile, you can [**buy me a coffee** ☕](https://
 
 ### The world & its people
 - **Per-agent hot-swappable models** — every villager runs a different LLM (Gemini-Flash, Qwen, DeepSeek, Groq-Llama, local Ollama, …), color-coded and reassignable live from the UI. The UI shows the model that *actually* answered each turn.
-- **A cozy 3D town + 2D map** — a 15-place **district town** (market, civic, residential, farm) laced with a real **street network**, rendered with hand-vendored **CC0 game art** (KayKit · Kenney · Quaternius, all catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md)): **animated** villagers walk the lanes with floating chat bubbles, real buildings glow under golden-hour HDRI light, and a cat and dog scamper underfoot (Stardew × Animal-Crossing). Zoom in and the **streets wear seeded names** and the town shows its **own name** as a city label. Toggle to a lighter top-down map for analysis.
+- **A cozy 3D town + 2D map** — a 15-place **district town** (market, civic, residential, farm) laced with a real **street network**, rendered with hand-vendored **CC0 game art** (KayKit · Kenney · Quaternius · CreativeTrio, all catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md)): **animated** villagers walk the lanes with floating chat bubbles past a wide, **varied skyline** — towers, a church, a windmill, town houses and shops, every agent-built structure drawn from deep variety pools so the city never reads as cloned. **Ambient cars** roll the road grid, golden-hour dust **motes** drift through the light, and a cat and dog scamper underfoot (Stardew × Animal-Crossing). Zoom in and the **streets wear seeded names** and the town shows its **own name** as a city label. Toggle to a lighter top-down map for analysis.
 - **Procgen towns (opt-in)** — flip `world.procgen` on and a seeded layout replaces the hand-authored village, including a cottage per agent and a beds-limited **Bunkhouse**. Blackouts have teeth, too: recharge fails at a blacked-out home until the lights come back.
 
 ### A society that emerges
@@ -100,6 +100,7 @@ If PetriDishOfMadness made you smile, you can [**buy me a coffee** ☕](https://
 - **Free-scale by design** — slow ticks, reflex (no-LLM) actions, decision caching, and per-provider usage tracking keep it runnable on free API tiers. Give a profile `rpd`/`tpd` daily caps in `config/profiles.yaml` and a one-shot `usage_alert` fires at 70% — alerts only, never throttling.
 - **Self-healing lanes** — degraded free providers no longer strand agents. A lane that keeps timing out is marked **sick** and its calls **detour** to the healthiest lane per-call (the agent's assigned model never changes), auto-probing the home lane every 4th detour so recovery needs no timers; a turn that blows its wall-clock budget resolves a **survival reflex** instead of idling; and a lane crossing 70% of its daily cap gets its agents **demoted one cadence tier** rather than throttled.
 - **Resume on boot** — a `./dev` restart or hot-reload no longer throws the live world away: on startup the backend resumes the most recent run from its latest snapshot (a new run with lineage back to the parent). **Reset** stays the one explicit fresh start.
+- **Pauses when the lanes go dark** — if every model lane becomes unreachable (offline, or all rate-limited/exhausted), the loop **auto-pauses** after a short run of failed turns instead of churning idle ticks forever, with a clear feed note explaining why; hit play to resume the moment it's back. Tunable via `auto_pause_on_provider_errors` / `provider_error_pause_threshold`.
 
 ---
 
