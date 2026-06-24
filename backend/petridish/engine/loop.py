@@ -162,6 +162,14 @@ class TickLoop:
         # W9 / EM-071 — world_extinct has been emitted for this run (one-shot).
         self._extinct_emitted: bool = False
 
+        # EM-226 — auto-pause on a sustained run of provider/network failures
+        # (connection down / all lanes exhausted). The streak resets on any turn
+        # that reaches a model; the pause event is one-shot, re-armed on recovery
+        # or on resume so a restored connection isn't immediately re-paused.
+        self._provider_error_streak: int = 0
+        self._provider_pause_emitted: bool = False
+        self._last_provider_error: str | None = None
+
         # W11a / EM-094 — Narrator mode. The in-flight narrator call, run OFF the
         # agents' critical path (same pattern as the animal cadence) so a slow /
         # failed narrator LLM call never stalls or delays a tick. _last_narrator
@@ -239,6 +247,10 @@ class TickLoop:
         # Drop any stale single-step requests so continuous running can't be
         # poisoned into re-pausing after one turn.
         self._pending_steps = 0
+        # EM-226 — resuming clears the provider-failure streak so a just-restored
+        # connection isn't immediately re-paused; re-arm the one-shot pause event.
+        self._provider_error_streak = 0
+        self._provider_pause_emitted = False
         self._paused = False
         self._world.running = True
         self._step_event.set()
@@ -635,6 +647,19 @@ class TickLoop:
             raw_result = await self._runtime.run_turn(agent)
             trace = raw_result.get("_trace", {}) if isinstance(raw_result, dict) else {}
 
+            # EM-226 — track sustained provider/network failures (connection down
+            # or every lane exhausted) so the loop can auto-pause instead of
+            # burning ticks on idle fallbacks. Any turn that reached a model — a
+            # success OR a content parse failure — breaks the streak and re-arms
+            # the one-shot pause event.
+            provider_err = self._provider_error_reason(raw_result)
+            if provider_err is not None:
+                self._provider_error_streak += 1
+                self._last_provider_error = provider_err
+            else:
+                self._provider_error_streak = 0
+                self._provider_pause_emitted = False
+
             # 2-6. Decision-trace spans, in order, all under this turn_id.
             self._emit_trace_chain(agent, profile_name, profile_color, trace)
 
@@ -743,6 +768,20 @@ class TickLoop:
             # W9 / EM-071 — pause only AFTER world_extinct has been emitted and
             # the world state broadcast; the final broadcast carries running=False.
             if extinct and bool(getattr(world.params, "auto_pause_on_extinction", True)):
+                self.pause()
+                self._broadcast_world_state()
+
+            # EM-226 — sustained provider/network outage: a run of turns in a row
+            # all idled on provider_error (connection down or all lanes
+            # exhausted/rate-limited). Pause (after the broadcast above) so the run
+            # stops burning ticks; resume once connectivity / limits recover.
+            threshold = int(getattr(world.params, "provider_error_pause_threshold", 8) or 8)
+            if (
+                self._provider_error_streak >= threshold
+                and bool(getattr(world.params, "auto_pause_on_provider_errors", True))
+                and not self._provider_pause_emitted
+            ):
+                self._emit_provider_pause(self._provider_error_streak, tick)
                 self.pause()
                 self._broadcast_world_state()
         finally:
@@ -1698,6 +1737,48 @@ class TickLoop:
                     "threshold": threshold,
                 },
             })
+
+    @staticmethod
+    def _provider_error_reason(raw_result: Any) -> str | None:
+        """Return the provider-error reason if THIS turn idled on a provider/network
+        failure (EM-226), else None. A provider failure is the runtime's idle
+        fallback (`kind == "parse_failure"`) whose `payload.reason` starts with
+        `provider_error` — i.e. the call never reached a model (connection down or
+        all lanes exhausted/rate-limited), distinct from a content parse failure
+        where a model DID answer with malformed JSON."""
+        if not isinstance(raw_result, dict):
+            return None
+        events = raw_result.get("_multi", [raw_result])
+        for evt in events:
+            if not isinstance(evt, dict) or evt.get("kind") != "parse_failure":
+                continue
+            reason = (evt.get("payload") or {}).get("reason")
+            if isinstance(reason, str) and reason.startswith("provider_error"):
+                return reason
+        return None
+
+    def _emit_provider_pause(self, streak: int, tick: int) -> None:
+        """Emit `world_paused` (EM-226) — once per outage. The caller pauses AFTER
+        this event + the world-state broadcast, so the final broadcast carries
+        running=False. Re-armed when a turn next reaches a model, or on resume."""
+        self._provider_pause_emitted = True
+        self._emit_event({
+            "kind": "world_paused",
+            "actor_id": None,
+            "actor_type": "system",
+            "text": (
+                f"⏸ Auto-paused — {streak} turns in a row couldn't reach any model "
+                f"(connection down, or all lanes rate-limited/exhausted). "
+                f"Resume once it's back."
+            ),
+            "payload": {
+                "tick": tick,
+                "reason": "provider_errors",
+                "streak": streak,
+                "detail": self._last_provider_error,
+                "auto_paused": True,
+            },
+        })
 
     def _emit_extinction(self, last_agent: AgentState, tick: int) -> None:
         """Emit `world_extinct` (EM-071, event-log v1.1.0 §4) — once per run.
