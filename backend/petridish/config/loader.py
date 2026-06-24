@@ -1811,5 +1811,12 @@ def load_personas() -> list[dict]:
             "archetype": str(c.get("archetype") or ""),
             "personality": str(c.get("personality") or ""),
             "suggested_profile": str(c.get("suggested_profile") or ""),
+            # EM-240 — additive persona schema; unknown/absent → lawful/citizen.
+            "disposition": (str(c.get("disposition") or "").strip().lower()
+                            if str(c.get("disposition") or "").strip().lower()
+                            in ("lawful", "opportunist", "criminal") else "lawful"),
+            "role": (str(c.get("role") or "").strip().lower()
+                     if str(c.get("role") or "").strip().lower()
+                     in ("citizen", "enforcer") else "citizen"),
         })
     return out

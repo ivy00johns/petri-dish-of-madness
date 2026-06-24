@@ -1114,7 +1114,8 @@ def test_fork_run_without_snapshot_400():
 # 11. Personas (EM-092) — GET shape; spawn prefill; explicit wins; 400s.
 # ──────────────────────────────────────────────────────────────────────────────
 
-PERSONA_KEYS = {"name", "archetype", "personality", "suggested_profile"}
+PERSONA_KEYS = {"name", "archetype", "personality", "suggested_profile",
+                "disposition", "role"}  # EM-240 — additive persona schema
 
 
 def test_get_personas_serves_the_card_library():
@@ -1152,7 +1153,9 @@ def test_load_personas_missing_or_malformed_yaml_is_empty(tmp_path, monkeypatch)
     cards = load_personas()
     assert [c["name"] for c in cards] == ["Real"]
     assert cards[0] == {"name": "Real", "archetype": "Farmer",
-                        "personality": "", "suggested_profile": ""}
+                        "personality": "", "suggested_profile": "",
+                        # EM-240 — additive persona schema; defaults when absent.
+                        "disposition": "lawful", "role": "citizen"}
 
 
 def test_spawn_with_persona_prefills_from_the_card():

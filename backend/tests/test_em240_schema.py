@@ -45,3 +45,26 @@ def test_spawn_agent_threads_disposition_and_role():
     assert a.role == "citizen"
     # Round-trips through to_dict
     assert a.to_dict()["disposition"] == "criminal"
+
+
+def test_load_personas_defaults_disposition_role(tmp_path, monkeypatch):
+    import petridish.config.loader as loader
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "personas.yaml").write_text(
+        "personas:\n"
+        "  - name: Crank\n"
+        "    archetype: Racketeer\n"
+        "    personality: shakes down stalls\n"
+        "    suggested_profile: groq-llama\n"
+        "    disposition: criminal\n"
+        "  - name: Dot\n"
+        "    archetype: Baker\n"
+        "    personality: bakes bread\n"
+    )
+    monkeypatch.setattr(loader, "_find_config_dir", lambda: cfg)
+    cards = {c["name"]: c for c in loader.load_personas()}
+    assert cards["Crank"]["disposition"] == "criminal"
+    assert cards["Crank"]["role"] == "citizen"          # defaulted
+    assert cards["Dot"]["disposition"] == "lawful"      # defaulted
+    assert cards["Dot"]["role"] == "citizen"
