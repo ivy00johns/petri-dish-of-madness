@@ -327,8 +327,10 @@ function zoneForPlace(p: Place): CityZone {
 }
 
 const CAR_KEYS: readonly CityPieceKey[] = ['car_a', 'car_b', 'car_c'];
-/** EM-176: parked cars off until EM-169 (W17) makes vehicles playable. */
-export const CARS_ENABLED = false;
+/** EM-176/EM-169: parked cars ON — ambient moving traffic (Traffic.tsx) now
+ *  gives vehicles a purpose, so curb-parked cars read as part of the scene
+ *  rather than static distraction. Flip to false for the pre-W17 look. */
+export const CARS_ENABLED = true;
 
 // ── Seeded hash (the repo idiom, keyed on seed/gridX/gridZ/purpose) ──────────
 
