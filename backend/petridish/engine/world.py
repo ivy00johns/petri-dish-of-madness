@@ -184,6 +184,11 @@ class AgentState:
     # worlds — and every pre-EM-223 snapshot — keep the exact prior dict shape
     # (the byte-identical guarantee). Canonical shape via normalize_plan().
     plan: dict | None = None
+    # EM-240 — Crime & Justice persona schema. ADDITIVE with non-None defaults;
+    # serialized ONLY when non-default (to_dict below), so a lawful citizen — and
+    # every pre-EM-240 snapshot — keeps the exact prior dict shape.
+    disposition: str = "lawful"   # lawful | opportunist | criminal — prompt bias only
+    role: str = "citizen"         # citizen | enforcer — enforcer unlocks justice verbs
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -230,6 +235,11 @@ class AgentState:
                 "made_tick": int(self.plan.get("made_tick", 0)),
                 "stale": bool(self.plan.get("stale", False)),
             }
+        # EM-240 — only when non-default, so lawful citizens keep the pre-EM-240 shape.
+        if self.disposition != "lawful":
+            d["disposition"] = self.disposition
+        if self.role != "citizen":
+            d["role"] = self.role
         return d
 
 
@@ -4099,6 +4109,8 @@ class World:
         profile: str,
         location: str,
         cadence_tier: str = "protagonist",
+        disposition: str = "lawful",
+        role: str = "citizen",
     ) -> AgentState:
         name = self._unique_agent_name(name)
         agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
@@ -4115,6 +4127,9 @@ class World:
             cadence_tier=(
                 cadence_tier if cadence_tier in self.CADENCE_TIERS else "protagonist"
             ),
+            # EM-240 — additive persona schema; unknown/absent → lawful/citizen.
+            disposition=disposition if disposition in ("lawful", "opportunist", "criminal") else "lawful",
+            role=role if role in ("citizen", "enforcer") else "citizen",
         )
         self.agents[agent_id] = agent
         # Join the current round's rotation only when the tier is due this
@@ -4570,6 +4585,12 @@ class World:
                 # and restore None; a malformed stored plan coerces to None
                 # (normalize_plan is total). Byte-stable round-trip (EM-155).
                 plan=normalize_plan(d.get("plan")),
+                # EM-240 — additive: pre-EM-240 snapshots lack the keys and
+                # restore the lawful/citizen defaults (unknown values fail-safe).
+                disposition=(str(d.get("disposition")) if d.get("disposition")
+                             in ("lawful", "opportunist", "criminal") else "lawful"),
+                role=(str(d.get("role")) if d.get("role")
+                      in ("citizen", "enforcer") else "citizen"),
             )
             a.relationships = {
                 str(aid): RelationshipState(
