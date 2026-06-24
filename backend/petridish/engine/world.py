@@ -189,6 +189,11 @@ class AgentState:
     # every pre-EM-240 snapshot — keeps the exact prior dict shape.
     disposition: str = "lawful"   # lawful | opportunist | criminal — prompt bias only
     role: str = "citizen"         # citizen | enforcer — enforcer unlocks justice verbs
+    # EM-240 — crime status substrate. ALL additive, serialized only when set.
+    notoriety: int = 0                       # 0..100; witnessed-crime heat, decays
+    crime_status: str | None = None          # None|wanted|detained|jailed|exiled
+    crime_status_until_tick: int = 0         # release tick for detained/jailed
+    rap_sheet: list[dict] = field(default_factory=list)  # capped crime record
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -240,6 +245,15 @@ class AgentState:
             d["disposition"] = self.disposition
         if self.role != "citizen":
             d["role"] = self.role
+        # EM-240 — crime status scalars: serialized only when non-default, so a
+        # clean agent (and every pre-EM-240 snapshot) keeps the exact prior shape.
+        if self.notoriety:
+            d["notoriety"] = self.notoriety
+        if self.crime_status is not None:
+            d["crime_status"] = self.crime_status
+            d["crime_status_until_tick"] = self.crime_status_until_tick
+        if self.rap_sheet:
+            d["rap_sheet"] = [dict(e) for e in self.rap_sheet]
         return d
 
 
@@ -4591,6 +4605,14 @@ class World:
                              in ("lawful", "opportunist", "criminal") else "lawful"),
                 role=(str(d.get("role")) if d.get("role")
                       in ("citizen", "enforcer") else "citizen"),
+                # EM-240 — crime status scalars: additive. Pre-EM-240 snapshots
+                # lack these keys and restore the clean defaults; notoriety is
+                # clamped 0..100 and an unknown crime_status fails safe to None.
+                notoriety=max(0, min(100, _int(d.get("notoriety")))),
+                crime_status=(str(d.get("crime_status")) if d.get("crime_status")
+                              in ("wanted", "detained", "jailed", "exiled") else None),
+                crime_status_until_tick=_int(d.get("crime_status_until_tick")),
+                rap_sheet=[dict(e) for e in (d.get("rap_sheet") or []) if isinstance(e, dict)],
             )
             a.relationships = {
                 str(aid): RelationshipState(

@@ -68,3 +68,29 @@ def test_load_personas_defaults_disposition_role(tmp_path, monkeypatch):
     assert cards["Crank"]["role"] == "citizen"          # defaulted
     assert cards["Dot"]["disposition"] == "lawful"      # defaulted
     assert cards["Dot"]["role"] == "citizen"
+
+
+def test_crime_scalars_default_and_omitted():
+    a = AgentState(id="x", name="X", personality="", profile="mock",
+                   location="plaza", energy=80.0, credits=20)
+    assert a.notoriety == 0
+    assert a.crime_status is None
+    assert a.crime_status_until_tick == 0
+    assert a.rap_sheet == []
+    d = a.to_dict()
+    for k in ("notoriety", "crime_status", "crime_status_until_tick", "rap_sheet"):
+        assert k not in d, f"{k} must be omitted at default for byte-stability"
+
+
+def test_crime_scalars_serialized_when_set():
+    a = AgentState(id="x", name="X", personality="", profile="mock",
+                   location="plaza", energy=80.0, credits=20)
+    a.notoriety = 42
+    a.crime_status = "wanted"
+    a.crime_status_until_tick = 99
+    a.rap_sheet = [{"tick": 3, "crime": "heist", "victim_id": "y", "witnessed": True}]
+    d = a.to_dict()
+    assert d["notoriety"] == 42
+    assert d["crime_status"] == "wanted"
+    assert d["crime_status_until_tick"] == 99
+    assert d["rap_sheet"][0]["crime"] == "heist"
