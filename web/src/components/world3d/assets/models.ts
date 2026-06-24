@@ -185,6 +185,15 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/house-modern.glb`, scale: 3.3, yOffset: 0 },       // Quaternius House 2.94u
     { url: `${POLY}/house-cottage.glb`, scale: 6.0, yOffset: 0 },      // CreativeTrio Cottage 2.80u
     { url: `${POLY}/house-fantasy.glb`, scale: 1.1, yOffset: 0 },      // Quaternius Fantasy House 2.93u, 3.73u tall
+    // EM-216e — new CC0 residential variety (poly.pizza; auto-measured to the
+    // ≤3.4u/≤4.2u city footprint, grounded). Quaternius town houses + a Kenney
+    // two-storey + a hut spread the most-repeated residential slot.
+    { url: `${POLY}/house-q2.glb`, scale: 0.796, yOffset: 0.011 },     // Quaternius House — 2.90u
+    { url: `${POLY}/townhouse-a.glb`, scale: 0.363, yOffset: 0.004 },  // Quaternius terrace — 2.90u
+    { url: `${POLY}/townhouse-b.glb`, scale: 0.774, yOffset: 0.001 },  // Quaternius town house — 2.90u
+    { url: `${POLY}/townhouse-c.glb`, scale: 0.66, yOffset: 0.009 },   // Quaternius town house — 2.90u
+    { url: `${POLY}/house-twostory.glb`, scale: 2.063, yOffset: 0 },   // Kenney two-storey — 2.90u
+    { url: `${POLY}/hut.glb`, scale: 2.474, yOffset: -0.004 },         // Quaternius hut — 2.90u
   ],
   // Storefronts — three Kenney commercial blocks + two literal shop GLBs
   // (EM-216d) so shops vary beyond the city-kit blocks. Slot 0 stays
@@ -196,6 +205,9 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${KENNEY_CITY}/commercial-g.glb`, scale: 2.4, yOffset: 0 }, // 2.33u, 4.06u tall
     { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },             // shopfront — 2.90u
     { url: `${POLY}/market.glb`, scale: 1.4, yOffset: 0 },              // market stalls — 2.95u
+    // EM-216e — new CC0 shopfronts (poly.pizza, auto-measured + grounded).
+    { url: `${POLY}/shop-kl.glb`, scale: 1.445, yOffset: 0 },           // Kay Lousberg shop — 2.90u
+    { url: `${POLY}/market-stalls.glb`, scale: 1.789, yOffset: 0.011 }, // Quaternius market stand — 2.90u
   ],
   // EM-216c — the GENERIC catch-all is the MOST-repeated structure in practice:
   // agents author abstract civic/economic kinds ('social', 'commerce', 'rule',
@@ -237,6 +249,15 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/bakery.glb`, scale: 1.45, yOffset: 0 },   // shopfront — 2.90u
     { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },   // shipping port — 2.50u
     { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 }, // tower beacon — 2.64u, 4.09u tall
+    // EM-216e — new CC0 civic/commercial/landmark variety (poly.pizza,
+    // auto-measured to the city footprint, grounded). Towers, a church, an
+    // office block and a windmill widen the dominant generic silhouette set.
+    { url: `${POLY}/office-tower.glb`, scale: 0.616, yOffset: 0.008 }, // Quaternius big building — 2.90u
+    { url: `${POLY}/skyscraper.glb`, scale: 1.27, yOffset: 0 },        // Kenney skyscraper — 1.58u, 4.0u tall
+    { url: `${POLY}/civic-block.glb`, scale: 1.422, yOffset: 0 },      // Kenney large building — 2.90u
+    { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },       // CreativeTrio church — 2.90u, 3.88u tall
+    { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },        // Quaternius bell tower — 1.87u, 4.0u tall
+    { url: `${POLY}/windmill.glb`, scale: 0.35, yOffset: 0.012 },      // Quaternius tower windmill — 2.77u, 4.0u tall
   ],
 };
 
