@@ -48,6 +48,7 @@ import { allCityModelSpecs } from './assets/cityModels';
 import { allPropModelSpecs } from './assets/propModels';
 import { CityScape, useCityPlan } from './CityScape';
 import { assignBuildingLots, DEFAULT_CITY_SEED } from './cityLayout';
+import { Ambiance } from './Ambiance';
 import { Traffic } from './Traffic';
 import { StreetLabels } from './StreetLabels';
 import { CityNameChip } from './CityNameChip';
@@ -585,6 +586,10 @@ export function CozyWorld({
             fleet, clock-driven sweep, reduced-motion-safe). Sibling of the
             scene so it shares the frame loop + world space; no handlers. */}
         <Traffic seed={world?.city_seed ?? DEFAULT_CITY_SEED} streets={cityPlan.streets} />
+        {/* EM-127 (partial): golden-hour dust motes — additive set dressing,
+            reduced-motion-safe, off the replay surface. Sibling of the scene so
+            it shares the frame loop + world space. */}
+        <Ambiance seed={world?.city_seed ?? DEFAULT_CITY_SEED} />
         <CameraDirector
           focus={focus}
           resetNonce={resetNonce}
