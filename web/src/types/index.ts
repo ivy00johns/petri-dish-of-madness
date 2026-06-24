@@ -293,6 +293,9 @@ export type EventKind =
   // world_extinct payload: {tick, last_agent_id, auto_paused}.
   | 'agent_starving'
   | 'world_extinct'
+  // EM-226 — auto-pause on a sustained provider/network outage.
+  // world_paused payload: {tick, reason, streak, detail, auto_paused}.
+  | 'world_paused'
   | 'rule_proposed'
   | 'rule_vote'
   | 'rule_passed'

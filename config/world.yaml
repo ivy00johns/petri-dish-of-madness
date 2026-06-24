@@ -249,6 +249,13 @@ world:
   # and (if true) auto-pause the loop. Animals alone do not keep the run alive.
   auto_pause_on_extinction: true
 
+  # EM-226 — when the connection drops or every lane is rate-limited/exhausted,
+  # turns idle on provider_error. After this many in a ROW (any turn that reaches
+  # a model resets the streak), emit `world_paused` and auto-pause instead of
+  # burning ticks forever. Set auto_pause_on_provider_errors:false to keep going.
+  auto_pause_on_provider_errors: true
+  provider_error_pause_threshold: 8
+
   # W6 / EM-067 — cap-aware throttle (optional, DEFAULT OFF). When enabled, the
   # tick loop aggregates recent llm_call usage per model profile over a sliding
   # window of `period_ticks`; a profile crossing `near_threshold` of its rpd/tpd

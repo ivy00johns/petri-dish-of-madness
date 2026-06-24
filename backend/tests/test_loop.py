@@ -190,3 +190,139 @@ async def test_step_advances_exactly_one_while_paused():
         assert world.tick == 1
     finally:
         await _drain_task(loop)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-226 — auto-pause on a sustained provider/network outage
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _provider_fail_result(agent) -> dict:
+    """An idle-fallback turn result whose reason is a provider_error (the shape
+    AgentRuntime.run_turn returns when the call never reached a model)."""
+    return {
+        "kind": "parse_failure",
+        "actor_id": agent.id,
+        "profile": "mock",
+        "profile_color": "#2ecc71",
+        "text": f"{agent.name} failed to produce a valid action (idle fallback): provider_error: x",
+        "payload": {
+            "reason": 'provider_error: {"error":{"message":"All models exhausted.","type":"routing_error"}}',
+        },
+        "_trace": {
+            "perceived": {"perceived_summary": None},
+            "memory": {},
+            "llm_attempts": [],
+            "reasoning": {"reasoning": None, "perceived_summary": None, "memories_used": None},
+            "action_chosen": {"chosen_tool": "idle", "args": {}, "tier": "llm"},
+            "resolved": {"outcome": "failed", "state_deltas": {}},
+        },
+    }
+
+
+def _ok_result(agent) -> dict:
+    """A normal successful (reached-a-model) turn result."""
+    return {
+        "kind": "agent_action",
+        "actor_id": agent.id,
+        "profile": "mock",
+        "profile_color": "#2ecc71",
+        "text": f"{agent.name} foraged.",
+        "payload": {"action": "forage"},
+        "_trace": {
+            "perceived": {"perceived_summary": "ok"},
+            "memory": {},
+            "llm_attempts": [],
+            "reasoning": {"reasoning": "r", "perceived_summary": "ok", "memories_used": []},
+            "action_chosen": {"chosen_tool": "forage", "args": {}, "tier": "llm"},
+            "resolved": {"outcome": "ok", "state_deltas": {}},
+        },
+    }
+
+
+def test_provider_error_reason_classifies():
+    cls = TickLoop._provider_error_reason
+    assert cls({"kind": "parse_failure", "payload": {"reason": "provider_error: z"}}) is not None
+    # a content parse failure (a model DID answer with junk) is NOT a provider error
+    assert cls({"kind": "parse_failure", "payload": {"reason": "no_json"}}) is None
+    # a success is not a provider error
+    assert cls({"kind": "agent_action", "payload": {}}) is None
+    # _multi results are scanned too
+    assert cls({"_multi": [{"kind": "parse_failure", "payload": {"reason": "provider_error: y"}}]}) is not None
+    assert cls(None) is None
+
+
+@pytest.mark.asyncio
+async def test_auto_pauses_on_sustained_provider_errors():
+    loop, world = _make_loop(agent_count=2)
+    world.params.provider_error_pause_threshold = 3
+    loop._paused = False  # simulate a running loop (we drive _execute_turn directly)
+    world.running = True
+    kinds: list[str] = []
+    orig = loop._emit_event
+    loop._emit_event = lambda evt: (kinds.append(evt.get("kind")), orig(evt))[1]  # type: ignore
+
+    async def fail(agent):
+        return _provider_fail_result(agent)
+    loop._runtime.run_turn = fail  # type: ignore
+
+    agent = next(iter(world.agents.values()))
+    for _ in range(3):
+        await loop._execute_turn(agent)
+
+    assert loop._provider_error_streak >= 3
+    assert loop._paused is True
+    assert world.running is False
+    assert "world_paused" in kinds
+    # one-shot: another failing turn does not emit a second world_paused
+    kinds.clear()
+    await loop._execute_turn(agent)
+    assert "world_paused" not in kinds
+    await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_streak_resets_when_a_turn_reaches_a_model():
+    loop, world = _make_loop(agent_count=2)
+    world.params.provider_error_pause_threshold = 3
+    loop._paused = False
+    world.running = True
+    results = [
+        _provider_fail_result, _provider_fail_result,
+        _ok_result,                       # breaks the streak
+        _provider_fail_result, _provider_fail_result,
+    ]
+    seq = iter(results)
+
+    async def run(agent):
+        return next(seq)(agent)
+    loop._runtime.run_turn = run  # type: ignore
+
+    agent = next(iter(world.agents.values()))
+    for _ in range(len(results)):
+        await loop._execute_turn(agent)
+
+    # never hit 3-in-a-row, so never paused
+    assert loop._paused is False
+    assert loop._provider_error_streak == 2
+    await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_disabled_flag_never_auto_pauses_on_provider_errors():
+    loop, world = _make_loop(agent_count=2)
+    world.params.provider_error_pause_threshold = 2
+    world.params.auto_pause_on_provider_errors = False
+    loop._paused = False
+    world.running = True
+
+    async def fail(agent):
+        return _provider_fail_result(agent)
+    loop._runtime.run_turn = fail  # type: ignore
+
+    agent = next(iter(world.agents.values()))
+    for _ in range(5):
+        await loop._execute_turn(agent)
+
+    assert loop._paused is False  # flag off ⇒ keeps running (streak still tracked)
+    assert loop._provider_error_streak >= 5
+    await _drain_task(loop)
