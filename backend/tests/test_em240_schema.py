@@ -94,3 +94,32 @@ def test_crime_scalars_serialized_when_set():
     assert d["crime_status"] == "wanted"
     assert d["crime_status_until_tick"] == 99
     assert d["rap_sheet"][0]["crime"] == "heist"
+
+
+def test_crime_param_defaults_when_block_absent():
+    world = _world()  # WorldParams() has no `crime` block
+    assert world._crime_param("wanted_threshold", 40) == 40
+    assert world._crime_param("detain_sentence", 6) == 6
+
+
+def test_crime_param_reads_dict_block():
+    world = _world()
+    world.params.crime = {"wanted_threshold": 25}  # dict block, EM-155 convention
+    assert world._crime_param("wanted_threshold", 40) == 25
+    assert world._crime_param("detain_sentence", 6) == 6  # falls through to default
+
+
+def test_world_params_carries_crimeparams_dataclass():
+    # CONTRACT B — `crime` is a real CrimeParams dataclass field on WorldParams
+    # (wired exactly like RelationshipParams), NOT an auto-ingested dict. A
+    # default-constructed WorldParams therefore exposes the dataclass defaults.
+    from petridish.config.loader import CrimeParams
+
+    p = WorldParams()
+    assert isinstance(p.crime, CrimeParams)
+    assert p.crime.wanted_threshold == 40
+    world = _world()
+    # The accessor reads the dataclass attribute; its `default` arg is only a
+    # fallback for a key absent from the dataclass.
+    assert world._crime_param("wanted_threshold", 999) == 40
+    assert world._crime_param("trial_fine", 999) == 25

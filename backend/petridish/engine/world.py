@@ -3545,6 +3545,14 @@ class World:
         (dataclass OR dict OR absent — EM-155 conventions, like _bld_param)."""
         return _block_get(getattr(self.params, "relationships", None), name, default)
 
+    def _crime_param(self, name: str, default: Any) -> Any:
+        """EM-240 — defensive accessor for the `world.crime` config block
+        (CrimeParams dataclass OR dict OR absent — EM-155 conventions, like
+        _rel_param/_bld_param). An absent block ⇒ every default ⇒ pre-EM-240
+        worlds run unchanged. `default` is only a fallback for a key missing from
+        the block, so keep these call-site defaults == CrimeParams defaults."""
+        return _block_get(getattr(self.params, "crime", None), name, default)
+
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
 

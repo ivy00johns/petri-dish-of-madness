@@ -610,6 +610,44 @@ class RelationshipParams:
 
 
 @dataclass
+class CrimeParams:
+    """EM-240 — Crime & Justice tunables (config `world.crime`). The engine reads
+    this block via its defensive `_crime_param` accessor with IDENTICAL defaults
+    (the RelationshipParams/_rel_param convention), so a world.yaml WITHOUT the
+    `crime` block behaves exactly like these values — i.e. byte-identical to
+    pre-EM-240. NO `enabled` flag by design: crime/justice verbs only fire on a
+    deliberate agent turn, so pre-EM-240 snapshots restore unchanged without one.
+    """
+    wanted_threshold: int = 40
+    detain_threshold: int = 60
+    notoriety_decay: int = 2
+    notoriety_per_extra_witness: int = 3
+    rap_sheet_cap: int = 10
+    heist_max: int = 30
+    heist_min_target_credits: int = 15
+    extort_max: int = 15
+    vandalize_blackout_ticks: int = 8
+    vandalize_notoriety: int = 10
+    heist_notoriety: int = 18
+    extort_notoriety: int = 12
+    steal_notoriety: int = 6
+    arson_notoriety: int = 22
+    bribe_efficacy: float = 0.75
+    bribe_notoriety: int = 14
+    launder_cut: float = 0.3
+    launder_notoriety_reduction: int = 8
+    investigate_notoriety: int = 10
+    conspiracy_notoriety: int = 6
+    conspiracy_trust_seed: int = 30
+    detain_sentence: int = 6
+    trial_sentence: int = 20
+    trial_fine: int = 25
+    acquittal_notoriety_relief: int = 15
+    accuser_acquittal_penalty: int = 8
+    released_notoriety_relief: int = 10
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -881,6 +919,10 @@ class WorldParams:
     # engine-matching defaults; thresholds only fire on NEW trust mutations,
     # so a world.yaml without the block restores pre-E snapshots byte-identical.
     relationships: RelationshipParams = field(default_factory=RelationshipParams)
+    # EM-240 — Crime & Justice tunables. Additive with engine-matching defaults;
+    # crime/justice verbs only fire on a deliberate agent turn, so a world.yaml
+    # without the `crime` block restores pre-EM-240 snapshots byte-identical.
+    crime: CrimeParams = field(default_factory=CrimeParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1378,6 +1420,67 @@ def _parse_relationships(raw: dict | None) -> RelationshipParams:
     )
 
 
+def _parse_crime(raw: dict | None) -> CrimeParams:
+    """Parse the optional `world.crime` block (EM-240).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_relationships`; int fields parse as int, float fields as float."""
+    if not isinstance(raw, dict):
+        return CrimeParams()
+    d = CrimeParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return CrimeParams(
+        wanted_threshold=_int("wanted_threshold", d.wanted_threshold),
+        detain_threshold=_int("detain_threshold", d.detain_threshold),
+        notoriety_decay=_int("notoriety_decay", d.notoriety_decay),
+        notoriety_per_extra_witness=_int(
+            "notoriety_per_extra_witness", d.notoriety_per_extra_witness),
+        rap_sheet_cap=_int("rap_sheet_cap", d.rap_sheet_cap),
+        heist_max=_int("heist_max", d.heist_max),
+        heist_min_target_credits=_int(
+            "heist_min_target_credits", d.heist_min_target_credits),
+        extort_max=_int("extort_max", d.extort_max),
+        vandalize_blackout_ticks=_int(
+            "vandalize_blackout_ticks", d.vandalize_blackout_ticks),
+        vandalize_notoriety=_int("vandalize_notoriety", d.vandalize_notoriety),
+        heist_notoriety=_int("heist_notoriety", d.heist_notoriety),
+        extort_notoriety=_int("extort_notoriety", d.extort_notoriety),
+        steal_notoriety=_int("steal_notoriety", d.steal_notoriety),
+        arson_notoriety=_int("arson_notoriety", d.arson_notoriety),
+        bribe_efficacy=_float("bribe_efficacy", d.bribe_efficacy),
+        bribe_notoriety=_int("bribe_notoriety", d.bribe_notoriety),
+        launder_cut=_float("launder_cut", d.launder_cut),
+        launder_notoriety_reduction=_int(
+            "launder_notoriety_reduction", d.launder_notoriety_reduction),
+        investigate_notoriety=_int(
+            "investigate_notoriety", d.investigate_notoriety),
+        conspiracy_notoriety=_int("conspiracy_notoriety", d.conspiracy_notoriety),
+        conspiracy_trust_seed=_int(
+            "conspiracy_trust_seed", d.conspiracy_trust_seed),
+        detain_sentence=_int("detain_sentence", d.detain_sentence),
+        trial_sentence=_int("trial_sentence", d.trial_sentence),
+        trial_fine=_int("trial_fine", d.trial_fine),
+        acquittal_notoriety_relief=_int(
+            "acquittal_notoriety_relief", d.acquittal_notoriety_relief),
+        accuser_acquittal_penalty=_int(
+            "accuser_acquittal_penalty", d.accuser_acquittal_penalty),
+        released_notoriety_relief=_int(
+            "released_notoriety_relief", d.released_notoriety_relief),
+    )
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -1554,6 +1657,7 @@ def _parse_world(
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
+        crime=_parse_crime(w.get("crime")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
