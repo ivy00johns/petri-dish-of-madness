@@ -1414,9 +1414,19 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             if getattr(agent, "role", "citizen") != "enforcer":
                 return "trial is reserved for enforcers (role) — you keep no badge"
             target = str(args.get("target") or "").strip()
+            # Task 12a — agents see NAMES, not ids. Resolve by id first, then by
+            # display name (case-insensitive, alive, lowest id on ties) so the
+            # gate AGREES with action_propose_rule (EM-108 menu/resolution rule).
             defendant = world.agents.get(target)
+            if defendant is None and target:
+                _wanted = target.lower()
+                defendant = next(
+                    (a for a in sorted(world.living_agents(), key=lambda x: x.id)
+                     if str(getattr(a, "name", "")).strip().lower() == _wanted),
+                    None,
+                )
             if defendant is None or not getattr(defendant, "alive", True):
-                return "trial requires args.target = the id of a living defendant"
+                return "trial requires args.target = the name or id of a living defendant"
             if getattr(defendant, "crime_status", None) in ("detained", "jailed"):
                 return f"{defendant.name} is already in custody"
         if effect == "name_town" and not str(args.get("name") or "").strip():
@@ -1909,8 +1919,8 @@ def _assemble_context(
                 None)
             if _defendant is not None:
                 propose_line += "|trial"
-                propose_tail += (f"; trial needs target=<a defendant's id> to put them "
-                                 f"on trial by vote (e.g. {_defendant.name})")
+                propose_tail += (f"; trial needs target=<the defendant's name or id> "
+                                 f"to put them on trial by vote (e.g. {_defendant.name})")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)

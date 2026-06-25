@@ -2300,12 +2300,24 @@ class World:
         # guard lives in the OPEN-proposal loop below (mirrors demolish/promote_image).
         if effect == "trial":
             target = str(target or "").strip()
+            # Task 12a — agents see NAMES, not ids. Resolve the defendant by id
+            # FIRST; if that misses, resolve by display name (case-insensitive,
+            # must be ALIVE, prefer the LOWEST id on ties) so an enforcer who
+            # names the defendant can actually start a trial. The payload always
+            # carries the RESOLVED id (downstream conviction/acquittal look it up).
             defendant = self.agents.get(target)
+            if defendant is None and target:
+                wanted = target.lower()
+                defendant = next(
+                    (a for a in sorted(self.living_agents(), key=lambda x: x.id)
+                     if str(a.name).strip().lower() == wanted),
+                    None,
+                )
             if defendant is None or not defendant.alive:
                 return False, f"trial requires a living defendant (got {target!r})", None
             if defendant.crime_status in ("detained", "jailed"):
                 return False, f"{defendant.name} is already in custody", None
-            payload = {"defendant_id": target, "charges": str(text)[:200]}
+            payload = {"defendant_id": defendant.id, "charges": str(text)[:200]}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is

@@ -270,6 +270,64 @@ def test_trial_acquittal_clears_notoriety_and_dings_accuser():
                for e in evts)
 
 
+# ── Task 12a — trial defendant resolves by agent-id OR display-name ────────────
+# Agents see NAMES, not ids, so an enforcer naming the defendant must start a
+# trial: resolve by id first, then by display name (case-insensitive, alive,
+# lowest id on ties), and carry the RESOLVED id on the payload.
+
+def test_trial_proposal_resolves_defendant_by_display_name():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "plaza")          # id="crook", name="Crook"
+    world = _world([cop, crook])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    # The enforcer names the defendant ("Crook") — NOT the id ("crook").
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "theft", target="Crook")
+    assert ok and rule is not None
+    # The rule must carry the RESOLVED id, not the name the agent typed.
+    assert rule.payload["defendant_id"] == "crook"
+
+
+def test_trial_proposal_resolves_name_case_insensitively():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "plaza")          # name="Crook"
+    world = _world([cop, crook])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "theft", target="cRoOk")
+    assert ok and rule is not None
+    assert rule.payload["defendant_id"] == "crook"
+
+
+def test_trial_proposal_by_name_rejects_unknown_name():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "plaza")
+    world = _world([cop, crook])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "theft", target="Nobody")
+    assert not ok and rule is None
+
+
+def test_trial_proposal_by_name_skips_dead_and_prefers_lowest_id_on_ties():
+    cop = _a("cop", "gov", role="enforcer")
+    # Two living agents share the display name "Dup"; one dead one too.
+    dead = AgentState(id="a_dead", name="Dup", personality="", profile="mock",
+                      location="plaza", energy=80.0, credits=20)
+    dead.alive = False
+    living_hi = AgentState(id="z_dup", name="Dup", personality="", profile="mock",
+                           location="plaza", energy=80.0, credits=20)
+    living_lo = AgentState(id="a_dup", name="Dup", personality="", profile="mock",
+                           location="plaza", energy=80.0, credits=20)
+    world = _world([cop, dead, living_hi, living_lo])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "theft", target="Dup")
+    assert ok and rule is not None
+    # Dead one is skipped; lowest id ("a_dup") wins over "z_dup".
+    assert rule.payload["defendant_id"] == "a_dup"
+
+
 # ── menu visibility (CONTRACT C) — trial extends the propose_rule effect list ──
 
 def _propose_line(sys_text):
