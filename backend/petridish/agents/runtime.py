@@ -2159,6 +2159,53 @@ def _assemble_context(
                 f"({len(_fac.get('members', []))} members)"
             )
 
+    # ── EM-240 — Crime & Justice context. Appended after faction_line. EMPTY
+    # (⇒ byte-identical prompt) for a lawful citizen with no status and no open
+    # offer — so the em161 protagonist golden fixture is unaffected. Rides this
+    # turn — zero extra LLM calls. (getattr keeps callers safe if the engine seam
+    # is ever absent.)
+    crime_block = ""
+    _disp = getattr(agent, "disposition", "lawful")
+    _role = getattr(agent, "role", "citizen")
+    _status = getattr(agent, "crime_status", None)
+    _noto = getattr(agent, "notoriety", 0)
+    _crime_lines: list[str] = []
+    if _disp in ("opportunist", "criminal"):
+        _crime_lines.append(
+            "You see angles others miss. Crime is on the table when the payoff is "
+            "right and no one is watching — steal, heist, extort, vandalize, "
+            "launder, or recruit an accomplice. Witnesses build your notoriety; "
+            "lie low to cool off."
+        )
+    if _role == "enforcer":
+        _crime_lines.append(
+            "You keep the peace. You can investigate suspects, accuse them, detain "
+            "the wanted, and escalate the worst to a town-hall trial."
+        )
+    if _status == "wanted":
+        _crime_lines.append(
+            f"You are WANTED (notoriety {_noto}). Lay low or get caught."
+        )
+    elif _status in ("detained", "jailed"):
+        _until = getattr(agent, "crime_status_until_tick", 0)
+        _left = max(0, _until - getattr(world, "tick", 0))
+        _crime_lines.append(
+            f"You are in JAIL for {_left} more ticks. You can only talk, whisper, "
+            "and think — no moving, working, or crime until you are released."
+        )
+    _offers = getattr(world, "pending_crime_offers", {})
+    _offer = _offers.get(agent.id) if isinstance(_offers, dict) else None
+    if _offer:
+        _recruiter = world.agents.get(_offer.get("recruiter_id"))
+        if _recruiter is not None:
+            _crime_lines.append(
+                f"{_recruiter.name} has offered you a criminal pact (a scheme). "
+                "Use accept_contract to seal it, or ignore it."
+            )
+    if _crime_lines:
+        crime_block = "\n=== ⚖ THE LAW & THE UNDERWORLD ===\n" + "\n".join(
+            f"  {ln}" for ln in _crime_lines)
+
     # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
     # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
     # proclamation is injected here so the god's word reaches every agent each turn
@@ -2329,7 +2376,7 @@ Agent ID: {agent.id}
 Location: {place_name} (kind={place_kind})
 Energy: {status_energy}/100
 Credits: {agent.credits}
-Mood: {agent.mood}{faction_line}
+Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
