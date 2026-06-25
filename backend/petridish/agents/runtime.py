@@ -114,6 +114,9 @@ ACTION_SCHEMA = {
                 # EM-240 — offensive crime verbs (Task 6): big-score theft, a
                 # shakedown for credits, and building sabotage short of arson.
                 "heist", "extort", "vandalize",
+                # EM-240 — economy & corruption verbs (Task 7): cool your own heat
+                # for a cut; pay a co-located enforcer to drop it (catchable).
+                "launder", "bribe",
                 # W7 / EM-060+062 construction actions (action-protocol v1.1.0).
                 "propose_project", "contribute_funds", "build_step",
                 "repair", "arson", "take_offline",
@@ -164,6 +167,8 @@ ACTION_SCHEMA = {
                             "remember", "propose_rule", "vote", "idle",
                             # EM-240 — offensive crime verbs (Task 6).
                             "heist", "extort", "vandalize",
+                            # EM-240 — economy & corruption verbs (Task 7).
+                            "launder", "bribe",
                             "propose_project", "contribute_funds", "build_step",
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
@@ -298,6 +303,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "heist":            {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_stealing"},
     "extort":           {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_extortion"},
     "vandalize":        {"tier": "reflex", "location_gate": "@building",     "agreement_gate": "ban_vandalism"},
+    # EM-240 — economy & corruption verbs (Task 7). launder cools your own heat
+    # for a cut (no target, no gate); bribe pays a co-located enforcer (target =
+    # the enforcer) — co-location is enforced in _validate_world like steal.
+    "launder":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "bribe":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # Social / governance → llm-served (the reasoning-heavy choices).
     "say":              {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "whisper":          {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
@@ -959,8 +969,9 @@ _TARGETED_ACTIONS = frozenset(
     {"give", "steal", "insult", "attack", "whisper", "set_relationship",
      # EM-240 — agent-targeted crime verbs resolve a name in args["target"] to an
      # agent id before dispatch (exactly like steal). vandalize is EXCLUDED — it
-     # targets a building_id, not an agent name.
-     "heist", "extort"}
+     # targets a building_id, not an agent name. launder is EXCLUDED — no target.
+     # bribe targets the enforcer (args["target"]), so it IS resolved here.
+     "heist", "extort", "bribe"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1291,6 +1302,14 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # building_id resolution mirror arson (handled at dispatch / by the world).
         if world.has_active_rule("ban_vandalism"):
             return "ban_vandalism rule is active — vandalize is forbidden"
+
+    elif action == "bribe":
+        # EM-240 — bribe targets a co-located enforcer (args["target"]); launder
+        # takes no target so it needs no world-validation. action_bribe re-checks
+        # the enforcer role + co-location, so a stray bribe stays safe.
+        target_error = _validate_target(args, agent, world, "bribe")
+        if target_error:
+            return target_error
 
     elif action in ("insult", "attack", "whisper", "set_relationship"):
         target_error = _validate_target(args, agent, world, action)
@@ -1754,6 +1773,16 @@ def _assemble_context(
                 valid_actions.append(f"extort (target) - shake down for credits: {tnames}")
         if _gate_ok("vandalize"):
             valid_actions.append("vandalize (building_id) - damage a building short of arson")
+        # EM-240 (Task 7) — launder offered to the inclined once they have heat.
+        if getattr(agent, "notoriety", 0) > 0:
+            valid_actions.append("launder (amount) - spend a cut to cool your notoriety")
+    # EM-240 (Task 7) — anyone with heat, co-located with an enforcer, may bribe.
+    # NOT disposition-gated: a lawful agent caught dirty can still try to buy out.
+    if getattr(agent, "notoriety", 0) > 0 and co_located:
+        cops = [a.name for a in co_located if getattr(a, "role", "citizen") == "enforcer"]
+        if cops:
+            valid_actions.append(
+                f"bribe (target, amount) - pay an enforcer to drop your heat: {', '.join(cops)}")
     if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
@@ -4307,6 +4336,34 @@ class AgentRuntime:
         elif action == "vandalize":
             result = self.world.action_vandalize(agent, args.get("building_id", ""))
             return _emit_world_result(result, base, thought)
+
+        # EM-240 — economy & corruption verbs (Task 7). launder takes NO target
+        # and returns (ok, reason, fee); bribe resolves an enforcer target and
+        # returns (ok, reason, paid). Both mirror steal's tuple-dispatch shape.
+        elif action == "launder":
+            ok, reason, fee = self.world.action_launder(agent, args.get("amount", 0))
+            if ok:
+                return {**base, "kind": "economy",
+                        "text": f"{agent.name} launders credits to cool their heat ({fee} cut).",
+                        "payload": {"action": "launder", "fee": fee, "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to launder but: {reason}",
+                    "payload": {"error": reason}}
+
+        elif action == "bribe":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to bribe but target not found",
+                        "payload": {"error": "target_not_found"}}
+            ok, reason, paid = self.world.action_bribe(agent, target, args.get("amount", 0))
+            if ok:
+                return {**base, "kind": "bribe", "target_id": target.id,
+                        "text": f"{agent.name} slips {target.name} {paid} credits to drop the heat.",
+                        "payload": {"action": "bribe", "amount": paid, "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to bribe but: {reason}",
+                    "payload": {"error": reason}}
 
         elif action == "say":
             text_said = args.get("text", "")

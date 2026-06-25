@@ -162,3 +162,93 @@ def test_action_schema_accepts_new_crime_verbs():
     for verb in ("heist", "extort", "vandalize"):
         jsonschema.validate({"action": verb, "args": {}}, ACTION_SCHEMA)
         jsonschema.validate({"actions": [{"action": verb, "args": {}}]}, ACTION_SCHEMA)
+
+
+# ── Task 7 — economy & corruption verbs: launder, bribe ───────────────────────
+
+def test_launder_reduces_notoriety_for_a_cut():
+    crook = _a("crook", "alley"); crook.credits = 100; crook.notoriety = 30
+    world = _world([crook])
+    ok, reason, fee = world.action_launder(crook, 50)
+    assert ok and fee == 15                  # launder_cut 0.3 * 50
+    assert crook.credits == 85
+    assert crook.notoriety == 22             # launder_notoriety_reduction (8)
+
+
+def test_launder_rejected_when_clean():
+    crook = _a("crook", "alley"); crook.notoriety = 0
+    world = _world([crook])
+    ok, reason, fee = world.action_launder(crook, 10)
+    assert not ok and fee == 0
+
+
+def test_bribe_wipes_payer_notoriety_and_pays_enforcer():
+    crook = _a("crook", "alley"); crook.credits = 40; crook.notoriety = 40
+    crook.crime_status = "wanted"
+    cop = _a("cop", "alley", role="enforcer")
+    world = _world([crook, cop])
+    ok, reason, paid = world.action_bribe(crook, cop, 20)
+    assert ok and paid == 20
+    assert cop.credits == 40
+    assert crook.notoriety == 10             # 40 * (1 - 0.75)
+    assert crook.crime_status is None        # dropped below wanted_threshold
+
+
+def test_witnessed_bribe_dirties_the_enforcer():
+    crook = _a("crook", "alley"); crook.credits = 40; crook.notoriety = 40
+    cop = _a("cop", "alley", role="enforcer")
+    snitch = _a("snitch", "alley")
+    world = _world([crook, cop, snitch])
+    world.action_bribe(crook, cop, 20)
+    assert cop.notoriety == 14               # bribe_notoriety, witnessed by snitch
+    assert cop.rap_sheet[-1]["crime"] == "bribery"
+
+
+# ── Task 7 — CONTRACT C: launder/bribe menu lines, gated by the design ────────
+
+def test_launder_menu_offered_to_inclined_with_notoriety():
+    crook = _a("crook", "alley", disposition="opportunist")
+    crook.notoriety = 20                       # something to cool
+    world = _world([crook])
+    prompt = _prompt_text(_assemble_context(crook, world, [], world.params))
+    assert "launder (amount)" in prompt
+
+
+def test_launder_menu_hidden_when_clean():
+    crook = _a("crook", "alley", disposition="opportunist")  # notoriety defaults 0
+    world = _world([crook])
+    prompt = _prompt_text(_assemble_context(crook, world, [], world.params))
+    assert "launder (amount)" not in prompt
+
+
+def test_bribe_menu_offered_when_wanted_and_cop_present():
+    crook = _a("crook", "alley", disposition="opportunist")
+    crook.notoriety = 40
+    cop = _a("cop", "alley", role="enforcer")
+    world = _world([crook, cop])
+    prompt = _prompt_text(_assemble_context(crook, world, [], world.params))
+    assert "bribe (target, amount)" in prompt
+    assert "Cop" in prompt                     # the enforcer is named as a target
+
+
+def test_bribe_menu_hidden_without_co_located_enforcer():
+    crook = _a("crook", "alley", disposition="opportunist")
+    crook.notoriety = 40
+    plain = _a("plain", "alley")               # co-located but not an enforcer
+    world = _world([crook, plain])
+    prompt = _prompt_text(_assemble_context(crook, world, [], world.params))
+    assert "bribe (target, amount)" not in prompt
+
+
+def test_bribe_menu_hidden_when_clean():
+    crook = _a("crook", "alley", disposition="opportunist")  # notoriety 0
+    cop = _a("cop", "alley", role="enforcer")
+    world = _world([crook, cop])
+    prompt = _prompt_text(_assemble_context(crook, world, [], world.params))
+    assert "bribe (target, amount)" not in prompt
+
+
+def test_action_schema_accepts_launder_and_bribe():
+    for verb in ("launder", "bribe"):
+        jsonschema.validate({"action": verb, "args": {}}, ACTION_SCHEMA)
+        jsonschema.validate({"actions": [{"action": verb, "args": {}}]}, ACTION_SCHEMA)

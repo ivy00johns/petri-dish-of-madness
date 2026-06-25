@@ -1568,6 +1568,57 @@ class World:
         }
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 — economy & corruption verbs (Task 7): launder, bribe. launder spends
+    # a cut of credits to cool the actor's own notoriety (only when dirty). bribe
+    # pays a co-located enforcer to wipe most of the payer's notoriety — but a
+    # third-party witness dirties the ENFORCER (corruption is catchable). Both
+    # clear a stale `wanted` once notoriety falls back below threshold.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_launder(self, agent: AgentState, amount: int) -> tuple[bool, str, int]:
+        """EM-240 — spend a cut of credits to cool notoriety. Only when dirty."""
+        if agent.notoriety <= 0:
+            return False, "nothing to launder", 0
+        amount = max(0, min(agent.credits, int(amount or 0)))
+        if amount <= 0:
+            return False, "no credits to launder", 0
+        fee = int(amount * float(self._crime_param("launder_cut", 0.3)))
+        agent.credits -= fee
+        agent.notoriety = max(0, agent.notoriety -
+                              int(self._crime_param("launder_notoriety_reduction", 8)))
+        self._clear_wanted_if_cool(agent)
+        return True, "ok", fee
+
+    def action_bribe(self, agent: AgentState, enforcer: AgentState,
+                     amount: int) -> tuple[bool, str, int]:
+        """EM-240 — pay a co-located enforcer to wipe notoriety. If a third party
+        witnesses it, the ENFORCER gains notoriety (corruption is catchable)."""
+        if enforcer.role != "enforcer":
+            return False, "can only bribe an enforcer", 0
+        if agent.location != enforcer.location:
+            return False, "enforcer not co-located", 0
+        amount = max(0, min(agent.credits, int(amount or 0)))
+        if amount <= 0:
+            return False, "no credits to offer", 0
+        agent.credits -= amount
+        enforcer.credits += amount
+        eff = float(self._crime_param("bribe_efficacy", 0.75))
+        agent.notoriety = max(0, int(agent.notoriety * (1.0 - eff)))
+        self._clear_wanted_if_cool(agent)
+        witnesses = [a for a in self.agents_at(agent.location)
+                     if a.id not in (agent.id, enforcer.id)]
+        if witnesses:
+            self._register_crime(enforcer, "bribery", agent.id,
+                                 int(self._crime_param("bribe_notoriety", 14)))
+        return True, "ok", amount
+
+    def _clear_wanted_if_cool(self, agent: AgentState) -> None:
+        """Drop a `wanted` flag once notoriety falls back below threshold."""
+        if agent.crime_status == "wanted" and \
+                agent.notoriety < int(self._crime_param("wanted_threshold", 40)):
+            agent.crime_status = None
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Wave H4 / EM-209 — pets & bonds. owner_id is the ONLY bond: adopting a
     # co-located animal sets it (no credits move, no agent↔agent edge touched);
     # feeding restores an owned pet's energy. The FOLLOW / DECLINE / GRIEF beats
