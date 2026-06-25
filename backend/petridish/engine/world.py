@@ -2243,9 +2243,14 @@ class World:
         # Wave I / EM-212: promote_image — the town VOTES a gallery image onto the
         # plaza banner. Carries the image_id on the payload (like demolish's target);
         # scoped per-image so two distinct images may have open votes at once.
+        # EM-240 (Task 11) — trial is a governance proposal effect: an enforcer
+        # escalates a suspect to a town-hall vote. It carries the defendant id on
+        # the payload (like demolish's target) and reuses the existing vote
+        # machinery (NO new tally code) — a passing vote convicts, a rejected one
+        # acquits (see _on_rule_activated / action_vote).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
-                         "name_town", "demolish", "promote_image"}
+                         "name_town", "demolish", "promote_image", "trial"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -2289,6 +2294,18 @@ class World:
             if image_id == self.plaza_banner_ref:
                 return False, "that image already hangs over the plaza", None
             payload = {"image_id": image_id}
+        # EM-240 (Task 11) — trial carries the DEFENDANT id on the payload (like
+        # demolish's target). A trial of an unknown/dead defendant, or one already
+        # detained/jailed, is meaningless — reject it. The per-defendant duplicate
+        # guard lives in the OPEN-proposal loop below (mirrors demolish/promote_image).
+        if effect == "trial":
+            target = str(target or "").strip()
+            defendant = self.agents.get(target)
+            if defendant is None or not defendant.alive:
+                return False, f"trial requires a living defendant (got {target!r})", None
+            if defendant.crime_status in ("detained", "jailed"):
+                return False, f"{defendant.name} is already in custody", None
+            payload = {"defendant_id": target, "charges": str(text)[:200]}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -2306,6 +2323,13 @@ class World:
                 if (rule.payload or {}).get("image_id") == payload.get("image_id"):
                     return False, f"a promote vote for {payload.get('image_id')!r} is already open", None
                 continue
+            # EM-240 (Task 11) — trial is scoped per DEFENDANT (two distinct
+            # defendants may have open trials at once); only a duplicate trial for
+            # the SAME defendant is blocked (mirrors demolish/promote_image).
+            if effect == "trial":
+                if (rule.payload or {}).get("defendant_id") == payload.get("defendant_id"):
+                    return False, f"{payload.get('defendant_id')!r} already has an open trial", None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -2313,10 +2337,11 @@ class World:
         # refreshes the existing rule instead of activating a duplicate.
         # EXCEPTION: name_town is a one-shot RENAME, and demolish is a one-shot
         # ACT (each targets a distinct building) — neither "renews"; each passing
-        # vote is fresh.
+        # vote is fresh. EM-240: trial is a one-shot ACT per defendant (same as
+        # demolish) — a conviction/acquittal is applied once, never "renewed".
         active = (
             self._active_rule(effect)
-            if effect not in ("name_town", "demolish", "promote_image") else None
+            if effect not in ("name_town", "demolish", "promote_image", "trial") else None
         )
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
@@ -2355,9 +2380,11 @@ class World:
                 # holds two simultaneously-active identical effects.
                 # name_town is a one-shot rename, not a stackable law — it never
                 # "renews"; a passing name supersedes whatever the town was called.
+                # EM-240: trial is a one-shot per-defendant ACT (like demolish) —
+                # it never "renews"; each passing guilty vote convicts afresh.
                 existing = (
                     self._active_rule(rule.effect)
-                    if rule.effect not in ("name_town", "promote_image") else None
+                    if rule.effect not in ("name_town", "promote_image", "trial") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -2366,6 +2393,13 @@ class World:
                 rule.status = "active"
                 self._on_rule_activated(rule)
                 return True, "ok", "active"
+            # EM-240 (Task 11) — a REJECTED trial is an ACQUITTAL: clear some of
+            # the defendant's notoriety and dock the accuser's standing with the
+            # onlookers/jurors who voted. Done before the status assignment so the
+            # rule's votes/payload/proposer are all still intact. Reuses the
+            # existing vote tally (new_status == "rejected") — NO new tally code.
+            if rule.effect == "trial" and new_status == "rejected" and not rule.applied:
+                self._on_trial_acquitted(rule)
             rule.status = new_status
             return True, "ok", new_status
         return True, "ok", None
@@ -2437,6 +2471,55 @@ class World:
                     },
                 })
             return
+        # EM-240 (Task 11) — trial CONVICTION: a passing guilty vote jails the
+        # defendant for trial_sentence, confiscates trial_fine, and pays restitution
+        # split evenly across the DISTINCT living victims on the defendant's rap
+        # sheet (remainder dropped). Parks trial_verdict(guilty) + jailed in the
+        # SAME outbox name_town/demolish use (drained by the loop). Reuses
+        # _jail_place_id (Task 10). A vanished defendant is a silent no-op.
+        if rule.effect == "trial":
+            rule.applied = True
+            defendant = self.agents.get((rule.payload or {}).get("defendant_id"))
+            if defendant is None:
+                return
+            sentence = int(self._crime_param("trial_sentence", 20))
+            fine = min(defendant.credits, int(self._crime_param("trial_fine", 25)))
+            defendant.credits -= fine
+            jail = self._jail_place_id()
+            if jail is not None:
+                defendant.location = jail
+            defendant.crime_status = "jailed"
+            defendant.crime_status_until_tick = self.tick + sentence
+            # Restitution: split the fine evenly across distinct living victims.
+            victim_ids: list[str] = []
+            for e in defendant.rap_sheet:
+                vid = e.get("victim_id")
+                v = self.agents.get(vid) if vid else None
+                if v is not None and v.alive and vid not in victim_ids:
+                    victim_ids.append(vid)
+            if victim_ids and fine > 0:
+                share = fine // len(victim_ids)
+                if share > 0:
+                    for vid in victim_ids:
+                        self.agents[vid].credits += share
+            self.pending_spawn_events.append({
+                "kind": "trial_verdict",
+                "actor_id": "system",
+                "actor_type": "system",
+                "target_id": defendant.id,
+                "text": f"⚖ By vote, {defendant.name} is found GUILTY and jailed.",
+                "payload": {"verdict": "guilty", "fine": fine,
+                            "sentence": sentence, "proposal_id": rule.id},
+            })
+            self.pending_spawn_events.append({
+                "kind": "jailed",
+                "actor_id": "system",
+                "actor_type": "system",
+                "target_id": defendant.id,
+                "text": f"{defendant.name} is led to jail for {sentence} ticks.",
+                "payload": {"until_tick": defendant.crime_status_until_tick},
+            })
+            return
         if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
@@ -2470,6 +2553,50 @@ class World:
                 "profile": agent.profile,
                 "location": agent.location,
             },
+        })
+
+    def _on_trial_acquitted(self, rule: RuleState) -> None:
+        """EM-240 (Task 11) — a REJECTED trial is an ACQUITTAL. Clear some of the
+        defendant's notoriety (acquittal_notoriety_relief) and clear a now-cool
+        `wanted` flag (Task 7's _clear_wanted_if_cool), then dock the accuser's
+        standing (accuser_acquittal_penalty trust) with the onlookers/jurors of the
+        proceeding. Parks a trial_verdict(acquitted) event. Idempotent via
+        rule.applied. The 'onlookers' = the people who VOTED on the trial (the
+        jurors who watched it) PLUS anyone physically co-located with the accuser —
+        a faithful read of 'co-located onlookers' that also covers jurors who voted
+        from elsewhere (voting is no longer location-gated, EM-199)."""
+        if rule.applied:
+            return
+        rule.applied = True
+        defendant = self.agents.get((rule.payload or {}).get("defendant_id"))
+        accuser = self.agents.get(rule.proposer_id)
+        if defendant is not None:
+            defendant.notoriety = max(
+                0, defendant.notoriety -
+                int(self._crime_param("acquittal_notoriety_relief", 15)))
+            self._clear_wanted_if_cool(defendant)
+        if accuser is not None:
+            pen = int(self._crime_param("accuser_acquittal_penalty", 8))
+            # Onlookers: trial voters (jurors who watched the proceeding) + anyone
+            # standing with the accuser. Dedup, and never dock the accuser or the
+            # defendant themselves.
+            onlooker_ids = set(rule.votes.keys())
+            onlooker_ids.update(a.id for a in self.agents_at(accuser.location))
+            onlooker_ids.discard(accuser.id)
+            if defendant is not None:
+                onlooker_ids.discard(defendant.id)
+            for oid in onlooker_ids:
+                onlooker = self.agents.get(oid)
+                if onlooker is not None and onlooker.alive:
+                    self._update_trust(onlooker, accuser, -pen)
+        self.pending_spawn_events.append({
+            "kind": "trial_verdict",
+            "actor_id": "system",
+            "actor_type": "system",
+            "target_id": defendant.id if defendant else None,
+            "text": (f"⚖ By vote, {defendant.name if defendant else 'the accused'} "
+                     "is ACQUITTED."),
+            "payload": {"verdict": "acquitted", "proposal_id": rule.id},
         })
 
     def drain_spawn_events(self) -> list[dict]:

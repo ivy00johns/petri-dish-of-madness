@@ -177,3 +177,132 @@ def test_non_enforcer_menu_omits_justice_verbs():
     assert "investigate (target)" not in s
     assert "accuse (target)" not in s
     assert "detain (target)" not in s
+
+
+# ── EM-240 Task 11 — town-hall trial (propose / convict / acquit / fine /
+# restitution). Trial reuses the existing governance vote machinery as a new
+# rule effect; conviction jails + fines + pays restitution; acquittal (rejected
+# trial) clears notoriety and dings the accuser's standing with onlookers. ───────
+
+def test_trial_proposal_requires_a_real_defendant():
+    cop = _a("cop", "plaza", role="enforcer")
+    world = _world([cop])
+    # governance gate: proposing requires a governance place — put the cop there.
+    world.places["plaza"].kind = "governance"
+    ok, reason, rule = world.action_propose_rule(
+        cop, "trial", "theft and arson", target="nobody")
+    assert not ok and rule is None
+
+
+def test_trial_proposal_rejects_dead_defendant():
+    cop = _a("cop", "gov", role="enforcer")
+    ghost = _a("ghost", "plaza"); ghost.alive = False
+    world = _world([cop, ghost])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "haunting", target="ghost")
+    assert not ok and rule is None
+
+
+def test_trial_proposal_rejects_defendant_in_custody():
+    cop = _a("cop", "gov", role="enforcer")
+    jailed = _a("jailed", "jail"); jailed.crime_status = "jailed"
+    world = _world([cop, jailed])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "more charges", target="jailed")
+    assert not ok and rule is None
+
+
+def test_trial_proposal_rejects_duplicate_per_defendant():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "plaza")
+    world = _world([cop, crook])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok1, _, rule1 = world.action_propose_rule(cop, "trial", "first", target="crook")
+    assert ok1 and rule1 is not None
+    ok2, _, rule2 = world.action_propose_rule(cop, "trial", "again", target="crook")
+    assert not ok2 and rule2 is None
+
+
+def test_trial_conviction_jails_and_fines_with_restitution():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "plaza"); crook.credits = 40
+    crook.rap_sheet = [{"tick": 0, "crime": "steal", "victim_id": "victim", "witnessed": True}]
+    victim = _a("victim", "plaza"); victim.credits = 10
+    juror = _a("juror", "plaza")
+    world = _world([cop, crook, victim, juror])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(
+        cop, "trial", "habitual theft", target="crook")
+    assert ok
+    # 3 of 4 vote guilty → conviction.
+    for v in (cop, victim, juror):
+        world.action_vote(v, rule.id, True)
+    assert crook.crime_status == "jailed"
+    assert crook.location == "jail"
+    assert crook.credits == 40 - 25          # trial_fine
+    assert victim.credits == 10 + 25         # sole victim gets full restitution
+    evts = world.drain_spawn_events()
+    kinds = {e["kind"] for e in evts}
+    assert "trial_verdict" in kinds and "jailed" in kinds
+
+
+def test_trial_acquittal_clears_notoriety_and_dings_accuser():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "plaza"); crook.notoriety = 30
+    j1 = _a("j1", "plaza"); j2 = _a("j2", "plaza"); j3 = _a("j3", "plaza")
+    world = _world([cop, crook, j1, j2, j3])
+    world.places["gov"] = PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance")
+    cop.location = "gov"
+    ok, reason, rule = world.action_propose_rule(cop, "trial", "vague vibes", target="crook")
+    assert ok
+    for v in (crook, j1, j2, j3):            # 4 of 5 vote not-guilty
+        world.action_vote(v, rule.id, False)
+    assert crook.notoriety == 15             # 30 - acquittal_notoriety_relief
+    # accuser (cop) takes an onlooker trust hit from at least one juror
+    assert any(j.relationships.get("cop") and j.relationships["cop"].trust < 0
+               for j in (j1, j2, j3))
+    evts = world.drain_spawn_events()
+    assert any(e["kind"] == "trial_verdict" and e["payload"]["verdict"] == "acquitted"
+               for e in evts)
+
+
+# ── menu visibility (CONTRACT C) — trial extends the propose_rule effect list ──
+
+def _propose_line(sys_text):
+    """Isolate the propose_rule menu line (so a menu assertion can't be satisfied
+    by the enforcer crime_block prose, which also mentions a 'town-hall trial')."""
+    for ln in sys_text.splitlines():
+        if "propose_rule (effect" in ln:
+            return ln
+    return ""
+
+
+def test_enforcer_menu_offers_trial_in_propose_rule_line():
+    cop = _a("cop", "gov", role="enforcer")
+    crook = _a("crook", "gov")
+    places = [
+        PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance"),
+        PlaceState(id="jail", name="Jail", x=9, y=9, kind="civic"),
+    ]
+    world = World(params=_params(), places=places, agents=[cop, crook])
+    line = _propose_line(_sys(cop, world))
+    assert line, "enforcer at a governance place should see the propose_rule line"
+    assert "trial" in line
+    assert "target=" in line and "Crook" in line  # the co-located defendant id/name
+
+
+def test_non_enforcer_menu_omits_trial_in_propose_rule_line():
+    citizen = _a("cit", "gov")
+    other = _a("other", "gov")
+    places = [
+        PlaceState(id="gov", name="Hall", x=1, y=1, kind="governance"),
+        PlaceState(id="jail", name="Jail", x=9, y=9, kind="civic"),
+    ]
+    world = World(params=_params(), places=places, agents=[citizen, other])
+    line = _propose_line(_sys(citizen, world))
+    assert line, "a citizen at a governance place should still see propose_rule"
+    assert "trial" not in line

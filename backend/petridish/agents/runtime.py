@@ -1403,10 +1403,22 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # FINDING 1 — promote_image MUST be in this set, else a valid proposal is
         # rejected at the runtime gate BEFORE it reaches world.action_propose_rule
         # (the gate is the agent's only path; QA passed only by bypassing it).
+        # EM-240 (Task 11): trial — an enforcer escalates a suspect to a town-hall
+        # vote (convict/acquit). Role-gated to enforcers (menu and resolution agree);
+        # carries the defendant id on args.target (mirrors demolish's target arg).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town", "demolish", "promote_image"}
+                         "ban_arson", "name_town", "demolish", "promote_image", "trial"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
+        if effect == "trial":
+            if getattr(agent, "role", "citizen") != "enforcer":
+                return "trial is reserved for enforcers (role) — you keep no badge"
+            target = str(args.get("target") or "").strip()
+            defendant = world.agents.get(target)
+            if defendant is None or not getattr(defendant, "alive", True):
+                return "trial requires args.target = the id of a living defendant"
+            if getattr(defendant, "crime_status", None) in ("detained", "jailed"):
+                return f"{defendant.name} is already in custody"
         if effect == "name_town" and not str(args.get("name") or "").strip():
             return "name_town requires a name (args.name = the town's new name)"
         if effect == "demolish":
@@ -1885,6 +1897,20 @@ def _assemble_context(
             propose_line += "|promote_image"
             propose_tail += (f"; promote_image needs image_id=<a gallery image's id, "
                              f"e.g. {_promotable}> to hang it over the plaza by vote")
+        # EM-240 (Task 11) — trial is an ENFORCER escalation: surface it on the
+        # propose_rule effect list only for enforcers standing with someone to put
+        # on trial (the menu/resolution-agree rule — the validator role-gates trial
+        # the same way). Names a concrete co-located, not-already-jailed defendant
+        # so the model is offered a target that will actually resolve.
+        if getattr(agent, "role", "citizen") == "enforcer":
+            _defendant = next(
+                (a for a in co_located
+                 if getattr(a, "crime_status", None) not in ("detained", "jailed")),
+                None)
+            if _defendant is not None:
+                propose_line += "|trial"
+                propose_tail += (f"; trial needs target=<a defendant's id> to put them "
+                                 f"on trial by vote (e.g. {_defendant.name})")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
