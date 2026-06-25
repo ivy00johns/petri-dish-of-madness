@@ -120,6 +120,9 @@ ACTION_SCHEMA = {
                 # EM-240 — conspiracy verbs (Task 8): pitch a co-located agent on a
                 # criminal pact; seal an offered pact into a warm ring bond.
                 "recruit", "accept_contract",
+                # EM-240 — enforcer justice verbs (Task 10): question witnesses to
+                # confirm a suspect's crimes; publicly accuse; jail the wanted.
+                "investigate", "accuse", "detain",
                 # W7 / EM-060+062 construction actions (action-protocol v1.1.0).
                 "propose_project", "contribute_funds", "build_step",
                 "repair", "arson", "take_offline",
@@ -174,6 +177,8 @@ ACTION_SCHEMA = {
                             "launder", "bribe",
                             # EM-240 — conspiracy verbs (Task 8).
                             "recruit", "accept_contract",
+                            # EM-240 — enforcer justice verbs (Task 10).
+                            "investigate", "accuse", "detain",
                             "propose_project", "contribute_funds", "build_step",
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
@@ -318,6 +323,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # target (rejected unless an open offer is addressed to the accepting agent).
     "recruit":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "accept_contract":  {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-240 — enforcer justice verbs (Task 10). All target a co-located agent
+    # (resolved like steal). No location_gate / agreement_gate here — the
+    # ENFORCER role gate lives in _validate_world (role rule, not a place rule).
+    "investigate":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "accuse":           {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "detain":           {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # Social / governance → llm-served (the reasoning-heavy choices).
     "say":              {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "whisper":          {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
@@ -983,7 +994,10 @@ _TARGETED_ACTIONS = frozenset(
      # bribe targets the enforcer (args["target"]), so it IS resolved here.
      # recruit targets a co-located agent; accept_contract takes NO target (the
      # offer is keyed by the accepting agent's id), so it is EXCLUDED here.
-     "heist", "extort", "bribe", "recruit"}
+     # EM-240 (Task 10) — enforcer justice verbs resolve a co-located agent name
+     # in args["target"] to a suspect id (investigate/accuse/detain), like steal.
+     "heist", "extort", "bribe", "recruit",
+     "investigate", "accuse", "detain"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1253,6 +1267,16 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     if not agent.alive:
         return "agent is dead"
 
+    # EM-240 (Task 10) — jail restriction: a detained/jailed agent may only talk
+    # and think until they are released (a release tick frees them in the world's
+    # per-round advance). Checked BEFORE every other gate so no jailed agent can
+    # move, work, or commit a crime — only say/whisper/idle/remember get through.
+    JAIL_ALLOWED = {"say", "whisper", "idle", "remember"}
+    if getattr(agent, "crime_status", None) in ("detained", "jailed") and \
+            action not in JAIL_ALLOWED:
+        return ("you are jailed — you can only talk, whisper, and think until "
+                "you are released")
+
     # ── Wave D2 / EM-163 — tier gate (RESOLUTION time, the billboard pattern;
     # EM-108: prompt-only gating is not enforcement). Background agents keep
     # talk/move/economy/billboard/vote — only PROPOSING gates. The background
@@ -1336,6 +1360,16 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # unless an open pact is addressed to this agent.
         if agent.id not in getattr(world, "pending_crime_offers", {}):
             return "no criminal pact has been offered to you"
+
+    elif action in ("investigate", "accuse", "detain"):
+        # EM-240 (Task 10) — justice verbs are reserved for enforcers (a role
+        # gate, not a place gate). All three target a co-located agent; the
+        # world action re-checks co-location + grounds, so this stays safe.
+        if getattr(agent, "role", "citizen") != "enforcer":
+            return f"{action} is reserved for enforcers (role) — you keep no badge"
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
 
     elif action in ("insult", "attack", "whisper", "set_relationship"):
         target_error = _validate_target(args, agent, world, action)
@@ -1817,6 +1851,14 @@ def _assemble_context(
         if cops:
             valid_actions.append(
                 f"bribe (target, amount) - pay an enforcer to drop your heat: {', '.join(cops)}")
+    # EM-240 (Task 10) — enforcer-only justice verbs, offered when co-located
+    # with someone to act on. The validator role-gate mirrors this (menu and
+    # resolution agree); a non-enforcer never sees these lines.
+    if getattr(agent, "role", "citizen") == "enforcer" and co_located:
+        tnames = ", ".join(a.name for a in co_located)
+        valid_actions.append(f"investigate (target) - question witnesses about: {tnames}")
+        valid_actions.append(f"accuse (target) - publicly accuse: {tnames}")
+        valid_actions.append(f"detain (target) - jail a wanted suspect: {tnames}")
     if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
@@ -4467,6 +4509,50 @@ class AgentRuntime:
             return {**base, "kind": "parse_failure",
                     "text": f"{agent.name} tried to accept a contract but: {reason}",
                     "payload": {"error": reason}}
+
+        # EM-240 — enforcer justice verbs (Task 10). investigate returns a
+        # (ok, reason, count) tuple like steal; accuse returns a ready event dict
+        # like vandalize; detain returns a dict on success OR a (False, reason,
+        # None) tuple on rejection (the MIXED return shape — handle both).
+        elif action == "investigate":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to investigate but target not found",
+                        "payload": {"error": "target_not_found"}}
+            ok, reason, n = self.world.action_investigate(agent, target)
+            if ok:
+                return {**base, "kind": "investigation", "target_id": target.id,
+                        "text": f"{agent.name} questions witnesses about {target.name} "
+                                f"({n} crime{'s' if n != 1 else ''} confirmed).",
+                        "payload": {"action": "investigate", "confirmed": n,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to investigate but: {reason}",
+                    "payload": {"error": reason}}
+
+        elif action == "accuse":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to accuse but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_accuse(agent, target), base, thought)
+
+        elif action == "detain":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to detain but target not found",
+                        "payload": {"error": "target_not_found"}}
+            result = self.world.action_detain(agent, target)
+            # action_detain returns a dict on success OR a (False, reason, None) tuple.
+            if isinstance(result, dict):
+                return _emit_world_result(result, base, thought)
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to detain but: {result[1]}",
+                    "payload": {"error": result[1]}}
 
         elif action == "say":
             text_said = args.get("text", "")

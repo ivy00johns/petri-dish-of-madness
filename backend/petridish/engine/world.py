@@ -1672,6 +1672,83 @@ class World:
         return True, "ok"
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 (Task 10) — enforcer justice verbs. investigate confirms a suspect's
+    # unwitnessed crimes into notoriety (needs a third party to question); accuse
+    # is a public naming (narrative + a feed event); detain jails a wanted /
+    # high-notoriety suspect on the spot for detain_sentence ticks. The jail is a
+    # place with id 'jail' (else the first civic place, else nowhere).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _jail_place_id(self) -> str | None:
+        """EM-240 — the town jail: a place with id 'jail', else the first civic
+        place, else None (a town with no jail simply cannot detain)."""
+        if "jail" in self.places:
+            return "jail"
+        for p in self.places.values():
+            if p.kind == "civic":
+                return p.id
+        return None
+
+    def action_investigate(self, agent: AgentState, suspect: AgentState) -> tuple[bool, str, int]:
+        """EM-240 — an enforcer questions co-located witnesses to confirm a
+        suspect's unwitnessed crimes into notoriety. Needs a third party present."""
+        if agent.location != suspect.location:
+            return False, "suspect not co-located", 0
+        witnesses = [a for a in self.agents_at(agent.location)
+                     if a.id not in (agent.id, suspect.id)]
+        if not witnesses:
+            return False, "no witnesses here to question", 0
+        base = int(self._crime_param("investigate_notoriety", 10))
+        confirmed = 0
+        for entry in suspect.rap_sheet:
+            if not entry.get("witnessed"):
+                entry["witnessed"] = True
+                suspect.notoriety = max(0, min(100, suspect.notoriety + base))
+                confirmed += 1
+        if confirmed and suspect.crime_status is None and \
+                suspect.notoriety >= int(self._crime_param("wanted_threshold", 40)):
+            suspect.crime_status = "wanted"
+        return True, "ok", confirmed
+
+    def action_accuse(self, agent: AgentState, suspect: AgentState) -> dict:
+        """EM-240 — an enforcer publicly names a suspect. Narrative + a feed
+        event; the actual penalty comes via detain or a trial vote."""
+        if agent.location != suspect.location:
+            return self._fail_event(agent.id, "accuse", "not co-located",
+                                    f"{agent.name} found no one here to accuse.")
+        return {
+            "kind": "accusation",
+            "actor_id": agent.id,
+            "target_id": suspect.id,
+            "text": f"{agent.name} accuses {suspect.name} of crimes against the town.",
+            "payload": {"notoriety": suspect.notoriety},
+        }
+
+    def action_detain(self, agent: AgentState, suspect: AgentState):
+        """EM-240 — an enforcer jails a wanted / high-notoriety suspect on the
+        spot for detain_sentence ticks. (The spec's 'red-handed' fast lane is
+        subsumed: a witnessed crime registers notoriety, which is the grounds.)
+        Returns a dict on success, or a (False, reason, None) tuple on rejection."""
+        if agent.location != suspect.location:
+            return False, "suspect not co-located", None
+        threshold = int(self._crime_param("detain_threshold", 60))
+        if not (suspect.crime_status == "wanted" or suspect.notoriety >= threshold):
+            return False, "insufficient grounds to detain", None
+        jail = self._jail_place_id()
+        if jail is None:
+            return False, "this town has no jail", None
+        suspect.location = jail
+        suspect.crime_status = "detained"
+        suspect.crime_status_until_tick = self.tick + int(self._crime_param("detain_sentence", 6))
+        return {
+            "kind": "detained",
+            "actor_id": agent.id,
+            "target_id": suspect.id,
+            "text": f"{agent.name} detains {suspect.name} and marches them to jail.",
+            "payload": {"until_tick": suspect.crime_status_until_tick},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Wave H4 / EM-209 — pets & bonds. owner_id is the ONLY bond: adopting a
     # co-located animal sets it (no credits move, no agent↔agent edge touched);
     # feeding restores an owned pet's energy. The FOLLOW / DECLINE / GRIEF beats
