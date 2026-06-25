@@ -111,6 +111,9 @@ ACTION_SCHEMA = {
                 "move_to", "say", "whisper", "work", "forage", "recharge",
                 "give", "steal", "insult", "attack", "set_relationship",
                 "remember", "propose_rule", "vote", "idle",
+                # EM-240 — offensive crime verbs (Task 6): big-score theft, a
+                # shakedown for credits, and building sabotage short of arson.
+                "heist", "extort", "vandalize",
                 # W7 / EM-060+062 construction actions (action-protocol v1.1.0).
                 "propose_project", "contribute_funds", "build_step",
                 "repair", "arson", "take_offline",
@@ -159,6 +162,8 @@ ACTION_SCHEMA = {
                             "move_to", "say", "whisper", "work", "forage", "recharge",
                             "give", "steal", "insult", "attack", "set_relationship",
                             "remember", "propose_rule", "vote", "idle",
+                            # EM-240 — offensive crime verbs (Task 6).
+                            "heist", "extort", "vandalize",
                             "propose_project", "contribute_funds", "build_step",
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
@@ -288,6 +293,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "work":             {"tier": "reflex", "location_gate": "work",          "agreement_gate": None},
     "give":             {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "steal":            {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_stealing"},
+    # EM-240 — offensive crime verbs (Task 6). heist/extort target an agent;
+    # vandalize targets a co-located building (@building gate, like arson).
+    "heist":            {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_stealing"},
+    "extort":           {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_extortion"},
+    "vandalize":        {"tier": "reflex", "location_gate": "@building",     "agreement_gate": "ban_vandalism"},
     # Social / governance → llm-served (the reasoning-heavy choices).
     "say":              {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "whisper":          {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
@@ -946,7 +956,11 @@ _NONEISH_STRINGS = {"", "none", "null", "nil"}
 _PLACE_ALIAS_KEYS = ("place", "place_id", "destination", "location", "to", "target")
 _TARGET_ALIAS_KEYS = ("target", "target_id", "agent", "agent_id", "who", "name")
 _TARGETED_ACTIONS = frozenset(
-    {"give", "steal", "insult", "attack", "whisper", "set_relationship"}
+    {"give", "steal", "insult", "attack", "whisper", "set_relationship",
+     # EM-240 — agent-targeted crime verbs resolve a name in args["target"] to an
+     # agent id before dispatch (exactly like steal). vandalize is EXCLUDED — it
+     # targets a building_id, not an agent name.
+     "heist", "extort"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1262,6 +1276,21 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         target_error = _validate_target(args, agent, world, "steal")
         if target_error:
             return target_error
+
+    elif action in ("heist", "extort"):
+        # EM-240 — agent-targeted crimes share steal's gate shape (ban + co-located).
+        gate = {"heist": "ban_stealing", "extort": "ban_extortion"}[action]
+        if world.has_active_rule(gate):
+            return f"{gate} rule is active — {action} is forbidden"
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
+
+    elif action == "vandalize":
+        # EM-240 — building-targeted crime; the @building co-location gate +
+        # building_id resolution mirror arson (handled at dispatch / by the world).
+        if world.has_active_rule("ban_vandalism"):
+            return "ban_vandalism rule is active — vandalize is forbidden"
 
     elif action in ("insult", "attack", "whisper", "set_relationship"):
         target_error = _validate_target(args, agent, world, action)
@@ -1714,6 +1743,17 @@ def _assemble_context(
         valid_actions.append(f"set_relationship (target, type) - ally|rival|neutral|friend|enemy")
         if _gate_ok("steal"):
             valid_actions.append(f"steal (target) - steal from: {target_names}")
+    # EM-240 — crime menu, only for the inclined (validator still allows all, so a
+    # lawful agent CAN emit an off-menu crime; the menu just doesn't invite it).
+    if getattr(agent, "disposition", "lawful") in ("opportunist", "criminal"):
+        if co_located:
+            tnames = ", ".join(a.name for a in co_located)
+            if _gate_ok("heist"):
+                valid_actions.append(f"heist (target) - big-score theft from: {tnames}")
+            if _gate_ok("extort"):
+                valid_actions.append(f"extort (target) - shake down for credits: {tnames}")
+        if _gate_ok("vandalize"):
+            valid_actions.append("vandalize (building_id) - damage a building short of arson")
     if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
@@ -4230,6 +4270,43 @@ class AgentRuntime:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to steal but: {reason}",
                         "payload": {"error": reason}}
+
+        # EM-240 — offensive crime verbs (Task 6). heist/extort resolve an agent
+        # target and return (ok, reason, amount) like steal; vandalize targets a
+        # building and returns a ready event dict like arson.
+        elif action == "heist":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to heist but target not found",
+                        "payload": {"error": "target_not_found"}}
+            ok, reason, amount = self.world.action_heist(agent, target)
+            if ok:
+                return {**base, "kind": "crime_committed", "target_id": target.id,
+                        "text": f"{agent.name} pulls off a heist on {target.name} ({amount} credits)!",
+                        "payload": {"action": "heist", "amount": amount, "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to heist but: {reason}",
+                    "payload": {"error": reason}}
+
+        elif action == "extort":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to extort but target not found",
+                        "payload": {"error": "target_not_found"}}
+            ok, reason, amount = self.world.action_extort(agent, target)
+            if ok:
+                return {**base, "kind": "crime_committed", "target_id": target.id,
+                        "text": f"{agent.name} shakes down {target.name} for {amount} credits!",
+                        "payload": {"action": "extort", "amount": amount, "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to extort but: {reason}",
+                    "payload": {"error": reason}}
+
+        elif action == "vandalize":
+            result = self.world.action_vandalize(agent, args.get("building_id", ""))
+            return _emit_world_result(result, base, thought)
 
         elif action == "say":
             text_said = args.get("text", "")

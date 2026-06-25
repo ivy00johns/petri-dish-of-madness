@@ -1488,6 +1488,86 @@ class World:
         return True, "ok", amount
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 — offensive crime verbs (Task 6): heist, extort, vandalize. heist and
+    # extort mirror steal's co-location + trust-crater + rivalry-snap shape with a
+    # bigger score and heavier notoriety; vandalize damages a place's power (a
+    # short blackout) short of arson's structural destruction.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _snap_to_rival(self, target: AgentState, agent: AgentState) -> None:
+        """EM-240 — the victim's view of the perpetrator snaps to at least rival
+        (enemy when trust has already cratered). Mirrors the steal escalation:
+        an existing rival/enemy/feud is the deeper state and is never downgraded."""
+        rel = target.relationships.get(agent.id)
+        if rel is None or rel.type not in ("rival", "enemy", "feud"):
+            if rel is None:
+                rel = RelationshipState()
+                target.relationships[agent.id] = rel
+            rel.type = "enemy" if rel.trust < -20 else "rival"
+            rel.since_tick = self.tick  # EM-113 — type changed here
+
+    def action_heist(self, agent: AgentState, target: AgentState) -> tuple[bool, str, int]:
+        """EM-240 — a big-score theft: up to heist_max (≫ steal_max), gated on a
+        worthwhile mark. Same co-location + ban_stealing gate as steal; heavier
+        notoriety. Victim trust craters like steal."""
+        if self.has_active_rule("ban_stealing"):
+            return False, "ban_stealing rule is active", 0
+        if agent.location != target.location:
+            return False, "target not co-located", 0
+        if target.credits < int(self._crime_param("heist_min_target_credits", 15)):
+            return False, "target not worth the risk", 0
+        amount = min(target.credits, int(self._crime_param("heist_max", 30)))
+        target.credits -= amount
+        agent.credits += amount
+        self._update_trust(agent, target, -20)
+        self._update_trust(target, agent, -15)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "heist", target.id,
+                             int(self._crime_param("heist_notoriety", 18)))
+        return True, "ok", amount
+
+    def action_extort(self, agent: AgentState, target: AgentState) -> tuple[bool, str, int]:
+        """EM-240 — threaten a co-located agent for credits (up to extort_max).
+        Always snaps the victim's view to at least rival."""
+        if agent.location != target.location:
+            return False, "target not co-located", 0
+        amount = min(target.credits, int(self._crime_param("extort_max", 15)))
+        if amount <= 0:
+            return False, "target has nothing to give", 0
+        target.credits -= amount
+        agent.credits += amount
+        self._update_trust(target, agent, -18)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "extort", target.id,
+                             int(self._crime_param("extort_notoriety", 12)))
+        return True, "ok", amount
+
+    def action_vandalize(self, agent: AgentState, building_id: str) -> dict:
+        """EM-240 — damage a building short of arson: a short blackout at its place,
+        no health destruction. Witnesses lose trust (like arson)."""
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(agent.id, "vandalize", "building_not_found",
+                                    f"{agent.name} tried to vandalize an unknown structure.")
+        place = self.places.get(building.location)
+        ticks = int(self._crime_param("vandalize_blackout_ticks", 8))
+        if place is not None:
+            place.blackout_until_tick = max(place.blackout_until_tick, self.tick + ticks)
+        for witness in self.agents_at(building.location):
+            if witness.id != agent.id:
+                self._update_trust(witness, agent, -10)
+        self._register_crime(agent, "vandalize", None,
+                             int(self._crime_param("vandalize_notoriety", 10)))
+        return {
+            "kind": "crime_committed",
+            "actor_id": agent.id,
+            "target_id": building.id,
+            "text": f"{agent.name} vandalizes {building.name}!",
+            "payload": {"action": "vandalize", "building_id": building.id,
+                        "blackout_ticks": ticks},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Wave H4 / EM-209 — pets & bonds. owner_id is the ONLY bond: adopting a
     # co-located animal sets it (no credits move, no agent↔agent edge touched);
     # feeding restores an owned pet's energy. The FOLLOW / DECLINE / GRIEF beats
@@ -1983,7 +2063,8 @@ class World:
         # plaza banner. Carries the image_id on the payload (like demolish's target);
         # scoped per-image so two distinct images may have open votes at once.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town", "demolish", "promote_image"}
+                         "ban_arson", "ban_extortion", "ban_vandalism",
+                         "name_town", "demolish", "promote_image"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
