@@ -117,6 +117,9 @@ ACTION_SCHEMA = {
                 # EM-240 — economy & corruption verbs (Task 7): cool your own heat
                 # for a cut; pay a co-located enforcer to drop it (catchable).
                 "launder", "bribe",
+                # EM-240 — conspiracy verbs (Task 8): pitch a co-located agent on a
+                # criminal pact; seal an offered pact into a warm ring bond.
+                "recruit", "accept_contract",
                 # W7 / EM-060+062 construction actions (action-protocol v1.1.0).
                 "propose_project", "contribute_funds", "build_step",
                 "repair", "arson", "take_offline",
@@ -169,6 +172,8 @@ ACTION_SCHEMA = {
                             "heist", "extort", "vandalize",
                             # EM-240 — economy & corruption verbs (Task 7).
                             "launder", "bribe",
+                            # EM-240 — conspiracy verbs (Task 8).
+                            "recruit", "accept_contract",
                             "propose_project", "contribute_funds", "build_step",
                             "repair", "arson", "take_offline",
                             "post_billboard", "read_billboard", "answer_proclamation",
@@ -308,6 +313,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # the enforcer) — co-location is enforced in _validate_world like steal.
     "launder":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "bribe":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-240 — conspiracy verbs (Task 8). recruit pitches a co-located agent (no
+    # gate; co-location enforced in _validate_world); accept_contract takes no
+    # target (rejected unless an open offer is addressed to the accepting agent).
+    "recruit":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "accept_contract":  {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # Social / governance → llm-served (the reasoning-heavy choices).
     "say":              {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
     "whisper":          {"tier": "llm",    "location_gate": None,            "agreement_gate": None},
@@ -971,7 +981,9 @@ _TARGETED_ACTIONS = frozenset(
      # agent id before dispatch (exactly like steal). vandalize is EXCLUDED — it
      # targets a building_id, not an agent name. launder is EXCLUDED — no target.
      # bribe targets the enforcer (args["target"]), so it IS resolved here.
-     "heist", "extort", "bribe"}
+     # recruit targets a co-located agent; accept_contract takes NO target (the
+     # offer is keyed by the accepting agent's id), so it is EXCLUDED here.
+     "heist", "extort", "bribe", "recruit"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1310,6 +1322,20 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         target_error = _validate_target(args, agent, world, "bribe")
         if target_error:
             return target_error
+
+    elif action == "recruit":
+        # EM-240 — recruit pitches a co-located agent on a criminal pact (shares
+        # steal's co-location shape, no ban gate). action_recruit re-checks
+        # co-location + self-target, so a stray recruit stays safe.
+        target_error = _validate_target(args, agent, world, "recruit")
+        if target_error:
+            return target_error
+
+    elif action == "accept_contract":
+        # EM-240 — accept_contract takes no target; reject up front (clear message)
+        # unless an open pact is addressed to this agent.
+        if agent.id not in getattr(world, "pending_crime_offers", {}):
+            return "no criminal pact has been offered to you"
 
     elif action in ("insult", "attack", "whisper", "set_relationship"):
         target_error = _validate_target(args, agent, world, action)
@@ -1771,11 +1797,19 @@ def _assemble_context(
                 valid_actions.append(f"heist (target) - big-score theft from: {tnames}")
             if _gate_ok("extort"):
                 valid_actions.append(f"extort (target) - shake down for credits: {tnames}")
+            # EM-240 (Task 8) — recruit a co-located agent into a criminal pact.
+            if _gate_ok("recruit"):
+                valid_actions.append(f"recruit (target) - pitch a criminal pact to: {tnames}")
         if _gate_ok("vandalize"):
             valid_actions.append("vandalize (building_id) - damage a building short of arson")
         # EM-240 (Task 7) — launder offered to the inclined once they have heat.
         if getattr(agent, "notoriety", 0) > 0:
             valid_actions.append("launder (amount) - spend a cut to cool your notoriety")
+    # EM-240 (Task 8) — an open pact addressed to this agent → offer accept_contract.
+    # NOT disposition-gated: the offer itself is the invitation (the recruiter
+    # already vetted the target), so a lawful agent CAN be drawn in.
+    if agent.id in getattr(world, "pending_crime_offers", {}):
+        valid_actions.append("accept_contract - seal the criminal pact offered to you")
     # EM-240 (Task 7) — anyone with heat, co-located with an enforcer, may bribe.
     # NOT disposition-gated: a lawful agent caught dirty can still try to buy out.
     if getattr(agent, "notoriety", 0) > 0 and co_located:
@@ -4363,6 +4397,28 @@ class AgentRuntime:
                         "payload": {"action": "bribe", "amount": paid, "thought": thought}}
             return {**base, "kind": "parse_failure",
                     "text": f"{agent.name} tried to bribe but: {reason}",
+                    "payload": {"error": reason}}
+
+        # EM-240 — conspiracy verbs (Task 8). recruit resolves a co-located target
+        # and returns a ready event dict (_emit_world_result, like vandalize);
+        # accept_contract takes NO target and returns a (ok, reason) 2-tuple.
+        elif action == "recruit":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to recruit but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_recruit(agent, target), base, thought)
+
+        elif action == "accept_contract":
+            ok, reason = self.world.action_accept_contract(agent)
+            if ok:
+                return {**base, "kind": "recruited",
+                        "text": f"{agent.name} seals the pact — a ring is born.",
+                        "payload": {"action": "accept_contract", "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to accept a contract but: {reason}",
                     "payload": {"error": reason}}
 
         elif action == "say":

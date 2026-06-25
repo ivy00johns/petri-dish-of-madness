@@ -252,3 +252,71 @@ def test_action_schema_accepts_launder_and_bribe():
     for verb in ("launder", "bribe"):
         jsonschema.validate({"action": verb, "args": {}}, ACTION_SCHEMA)
         jsonschema.validate({"actions": [{"action": verb, "args": {}}]}, ACTION_SCHEMA)
+
+
+# ── Task 8 — conspiracy verbs: recruit, accept_contract ───────────────────────
+
+def test_recruit_posts_offer_without_committing_crime():
+    boss = _a("boss", "alley"); crew = _a("crew", "alley")
+    world = _world([boss, crew])
+    evt = world.action_recruit(boss, crew)
+    assert evt["kind"] == "recruited"
+    assert world.pending_crime_offers.get("crew", {}).get("recruiter_id") == "boss"
+    assert crew.notoriety == 0               # no crime yet
+
+
+def test_accept_contract_forms_a_warm_pact():
+    boss = _a("boss", "alley"); crew = _a("crew", "alley")
+    world = _world([boss, crew])
+    world.action_recruit(boss, crew)
+    ok, reason = world.action_accept_contract(crew)
+    assert ok
+    # Mutual warm edges (ally) above faction_trust → a ring can derive.
+    assert boss.relationships["crew"].type == "ally"
+    assert crew.relationships["boss"].type == "ally"
+    assert boss.relationships["crew"].trust >= 25
+    assert crew.notoriety == 6 and boss.notoriety == 6   # conspiracy_notoriety
+    assert "crew" not in world.pending_crime_offers       # consumed
+
+
+def test_accept_contract_without_offer_is_rejected():
+    lone = _a("lone", "alley")
+    world = _world([lone])
+    ok, reason = world.action_accept_contract(lone)
+    assert not ok
+
+
+def test_recruit_menu_offered_to_inclined_only():
+    inclined = _a("inclined", "alley", disposition="opportunist")
+    mark = _a("mark", "alley")
+    world = _world([inclined, mark])
+    prompt = _prompt_text(_assemble_context(inclined, world, [], world.params))
+    assert "recruit (target)" in prompt
+
+
+def test_recruit_menu_hidden_from_lawful():
+    lawful = _a("lawful", "alley")             # disposition defaults to "lawful"
+    mark = _a("mark", "alley")
+    world = _world([lawful, mark])
+    prompt = _prompt_text(_assemble_context(lawful, world, [], world.params))
+    assert "recruit (target)" not in prompt
+
+
+def test_accept_contract_menu_only_when_offer_pending():
+    boss = _a("boss", "alley"); crew = _a("crew", "alley")
+    world = _world([boss, crew])
+    # No offer yet → no accept_contract line for the would-be recruit.
+    prompt = _prompt_text(_assemble_context(crew, world, [], world.params))
+    assert "accept_contract" not in prompt
+    # Post an offer → accept_contract is now offered to the addressed agent only.
+    world.action_recruit(boss, crew)
+    prompt_crew = _prompt_text(_assemble_context(crew, world, [], world.params))
+    assert "accept_contract" in prompt_crew
+    prompt_boss = _prompt_text(_assemble_context(boss, world, [], world.params))
+    assert "accept_contract" not in prompt_boss
+
+
+def test_action_schema_accepts_conspiracy_verbs():
+    for verb in ("recruit", "accept_contract"):
+        jsonschema.validate({"action": verb, "args": {}}, ACTION_SCHEMA)
+        jsonschema.validate({"actions": [{"action": verb, "args": {}}]}, ACTION_SCHEMA)

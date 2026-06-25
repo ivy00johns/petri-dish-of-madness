@@ -809,6 +809,10 @@ class World:
         # so they ride the SAME action `_multi` chain (same turn_id) as the
         # action that mutated trust. NOT serialized: drained within the turn.
         self.pending_relationship_events: list[dict] = []
+        # EM-240 — open recruit offers, keyed by TARGET agent id → {recruiter_id,
+        # tick}. Posted by action_recruit; consumed on the target's
+        # accept_contract turn. NOT snapshotted (ephemeral, like whispers).
+        self.pending_crime_offers: dict[str, dict] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -1617,6 +1621,55 @@ class World:
         if agent.crime_status == "wanted" and \
                 agent.notoriety < int(self._crime_param("wanted_threshold", 40)):
             agent.crime_status = None
+
+    def action_recruit(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-240 — propose a criminal pact to a co-located agent. Posts a pending
+        offer the target may accept on its NEXT turn. No crime committed here."""
+        if agent.location != target.location:
+            return self._fail_event(agent.id, "recruit", "not co-located",
+                                    f"{agent.name} found no one here to recruit.")
+        if agent.id == target.id:
+            return self._fail_event(agent.id, "recruit", "self",
+                                    f"{agent.name} cannot recruit themselves.")
+        self.pending_crime_offers[target.id] = {
+            "recruiter_id": agent.id, "tick": self.tick,
+        }
+        return {
+            "kind": "recruited",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"{agent.name} quietly pitches {target.name} on a scheme.",
+            "payload": {"action": "recruit"},
+        }
+
+    def action_accept_contract(self, agent: AgentState) -> tuple[bool, str]:
+        """EM-240 — accept the open pact addressed to this agent: seal a warm
+        mutual bond (the ring) and mark both with a conspiracy notoriety bump.
+        The mutual ally edge (seeded to conspiracy_trust_seed) lets
+        recompute_factions cluster the conspirators — ally is NOT trust-gated,
+        partner is, which is why fresh conspirators use ally."""
+        offer = self.pending_crime_offers.pop(agent.id, None)
+        if not offer:
+            return False, "no open offer to accept"
+        recruiter = self.agents.get(offer.get("recruiter_id"))
+        if recruiter is None or not recruiter.alive:
+            return False, "the recruiter is gone"
+        seed = int(self._crime_param("conspiracy_trust_seed", 30))
+        for a, b in ((agent, recruiter), (recruiter, agent)):
+            rel = a.relationships.get(b.id)
+            if rel is None:
+                rel = RelationshipState()
+                a.relationships[b.id] = rel
+            rel.trust = max(rel.trust, seed)
+            if rel.type in ("neutral",):
+                rel.type = "ally"
+                rel.since_tick = self.tick
+        bump = int(self._crime_param("conspiracy_notoriety", 6))
+        for who in (agent, recruiter):
+            who.notoriety = max(0, min(100, who.notoriety + bump))
+            who.rap_sheet.append({"tick": self.tick, "crime": "conspiracy",
+                                  "victim_id": None, "witnessed": False})
+        return True, "ok"
 
     # ──────────────────────────────────────────────────────────────────────────
     # Wave H4 / EM-209 — pets & bonds. owner_id is the ONLY bond: adopting a
