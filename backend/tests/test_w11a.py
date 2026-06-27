@@ -587,6 +587,117 @@ def test_chronicle_chaos_counts_include_commitment_lapsed_through_query():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 3b. EM-225 — Chronicle DEEP DIVE (multi-pass per-dimension review → synthesis)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_chronicle_deepdive_runs_multipass_and_emits_one_deepdive_chapter():
+    """EM-225 — start_chronicle_deepdive runs ONE focused pass per dimension
+    (governance / chat / growth) then a SYNTHESIS pass, and emits a SINGLE
+    narrator_summary stamped mode="deepdive" carrying the per-dimension notes,
+    the server-computed chaos facts + version, and the full-run window."""
+    from petridish.engine.loop import CHRONICLER_VERSION, TickLoop
+
+    params = _make_params(narrator=NarratorParams(
+        model_profile="narrator-mock", every_n_ticks=999))  # enabled False ⇒ no auto
+    tm = TextMock("The dimension held, and the saga deepened — Ada at its heart.")
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 6))
+    assert world.tick == 6
+
+    # Seed the whole run with drama spanning all three dimensions.
+    run_id = loop._run_id
+    repo.save_event(run_id, {"kind": "agent_speech", "actor_id": "agent_ada",
+                             "text": 'Ada says: "We must build the dividend engine now."',
+                             "payload": {"said": "We must build the dividend engine now."}}, 2)
+    repo.save_event(run_id, {"kind": "rule_passed", "actor_id": "system",
+                             "text": "By vote, a UBI of 10 credits passes.",
+                             "payload": {}}, 3)
+    repo.save_event(run_id, {"kind": "agent_died", "actor_id": "agent_bram",
+                             "text": "Bram starved in the cold.", "payload": {}}, 5)
+
+    asyncio.run(loop._run_deepdive("narrator-mock"))
+
+    # ONE call per dimension + ONE synthesis = 1 + len(dimensions) calls.
+    assert tm.calls == 1 + len(TickLoop._DEEPDIVE_DIMENSIONS)
+
+    rows = repo.get_events(run_id, kinds=["narrator_summary"], order="asc")
+    assert len(rows) == 1, "a deep dive emits exactly ONE chapter"
+    p = rows[0]["payload"]
+    assert p["mode"] == "deepdive", "the chapter must be marked as a deep dive"
+    assert p["chronicler_version"] == CHRONICLER_VERSION
+    assert (p["from_tick"], p["to_tick"]) == (0, 6), "deep dive spans the whole run"
+    # The per-dimension notes are stamped (each non-empty pass landed).
+    assert set(p["dimensions"].keys()) == {"governance", "chat", "growth"}
+    # Server-computed chaos facts come along (real counts, not all-zero).
+    chaos = p["chaos"]
+    assert chaos["counts"]["spoken"] == 1
+    assert chaos["counts"]["laws"] == 1
+    assert chaos["counts"]["deaths"] == 1
+    assert "Ada" in chaos["cast"]
+
+
+def test_chronicle_deepdive_unknown_model_is_a_noop():
+    """The picker never forces a paid lane: an unknown/unconfigured model starts
+    nothing and emits no chapter (the API maps this to a 400)."""
+    params = _make_params(narrator=NarratorParams(model_profile="narrator-mock"))
+    tm = TextMock()
+    loop, world, repo, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 4))
+    started = loop.start_chronicle_deepdive("no-such-profile")
+    assert started is False
+    assert tm.calls == 0
+    assert repo.get_events(loop._run_id, kinds=["narrator_summary"]) == []
+
+
+def test_chronicle_deepdive_start_is_single_flight():
+    """EM-225 — start_chronicle_deepdive returns True once and False while a deep
+    dive is already in flight (single-flight, like the backfill)."""
+    params = _make_params(narrator=NarratorParams(model_profile="narrator-mock"))
+    tm = TextMock("The saga deepened.")
+    loop, world, _, _ = _make_loop(params, narrator_provider=tm)
+    asyncio.run(_drive(loop, world, 4))
+
+    async def _exercise():
+        first = loop.start_chronicle_deepdive("narrator-mock")
+        # A second start while the first task is still pending must be refused.
+        second = loop.start_chronicle_deepdive("narrator-mock")
+        if loop._chronicle_deepdive_task is not None:
+            await loop._chronicle_deepdive_task
+        return first, second
+
+    first, second = asyncio.run(_exercise())
+    assert first is True
+    assert second is False, "a second deep dive must be refused while one is in flight"
+
+
+def test_chronicle_deepdive_endpoint_kicks_off_or_400s_on_bad_model():
+    """EM-225 — POST /api/chronicle/deepdive: an unknown model is a 400 (never a
+    paid lane); a configured one returns 200 with status building/already_running
+    and mode='deepdive'. Exercises the real app + loop wired by lifespan."""
+    from fastapi.testclient import TestClient
+    from petridish.api.app import app
+    appmod = sys.modules["petridish.api.app"]
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        assert appmod._loop is not None, "lifespan must wire the loop"
+        # Unknown model → 400, no background task started.
+        bad = client.post("/api/chronicle/deepdive", json={"model": "no-such-profile"})
+        assert bad.status_code == 400
+
+        # A real, configured profile (the first legend entry) → 200 + the contract.
+        profiles = client.get("/api/profiles").json()
+        assert profiles, "the embedded config must expose at least one profile"
+        good = client.post(
+            "/api/chronicle/deepdive", json={"model": profiles[0]["name"]}
+        )
+        assert good.status_code == 200, good.text
+        data = good.json()
+        assert data["status"] in ("building", "already_running")
+        assert data["mode"] == "deepdive"
+        assert data["model"] == profiles[0]["name"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 4. animal_action payload.place (event-log.md v1.2.0 note 2)
 # ──────────────────────────────────────────────────────────────────────────────
 

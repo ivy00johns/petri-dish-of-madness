@@ -75,6 +75,21 @@ world:
     sick_threshold: 3    # timed_out entries in the 6-window that mark a lane sick
     probe_every: 4       # every Nth would-be-detour probes the home lane
 
+  # EM-167 — Ollama overflow lane. Background/supporting cadence-tier turns
+  # spill OFF FreeLLMAPI onto a local Ollama lane (profiles.yaml `ollama`) as an
+  # off-critical-path overflow — the animal-task pattern: a slow, non-survival
+  # lane that, if it stalls or is unreachable, falls back to the home/EM-205-
+  # auto/EM-173-idle path WITHOUT ever hard-failing a turn (protagonists NEVER
+  # overflow — their traffic stays pinned). ~40% of background calls move off
+  # the free proxy. A missing/unavailable/sick `ollama` profile self-suppresses.
+  # MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  overflow_lane:
+    enabled: false                    # OFF: live-verify pends a running `ollama
+                                      # serve`; flip true once Ollama is reachable
+    profile: ollama                   # the overflow target (profiles.yaml)
+    tiers: [background, supporting]   # cadence tiers whose turns spill over
+
   # Wave D3 / EM-168 — cap-pressure governor. When a lane's usage_alert fires
   # (UsageAlertTracker crossed 70% of its rpd/tpd day cap, profiles.yaml),
   # every agent ASSIGNED to that lane is demoted ONE cadence tier
@@ -129,6 +144,10 @@ world:
     vandalize_notoriety: 10
     heist_notoriety: 18
     extort_notoriety: 12
+    intimidate_notoriety: 14       # EM-237 — threaten without contact (fear)
+    deceive_notoriety: 8           # EM-237 — plant a false belief (lying)
+    intimidate_take_fraction: 0.25 # EM-237 — fraction of the mark's purse coerced
+    intimidate_max: 10             # EM-237 — cap on a single coerced sum (< extort)
     steal_notoriety: 6             # folded into existing steal
     arson_notoriety: 22            # folded into existing arson
     bribe_efficacy: 0.75           # fraction of payer notoriety wiped
@@ -144,6 +163,173 @@ world:
     acquittal_notoriety_relief: 15 # notoriety cleared on acquittal
     accuser_acquittal_penalty: 8   # accuser trust hit from onlookers
     released_notoriety_relief: 10  # notoriety cleared on release
+
+  # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
+  # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
+  # every agent (floats 0..100, default 100). They decay every turn at these
+  # small non-zero rates but UNLIKE energy they NEVER kill: a need below its
+  # salience threshold only adds a conditional prompt nudge (toward learning /
+  # politics), so a full-needs agent's prompt stays byte-identical to pre-EM-229.
+  # EW drives (energy ~30h / influence ~24h / knowledge ~36h) scale to SLOWER
+  # decay than energy_decay_per_turn (4). Knowledge is replenished by learning
+  # (teach/skill-gain, EM-227/228); influence by governance/social wins. Absent
+  # ⇒ engine defaults (no behavior change). MUST stay in sync with the
+  # NeedsParams mirror in backend/petridish/config/loader.py.
+  needs:
+    knowledge_decay_per_turn: 0.5      # < energy_decay_per_turn (4); curiosity drift
+    influence_decay_per_turn: 0.4      # politics drift
+    knowledge_salience_threshold: 40   # below → prompt nudges toward learning
+    influence_salience_threshold: 40   # below → prompt nudges toward politics
+
+  # EM-233 — memory consolidation ("sleep") + soul entries (contracts/wave-m.md
+  # §3 Wave M1). At each ROUND boundary an agent whose `beliefs` count exceeds
+  # consolidate_at has its OLDEST beliefs deterministically rolled into ONE digest
+  # line (a structured rollup, NO LLM in v1), keeping the consolidate_keep_recent
+  # most-recent beliefs verbatim; a `memory` event fires. This bounds the belief
+  # list at the ceiling so long-lived agents stay coherent. `soul` is a tiny
+  # IMMUTABLE list of identity anchors (≤ soul_cap entries, seeded from a persona
+  # at spawn if configured) injected into every prompt as who-you-are context and
+  # NEVER summarized by consolidation. A soulless agent + a small belief list are
+  # byte-identical to pre-EM-233 (no `enabled` flag needed). Absent ⇒ engine
+  # defaults (no behavior change). MUST stay in sync with the MemoryParams mirror
+  # in backend/petridish/config/loader.py.
+  memory:
+    consolidate_at: 20          # beliefs count ceiling → round-boundary rollup
+    consolidate_keep_recent: 8  # most-recent beliefs kept verbatim (< consolidate_at)
+    soul_cap: 3                 # max identity anchors per agent
+
+  # EM-227 — skills & emergent professions (contracts/wave-m.md §3 Wave M2). The
+  # skill LIBRARY: each named skill GATES a list of high-value actions on a min
+  # level, so specialists emerge (only a builder proposes/builds, only an artist
+  # paints, only an orator legislates). Skills are GAINED by doing (xp_per_use per
+  # successful gated action; a level each xp_per_level, capped at max_level) and by
+  # teaching (EM-228). SURVIVAL verbs (move/work/forage/say/whisper/recharge/idle/
+  # remember) are NEVER gated. `archetypes` seeds a deterministic starting spread
+  # per persona so identical agents diverge. An EMPTY library gates NOTHING
+  # (byte-identical pre-EM-227 + the em161 golden). MUST stay in sync with the
+  # SkillsParams mirror in backend/petridish/config/loader.py.
+  skills:
+    xp_per_use: 10              # xp for ONE successful gated action (learn-by-doing)
+    xp_per_level: 30            # xp per level (deterministic threshold)
+    max_level: 5                # level ceiling
+    library:
+      building:
+        gates: [propose_project, build_step]
+        min_level: 1
+      art:
+        gates: [create_image]
+        min_level: 1
+      rhetoric:
+        gates: [propose_rule]
+        min_level: 1
+    archetypes:                 # deterministic starting spread per persona archetype
+      builder: {building: 2}
+      artist: {art: 2}
+      orator: {rhetoric: 2}
+      farmer: {building: 1}
+      healer: {art: 1}
+
+  # EM-231 — cooperation-gated tools (contracts/wave-m.md §3 Wave M2). EW's hard
+  # mechanic: a class of high-value action unlocks ONLY when both partners have
+  # AGREED to cooperate. A co-located pair forms a HANDSHAKE
+  # (offer_cooperation → accept_cooperation, the R4 two-turn pattern); the ONE
+  # gated action `co_build(building_id)` then requires that active handshake plus
+  # a co-located partner, advancing a building by co_build_bonus_step. Set ABOVE
+  # buildings.build_step (20) so a JOINT build genuinely outpaces solo work — the
+  # cooperation payoff. Purely additive (no enabled flag): a world that never
+  # forms a handshake has no cooperation state, so snapshots + the em161 golden
+  # are byte-identical. MUST stay in sync with the CooperationParams mirror in
+  # backend/petridish/config/loader.py.
+  cooperation:
+    co_build_bonus_step: 35     # progress one co_build adds (> build_step's 20 — the joint-build payoff)
+
+  # EM-232 — peer-judged credit economy / Victory Arch (contracts/wave-m.md §3
+  # Wave M3). A periodic pitch -> peer-judge -> award cycle (EW's ~2-day Victory
+  # Arch cadence). Agents pitch_contribution(text) to park a pitch; every
+  # every_n_ticks ticks the parked pitches are ranked by a DETERMINISTIC
+  # contribution score (each pitcher's durable ledger: buildings funded, skills
+  # taught, trades settled, projects built — tie-broken by agent id, NO random),
+  # and the top_n win `award` credits + a renown bump + an influence replenish
+  # (the EM-229 hook). An `arch_award` event fires per winner; the queue clears.
+  # Adds reputation-through-contribution + the inequality story (a Gini/AWI read).
+  # DEFAULT-OFF in the dataclass (every_n_ticks 0) keeps snapshots + the em161
+  # golden byte-identical; this LIVE config turns it ON with a positive cadence.
+  # MUST stay in sync with the VictoryArchParams mirror in
+  # backend/petridish/config/loader.py.
+  victory_arch:
+    every_n_ticks: 120          # EM-232 live run — fire the pitch->judge->award cycle every 120 ticks
+    award: 50                   # credits each winning pitcher receives
+    top_n: 1                    # how many top-ranked pitchers win per cycle
+    reputation_bonus: 5         # renown points added to each winner (durable reputation signal)
+    influence_replenish: 25     # influence (EM-229 need) topped up on each winner, clamped 0..100
+
+  # EM-235 — boost queue (contracts/wave-m.md §3 Wave M3). Agents spend credits
+  # (the reflex verb buy_turn) for EXTRA scheduled turns/airtime — EW's
+  # ComputeCredits, where agents literally purchase influence over the shared
+  # timeline (the north-star: MORE turns/LLM calls, never fewer). Each buy_turn
+  # deducts `cost` credits (rejected when the agent is too poor) and grants ONE
+  # extra scheduled turn this round; the scheduler honors a durable per-agent
+  # counter (boosted_turns, appended in sorted-id order for determinism) and
+  # `max_per_round` caps how many extra turns one agent may buy in a single round.
+  # DEFAULT-OFF in the dataclass (cost 0) keeps snapshots + the em161 golden
+  # byte-identical AND the scheduler untouched; this LIVE config turns it ON with a
+  # positive cost. MUST stay in sync with the BoostParams mirror in
+  # backend/petridish/config/loader.py.
+  boost:
+    cost: 8                     # EM-235 live run — credits one buy_turn deducts (the price of an extra turn)
+    max_per_round: 2            # how many extra turns one agent may buy in a single round
+
+  # EM-236 — living constitution (contracts/wave-m.md §3 Wave M3). An amendable,
+  # ARTICLED foundational document layered over the flat rule list. Agents grow it
+  # ONLY through governance: propose_rule(effect=amend_constitution, op=add|edit|
+  # remove, text, article_id?) ratifies on a `ratify_threshold` supermajority (0.7
+  # == the demolish bar), mutates World.constitution, emits constitution_amended,
+  # and tops up the proposer's influence need (EM-229) by `influence_replenish`.
+  # The constitution is empty until an amendment ratifies (no `enabled` flag), so
+  # this block only tunes the bar + reward — an un-amended world stays byte-
+  # identical to pre-EM-236. MUST stay in sync with the ConstitutionParams mirror
+  # in backend/petridish/config/loader.py.
+  constitution:
+    ratify_threshold: 0.7       # YES-vote supermajority fraction an amendment needs to ratify (0.7 = 70%, the demolish bar)
+    influence_replenish: 15     # influence (EM-229 need) topped up on the PROPOSER when an amendment ratifies, clamped 0..100
+
+  # EM-203 — governance renewal cooldown (contracts/wave-m.md §3 Wave M4). The
+  # W11b/EM-087 RENEWAL ritual lets agents re-pass a law identical to an ACTIVE
+  # rule (it refreshes the law instead of stacking a duplicate) — civic charm,
+  # but run-663 showed it degenerate into endless no-op re-passes of the SAME
+  # unchanged law (work_bonus ×35, ubi ×27, recharge_subsidy ×19). When
+  # renewal_cooldown_ticks > 0, a renewal of an active rule whose last activation
+  # is within the window is rejected as 'already active (settled)', nudging
+  # agents to legislate something NEW. 0 = no cooldown (pre-EM-203 behavior).
+  # ~3 in-world days at 20 turns/day keeps the ritual meaningful without spam.
+  # MUST stay in sync with the GovernanceParams mirror in
+  # backend/petridish/config/loader.py.
+  governance:
+    renewal_cooldown_ticks: 60  # ticks an unchanged ACTIVE rule can't be renewed for (0 = pre-EM-203; live run nudges new legislation)
+
+  # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
+  # Wave M1). When enabled, EVERY agent's turn context gets a single block that
+  # asks them to reason about the commons by universalizing — "before acting on a
+  # shared resource, ask: what if EVERY agent did this?" — the cheap cooperation
+  # lift from the GovSim paper. It rides the SAME turn (zero extra LLM calls) and
+  # carries NO per-agent/world state (pure config-read prompt block), so flipping
+  # it leaves snapshots byte-identical. DEFAULT OFF in the dataclass keeps the
+  # em161 golden intact; this LIVE config flips enabled:true. MUST stay in sync
+  # with the UniversalizationParams mirror in backend/petridish/config/loader.py.
+  universalization:
+    enabled: true               # EM-234 live run — inject the commons-reasoning scaffold into every turn (zero extra calls)
+
+  # EM-224 — PIANO coherence for multi-action turns. A deterministic, zero-LLM
+  # bottleneck that reconciles a turn's actions[] against its first speech act's
+  # intent (catches "Sure, friend!" then steal from the same agent). DEFAULT OFF
+  # so the prompt golden + snapshots stay byte-identical; flip enabled:true for a
+  # live run. MUST stay in sync with the CoherenceParams mirror in
+  # backend/petridish/config/loader.py.
+  #   strategy: annotate  → keep both, stamp the contradiction (hypocrisy legible)
+  #             drop       → suppress the contradicting act (the speech wins)
+  coherence:
+    enabled: false
+    strategy: annotate
 
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
@@ -169,6 +355,28 @@ world:
     birth_cost_credits: 6        # paid by BOTH parents (credits sink)
     birth_chance: 0.25           # seeded per-pair unit-float gate per round
     pair_cooldown_ticks: 600     # min ticks between children of the same pair
+
+  # EM-126 — generational depth (contracts/wave-m.md §3 Wave M4). Builds on the
+  # EM-114 children mechanic: agents pass through LIFE STAGES as they age, and on
+  # death pass their estate down the parents/children lineage to an heir.
+  #   * Aging cadence: age_ticks increments once per ROUND (in World.age_agents,
+  #     hooked at the round boundary, ONLY when enabled). Thresholds are in rounds:
+  #     age_ticks < child_until ⇒ child; age_ticks >= elder_after ⇒ elder; else
+  #     adult. Promotion is PURE arithmetic — no random, no clock (replay-safe).
+  #   * Inheritance: on death the estate passes to the deceased's HEIR — chosen
+  #     deterministically from the lineage (living children first, then living
+  #     parents; lowest-id heir in the closest tier). inherit_credits transfers
+  #     all credits; inherit_relationships also copies relationships/grudges the
+  #     heir lacks. Emits an `inherited` event. No heir ⇒ a no-op.
+  # Set enabled:false (the default) for byte-identical pre-EM-126 behavior: no
+  # aging, no estate, the EM-114 children mechanic untouched. MUST stay in sync
+  # with the default-config mirror in backend/petridish/config/loader.py.
+  generations:
+    enabled: false
+    child_until: 6               # age_ticks (rounds) below which an agent is a child
+    elder_after: 60              # age_ticks (rounds) at/above which an agent is an elder
+    inherit_credits: true        # pass the deceased's credits to the heir
+    inherit_relationships: false # also copy relationships/grudges the heir lacks
 
   # Wave E / EM-120 — factions, feuds & reputation (contracts/wave-e.md B3).
   # At each ROUND boundary — after the EM-114 birth check (contract order:

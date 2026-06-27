@@ -47,7 +47,8 @@ byte-identical until a district actually grows). Branch `feat/district-growth`.
 
 **Canonical — the living plan (edit these):**
 - `BUILD-PLAN.md` — strategic roadmap (waves + exit criteria) + closure log
-- `docs/REMAINING-WORK.md` — every open item, ID'd + prioritized (EM-### scheme)
+- `docs/REMAINING-WORK.md` — every **open / in-progress** item, ID'd + prioritized (EM-### scheme). Kept lean: `done` rows are swept out (see below)
+- `docs/COMPLETED-WORK.md` — the **completed archive**: every shipped item's row, verbatim (the tactical detail behind the closure log). Append-only history; keeps the open ledger short + cheap to load
 - `docs/FUTURE.md` — explicitly out of scope for v1 (the deferred non-goals)
 - `ASSET_LICENSES.md` — the CC0-only art ledger (every vendored GLB/HDRI, source + license)
 
@@ -65,3 +66,8 @@ the report→ledger intake loop: run the **`plan-intake`** skill on the report, 
 proposed entries, and they land in `docs/REMAINING-WORK.md` + the closure log in
 `BUILD-PLAN.md`. `plan-intake` is fail-closed — nothing is filed without explicit approval.
 See the `living-plan` skill for the full convention.
+
+Work also flows **out**: when an item ships, its row is swept from `docs/REMAINING-WORK.md`
+to `docs/COMPLETED-WORK.md` (the completion sweep — `plan-intake` does this as a final step,
+or do it at any wave/PR close). History is preserved in full; the open ledger just stays a
+short, current to-do list instead of an ever-growing pile of finished work.

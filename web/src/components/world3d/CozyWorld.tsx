@@ -544,10 +544,10 @@ export function CozyWorld({
     );
   }
 
-  // EM-188: the city's title — absent-safe (town_name is additive backend
-  // state; mock mode / old snapshots may lack it, and it is not yet part of
-  // the frontend WorldState type, so it is read defensively).
-  const townName = (world as { town_name?: unknown }).town_name;
+  // EM-188/192: the city's title — absent-safe (town_name is additive backend
+  // state; mock mode / old snapshots may lack it). Now typed on WorldState
+  // (EM-192) so it reads straight off `world` — no defensive cast.
+  const townName = world.town_name;
 
   return (
     <div className="relative h-full w-full">
@@ -599,7 +599,7 @@ export function CozyWorld({
         />
       </Canvas>
       {/* EM-188: the city's name, once, as a HUD chip (absent-safe). */}
-      <CityNameChip name={typeof townName === 'string' ? townName : null} />
+      <CityNameChip name={townName} />
     </div>
   );
 }

@@ -156,6 +156,7 @@ class Router:
         cache_enabled: bool = True,
         cache_max: int = _DEFAULT_CACHE_MAX,
         lane_failover: Any = None,
+        overflow_lane: Any = None,
         auto_breaker_probe_every: int = _AUTO_BREAKER_PROBE_EVERY,
     ):
         self._profiles: dict[str, ModelProfile] = {p.name: p for p in profiles}
@@ -227,6 +228,18 @@ class Router:
         # by clear_cache() on world reset, like the lane windows. No clock
         # reads anywhere — counters only.
         self._lane_failover = lane_failover
+        # ── EM-167 — Ollama overflow lane ──────────────────────────────────────
+        # The config `world.overflow_lane` block (an OverflowLaneParams
+        # dataclass, a plain dict, or None ⇒ OFF defaults). When enabled,
+        # effective_profile spills a background/supporting cadence-tier turn off
+        # its home FreeLLMAPI lane onto the configured overflow profile (default
+        # `ollama`) as an off-critical-path background call (the animal-task
+        # pattern). The target self-suppresses when missing / unavailable / mock
+        # / sick, so a down Ollama never hard-fails a turn — it falls back to the
+        # home lane (then EM-205 auto-backup / EM-173 idle). Read via the
+        # defensive _ol_value accessor with router-matching defaults (absent ⇒
+        # OFF ⇒ byte-identical pre-EM-167 routing). No clock reads.
+        self._overflow_lane = overflow_lane
         # substitute profile -> detours routed there this run (load-spread
         # tie-break + /api/lanes `detours_routed_here`).
         self._lane_detours_routed: dict[str, int] = {}
@@ -710,6 +723,60 @@ class Router:
         except (TypeError, ValueError):
             return _LANE_PROBE_EVERY_DEFAULT
 
+    # ── EM-167 — Ollama overflow lane ──────────────────────────────────────────
+
+    def _ol_value(self, key: str, default: Any) -> Any:
+        """Read one `world.overflow_lane` knob defensively: the block may be an
+        OverflowLaneParams dataclass, a plain dict, or absent (⇒ defaults)."""
+        cfg = self._overflow_lane
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            value = cfg.get(key, default)
+        else:
+            value = getattr(cfg, key, default)
+        return default if value is None else value
+
+    def _overflow_enabled(self) -> bool:
+        return bool(self._ol_value("enabled", False))
+
+    def _overflow_profile(self) -> str:
+        return str(self._ol_value("profile", "ollama"))
+
+    def _overflow_tiers(self) -> tuple[str, ...]:
+        tiers = self._ol_value("tiers", ("background", "supporting"))
+        if isinstance(tiers, (list, tuple)):
+            return tuple(str(t) for t in tiers)
+        return ("background", "supporting")
+
+    def _overflow_target(self, home: str, tier: str | None) -> str | None:
+        """EM-167 — the overflow profile a turn should spill to, or None when
+        the overflow path does not apply this turn (so the caller keeps its
+        EM-177 home/failover routing). None when: overflow disabled, the tier is
+        not in the configured set (protagonist NEVER overflows), or the target
+        is unset / IS the home lane / unknown / mock / unavailable / sick. The
+        last group is the GRACEFUL self-suppression: a down or stalling Ollama
+        stops being chosen automatically, so the turn never hard-fails. Counters
+        only — no clock reads."""
+        if not self._overflow_enabled():
+            return None
+        if tier is None or tier not in self._overflow_tiers():
+            return None
+        target = self._overflow_profile()
+        if not target or target == home:
+            return None
+        profile = self._profiles.get(target)
+        if profile is None or profile.adapter == "mock":
+            return None
+        try:
+            if not profile.available():
+                return None
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if self.lane_sick(target):
+            return None
+        return target
+
     def lane_sick(self, profile_name: str) -> bool:
         """EM-177 sickness predicate: ≥ sick_threshold (default 3) demerits in
         the existing EM-135 6-window. Mock lanes are never sick. A demerit is
@@ -773,14 +840,25 @@ class Router:
             log.debug("lane_detour sink failed: %s", exc)
 
     def effective_profile(
-        self, agent_id: str, preferred: str
+        self, agent_id: str, preferred: str, tier: str | None = None
     ) -> tuple[str, str | None]:
-        """EM-177 — resolve the lane ONE call should actually go through.
+        """EM-177 / EM-167 — resolve the lane ONE call should actually go through.
 
         Returns (profile_to_call, reason) with reason in {None, "detour",
-        "probe"}. The agent's ASSIGNED profile never changes — identity, UI
-        chip, and reassign semantics are untouched; detours are per-call.
+        "probe", "overflow"}. The agent's ASSIGNED profile never changes —
+        identity, UI chip, and reassign semantics are untouched; detours are
+        per-call.
 
+          - EM-167 overflow: when `world.overflow_lane.enabled` and this turn's
+            `tier` is in the configured set (default background + supporting —
+            protagonist NEVER overflows), the call spills to the configured
+            overflow profile (default `ollama`) as (target, "overflow") — an
+            off-critical-path background call (the animal-task pattern). The
+            target self-suppresses when missing / unavailable / mock / sick, so
+            a down Ollama falls back to the home/failover routing below (the
+            turn never hard-fails). Overflow is resolved BEFORE failover: for
+            background traffic the off-FreeLLMAPI lane wins even when the home
+            lane is sick.
           - failover disabled, home healthy, or no healthy candidate
             ⇒ (preferred, None) — byte-identical pre-D3 routing.
           - home SICK with a healthy candidate ⇒ every probe_every-th
@@ -789,9 +867,18 @@ class Router:
             no timers, no clock reads); the rest detour to the healthiest
             candidate as (candidate, "detour").
 
+        `tier` defaults to None so the pre-EM-167 two-arg call sites (and
+        duck-typed test routers) keep their exact behavior: no tier ⇒ no
+        overflow, just the EM-177 path.
+
         `lane_detour` edge events fire ONLY on streak transitions: the first
         detour of a streak (degraded) and the first healthy call after one
         (recovered) — exactly two per sick→recovered cycle."""
+        # EM-167 — off-critical-path overflow first (background/supporting only).
+        overflow = self._overflow_target(preferred, tier)
+        if overflow is not None:
+            return overflow, "overflow"
+
         if not self._failover_enabled():
             return preferred, None
 

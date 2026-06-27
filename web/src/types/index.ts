@@ -296,6 +296,11 @@ export interface WorldState {
   // diverged from the tier-1 baseline (a fresh world omits it); when absent the
   // 3D city re-derives tier-1 neighborhoods from `places` and renders identically.
   neighborhoods?: Neighborhood[];
+  // EM-188/192 (additive): the town's runtime-mutable name (agents vote to rename
+  // it via a `town_named` event). Optional/null so mock mode and pre-naming
+  // snapshots stay valid; the CityNameChip / ChronicleView render it only when a
+  // non-empty string is present. Typed here so reads stop using a defensive cast.
+  town_name?: string | null;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -451,6 +456,17 @@ export interface SpawnSpec {
    * explicit fields win) — an edited form omits it and sends the fields alone.
    */
   persona?: string;
+  /**
+   * run-663 / EM-202 (A/B persona-across-models): when present with ≥2 profile
+   * names, the backend (god mode only) spawns ONE variant agent per model that
+   * shares this spec's name/personality, naming each `${name}·${tag}` (tag =
+   * the profile's first dash-segment) and tagging every agent_spawned event with
+   * payload.ab_group = name so the feed/roster read the variants as one group.
+   * Optional/additive — a single-profile spawn omits it and is byte-identical to
+   * the pre-EM-202 payload. Carried with `profile` ignored by the backend on this
+   * path (each variant supplies its own model).
+   */
+  ab_models?: string[];
 }
 
 // ============================================================

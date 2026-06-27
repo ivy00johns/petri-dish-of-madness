@@ -291,6 +291,59 @@ world:
     enabled: true                # EM-223 live tuning run (2026-06-21)
     max_steps: 5
     reflex_bias: true
+  # EM-227 — skills & emergent professions. MUST stay byte-equal to the world.yaml
+  # skills block (the city25 variant changes only the cast). Each named skill GATES
+  # high-value actions on a min level; skills are gained by doing + teaching;
+  # archetypes seed a deterministic starting spread. Survival verbs are never gated.
+  skills:
+    xp_per_use: 10
+    xp_per_level: 30
+    max_level: 5
+    library:
+      building:
+        gates: [propose_project, build_step]
+        min_level: 1
+      art:
+        gates: [create_image]
+        min_level: 1
+      rhetoric:
+        gates: [propose_rule]
+        min_level: 1
+    archetypes:
+      builder: {building: 2}
+      artist: {art: 2}
+      orator: {rhetoric: 2}
+      farmer: {building: 1}
+      healer: {art: 1}
+  # EM-232 — peer-judged credit economy / Victory Arch. MUST stay byte-equal to the
+  # world.yaml victory_arch block (the city25 variant changes only the cast). The
+  # periodic pitch -> peer-judge -> award cycle: top contributors (funding, teaching,
+  # trading, building) win credits + renown + an influence top-up every cadence.
+  victory_arch:
+    every_n_ticks: 120           # EM-232 live run — fire the pitch->judge->award cycle every 120 ticks
+    award: 50                    # credits each winning pitcher receives
+    top_n: 1                     # how many top-ranked pitchers win per cycle
+    reputation_bonus: 5          # renown points added to each winner (durable reputation signal)
+    influence_replenish: 25      # influence (EM-229 need) topped up on each winner, clamped 0..100
+  # EM-235 — boost queue. MUST stay byte-equal to the world.yaml boost block (the
+  # city25 variant changes only the cast). Agents spend credits (buy_turn) for an
+  # EXTRA scheduled turn — buying airtime on the shared timeline (the north-star:
+  # MORE turns/LLM calls); the scheduler grants the extra slot, max_per_round caps
+  # how many one agent buys per round.
+  boost:
+    cost: 8                      # EM-235 live run — credits one buy_turn deducts (the price of an extra turn)
+    max_per_round: 2             # how many extra turns one agent may buy in a single round
+  # EM-234 — universalization prompting (GovSim scaffold). MUST stay byte-equal to
+  # the world.yaml universalization block (the city25 variant changes only the
+  # cast). Injects the always-on "what if EVERY agent did this?" commons-reasoning
+  # block into every turn (zero extra LLM calls).
+  universalization:
+    enabled: true                # EM-234 live run — inject the commons-reasoning scaffold into every turn
+  # EM-203 — governance renewal cooldown. MUST stay byte-equal to the world.yaml
+  # governance block (the city25 variant changes only the cast). Blocks re-passing
+  # an unchanged active rule within the window so agents legislate something NEW.
+  governance:
+    renewal_cooldown_ticks: 60   # ticks an unchanged ACTIVE rule can't be renewed for (0 = pre-EM-203)
   district_growth:               # EM-123 — zoned districts deepen as megaprojects complete (zero LLM calls; EM-174-safe)
     enabled: true                # off ⇒ every district stays tier 1 (byte-identical pre-EM-123)
     completions_per_tier: 2      # completed collective buildings in a district per +1 tier

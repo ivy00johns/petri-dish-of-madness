@@ -135,6 +135,9 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     router = Router(
         cfg.profiles,
         lane_failover=getattr(cfg.world, "lane_failover", None),
+        # EM-167 — thread the `world.overflow_lane` block (defensive getattr:
+        # pre-EM-167 configs lack the field and get the OFF defaults).
+        overflow_lane=getattr(cfg.world, "overflow_lane", None),
         cache_enabled=bool(getattr(cache_cfg, "enabled", True)),
         cache_max=int(getattr(cache_cfg, "max_entries", 512)),
     )
@@ -709,6 +712,36 @@ async def chronicle_build(body: ChronicleBuildBody):
         "model": model,
         "rebuild": body.rebuild,
         "restamp": body.restamp,
+    }
+
+
+class ChronicleDeepDiveBody(BaseModel):
+    # EM-225 — optional model override (the picker). Absent → the configured
+    # (free) narrator profile. A deep dive is a one-off, off-critical-path read,
+    # so the caller may opt into a stronger lane — never forced, never paid by
+    # default.
+    model: str | None = Field(default=None, max_length=60)
+
+
+@app.post("/api/chronicle/deepdive")
+async def chronicle_deepdive(body: ChronicleDeepDiveBody):
+    """EM-225 — kick off a MULTI-PASS deep dive: a richer one-off saga built from
+    a per-dimension review (governance / chat / growth) then a synthesis pass,
+    OFF the agent critical path. Distinct from the single-pass /api/chronicle/build
+    backfill. Returns immediately (background task); the chapter emits live as a
+    narrator_summary stamped mode="deepdive". The model is the caller's choice —
+    defaults to the configured (free) narrator profile, never a paid lane."""
+    if _loop is None or _world is None or _router is None:
+        raise HTTPException(503, "Not initialized")
+    cfg = getattr(_world.params, "narrator", None)
+    model = (body.model or getattr(cfg, "model_profile", "") or "").strip()
+    if not model or _router.get_profile(model) is None:
+        raise HTTPException(400, f"Unknown or unconfigured chronicle model: {model!r}")
+    started = _loop.start_chronicle_deepdive(model)
+    return {
+        "status": "building" if started else "already_running",
+        "model": model,
+        "mode": "deepdive",
     }
 
 

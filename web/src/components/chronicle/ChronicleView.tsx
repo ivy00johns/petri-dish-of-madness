@@ -309,7 +309,7 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
   const activeEntryRef = useRef<HTMLButtonElement | null>(null);
 
   const profiles = world?.profiles ?? [];
-  const townName = (world as { town_name?: string } | null)?.town_name?.trim() || '';
+  const townName = world?.town_name?.trim() || '';
 
   const N = chapters.length;
   // Clamp idx: if selected is null → last; if chapters just grew and selected is OOB → last
@@ -425,6 +425,35 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
     }
   }
 
+  // EM-225 — request a MULTI-PASS deep dive: a richer one-off saga reviewed per
+  // dimension (governance / chat / growth) then synthesised. Off the agent
+  // critical path; the chapter streams in as a deep-dive narrator_summary.
+  async function deepDive() {
+    setBuilding(true);
+    setBuildMsg(null);
+    try {
+      const res = await fetch('/api/chronicle/deepdive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(model ? { model } : {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBuildMsg(`Couldn't deep dive: ${data.detail ?? res.status}`);
+      } else if (data.status === 'already_running') {
+        setBuildMsg('A deep dive is already underway…');
+      } else {
+        setBuildMsg(
+          `Deep dive underway (${data.model}) — a richer chapter appears when the passes finish.`,
+        );
+      }
+    } catch {
+      setBuildMsg("Couldn't reach the backend.");
+    } finally {
+      setBuilding(false);
+    }
+  }
+
   // ---- Toolbar ----
   const toolbar = (
     <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-lab-border px-4 py-2 bg-lab-surface">
@@ -465,6 +494,15 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
         className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-border text-lab-muted-bright bg-lab-chrome rounded-sm hover:bg-lab-border hover:text-lab-text disabled:opacity-50 disabled:cursor-default transition-colors cursor-pointer"
       >
         Rebuild all
+      </button>
+      <button
+        type="button"
+        onClick={deepDive}
+        disabled={building}
+        title="Multi-pass deep dive: review the whole run per dimension (governance / chat / growth), then synthesise one richer chapter"
+        className="font-mono text-[10px] uppercase tracking-wide px-2 py-0.5 border border-lab-acid text-lab-acid bg-lab-chrome rounded-sm hover:bg-lab-acid hover:text-lab-bg disabled:opacity-50 disabled:cursor-default transition-colors cursor-pointer"
+      >
+        <span aria-hidden="true">🔬</span> Deep Dive
       </button>
     </div>
   );
@@ -599,11 +637,22 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
             <article className="mx-auto max-w-[68ch] px-6 sm:px-10 py-10">
               {/* Chapter header */}
               <header className="mb-8">
-                <div className="font-serif text-6xl text-lab-acid mb-3 leading-none">
-                  {toRoman(idx + 1)}
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="font-serif text-6xl text-lab-acid leading-none">
+                    {toRoman(idx + 1)}
+                  </div>
+                  {chapter.mode === 'deepdive' && (
+                    <span
+                      data-testid="deepdive-badge"
+                      className="font-mono text-[10px] uppercase tracking-widest text-lab-bg bg-lab-acid px-2 py-0.5 rounded-sm self-center"
+                    >
+                      🔬 Deep Dive
+                    </span>
+                  )}
                 </div>
                 <p className="font-mono text-[11px] text-lab-muted-bright tabular-nums">
-                  Chapter {idx + 1} of {N} · ticks {chapter.fromTick}–{chapter.toTick}
+                  {chapter.mode === 'deepdive' ? 'Deep Dive' : `Chapter ${idx + 1} of ${N}`} · ticks{' '}
+                  {chapter.fromTick}–{chapter.toTick}
                   {chapter.profile
                     ? ` · ${
                         chapter.routedVia && chapter.routedVia !== chapter.profile
@@ -616,6 +665,28 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
                     : ''}
                 </p>
               </header>
+
+              {/* EM-225 — deep-dive dimension notes: the per-lens study the
+                  synthesis was woven from (governance / chat / growth). */}
+              {chapter.mode === 'deepdive' &&
+                chapter.dimensions &&
+                Object.keys(chapter.dimensions).length > 0 && (
+                  <section
+                    data-testid="deepdive-dimensions"
+                    className="mb-8 border-l-2 border-lab-acid pl-4 flex flex-col gap-3"
+                  >
+                    {Object.entries(chapter.dimensions).map(([dim, note]) => (
+                      <div key={dim}>
+                        <h3 className="font-mono text-[9px] uppercase tracking-widest text-lab-acid mb-1">
+                          {dim}
+                        </h3>
+                        <p className="font-mono text-[11px] text-lab-muted-bright leading-snug whitespace-pre-line">
+                          {note}
+                        </p>
+                      </div>
+                    ))}
+                  </section>
+                )}
 
               {/* Prose */}
               <div data-testid="chapter-prose" className="font-serif text-[17px] leading-[1.8] text-lab-text">

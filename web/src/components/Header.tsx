@@ -26,10 +26,12 @@ interface HeaderProps {
   mockMode: boolean;
 }
 
-// EM-201 — the three top-level views.
+// EM-201 — the top-level views. EM-215 adds the Diary: the per-agent inner-life
+// reading room (the individual cousin to the town Chronicle).
 const NAV_TABS = [
   { to: '/', label: 'Live' },
   { to: '/chronicle', label: 'Chronicle' },
+  { to: '/diary', label: 'Diary' },
   { to: '/inspector', label: 'Inspector' },
 ] as const;
 
@@ -101,11 +103,11 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
         <div className="flex items-center gap-1.5">
           <div
             className={`w-2 h-2 rounded-full ${running ? 'animate-pulse' : ''}`}
-            style={{ backgroundColor: running ? '#27ae60' : '#ff9900' }}
+            style={{ backgroundColor: running ? 'var(--rel-ally)' : 'var(--lab-warn)' }}
           />
           <span
             className="font-mono text-[10px] font-semibold"
-            style={{ color: running ? '#27ae60' : '#ff9900' }}
+            style={{ color: running ? 'var(--rel-ally)' : 'var(--lab-warn)' }}
           >
             {running ? 'RUNNING' : 'PAUSED'}
           </span>
@@ -141,11 +143,11 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
         <div className="flex items-center gap-1.5">
           <div
             className="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: connected ? '#27ae60' : '#ff3333' }}
+            style={{ backgroundColor: connected ? 'var(--rel-ally)' : 'var(--lab-danger)' }}
           />
           <span
             className="font-mono text-[10px]"
-            style={{ color: connected ? '#27ae60' : '#ff3333' }}
+            style={{ color: connected ? 'var(--rel-ally)' : 'var(--lab-danger)' }}
           >
             {connected ? 'LIVE' : 'DISCONNECTED'}
           </span>

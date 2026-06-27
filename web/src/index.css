@@ -15,8 +15,7 @@
   }
 
   body {
-    background-color: #0a0a0b;
-    color: #e8e8f0;
+    @apply bg-lab-bg text-lab-text;
     font-family: 'IBM Plex Mono', monospace;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
@@ -30,25 +29,25 @@
     height: 4px;
   }
   ::-webkit-scrollbar-track {
-    background: #0a0a0b;
+    @apply bg-lab-bg;
   }
   ::-webkit-scrollbar-thumb {
-    background: #3a3a48;
+    @apply bg-lab-border-bright;
     border-radius: 2px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #5a5a72;
+    @apply bg-lab-muted;
   }
 
   /* Selection */
   ::selection {
     background: rgba(200, 255, 0, 0.25);
-    color: #e8e8f0;
+    @apply text-lab-text;
   }
 
   /* Focus styles */
   :focus-visible {
-    outline: 1px solid #c8ff00;
+    @apply outline outline-1 outline-lab-acid;
     outline-offset: 2px;
   }
 }
@@ -134,8 +133,8 @@
   /* Grid lines on canvas bg */
   .canvas-grid {
     background-image:
-      linear-gradient(to right, #1a1a20 1px, transparent 1px),
-      linear-gradient(to bottom, #1a1a20 1px, transparent 1px);
+      linear-gradient(to right, var(--lab-chrome, #1a1a20) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--lab-chrome, #1a1a20) 1px, transparent 1px);
     background-size: 50px 50px;
   }
 }

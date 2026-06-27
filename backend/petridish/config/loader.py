@@ -85,6 +85,18 @@ world:
     enabled: true
     sick_threshold: 3
     probe_every: 4
+  # EM-167 — Ollama overflow lane: background/supporting cadence-tier turns
+  # spill OFF FreeLLMAPI onto a local Ollama lane as an off-critical-path
+  # overflow (the animal-task pattern) — ~40% of background calls move off the
+  # free proxy. DEFAULT OFF: routing to Ollama changes behavior, and live-verify
+  # pends a running `ollama serve`. A missing/unavailable/sick `ollama` profile
+  # self-suppresses, so a turn never hard-fails if Ollama is down (it falls back
+  # to the home/EM-205-auto/EM-173-idle path). MUST stay in sync with
+  # config/world.yaml. enabled:false = byte-identical pre-EM-167 routing.
+  overflow_lane:
+    enabled: false
+    profile: ollama
+    tiers: [background, supporting]
   # Wave D3 / EM-168 — cap-pressure governor: a lane's usage_alert demotes its
   # agents one cadence tier until the alert tracker's UTC-day rollover. MUST
   # stay in sync with config/world.yaml. OFF since the 2026-06-12 EM-198
@@ -101,6 +113,130 @@ world:
     friend_interactions: 5
     feud_trust: -40
     partner_trust_threshold: 40
+  # EM-229 — three-needs psychology: decaying `knowledge` + `influence` drives
+  # ride alongside `energy` on every agent. They decay every turn at these small
+  # non-zero rates but NEVER kill (only energy does) — a need below its salience
+  # threshold only adds a conditional prompt nudge (so a full-needs agent's
+  # prompt is byte-identical to pre-EM-229). Replenished by learning (knowledge)
+  # and governance/social wins (influence). MUST stay in sync with
+  # config/world.yaml. Absent ⇒ these exact defaults (no behavior change).
+  needs:
+    knowledge_decay_per_turn: 0.5
+    influence_decay_per_turn: 0.4
+    knowledge_salience_threshold: 40
+    influence_salience_threshold: 40
+  # EM-233 — memory consolidation ("sleep") + soul entries. At each round
+  # boundary an agent whose `beliefs` count exceeds consolidate_at has its OLDEST
+  # beliefs deterministically rolled into ONE digest line (a structured rollup,
+  # NO LLM), keeping consolidate_keep_recent most-recent beliefs verbatim; emits a
+  # `memory` event. `soul` is a tiny immutable list of identity anchors (≤ soul_cap,
+  # seeded from a persona at spawn if configured) injected into every prompt and
+  # NEVER summarized. Soulless agents + a small belief list are byte-identical to
+  # pre-EM-233. MUST stay in sync with config/world.yaml. Absent ⇒ these exact
+  # defaults (no behavior change).
+  memory:
+    consolidate_at: 20
+    consolidate_keep_recent: 8
+    soul_cap: 3
+  # EM-227 — skills & emergent professions. The skill LIBRARY: each named skill
+  # GATES a list of high-value actions on a min level, so specialists emerge
+  # (only a builder proposes/builds; only an artist paints; only an orator
+  # legislates). Skills are GAINED by doing (xp_per_use per successful gated
+  # action; xp_per_level per level, capped at max_level) and by teaching (EM-228).
+  # SURVIVAL verbs (move/work/forage/say/whisper/recharge/idle/remember) are NEVER
+  # gated. `archetypes` seeds a deterministic starting spread per persona so
+  # identical agents diverge. An EMPTY library gates NOTHING (byte-identical
+  # pre-EM-227 + the em161 golden). MUST stay in sync with config/world.yaml.
+  skills:
+    xp_per_use: 10
+    xp_per_level: 30
+    max_level: 5
+    library:
+      building:
+        gates: [propose_project, build_step]
+        min_level: 1
+      art:
+        gates: [create_image]
+        min_level: 1
+      rhetoric:
+        gates: [propose_rule]
+        min_level: 1
+    archetypes:
+      builder: {building: 2}
+      artist: {art: 2}
+      orator: {rhetoric: 2}
+      farmer: {building: 1}
+      healer: {art: 1}
+  # EM-231 — cooperation-gated tools. A co-located pair forms a HANDSHAKE
+  # (offer_cooperation → accept_cooperation); the gated `co_build` action then
+  # advances a building by co_build_bonus_step (set ABOVE buildings.build_step
+  # so a joint build outpaces solo work — the cooperation payoff). Purely
+  # additive: a world that never forms a handshake has no cooperation state
+  # (golden + snapshot byte-identical). MUST stay in sync with config/world.yaml.
+  cooperation:
+    co_build_bonus_step: 35
+  # EM-232 — peer-judged credit economy / Victory Arch. A periodic
+  # pitch -> peer-judge -> award cycle: agents pitch_contribution(text) to park a
+  # pitch; every `every_n_ticks` ticks the parked pitches are ranked by a
+  # DETERMINISTIC contribution score (buildings funded, skills taught, trades
+  # settled, projects built; tie-broken by id — no random), and the top_n pitchers
+  # each win `award` credits + a renown bump + an influence replenish (EM-229). An
+  # `arch_award` event fires per winner; the queue clears. DEFAULT-OFF here
+  # (every_n_ticks 0 = no cycle, no pitch line) so this embedded mirror stays
+  # byte-identical to pre-EM-232 — the live config/world.yaml sets a positive
+  # cadence. MUST stay in sync with config/world.yaml.
+  victory_arch:
+    every_n_ticks: 0
+    award: 50
+    top_n: 1
+    reputation_bonus: 5
+    influence_replenish: 25
+  # EM-235 — boost queue. Agents spend credits (buy_turn) for EXTRA scheduled
+  # turns/airtime (EW's ComputeCredits) — they buy influence over the shared
+  # timeline (the north-star: MORE turns/LLM calls). cost credits are deducted per
+  # buy (rejected if too poor); the scheduler grants the agent an extra slot,
+  # bounded by max_per_round per round. DEFAULT-OFF here (cost 0 = every buy
+  # rejected, no buy_turn line, scheduler untouched) so this embedded mirror stays
+  # byte-identical to pre-EM-235 — the live config/world.yaml sets a positive cost.
+  # MUST stay in sync with config/world.yaml.
+  boost:
+    cost: 0
+    max_per_round: 2
+  # EM-236 — living constitution. Agents amend an ARTICLED foundational document
+  # via propose_rule(effect=amend_constitution, op=add|edit|remove); it ratifies
+  # on a 70% supermajority (the demolish bar) and replenishes the proposer's
+  # influence need. The constitution is empty until an amendment ratifies, so this
+  # block only TUNES the bar + reward — an un-amended world is byte-identical to
+  # pre-EM-236. MUST stay in sync with config/world.yaml.
+  constitution:
+    ratify_threshold: 0.7
+    influence_replenish: 15
+  # EM-203 — governance renewal cooldown. When > 0, re-proposing an effect
+  # identical to an ACTIVE rule whose last activation is within the window is
+  # rejected as 'already active (settled)' so agents legislate something NEW
+  # (run-663: work_bonus re-passed 35×, ubi 27×, recharge_subsidy 19×). DEFAULT 0
+  # here = no cooldown = byte-identical to pre-EM-203 (the W11b renewal ritual is
+  # untouched); the live config/world.yaml sets a positive window. MUST stay in
+  # sync with config/world.yaml.
+  governance:
+    renewal_cooldown_ticks: 0
+  # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
+  # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
+  # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
+  # this embedded mirror stays byte-identical to pre-EM-234 (the live
+  # config/world.yaml flips enabled:true). MUST stay in sync with config/world.yaml.
+  universalization:
+    enabled: false
+  # EM-224 — PIANO coherence for multi-action turns. When enabled, a
+  # deterministic zero-LLM bottleneck reconciles a turn's actions[] against the
+  # intent of its first speech act (catches "Sure, friend!" then steal). DEFAULT
+  # OFF here so this embedded mirror stays byte-identical to pre-EM-224 (no
+  # prompt block, no agent/world state). MUST stay in sync with config/world.yaml.
+  #   strategy: annotate  → keep both, stamp the contradiction (hypocrisy legible)
+  #             drop       → suppress the contradicting act (the speech wins)
+  coherence:
+    enabled: false
+    strategy: annotate
   # Wave E / EM-114 — lightweight children: once per round boundary, mutual
   # partners (are_partners) co-located at a home may have a child — a NEW
   # agent at background tier, only into vacancies under max_population AND
@@ -115,6 +251,18 @@ world:
     birth_cost_credits: 6
     birth_chance: 0.25
     pair_cooldown_ticks: 600
+  # EM-126 — generational depth: life stages (child→adult→elder, aged once per
+  # round) + inheritance of credits (and optionally relationships) to an EM-114
+  # lineage heir on death. DEFAULT OFF here so this embedded mirror stays byte-
+  # identical to pre-EM-126 (no aging, no estate, EM-114 children untouched). The
+  # live config/world.yaml flips enabled:true. MUST stay in sync with
+  # config/world.yaml. Thresholds are in ROUNDS (= age_ticks).
+  generations:
+    enabled: false
+    child_until: 6
+    elder_after: 60
+    inherit_credits: true
+    inherit_relationships: false
   # Wave E / EM-120 — factions, feuds & reputation: at each round boundary
   # (after the birth check) connected components over MUTUAL warm edges
   # (both directions ally|friend|partner|family AND both trusts >=
@@ -500,6 +648,60 @@ class PlanningParams:
 
 
 @dataclass
+class UniversalizationParams:
+    """EM-234 — Universalization prompting (config `world.universalization`).
+
+    The GovSim "universalization" scaffold — before acting on the commons, ask:
+    what if EVERY agent did this? — is a single ALWAYS-ON prompt block injected
+    into every agent's turn context. Because it changes the prompt for ALL agents
+    unconditionally, it would break the em161 lawful-citizen golden, so it is
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-234 — no block at all,
+    no per-agent state, so the protagonist prompt golden file and the snapshot key
+    set are unchanged (EM-234 carries NO AgentState/World state — it is a pure
+    config-read prompt block). The engine reads via the defensive
+    `_universalization_enabled` accessor with the IDENTICAL default, so an absent
+    block behaves the same (config-absent = OFF). Flip `enabled: true` for the
+    live runs to get the cheap cooperation lift (zero extra LLM calls — it rides
+    the existing turn).
+
+      enabled — master toggle (default False = zero behavioral change).
+    """
+    enabled: bool = False
+
+
+@dataclass
+class CoherenceParams:
+    """EM-224 — PIANO coherence for multi-action turns (config `world.coherence`).
+
+    A deterministic, zero-LLM coherence bottleneck that runs AFTER the turn's
+    `actions[]` are flattened (EM-199 `_normalize_steps`) and BEFORE they apply:
+    it derives a single intent from the turn's first speech act, then reconciles
+    later hostile/helpful steps against it — catching "Sure, friend!" then steal
+    from the same agent. Takes ONLY PIANO's coherence idea (NOT its
+    parallelize-to-cut-latency motive — we want MORE calls). Zero extra LLM calls.
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-224. EM-224 adds NO
+    prompt block (so the em161 golden is unchanged either way) and NO
+    AgentState/World state (so EM-155 snapshots are unchanged) — it is a pure
+    per-turn structural pass. The engine reads via the defensive
+    `_coherence_enabled` accessor with the IDENTICAL default, so an absent block
+    behaves the same (config-absent = OFF). Flip `enabled: true` for live runs.
+
+      enabled  — master toggle (default False = zero behavioral change).
+      strategy — how a flagged contradiction is handled:
+                 'annotate' (default) keeps both steps but stamps the
+                 contradicting action's event with a coherence note (the
+                 hypocrisy becomes legible, the world still mutates);
+                 'drop' suppresses the contradicting step (the speech wins) and
+                 emits a coherence_note in its place. ('reorder' is reserved →
+                 falls back to 'annotate'.)
+    """
+    enabled: bool = False
+    strategy: str = "annotate"
+
+
+@dataclass
 class ProcgenParams:
     """W11b / EM-098 — procedural town generation (config `world.procgen`).
     DEFAULT OFF: the hand-authored town stays byte-identical. When enabled, the
@@ -543,6 +745,35 @@ class LaneFailoverParams:
     enabled: bool = True
     sick_threshold: int = 3
     probe_every: int = 4
+
+
+@dataclass
+class OverflowLaneParams:
+    """EM-167 — Ollama overflow lane (config `world.overflow_lane`). Routes
+    background/supporting cadence-tier turns OFF FreeLLMAPI onto a local Ollama
+    lane as an off-critical-path overflow (the animal-task pattern): a slow,
+    non-survival lane that, if it stalls or is unreachable, falls back to the
+    existing routing WITHOUT ever hard-failing a turn. The router
+    (providers/router.py) reads this block via its defensive _ol_value accessor
+    with IDENTICAL defaults, so an absent block behaves exactly like these
+    values (byte-identical pre-EM-167 routing).
+
+      enabled — master toggle (default OFF). Routing to Ollama CHANGES behavior
+                for existing worlds, so `false`/absent ⇒ effective_profile never
+                considers the overflow path (no new spans, no detours). Flip
+                `true` once a real `ollama serve` is reachable. Live-verify of
+                the overflow lane pends a running Ollama.
+      profile — the overflow target profile name (must exist in profiles.yaml).
+                Default `ollama`; a missing / unavailable / sick target
+                self-suppresses (the turn falls back to home/failover routing).
+      tiers   — the cadence tiers whose turns spill to the overflow lane
+                (protagonist NEVER overflows — its traffic stays on the pinned
+                lane). Default background + supporting (~40% of background
+                calls move off FreeLLMAPI).
+    """
+    enabled: bool = False
+    profile: str = "ollama"
+    tiers: tuple[str, ...] = ("background", "supporting")
 
 
 @dataclass
@@ -633,6 +864,16 @@ class CrimeParams:
     vandalize_notoriety: int = 10
     heist_notoriety: int = 18
     extort_notoriety: int = 12
+    # EM-237 — harm-surface finishers (intimidate / deceive). Two reflex verbs
+    # atop the EM-240 crime path; their witnessed-notoriety bases live here so an
+    # absent `crime` block (city25 / the embedded mirror) still scores them at
+    # these exact defaults via _crime_param (config-absent = no-op). intimidate
+    # coerces a fraction of the mark's purse (lighter take than extort_max=15,
+    # heavier fear); deceive moves no credits (it plants a lie + sours trust).
+    intimidate_notoriety: int = 14
+    deceive_notoriety: int = 8
+    intimidate_take_fraction: float = 0.25
+    intimidate_max: int = 10
     steal_notoriety: int = 6
     arson_notoriety: int = 22
     bribe_efficacy: float = 0.75
@@ -648,6 +889,270 @@ class CrimeParams:
     acquittal_notoriety_relief: int = 15
     accuser_acquittal_penalty: int = 8
     released_notoriety_relief: int = 10
+
+
+@dataclass
+class NeedsParams:
+    """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
+    — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
+
+    UNLIKE energy these NEVER kill; they only bias behavior via a conditional
+    prompt line that surfaces ONLY when a need drops below its salience threshold
+    (so a full-needs agent's prompt is byte-identical to pre-EM-229 — the em161
+    golden). The engine reads this block via the defensive `_needs_param`
+    accessor with IDENTICAL defaults, so a world.yaml WITHOUT a `needs` block
+    decays at exactly these rates (no KeyError, no crash).
+
+    EW drives map energy ~30h / influence ~24h / knowledge ~36h → scaled to our
+    tick cadence as SLOWER decay than energy (energy_decay_per_turn defaults 4):
+    small non-zero per-turn defaults so the needs drift over many turns. NO
+    `enabled` flag — the decay is always-on (additive, additive-default fields),
+    and the always-on PROMPT change is kept golden-safe by the salience gate.
+
+      knowledge_decay_per_turn     — knowledge lost each turn (curiosity drive)
+      influence_decay_per_turn     — influence lost each turn (politics drive)
+      knowledge_salience_threshold — below this, the prompt nudges toward
+                                     learning/teaching (curiosity)
+      influence_salience_threshold — below this, the prompt nudges toward
+                                     politics/campaigning/social wins
+
+    Replenishment (engine `replenish_knowledge` / `replenish_influence`): learning
+    (teach/skill-gain, EM-227/228) tops up knowledge; governance/social wins top
+    up influence. Wave M2 wires those call-sites; the hooks clamp to 100.
+    """
+    knowledge_decay_per_turn: float = 0.5
+    influence_decay_per_turn: float = 0.4
+    knowledge_salience_threshold: float = 40.0
+    influence_salience_threshold: float = 40.0
+
+
+@dataclass
+class MemoryParams:
+    """EM-233 — Memory consolidation ("sleep") + soul entries (config
+    `world.memory`). Two cognition pieces ride on AgentState:
+
+      * SOUL — a tiny IMMUTABLE list of identity anchors (`soul`), seeded from a
+        persona at spawn if configured, capped at `soul_cap`. NEVER summarized;
+        injected into every prompt. An empty soul (the default) ⇒ no prompt block
+        ⇒ the em161 lawful-citizen golden is byte-identical.
+      * CONSOLIDATION — at the round boundary, an agent whose `beliefs` count
+        exceeds `consolidate_at` has its OLDEST beliefs deterministically rolled
+        into ONE digest line (a structured rollup, NO LLM in v1), keeping the
+        `consolidate_keep_recent` most-recent beliefs verbatim. Emits a `memory`
+        event. Pure arithmetic/string work — no random, no clock (EM-155).
+
+    The engine reads this block via the defensive `_memory_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `memory` block consolidates at
+    exactly these values (no KeyError, no crash) and a soulless agent stays
+    byte-identical to pre-EM-233. NO `enabled` flag by design: consolidation only
+    fires above the count ceiling (a small cast under it is untouched), and the
+    soul block is empty by default — both additive, both golden-safe.
+
+      consolidate_at          — beliefs count above which the round-boundary
+                                consolidation rolls up the oldest beliefs. The
+                                belief list is bounded at this ceiling.
+      consolidate_keep_recent — how many of the most-recent beliefs survive a
+                                consolidation verbatim (the rest fold into the
+                                single digest line). MUST be < consolidate_at.
+      soul_cap                — max identity anchors per agent (seed + restore
+                                both truncate to this).
+    """
+    consolidate_at: int = 20
+    consolidate_keep_recent: int = 8
+    soul_cap: int = 3
+
+
+@dataclass
+class SkillsParams:
+    """EM-227 — Skills & emergent professions (config `world.skills`). A
+    per-agent `skills: dict[str, int]` (skill name → level) rides on every
+    AgentState; THIS block is the world's skill LIBRARY plus the xp/level math
+    and the per-archetype seed table.
+
+      library    — {skill_name: {gates: [action, ...], min_level: int}}. Each
+                   named skill GATES a list of high-value actions: an agent
+                   attempting a gated action whose level < min_level is rejected
+                   ("you lack the <skill> skill"). An EMPTY library (the default,
+                   and any world.yaml without the block) gates NOTHING — every
+                   existing action stays open, so a pre-EM-227 world (and the
+                   em161 golden) behaves byte-identically. Survival verbs
+                   (move/work/forage/say/whisper/recharge/idle/remember) are
+                   NEVER listed here — they are always open by contract.
+      archetypes — {archetype_name: {skill: starting_level}}. The deterministic
+                   seed table: World.seed_skills(agent, archetype) grants these
+                   starting levels so identical agents diverge by archetype. No
+                   archetype / no library ⇒ a no-op seed (skill-less, golden-safe).
+      xp_per_use   — xp granted for ONE successful gated action (learn-by-doing).
+      xp_per_level — xp needed per level (a level is gained each time the
+                     accumulated xp crosses a multiple of this). Deterministic
+                     arithmetic — no random, no clock (EM-155).
+      max_level    — the level ceiling (xp past it grants no further levels).
+
+    The engine reads this block via the defensive `_skills_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `skills` block is a complete
+    no-op (no KeyError, no gating, no prompt block). NO `enabled` flag by design:
+    an empty library IS the off state (additive, golden-safe)."""
+    library: dict = field(default_factory=dict)
+    archetypes: dict = field(default_factory=dict)
+    xp_per_use: int = 10
+    xp_per_level: int = 30
+    max_level: int = 5
+
+
+@dataclass
+class CooperationParams:
+    """EM-231 — Cooperation-gated tools (config `world.cooperation`). EW's hard
+    mechanic: a class of high-value action is unlocked ONLY when both partners
+    have AGREED to cooperate.
+
+    A co-located pair forms a HANDSHAKE — one agent `offer_cooperation(target)`,
+    the other `accept_cooperation` — creating a SYMMETRIC active link on the
+    World. The ONE cooperation-gated action `co_build(building_id)` then requires
+    an active handshake with a CO-LOCATED partner: it advances a building like
+    `build_step` but by `co_build_bonus_step` (the cooperation payoff over a solo
+    build_step). A solo agent attempting co_build is cleanly rejected.
+
+    The engine reads this block via the defensive `_coop_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `cooperation` block behaves at
+    exactly these values (no KeyError). NO `enabled` flag by design — the
+    handshake + the gated verb are PURELY ADDITIVE affordances: a world that
+    never forms a handshake has no cooperation state (golden + snapshot
+    byte-identical), and co_build is simply unavailable until a pair agrees.
+
+      co_build_bonus_step — progress a single co_build adds to a building (set
+                            ABOVE buildings.build_step — default 20 — so a joint
+                            build genuinely outpaces solo work; the cooperation
+                            payoff). Clamped to >= 1.
+    """
+    co_build_bonus_step: int = 35
+
+
+@dataclass
+class VictoryArchParams:
+    """EM-232 — Peer-judged credit economy / Victory Arch (config
+    `world.victory_arch`). A periodic pitch -> peer-judge -> award cycle (EW's
+    ~2-day Victory Arch cadence).
+
+    Agents `pitch_contribution(text)` (a reflex verb) to park a pitch. At a cycle
+    boundary — `every_n_ticks` ticks — the parked pitches are ranked by a
+    DETERMINISTIC contribution score (each pitcher's durable `contributions`
+    ledger: buildings funded, skills taught, trades settled, projects built; NO
+    random, tie-broken by agent id). The top_n pitchers each get `award` credits +
+    a `reputation_bonus` renown bump + an `influence_replenish` (the EM-229 hook).
+    An `arch_award` event fires per winner; the pitch queue clears each cycle.
+    Adds reputation-through-contribution + the inequality story (a Gini/AWI read).
+
+    The engine reads this block via the defensive `_arch_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `victory_arch` block is a
+    complete NO-OP: `every_n_ticks` defaults to 0, the cycle gate is never true,
+    no pitch line is offered, and pitches simply accumulate without an award
+    (byte-identical pre-EM-232 + the em161 golden). The DEFAULT-OFF (every_n_ticks
+    0) IS the off state by design — no separate `enabled` flag (the EM-227 empty-
+    library convention). The live config sets a positive cadence to turn it on.
+
+      every_n_ticks      — the cycle cadence: a cycle fires when
+                           `tick > 0 and tick % every_n_ticks == 0`. <= 0 ⇒ OFF
+                           (no cycle ever, pitches accumulate, no prompt line).
+      award              — credits granted to each winning pitcher (the prize).
+      top_n              — how many top-ranked pitchers win each cycle (>= 1).
+      reputation_bonus   — renown points added to each winner (the durable
+                           reputation-through-contribution signal; clamped >= 0).
+      influence_replenish — influence (EM-229 need) topped up on each winner,
+                           clamped 0..100 by replenish_influence (>= 0).
+    """
+    every_n_ticks: int = 0
+    award: int = 50
+    top_n: int = 1
+    reputation_bonus: int = 5
+    influence_replenish: float = 25.0
+
+
+@dataclass
+class BoostParams:
+    """EM-235 — Boost queue (config `world.boost`). Agents spend credits to buy
+    EXTRA scheduled turns/airtime (EW's ComputeCredits) — they literally purchase
+    influence over the shared timeline (the north-star: MORE turns/LLM calls).
+
+    A reflex verb `buy_turn` deducts `cost` credits (rejected when the agent is too
+    poor) and bumps a durable per-agent counter `boosted_turns`. The scheduler
+    honors the counter: when a round's due rotation is exhausted, every agent with
+    a parked boost gets ONE extra slot (sorted by id for determinism), the counter
+    decrementing as that slot is consumed — BEFORE the round rolls over. A per-agent
+    per-round cap (`max_per_round`) bounds how many extra turns one agent buys in a
+    single round.
+
+    The engine reads this block via the defensive `_boost_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `boost` block is a complete
+    NO-OP: `cost` defaults to 0, every buy is rejected (no credits move, no boost
+    granted), no `buy_turn` line is offered, and the scheduler is untouched
+    (byte-identical pre-EM-235 + the em161 golden). The DEFAULT-OFF (cost 0) IS the
+    off state by design — no separate `enabled` flag (the EM-232 cadence-0
+    convention). The live config sets a positive cost to turn it on.
+
+      cost           — credits a single `buy_turn` deducts (the price of one extra
+                       turn). <= 0 ⇒ OFF (every buy rejected, no prompt line).
+      max_per_round  — how many extra turns ONE agent may buy in a single round
+                       (>= 1; the per-round cap resets at each round boundary).
+    """
+    cost: int = 0
+    max_per_round: int = 2
+
+
+@dataclass
+class ConstitutionParams:
+    """EM-236 — Living constitution (config `world.constitution`). An amendable,
+    ARTICLED foundational document layered over today's flat rule list.
+
+    Articles are added/edited/removed ONLY through governance: an agent proposes a
+    `propose_rule(effect="amend_constitution", op=..., text=..., article_id?=...)`
+    and it RATIFIES on a 70% SUPERMAJORITY — the same bar as `demolish`. A ratified
+    amendment mutates `World.constitution` and replenishes the proposer's influence
+    need (EM-229). The constitution is surfaced in the prompt ONLY when non-empty.
+
+    The engine reads this block via the defensive `_constitution_param` accessor
+    with IDENTICAL defaults, so a world.yaml WITHOUT a `constitution` block behaves
+    exactly like these values — i.e. byte-identical to pre-EM-236. NO `enabled`
+    flag: the constitution is empty until an amendment is RATIFIED (a deliberate
+    governance act), so an un-amended world (and every pre-EM-236 snapshot) stays
+    byte-identical without one — the constitution simply never grows.
+
+      ratify_threshold    — the YES-vote supermajority fraction an amendment needs
+                            to ratify (0.7 == 70%, the `demolish` bar). Clamped to
+                            (0, 1]; the engine accessor falls back to 0.7.
+      influence_replenish — influence (EM-229 need) topped up on the PROPOSER when
+                            an amendment ratifies (a governance win), clamped
+                            0..100 by replenish_influence (>= 0).
+    """
+    ratify_threshold: float = 0.7
+    influence_replenish: float = 15.0
+
+
+@dataclass
+class GovernanceParams:
+    """EM-203 — governance renewal cooldown (config `world.governance`). A
+    settled-signal guard over the W11b/EM-087 RENEWAL ritual: re-proposing an
+    effect identical to an ACTIVE rule is normally allowed (it tags renewal_of
+    and refreshes the law on passing — civic charm). But run-663 showed agents
+    re-passing the SAME unchanged law endlessly (work_bonus ×35, ubi ×27,
+    recharge_subsidy ×19) instead of legislating anything NEW.
+
+    When `renewal_cooldown_ticks` > 0, a renewal of an active rule whose LAST
+    activation (max of created_tick / renewed_at) is within the cooldown is
+    rejected as 'already active (settled)', nudging agents to author new work.
+
+    The engine reads this via the defensive `_governance_param` accessor with an
+    IDENTICAL default, so a world.yaml WITHOUT a `governance` block behaves
+    exactly like pre-EM-203 — i.e. byte-identical. NO `enabled` flag: the DEFAULT
+    of 0 disables the cooldown (every renewal still allowed, the W11b ritual
+    intact), so an absent block and every pre-EM-203 snapshot stay byte-identical
+    without one — the live config sets a positive window.
+
+      renewal_cooldown_ticks — ticks an unchanged ACTIVE effect-rule cannot be
+                               renewed for, measured from its last activation.
+                               0 (default) = no cooldown (pre-EM-203 behavior).
+                               Clamped to >= 0 (a malformed value falls back to 0).
+    """
+    renewal_cooldown_ticks: int = 0
 
 
 @dataclass
@@ -678,6 +1183,53 @@ class ChildrenParams:
     birth_cost_credits: int = 6
     birth_chance: float = 0.25
     pair_cooldown_ticks: int = 600
+
+
+@dataclass
+class GenerationsParams:
+    """EM-126 — generational depth (config `world.generations`). Builds on the
+    EM-114 children mechanic: agents pass through LIFE STAGES (child → adult →
+    elder) as they age, and on death pass their estate (credits, optionally
+    relationships/grudges) down the EM-114 parents/children lineage to an heir.
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-126 — no agent ages
+    (age_ticks stays 0), every agent stays `adult`, and death drops no estate
+    (the EM-114 children mechanic is untouched). So the protagonist prompt golden
+    file and the snapshot key set are unchanged, and EM-114 children keep working
+    exactly as before. The engine reads this block via the defensive
+    `_generations_param` accessor with IDENTICAL defaults, so a world.yaml WITHOUT
+    a `generations` block — and an absent block — behaves the same (config-absent
+    = OFF). Flip `enabled: true` for the live runs to get life stages + inheritance.
+
+    Aging cadence (when enabled): `age_ticks` increments ONCE per round in
+    World.age_agents (hooked at the round boundary). The thresholds are measured in
+    ROUNDS (= age_ticks): an agent with age_ticks < child_until is a `child`, with
+    age_ticks >= elder_after an `elder`, otherwise an `adult`. Promotion is PURE
+    arithmetic over age_ticks (no random, no clock — EM-155 / replay-safe).
+
+    Inheritance (when enabled): on death, the estate passes to the deceased's HEIR
+    — selected deterministically from the EM-114 lineage (living children first,
+    then living parents; the lowest-id heir among the closest tier wins, a pure
+    sorted-id pick). `inherit_credits` (default ON) transfers all the deceased's
+    credits to the heir; `inherit_relationships` (default OFF) additionally copies
+    the deceased's relationships/grudges the heir does not already hold. Emits an
+    `inherited` event. No heir ⇒ a no-op (credits simply vanish, as today).
+
+      enabled               — master toggle (default False = zero behavioral
+                              change; EM-114 children unaffected).
+      child_until           — age_ticks (rounds) below which an agent is a child.
+                              Clamped >= 0; default 6.
+      elder_after           — age_ticks (rounds) at/above which an agent is an
+                              elder. Clamped >= child_until; default 60.
+      inherit_credits       — pass the deceased's credits to the heir (default ON).
+      inherit_relationships — also copy the deceased's relationships/grudges the
+                              heir lacks (default OFF — a smaller, safer estate).
+    """
+    enabled: bool = False
+    child_until: int = 6
+    elder_after: int = 60
+    inherit_credits: bool = True
+    inherit_relationships: bool = False
 
 
 @dataclass
@@ -914,6 +1466,10 @@ class WorldParams:
     # router-matching defaults (default ON); `enabled: false` restores the
     # byte-identical pre-D3 routing.
     lane_failover: LaneFailoverParams = field(default_factory=LaneFailoverParams)
+    # EM-167 — Ollama overflow lane. Additive with router-matching defaults
+    # (default OFF); an absent block / `enabled: false` keeps the byte-identical
+    # pre-EM-167 routing (no overflow detours, no new spans).
+    overflow_lane: OverflowLaneParams = field(default_factory=OverflowLaneParams)
     # Wave D3 / EM-168 — cap-pressure governor. Additive with engine-matching
     # defaults (default ON); `enabled: false` keeps usage alerts alert-only
     # (byte-identical pre-D3 behavior).
@@ -926,11 +1482,63 @@ class WorldParams:
     # crime/justice verbs only fire on a deliberate agent turn, so a world.yaml
     # without the `crime` block restores pre-EM-240 snapshots byte-identical.
     crime: CrimeParams = field(default_factory=CrimeParams)
+    # EM-229 — three-needs psychology tunables. Additive with engine-matching
+    # defaults; the decay is always-on but the prompt surfacing is salience-gated
+    # so a world.yaml without the `needs` block keeps the em161 golden + restores
+    # pre-EM-229 snapshots byte-identical (needs default 100.0, omitted at 100).
+    needs: NeedsParams = field(default_factory=NeedsParams)
+    # EM-233 — memory consolidation + soul entries. Additive with engine-matching
+    # defaults; consolidation only fires above the count ceiling and the soul
+    # block is empty by default, so a world.yaml without the `memory` block keeps
+    # the em161 golden + restores pre-EM-233 snapshots byte-identical.
+    memory: MemoryParams = field(default_factory=MemoryParams)
+    # EM-227 — skills & emergent professions. Additive with an EMPTY library by
+    # default, so a world.yaml without the `skills` block gates NOTHING (every
+    # existing action open) — byte-identical pre-EM-227 + the em161 golden. A
+    # populated `library` gates its listed high-value actions on a min skill
+    # level; `archetypes` seeds a deterministic starting spread per persona.
+    skills: SkillsParams = field(default_factory=SkillsParams)
+    # EM-231 — cooperation-gated tools. Additive: the handshake + the gated
+    # co_build verb are pure affordances with no `enabled` flag — a world that
+    # never forms a handshake has no cooperation state (golden + snapshot
+    # byte-identical), and co_build is simply unavailable until a pair agrees.
+    cooperation: CooperationParams = field(default_factory=CooperationParams)
+    # EM-232 — peer-judged credit economy / Victory Arch. Additive with a DEFAULT-
+    # OFF cadence (every_n_ticks 0), so a world.yaml without the `victory_arch`
+    # block never fires a cycle and never offers the pitch line — byte-identical
+    # pre-EM-232 + the em161 golden. A positive cadence turns the pitch->judge->
+    # award cycle on (the live config sets one).
+    victory_arch: VictoryArchParams = field(default_factory=VictoryArchParams)
+    # EM-235 — boost queue. Additive with a DEFAULT-OFF cost (0), so a world.yaml
+    # without the `boost` block rejects every buy_turn and never offers the line —
+    # byte-identical pre-EM-235 + the em161 golden + an untouched scheduler. A
+    # positive cost turns the buy-an-extra-turn economy on (the live config sets one).
+    boost: BoostParams = field(default_factory=BoostParams)
+    # EM-236 — living constitution. Additive with engine-matching defaults; the
+    # constitution is empty until an amendment RATIFIES (a governance act), so a
+    # world.yaml without the `constitution` block — and every pre-EM-236 snapshot —
+    # is byte-identical (no `enabled` flag: the document simply never grows). The
+    # block only tunes the ratify supermajority + the proposer's influence reward.
+    constitution: ConstitutionParams = field(default_factory=ConstitutionParams)
+    # EM-203 — governance renewal cooldown. Additive with an engine-matching
+    # default of 0 (no cooldown), so a world.yaml without the `governance` block —
+    # and every pre-EM-203 snapshot — is byte-identical (no `enabled` flag: 0
+    # leaves the W11b renewal ritual untouched). A positive value blocks re-passing
+    # an unchanged active rule within the window (the run-663 work_bonus/ubi spam).
+    governance: GovernanceParams = field(default_factory=GovernanceParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
     # `enabled: false` skips the birth check entirely.
     children: ChildrenParams = field(default_factory=ChildrenParams)
+    # EM-126 — generational depth. Additive with an engine-matching default;
+    # DEFAULT OFF, so a world.yaml without the `generations` block is byte-identical
+    # to pre-EM-126 (prompt golden + snapshot key set) — no agent ages, every agent
+    # stays adult, and death drops no estate, so the EM-114 children mechanic is
+    # untouched. `enabled: true` turns on life stages (child→adult→elder aging
+    # cadence) + inheritance of credits (and optionally relationships) to a lineage
+    # heir on death (emits an `inherited` event).
+    generations: GenerationsParams = field(default_factory=GenerationsParams)
     # Wave E / EM-184 — world-scale god miracles. Additive with
     # engine-matching defaults (default ON); `enabled: false` rejects the
     # world kinds only — targeted bless/grant stay byte-identical.
@@ -944,6 +1552,21 @@ class WorldParams:
     # `planning` block is byte-identical to pre-EM-223 (prompt golden +
     # snapshot key set). `enabled: true` activates the plan layer.
     planning: PlanningParams = field(default_factory=PlanningParams)
+    # EM-234 — universalization prompting (GovSim scaffold). Additive with an
+    # engine-matching default; DEFAULT OFF, so a world.yaml without the
+    # `universalization` block is byte-identical to pre-EM-234 (prompt golden +
+    # snapshot key set — EM-234 carries NO per-agent/world state). `enabled: true`
+    # injects the always-on "what if EVERY agent did this?" commons-reasoning
+    # block into every turn (zero extra LLM calls — rides the existing turn).
+    universalization: UniversalizationParams = field(
+        default_factory=UniversalizationParams)
+    # EM-224 — PIANO coherence for multi-action turns. Additive with an
+    # engine-matching default; DEFAULT OFF, so a world.yaml without the
+    # `coherence` block is byte-identical to pre-EM-224 (prompt golden +
+    # snapshot key set — EM-224 carries NO prompt block and NO agent/world
+    # state). `enabled: true` runs the deterministic coherence bottleneck over
+    # each turn's resolved actions[] (zero extra LLM calls — rides the turn).
+    coherence: CoherenceParams = field(default_factory=CoherenceParams)
     # EM-123 — zoned districts that deepen as megaprojects complete. Additive
     # with engine-matching defaults (default ON); `enabled: false` keeps every
     # district at tier 1 (byte-identical pre-EM-123: no district_grew events,
@@ -1254,6 +1877,40 @@ def _parse_planning(raw: dict | None) -> PlanningParams:
     )
 
 
+def _parse_universalization(raw: dict | None) -> UniversalizationParams:
+    """Parse the optional `world.universalization` block (EM-234).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-234 (prompt golden +
+    snapshot key set)."""
+    if not isinstance(raw, dict):
+        return UniversalizationParams()
+    d = UniversalizationParams()
+    return UniversalizationParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+    )
+
+
+_COHERENCE_STRATEGIES = ("annotate", "drop")
+
+
+def _parse_coherence(raw: dict | None) -> CoherenceParams:
+    """Parse the optional `world.coherence` block (EM-224).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-224 (prompt golden +
+    snapshot key set — EM-224 carries NO prompt block and NO agent/world state).
+    An unknown strategy falls back to the default ('annotate')."""
+    if not isinstance(raw, dict):
+        return CoherenceParams()
+    d = CoherenceParams()
+    strategy = raw.get("strategy", d.strategy)
+    if strategy not in _COHERENCE_STRATEGIES:
+        strategy = d.strategy
+    return CoherenceParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        strategy=strategy,
+    )
+
+
 def _parse_procgen(raw: dict | None) -> ProcgenParams:
     """Parse the optional `world.procgen` block (W11b / EM-098). Absent/empty ->
     disabled defaults (the hand-authored town stays). `kind_weights` merges the
@@ -1367,6 +2024,36 @@ def _parse_lane_failover(raw: dict | None) -> LaneFailoverParams:
     )
 
 
+def _parse_overflow_lane(raw: dict | None) -> OverflowLaneParams:
+    """Parse the optional `world.overflow_lane` block (EM-167). Absent/empty/
+    malformed -> router-matching defaults (overflow OFF). `profile` falls back
+    to the default when not a non-empty string; `tiers` falls back to the
+    default when not a list of strings (and is normalized to a tuple so the
+    config_json fork seam round-trips: asdict serializes a tuple to a list,
+    this reparses it to a tuple)."""
+    if not isinstance(raw, dict):
+        return OverflowLaneParams()
+    d = OverflowLaneParams()
+
+    profile = raw.get("profile", d.profile)
+    if not isinstance(profile, str) or not profile:
+        profile = d.profile
+
+    tiers_raw = raw.get("tiers", d.tiers)
+    if isinstance(tiers_raw, (list, tuple)) and all(
+        isinstance(t, str) for t in tiers_raw
+    ):
+        tiers = tuple(tiers_raw)
+    else:
+        tiers = d.tiers
+
+    return OverflowLaneParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        profile=profile,
+        tiers=tiers,
+    )
+
+
 def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
     """Parse the optional `world.cap_governor` block (Wave D3 / EM-168).
     Absent/empty/malformed -> engine-matching defaults (governor ON)."""
@@ -1460,6 +2147,11 @@ def _parse_crime(raw: dict | None) -> CrimeParams:
         vandalize_notoriety=_int("vandalize_notoriety", d.vandalize_notoriety),
         heist_notoriety=_int("heist_notoriety", d.heist_notoriety),
         extort_notoriety=_int("extort_notoriety", d.extort_notoriety),
+        intimidate_notoriety=_int("intimidate_notoriety", d.intimidate_notoriety),
+        deceive_notoriety=_int("deceive_notoriety", d.deceive_notoriety),
+        intimidate_take_fraction=_float(
+            "intimidate_take_fraction", d.intimidate_take_fraction),
+        intimidate_max=_int("intimidate_max", d.intimidate_max),
         steal_notoriety=_int("steal_notoriety", d.steal_notoriety),
         arson_notoriety=_int("arson_notoriety", d.arson_notoriety),
         bribe_efficacy=_float("bribe_efficacy", d.bribe_efficacy),
@@ -1482,6 +2174,234 @@ def _parse_crime(raw: dict | None) -> CrimeParams:
         released_notoriety_relief=_int(
             "released_notoriety_relief", d.released_notoriety_relief),
     )
+
+
+def _parse_needs(raw: dict | None) -> NeedsParams:
+    """Parse the optional `world.needs` block (EM-229).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_crime`; all fields are floats. Decay rates clamp to >= 0 (a negative
+    decay would REPLENISH a need each turn — never intended)."""
+    if not isinstance(raw, dict):
+        return NeedsParams()
+    d = NeedsParams()
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return NeedsParams(
+        knowledge_decay_per_turn=max(0.0, _float(
+            "knowledge_decay_per_turn", d.knowledge_decay_per_turn)),
+        influence_decay_per_turn=max(0.0, _float(
+            "influence_decay_per_turn", d.influence_decay_per_turn)),
+        knowledge_salience_threshold=_float(
+            "knowledge_salience_threshold", d.knowledge_salience_threshold),
+        influence_salience_threshold=_float(
+            "influence_salience_threshold", d.influence_salience_threshold),
+    )
+
+
+def _parse_memory(raw: dict | None) -> MemoryParams:
+    """Parse the optional `world.memory` block (EM-233).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_needs`; all fields are ints clamped to >= 0 (a negative ceiling would
+    consolidate every turn — never intended)."""
+    if not isinstance(raw, dict):
+        return MemoryParams()
+    d = MemoryParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return MemoryParams(
+        consolidate_at=_int("consolidate_at", d.consolidate_at),
+        consolidate_keep_recent=_int(
+            "consolidate_keep_recent", d.consolidate_keep_recent),
+        soul_cap=_int("soul_cap", d.soul_cap),
+    )
+
+
+def _parse_skills(raw: dict | None) -> SkillsParams:
+    """Parse the optional `world.skills` block (EM-227).
+    Absent/empty/malformed -> a SkillsParams with an EMPTY library (gates
+    nothing — byte-identical pre-EM-227 + the em161 golden). Each key falls back
+    to its default individually; the library/archetypes are deep-coerced so a
+    malformed skill/archetype entry is dropped rather than breaking the block."""
+    if not isinstance(raw, dict):
+        return SkillsParams()
+    d = SkillsParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    library: dict = {}
+    raw_lib = raw.get("library")
+    if isinstance(raw_lib, dict):
+        for name, spec in raw_lib.items():
+            if not isinstance(name, str) or not isinstance(spec, dict):
+                continue
+            gates = spec.get("gates")
+            gate_list = [str(g) for g in gates if isinstance(g, str)] \
+                if isinstance(gates, list) else []
+            try:
+                min_level = max(1, int(spec.get("min_level", 1)))
+            except (TypeError, ValueError):
+                min_level = 1
+            library[name] = {"gates": gate_list, "min_level": min_level}
+
+    archetypes: dict = {}
+    raw_arch = raw.get("archetypes")
+    if isinstance(raw_arch, dict):
+        for arch, table in raw_arch.items():
+            if not isinstance(arch, str) or not isinstance(table, dict):
+                continue
+            seeded: dict = {}
+            for skill, level in table.items():
+                if not isinstance(skill, str):
+                    continue
+                try:
+                    lvl = max(0, int(level))
+                except (TypeError, ValueError):
+                    continue
+                if lvl > 0:
+                    seeded[skill] = lvl
+            if seeded:
+                archetypes[arch] = seeded
+
+    return SkillsParams(
+        library=library,
+        archetypes=archetypes,
+        xp_per_use=_int("xp_per_use", d.xp_per_use),
+        xp_per_level=max(1, _int("xp_per_level", d.xp_per_level)),
+        max_level=_int("max_level", d.max_level),
+    )
+
+
+def _parse_cooperation(raw: dict | None) -> CooperationParams:
+    """Parse the optional `world.cooperation` block (EM-231).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_memory`; the bonus step clamps to >= 1 (a non-positive joint build
+    would never advance — never intended)."""
+    if not isinstance(raw, dict):
+        return CooperationParams()
+    d = CooperationParams()
+    try:
+        bonus = max(1, int(raw.get("co_build_bonus_step", d.co_build_bonus_step)))
+    except (TypeError, ValueError):
+        bonus = d.co_build_bonus_step
+    return CooperationParams(co_build_bonus_step=bonus)
+
+
+def _parse_victory_arch(raw: dict | None) -> VictoryArchParams:
+    """Parse the optional `world.victory_arch` block (EM-232).
+    Absent/empty/malformed -> engine-matching defaults (every_n_ticks 0 ⇒ OFF, a
+    complete no-op). Each key falls back to its default individually (a malformed
+    value never breaks the block). Mirrors `_parse_cooperation`; cadence/award/
+    bonus clamp to >= 0 and top_n to >= 1 (a non-positive top_n would award
+    nobody — never intended), so a tampered value can never crash a cycle."""
+    if not isinstance(raw, dict):
+        return VictoryArchParams()
+    d = VictoryArchParams()
+
+    def _int_nonneg(key, fallback):
+        try:
+            return max(0, int(raw.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    try:
+        top_n = max(1, int(raw.get("top_n", d.top_n)))
+    except (TypeError, ValueError):
+        top_n = d.top_n
+    try:
+        influence = max(0.0, float(raw.get("influence_replenish", d.influence_replenish)))
+    except (TypeError, ValueError):
+        influence = d.influence_replenish
+    return VictoryArchParams(
+        every_n_ticks=_int_nonneg("every_n_ticks", d.every_n_ticks),
+        award=_int_nonneg("award", d.award),
+        top_n=top_n,
+        reputation_bonus=_int_nonneg("reputation_bonus", d.reputation_bonus),
+        influence_replenish=influence,
+    )
+
+
+def _parse_boost(raw: dict | None) -> BoostParams:
+    """Parse the optional `world.boost` block (EM-235).
+    Absent/empty/malformed -> engine-matching defaults (cost 0 ⇒ OFF, a complete
+    no-op). Each key falls back to its default individually (a malformed value
+    never breaks the block). Mirrors `_parse_victory_arch`; cost clamps to >= 0
+    and max_per_round to >= 1 (a non-positive cap would forbid every buy — never
+    intended), so a tampered value can never crash a buy or the scheduler."""
+    if not isinstance(raw, dict):
+        return BoostParams()
+    d = BoostParams()
+
+    def _int_nonneg(key, fallback):
+        try:
+            return max(0, int(raw.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    try:
+        max_per_round = max(1, int(raw.get("max_per_round", d.max_per_round)))
+    except (TypeError, ValueError):
+        max_per_round = d.max_per_round
+    return BoostParams(
+        cost=_int_nonneg("cost", d.cost),
+        max_per_round=max_per_round,
+    )
+
+
+def _parse_constitution(raw: dict | None) -> ConstitutionParams:
+    """Parse the optional `world.constitution` block (EM-236).
+    Absent/empty/malformed -> engine-matching defaults (the un-amended world is a
+    complete no-op). Each key falls back to its default individually (a malformed
+    value never breaks the block). ratify_threshold clamps to (0, 1] (a value <= 0
+    would ratify on the first vote; > 1 would be impossible to pass — never
+    intended), influence_replenish clamps to >= 0."""
+    if not isinstance(raw, dict):
+        return ConstitutionParams()
+    d = ConstitutionParams()
+    try:
+        thr = float(raw.get("ratify_threshold", d.ratify_threshold))
+        if not (0.0 < thr <= 1.0):
+            thr = d.ratify_threshold
+    except (TypeError, ValueError):
+        thr = d.ratify_threshold
+    try:
+        infl = max(0.0, float(raw.get("influence_replenish", d.influence_replenish)))
+    except (TypeError, ValueError):
+        infl = d.influence_replenish
+    return ConstitutionParams(ratify_threshold=thr, influence_replenish=infl)
+
+
+def _parse_governance(raw: dict | None) -> GovernanceParams:
+    """Parse the optional `world.governance` block (EM-203).
+    Absent/empty/malformed -> engine-matching defaults (renewal_cooldown_ticks 0
+    == no cooldown == pre-EM-203 behavior). The single key falls back to its
+    default individually and clamps to >= 0 (a negative/malformed value never
+    breaks the block)."""
+    if not isinstance(raw, dict):
+        return GovernanceParams()
+    d = GovernanceParams()
+    try:
+        cooldown = max(0, int(raw.get("renewal_cooldown_ticks",
+                                      d.renewal_cooldown_ticks)))
+    except (TypeError, ValueError):
+        cooldown = d.renewal_cooldown_ticks
+    return GovernanceParams(renewal_cooldown_ticks=cooldown)
 
 
 def _parse_children(raw: dict | None) -> ChildrenParams:
@@ -1511,6 +2431,35 @@ def _parse_children(raw: dict | None) -> ChildrenParams:
         birth_cost_credits=_nonneg_int("birth_cost_credits", d.birth_cost_credits),
         birth_chance=_unit_float("birth_chance", d.birth_chance),
         pair_cooldown_ticks=_nonneg_int("pair_cooldown_ticks", d.pair_cooldown_ticks),
+    )
+
+
+def _parse_generations(raw: dict | None) -> GenerationsParams:
+    """Parse the optional `world.generations` block (EM-126).
+    Absent/empty/malformed -> engine-matching defaults (enabled=False == zero
+    behavioral change == pre-EM-126: no aging, no inheritance, EM-114 children
+    untouched). Each key falls back to its default individually; the round
+    thresholds clamp to >= 0 and elder_after is held >= child_until (a malformed/
+    inverted pair never produces an impossible 'never adult' band)."""
+    if not isinstance(raw, dict):
+        return GenerationsParams()
+    d = GenerationsParams()
+
+    def _nonneg_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    child_until = _nonneg_int("child_until", d.child_until)
+    elder_after = max(child_until, _nonneg_int("elder_after", d.elder_after))
+    return GenerationsParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        child_until=child_until,
+        elder_after=elder_after,
+        inherit_credits=bool(raw.get("inherit_credits", d.inherit_credits)),
+        inherit_relationships=bool(
+            raw.get("inherit_relationships", d.inherit_relationships)),
     )
 
 
@@ -1658,12 +2607,24 @@ def _parse_world(
         cadence=_parse_cadence(w.get("cadence")),
         memory_retrieval=_parse_memory_retrieval(w.get("memory_retrieval")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
+        overflow_lane=_parse_overflow_lane(w.get("overflow_lane")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),
+        needs=_parse_needs(w.get("needs")),
+        memory=_parse_memory(w.get("memory")),
+        skills=_parse_skills(w.get("skills")),
+        cooperation=_parse_cooperation(w.get("cooperation")),
+        victory_arch=_parse_victory_arch(w.get("victory_arch")),
+        boost=_parse_boost(w.get("boost")),
+        constitution=_parse_constitution(w.get("constitution")),
+        governance=_parse_governance(w.get("governance")),
         children=_parse_children(w.get("children")),
+        generations=_parse_generations(w.get("generations")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
+        universalization=_parse_universalization(w.get("universalization")),
+        coherence=_parse_coherence(w.get("coherence")),
         miracles=_parse_miracles(w.get("miracles")),
         district_growth=_parse_district_growth(w.get("district_growth")),
     )

@@ -99,6 +99,47 @@ describe('GRANT — the picker + both halves of the flow', () => {
     expect(screen.getByRole('button', { name: 'Grant via grant_credits' })).toBeInTheDocument();
   });
 
+  // EM-191 — the petitioner's (injection-shaped) words must be typographically
+  // quarantined from the god's own UI voice: they render in their own nested
+  // <blockquote> with the italic + left-border quote idiom, NOT blended into the
+  // surrounding god-console chrome (the action buttons, the "petition" label).
+  it('renders the quoted petition in its OWN distinct nested block, set apart from god’s voice', async () => {
+    const user = userEvent.setup();
+    render(<EventFeed events={[petition()]} onGrantReply={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Grant this petition' }));
+
+    // The quote lives in its own dedicated element — not flattened into the
+    // god-console chrome with the action buttons.
+    const quote = screen.getByTestId('grant-petition-quote');
+    expect(quote.tagName).toBe('BLOCKQUOTE');
+    expect(quote).toHaveTextContent('please send rain for the gardens');
+
+    // Distinct typographic treatment: italic + a left-border quote rule, via
+    // token-disciplined classes (no hardcoded hex).
+    expect(quote.className).toMatch(/\bitalic\b/);
+    expect(quote.className).toMatch(/border-l-2/);
+    expect(quote.className).toMatch(/border-lab-/);
+    expect(quote.className).toMatch(/text-lab-/);
+
+    // The god's action verbs ("Granted" via the buttons) are NOT inside the
+    // petitioner's quote block — the two voices never share an element.
+    expect(quote.textContent).not.toMatch(/grant via/i);
+
+    // The petitioner's words also do not bleed into a grant button's label.
+    const sendRain = screen.getByRole('button', { name: 'Grant via send_rain' });
+    expect(sendRain.textContent).not.toMatch(/please send rain for the gardens/);
+  });
+
+  it('shows a placeholder in the distinct quote block when the petition has no text', async () => {
+    const user = userEvent.setup();
+    const blank = petition({ text: '', payload: { place: 'plaza', text: '' } });
+    render(<EventFeed events={[blank]} onGrantReply={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Grant this petition' }));
+    const quote = screen.getByTestId('grant-petition-quote');
+    expect(quote.tagName).toBe('BLOCKQUOTE');
+    expect(quote).toHaveTextContent('(no petition text)');
+  });
+
   it('a WORLD kind posts {kind} with NO agent_id key, then replies quoting the petition', async () => {
     const user = userEvent.setup();
     const onGrantReply = vi.fn();

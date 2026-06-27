@@ -21,24 +21,23 @@ logging.basicConfig(
 log = logging.getLogger("petridish.run")
 
 
-async def run_headless(ticks: int, profile_override: str | None) -> None:
-    from petridish.config.loader import load_config
+def build_world(cfg):
+    """Build the (world, router, runtime, repo) quad for a headless run.
+
+    EM-186 — D3 wiring parity with the API server: this MIRRORS
+    `petridish.api.app._build_world` so the headless entry point constructs the
+    Router with the SAME keyword params as the server. Previously `run.py`
+    called the bare `Router(cfg.profiles)`, dropping:
+      • `world.lane_failover` (EM-177) — so lane failover never engaged headless,
+      • `world.cache` (W7/EM-068) — so the Router fell back to its default-ON
+        decision cache even when the shipped yaml disables it.
+    Defaults coincide with the shipped yaml, so a config WITHOUT these blocks
+    builds a Router byte-identical to the old behavior (defensive getattr).
+    """
     from petridish.engine.world import World, AgentState, PlaceState
-    from petridish.engine.loop import TickLoop
     from petridish.agents.runtime import AgentRuntime
     from petridish.persistence.repository import SQLiteRepository
     from petridish.providers.router import Router
-    from petridish.providers.mock import MockProvider
-
-    # Reset mock scripts for a fresh run
-    MockProvider.reset_scripts()
-
-    cfg = load_config(profile_override=profile_override)
-
-    log.info("=== PetriDishOfMadness Headless Run ===")
-    log.info("Ticks: %d | Profile override: %s", ticks, profile_override or "none")
-    log.info("Agents: %s", [a.name for a in cfg.agents])
-    log.info("Profiles: %s", [p.name for p in cfg.profiles])
 
     places = [
         PlaceState(id=p.id, name=p.name, x=p.x, y=p.y,
@@ -64,12 +63,147 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
     ]
 
     world = World(params=cfg.world, places=places, agents=agents)
-    router = Router(cfg.profiles)
+    # Wave D3 / EM-177 — thread the `world.lane_failover` block to the router
+    # (defensive getattr: pre-D3 configs lack the field and get the defaults).
+    # W7 / EM-068 — thread the `world.cache` block too: the decision cache is
+    # config-gated (OFF since 2026-06-12 per the EM-198 rescope). Honor the
+    # config so `enabled: false` actually disables it; defensive getattr keeps
+    # cache-less configs on the pre-W7 default-ON behavior. This is the EXACT
+    # construction app.py._build_world uses.
+    cache_cfg = getattr(cfg.world, "cache", None)
+    router = Router(
+        cfg.profiles,
+        lane_failover=getattr(cfg.world, "lane_failover", None),
+        # EM-167 — thread the `world.overflow_lane` block too (defensive getattr:
+        # pre-EM-167 configs lack the field and get the OFF defaults).
+        overflow_lane=getattr(cfg.world, "overflow_lane", None),
+        cache_enabled=bool(getattr(cache_cfg, "enabled", True)),
+        cache_max=int(getattr(cache_cfg, "max_entries", 512)),
+    )
+
+    # Register each agent's profile with the router
     for agent in agents:
         router.reassign(agent.id, agent.profile)
 
     repo = SQLiteRepository(getattr(cfg.world, "db_path", ":memory:") or ":memory:")
     runtime = AgentRuntime(world, router)
+    return world, router, runtime, repo
+
+
+def wire_router_sinks(world, router, loop) -> None:
+    """EM-186 — wire the EM-083/EM-168/EM-177 sinks + usage-window probe onto
+    the headless Router/world, MIRRORING `api/app.py`'s lifespan wiring so the
+    cap-pressure governor (EM-168) and lane failover (EM-177) behave identically
+    headless and on the server.
+
+    The server reads module-global `_loop`/`_world`/`_router`; here the same
+    three callbacks close over the passed-in `loop`/`world`/`router` and route
+    through `loop._emit_event` (persist + broadcast, exactly like the server's
+    `_emit_usage_alert`/`_emit_lane_detour`). Defensive: alerting/governing must
+    never break a turn.
+    """
+    def _usage_alert_window() -> str:
+        # The UsageAlertTracker's CURRENT UTC-day window key, or "" when unknown
+        # (EM-168). A pure attribute peek — the tracker owns every clock read.
+        tracker = getattr(router, "_usage_alerts", None)
+        return str(getattr(tracker, "_window", "") or "")
+
+    def _apply_cap_governor(alert: dict) -> None:
+        # EM-168 — demote agents on the alerting lane one cadence tier for the
+        # rest of the tracker's day window (world.apply_cap_pressure owns the
+        # rules). Same global-reading shape as the server's _apply_cap_governor.
+        provider = alert.get("provider")
+        if not provider:
+            return
+        try:
+            apply = getattr(world, "apply_cap_pressure", None)
+            if not callable(apply):
+                return
+            events = apply(str(provider), _usage_alert_window())
+            for evt in events:
+                loop._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("cap governor failed for %s: %s", provider, exc)
+
+    def _emit_usage_alert(alert: dict) -> None:
+        # W11b / EM-083 — one usage_alert row per provider/metric/day window,
+        # then EM-168 drives the cap-pressure governor. Mirrors app.py.
+        try:
+            loop._emit_event({
+                "kind": "usage_alert",
+                "actor_type": "system",
+                "actor_id": None,
+                "profile": alert.get("provider"),
+                "text": (
+                    f"{alert.get('provider')} usage crossed {alert.get('pct')}% "
+                    f"of its {alert.get('metric')} day cap ({alert.get('limit')})."
+                ),
+                "payload": {
+                    "provider": alert.get("provider"),
+                    "metric": alert.get("metric"),
+                    "pct": alert.get("pct"),
+                    "limit": alert.get("limit"),
+                },
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("usage_alert emission failed: %s", exc)
+        _apply_cap_governor(alert)
+
+    def _emit_lane_detour(payload: dict) -> None:
+        # Wave D3 / EM-177 — one lane_detour row per streak edge. Mirrors app.py.
+        try:
+            agent = (world.agents or {}).get(payload.get("agent_id"))
+            who = agent.name if agent is not None else (
+                payload.get("agent_id") or "an agent")
+            home = payload.get("home")
+            substitute = payload.get("substitute")
+            phase = payload.get("phase")
+            if phase == "recovered":
+                text = f"✓ {home} lane recovered — {who} is back home"
+            else:
+                text = (f"⚠ {home} lane is degraded — "
+                        f"{who} is borrowing {substitute}")
+            loop._emit_event({
+                "kind": "lane_detour",
+                "actor_type": "system",
+                "actor_id": None,
+                "profile": home,
+                "text": text,
+                "payload": {
+                    "phase": phase,
+                    "home": home,
+                    "substitute": substitute,
+                    "agent_id": payload.get("agent_id"),
+                },
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("lane_detour emission failed: %s", exc)
+
+    # W11b / EM-083 — route usage_alert payloads into the event log.
+    router.set_usage_alert_sink(_emit_usage_alert)
+    # Wave D3 / EM-177 — route lane_detour streak-edge payloads the same way.
+    router.set_lane_event_sink(_emit_lane_detour)
+    # Wave D3 / EM-168 — zero-clock-read peek at the tracker's day window so the
+    # scheduler can restore cap-governor demotions at rollover.
+    world.set_usage_window_probe(_usage_alert_window)
+
+
+async def run_headless(ticks: int, profile_override: str | None) -> None:
+    from petridish.config.loader import load_config
+    from petridish.engine.loop import TickLoop
+    from petridish.providers.mock import MockProvider
+
+    # Reset mock scripts for a fresh run
+    MockProvider.reset_scripts()
+
+    cfg = load_config(profile_override=profile_override)
+
+    log.info("=== PetriDishOfMadness Headless Run ===")
+    log.info("Ticks: %d | Profile override: %s", ticks, profile_override or "none")
+    log.info("Agents: %s", [a.name for a in cfg.agents])
+    log.info("Profiles: %s", [p.name for p in cfg.profiles])
+
+    world, router, runtime, repo = build_world(cfg)
     # Inject world into mock providers so they can vote dynamically
     router.inject_world(world)
 
@@ -92,6 +226,9 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
         broadcaster=collector,
     )
     loop_ctrl.init_run(cfg)
+    # Wave D3 / EM-186 — wire the EM-083/EM-168/EM-177 sinks + usage-window probe
+    # onto the headless router/world, parity with api/app.py's lifespan.
+    wire_router_sinks(world, router, loop_ctrl)
 
     # Drive the loop manually: run exactly `ticks` turns
     log.info("Starting %d ticks...", ticks)
@@ -104,6 +241,7 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             continue
 
         world.apply_energy_decay(agent)
+        world.apply_needs_decay(agent)  # EM-229 — knowledge + influence drift
         raw_result = await runtime.run_turn(agent)
 
         if "_multi" in raw_result:
@@ -141,6 +279,23 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             }
             collector(death_evt)
             repo.save_agent(loop_ctrl._run_id or 1, agent, world.tick)
+            # EM-126 — inheritance: pass the deceased's estate down its EM-114
+            # lineage to a deterministic heir (parity with the loop.py death path),
+            # emitting an `inherited` event. Gated behind world.generations.enabled:
+            # OFF (the default) ⇒ None ⇒ nothing moves (byte-identical pre-EM-126).
+            inherit_evt = world.apply_inheritance(agent)
+            if inherit_evt is not None:
+                stamped_inh = {
+                    "type": "event",
+                    "seq": i,
+                    "tick": world.tick,
+                    **inherit_evt,
+                }
+                collector(stamped_inh)
+                heir_id = inherit_evt.get("payload", {}).get("heir_id")
+                heir = world.agents.get(heir_id) if heir_id else None
+                if heir is not None:
+                    repo.save_agent(loop_ctrl._run_id or 1, heir, world.tick)
 
         repo.save_agent(loop_ctrl._run_id or 1, agent, world.tick)
 

@@ -282,6 +282,23 @@ function SpawnForm({
   const [picked, setPicked] = useState<PersonaRow | null>(null);
   const [editedSincePick, setEditedSincePick] = useState(false);
 
+  // ── EM-202 (A/B persona-across-models) ──────────────────────────────────
+  // "A/B test" toggle reveals a model multi-select. With ≥2 models picked the
+  // spawn fires the A/B group (backend god-mode only): one variant per model,
+  // sharing this form's name/personality. Off ⇒ the single-profile spawn is
+  // unchanged. The toggle is god-mode-only (the backend 400s ab_models under
+  // governance), so flipping to GOV clears it.
+  const [abEnabled, setAbEnabled] = useState(false);
+  const [abModels, setAbModels] = useState<ReadonlySet<string>>(new Set());
+  const toggleAbModel = useCallback((profileName: string) => {
+    setAbModels((cur) => {
+      const next = new Set(cur);
+      if (next.has(profileName)) next.delete(profileName);
+      else next.add(profileName);
+      return next;
+    });
+  }, []);
+
   const handlePickPersona = useCallback((p: PersonaRow | null) => {
     setPicked(p);
     setEditedSincePick(false);
@@ -306,8 +323,24 @@ function SpawnForm({
   // Data-driven model color when known; null falls back to a lab token class
   // (no hardcoded hex literal — design-token-guard clean).
   const swatch = selectedProfile?.color ?? null;
-  const canSpawn = name.trim().length > 0 && !!profile && !!location;
   const sendPersona = picked !== null && !editedSincePick;
+  // EM-202: the A/B group fires only in god mode with ≥2 models picked. When
+  // it's armed the single profile is irrelevant (each variant supplies its own).
+  const abActive = abEnabled && mode === 'god';
+  const abPicked = useMemo(
+    () => profiles.filter((p) => abModels.has(p.name)),
+    [profiles, abModels],
+  );
+  const abReady = abActive && abPicked.length >= 2;
+  const canSpawn =
+    name.trim().length > 0 && !!location && (abActive ? abReady : !!profile);
+
+  // GOV doesn't support ab_models (the backend 400s it) — drop the A/B arm when
+  // the operator switches to governance so a stale group can't leak through.
+  const setModeSafe = useCallback((m: SpawnMode) => {
+    setMode(m);
+    if (m !== 'god') setAbEnabled(false);
+  }, []);
 
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
@@ -321,6 +354,9 @@ function SpawnForm({
         mode,
         // EM-092: persona name rides along only while untouched.
         ...(sendPersona && picked ? { persona: picked.name } : {}),
+        // EM-202: the A/B group — one variant per model. Only when ≥2 picked
+        // in god mode; otherwise omitted entirely (single-profile spawn).
+        ...(abReady ? { ab_models: abPicked.map((p) => p.name) } : {}),
       });
       setJustSpawned(name.trim());
       setName('');
@@ -329,7 +365,7 @@ function SpawnForm({
       setEditedSincePick(false);
       window.setTimeout(() => setJustSpawned(null), 2200);
     },
-    [canSpawn, name, personality, profile, location, mode, onSpawn, sendPersona, picked],
+    [canSpawn, name, personality, profile, location, mode, onSpawn, sendPersona, picked, abReady, abPicked],
   );
 
   return (
@@ -444,7 +480,7 @@ function SpawnForm({
             <button
               key={m}
               type="button"
-              onClick={() => setMode(m)}
+              onClick={() => setModeSafe(m)}
               role="radio"
               aria-checked={mode === m}
               className={
@@ -465,14 +501,73 @@ function SpawnForm({
         </p>
       </div>
 
+      {/* EM-202: A/B persona-across-models — spawn the SAME persona on N models
+          at once ("which model plays Vesper better?"). God mode only; the
+          backend 400s ab_models under governance, so the toggle disables there.
+          With ≥2 models picked the single Model-profile select above is ignored
+          (each variant supplies its own). lab-* tokens only; the data-driven
+          chip colors mirror the established ReassignRow swatch idiom. */}
+      <div className="space-y-1 border-t border-lab-border/40 pt-2">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={abEnabled}
+            disabled={mode !== 'god'}
+            onChange={(e) => setAbEnabled(e.target.checked)}
+            className="accent-lab-acid"
+            aria-label="A/B test this persona across multiple models"
+          />
+          <span className="font-mono text-[10px] text-lab-muted uppercase tracking-wider">
+            ⚗ A/B test across models
+          </span>
+        </label>
+        {mode !== 'god' ? (
+          <p className="font-mono text-[9px] text-lab-dim leading-snug">
+            A/B groups spawn immediately — switch to ⚡ GOD to use them.
+          </p>
+        ) : abEnabled ? (
+          <div className="space-y-1">
+            <div className="flex flex-wrap gap-1" role="group" aria-label="A/B models">
+              {profiles.map((p) => {
+                const on = abModels.has(p.name);
+                return (
+                  <button
+                    key={p.name}
+                    type="button"
+                    onClick={() => toggleAbModel(p.name)}
+                    aria-pressed={on}
+                    aria-label={`Toggle ${p.name} in the A/B group`}
+                    title={p.available === false ? `${p.name} (unavailable)` : p.name}
+                    className={`font-mono text-[9px] px-1 py-px border rounded-sm cursor-pointer
+                                transition-colors duration-100 whitespace-nowrap
+                                ${on ? '' : 'border-lab-border text-lab-muted hover:border-lab-acid hover:text-lab-acid'}`}
+                    style={on ? { color: p.color, borderColor: p.color, backgroundColor: `color-mix(in srgb, ${p.color} 13%, transparent)` } : undefined}
+                  >
+                    {on ? '✓ ' : ''}{p.name}{p.available === false ? ' (unavail)' : ''}
+                  </button>
+                );
+              })}
+            </div>
+            <p
+              className={`font-mono text-[9px] leading-snug ${abReady ? 'text-lab-acid' : 'text-lab-dim'}`}
+              role="status"
+            >
+              {abReady
+                ? `${abPicked.length} models — spawns ${abPicked.length} variants sharing the name “${name.trim() || '…'}”.`
+                : 'Pick at least 2 models to fire an A/B group.'}
+            </p>
+          </div>
+        ) : null}
+      </div>
+
       {/* Submit */}
       <button
         type="submit"
         className="lab-btn lab-btn-primary w-full"
         disabled={!canSpawn}
-        aria-label="Spawn agent"
+        aria-label={abReady ? 'Spawn A/B group' : 'Spawn agent'}
       >
-        ✚ SPAWN AGENT
+        {abReady ? `⚗ SPAWN A/B ×${abPicked.length}` : '✚ SPAWN AGENT'}
       </button>
       {justSpawned && (
         <p

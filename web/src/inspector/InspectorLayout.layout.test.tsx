@@ -1,15 +1,20 @@
 /**
- * Wave G (EM-197) — the viewport-fit data-dense annex (contract §G2).
+ * Wave G (EM-197) — the viewport-fit data-dense annex (contract §G2), as
+ * carried forward through Wave M (EM-204) — the tabbed IA.
  *
- * Layout law, structurally pinned (jsdom can't lay out, so the class sets ARE
- * the contract):
+ * EM-204 grouped the formerly-flat 9-panel grid into four TABS (Forensics /
+ * Society / Chaos / Runs); only the active tab's panels mount. The wave-G
+ * layout law is UNCHANGED and still structurally pinned per tab (jsdom can't
+ * lay out, so the class sets ARE the contract):
  *
  *  1. NO PAGE SCROLL at ≥1024px — the annex root pins h-dvh + overflow-hidden;
- *     the panel grid absorbs the remaining viewport (flex-1 min-h-0,
- *     lg:overflow-hidden) and every panel scrolls INTERNALLY.
+ *     the active tab's panel area absorbs the remaining viewport (flex-1
+ *     min-h-0, lg:overflow-hidden) and every panel scrolls INTERNALLY.
  *  2. EMPTY PANELS COLLAPSE to a slim strip (zero-state text + expand
  *     affordance); data arriving auto-expands; siblings reclaim the space.
- *  3. The fixed chrome (status strip + scrub strip) stays OUTSIDE the grid.
+ *  3. The fixed chrome (status strip + scrub strip + the new tab bar) stays
+ *     OUTSIDE the grid, ABOVE the tab body — switching tabs never scrolls the
+ *     scrub away.
  *
  * Rendered against a 3k-event run so the structural assertions hold at the
  * volume the contract names (1440×900 / 3k events).
@@ -91,7 +96,12 @@ function renderAnnex(history: WorldEvent[]) {
   );
 }
 
-describe('InspectorLayout — viewport-fit grid at a 3k-event run (wave G §G2.1)', () => {
+/** Click a section tab by its visible label. */
+function goToTab(name: RegExp) {
+  fireEvent.click(screen.getByRole('tab', { name }));
+}
+
+describe('InspectorLayout — viewport-fit grid at a 3k-event run (wave G §G2.1 / EM-204)', () => {
   it('the annex root pins the no-page-scroll rules (h-dvh + overflow-hidden)', () => {
     renderAnnex(bigHistory());
     const main = screen.getByRole('main');
@@ -100,7 +110,7 @@ describe('InspectorLayout — viewport-fit grid at a 3k-event run (wave G §G2.1
     }
   });
 
-  it('the panel grid absorbs the remaining viewport; page scroll only <1024', () => {
+  it('the active tab area absorbs the remaining viewport; page scroll only <1024', () => {
     renderAnnex(bigHistory());
     const grid = screen.getByTestId('inspector-grid');
     for (const cls of [
@@ -109,42 +119,60 @@ describe('InspectorLayout — viewport-fit grid at a 3k-event run (wave G §G2.1
       'min-h-0',
       'grid-cols-1', // <1024 stacked fallback…
       'overflow-y-auto', // …the ONLY scrolling mode
-      'lg:overflow-hidden', // ≥1024: the grid never scrolls — panels do
-      'lg:grid-cols-2', // 1024–1279: two columns
-      'xl:grid-cols-3', // ≥1280: three columns
+      'lg:overflow-hidden', // ≥1024: the area never scrolls — panels do
     ]) {
       expect(grid.classList.contains(cls), `grid missing ${cls}`).toBe(true);
     }
   });
 
-  it('every data panel mounts with its OWN internal scroll container', () => {
+  it('the Forensics tab lays the map beside the trace in a 2-up grid ≥1280px', () => {
     renderAnnex(bigHistory());
-    // Chaos feed + decision-trace turn rail: virtualized internal scrollers.
-    expect(screen.getAllByTestId('virtual-list').length).toBeGreaterThanOrEqual(2);
-    // Governance timeline: its own overflow-y-auto list.
+    // Default tab is Forensics — map + decision trace, two columns at xl.
+    const map = screen.getByLabelText('Replay map (EM-055)');
+    const inner = map.closest('.xl\\:grid-cols-2');
+    expect(inner, 'Forensics inner grid missing xl:grid-cols-2').not.toBeNull();
+    expect(screen.getByLabelText('Decision trace (EM-056)')).toBeInTheDocument();
+  });
+
+  it('every data panel mounts with its OWN internal scroll container (per tab)', () => {
+    renderAnnex(bigHistory());
+    // Forensics: decision-trace turn rail is a virtualized internal scroller +
+    // the replay map renders inside its cell.
+    expect(screen.getAllByTestId('virtual-list').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByLabelText('Replay map (EM-055)')).toBeInTheDocument();
+
+    // Society: governance timeline owns an overflow-y-auto list; social graph
+    // renders inside its cell.
+    goToTab(/society/i);
     const gov = screen.getByLabelText('Governance & laws history (EM-057)');
     const govScroller = gov.querySelector('ol');
     expect(govScroller).not.toBeNull();
     expect(govScroller!.classList.contains('overflow-y-auto')).toBe(true);
     expect(govScroller!.classList.contains('min-h-0')).toBe(true);
-    // The replay map + social graph render inside their cells.
-    expect(screen.getByLabelText('Replay map (EM-055)')).toBeInTheDocument();
     expect(screen.getByLabelText('Social graph (EM-058)')).toBeInTheDocument();
+
+    // Chaos: the critter feed's virtual scroller.
+    goToTab(/chaos/i);
+    expect(screen.getAllByTestId('virtual-list').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('the scrub strip is FIXED chrome outside the grid (never scrolls away)', () => {
+  it('the scrub strip + tab bar are FIXED chrome outside the grid (never scroll away)', () => {
     renderAnnex(bigHistory());
     const strip = screen.getByLabelText('Replay scrubber (EM-055)');
+    const tablist = screen.getByRole('tablist', { name: /inspector sections/i });
     const grid = screen.getByTestId('inspector-grid');
     expect(grid.contains(strip)).toBe(false);
+    expect(grid.contains(tablist)).toBe(false);
     expect(strip.classList.contains('shrink-0')).toBe(true);
+    expect(tablist.classList.contains('shrink-0')).toBe(true);
     expect(screen.getByLabelText('Scrub to tick')).toBeInTheDocument();
   });
 });
 
-describe('InspectorLayout — empty panels collapse to slim strips (wave G §G2.2)', () => {
+describe('InspectorLayout — empty panels collapse to slim strips (wave G §G2.2 / EM-204)', () => {
   it('governance at 0 rules renders the strip; the panel is unmounted', () => {
     renderAnnex(bigHistory({ governance: false }));
+    goToTab(/society/i);
     const strip = screen.getByRole('region', { name: /governance · laws \(empty, collapsed\)/i });
     // Zero-state says what would fill it.
     expect(within(strip).getByText(/no laws yet — proposals from town hall/i)).toBeInTheDocument();
@@ -154,6 +182,7 @@ describe('InspectorLayout — empty panels collapse to slim strips (wave G §G2.
 
   it('the expand affordance opens the empty panel (and can re-collapse it)', () => {
     renderAnnex(bigHistory({ governance: false }));
+    goToTab(/society/i);
     fireEvent.click(
       screen.getByRole('button', { name: /expand the empty governance · laws panel/i }),
     );
@@ -167,6 +196,7 @@ describe('InspectorLayout — empty panels collapse to slim strips (wave G §G2.
 
   it('a rule existing expands governance automatically (no strip)', () => {
     renderAnnex(bigHistory({ governance: true }));
+    goToTab(/society/i);
     expect(screen.getByLabelText('Governance & laws history (EM-057)')).toBeInTheDocument();
     expect(
       screen.queryByRole('region', { name: /governance · laws \(empty, collapsed\)/i }),
@@ -175,6 +205,7 @@ describe('InspectorLayout — empty panels collapse to slim strips (wave G §G2.
 
   it('chaos at 0 animal events collapses; with critter data it mounts in full', () => {
     renderAnnex(bigHistory({ animals: false }));
+    goToTab(/chaos/i);
     expect(
       screen.getByRole('region', { name: /animal chaos feed \(empty, collapsed\)/i }),
     ).toBeInTheDocument();
@@ -183,6 +214,7 @@ describe('InspectorLayout — empty panels collapse to slim strips (wave G §G2.
 
   it('with critter data the chaos panel mounts in full (no strip)', () => {
     renderAnnex(bigHistory({ animals: true }));
+    goToTab(/chaos/i);
     expect(screen.getByLabelText('Animal Chaos Feed (EM-065)')).toBeInTheDocument();
     expect(
       screen.queryByRole('region', { name: /animal chaos feed \(empty, collapsed\)/i }),

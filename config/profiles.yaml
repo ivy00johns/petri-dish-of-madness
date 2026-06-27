@@ -142,14 +142,25 @@ profiles:
     adapter: mock
     color: "#888"
 
-  # ── Ollama profile (opt-in; requires local Ollama or OLLAMA_BASE_URL) ──
-  # Uncomment and set OLLAMA_BASE_URL (or leave default for local Ollama).
+  # ── EM-167 — Ollama overflow lane (local; off-critical-path background) ──
+  # The overflow target for `world.overflow_lane` (world.yaml): background/
+  # supporting cadence-tier turns spill here OFF FreeLLMAPI as an off-critical-
+  # path background lane (the animal-task pattern), moving ~40% of background
+  # calls off the free proxy. Named literally `ollama` so the default
+  # `overflow_lane.profile: ollama` resolves.
   #
-  # - name: ollama-llama
-  #   adapter: openai
-  #   base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
-  #   api_key_env: OLLAMA_API_KEY   # set to any non-empty string for Ollama (e.g. "ollama")
-  #   model_id: llama3.2
-  #   max_tokens: 1024
-  #   temperature: 0.8
-  #   color: "#27ae60"
+  # INERT until BOTH (a) `world.overflow_lane.enabled: true` AND (b) Ollama is
+  # actually reachable: with OLLAMA_API_KEY unset the profile's available() is
+  # False, so the overflow router self-suppresses and never routes here (no
+  # turn hard-fails if Ollama is down — it falls back to the home lane). To turn
+  # it on: `ollama serve` (or set OLLAMA_BASE_URL), export OLLAMA_API_KEY=ollama,
+  # and flip overflow_lane.enabled in world.yaml. Live-verify pends a running
+  # Ollama (not reachable in CI).
+  - name: ollama
+    adapter: openai
+    base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
+    api_key_env: OLLAMA_API_KEY   # set to any non-empty string for Ollama (e.g. "ollama")
+    model_id: ${OLLAMA_MODEL:-llama3.2}
+    max_tokens: 1024
+    temperature: 0.8
+    color: "#27ae60"

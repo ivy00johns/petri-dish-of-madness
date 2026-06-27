@@ -114,6 +114,9 @@ ACTION_SCHEMA = {
                 # EM-240 — offensive crime verbs (Task 6): big-score theft, a
                 # shakedown for credits, and building sabotage short of arson.
                 "heist", "extort", "vandalize",
+                # EM-237 — harm-surface finishers: threaten without contact (fear);
+                # lie as a first-class act (plant a false belief).
+                "intimidate", "deceive",
                 # EM-240 — economy & corruption verbs (Task 7): cool your own heat
                 # for a cut; pay a co-located enforcer to drop it (catchable).
                 "launder", "bribe",
@@ -134,6 +137,25 @@ ACTION_SCHEMA = {
                 # Wave H4 / EM-209 — pets & bonds: adopt a co-located unowned
                 # animal, feed a co-located one (owner sustains a declining pet).
                 "adopt", "feed_pet",
+                # EM-228 — cooperation lever: teach a co-located lower-skilled
+                # agent a skill you outrank them in; ASK a more-skilled co-located
+                # agent to teach you one (parks a pending request they perceive).
+                "teach_skill", "request_skill",
+                # EM-230 — real trade: offer a co-located agent a two-sided deal
+                # (credits and/or a skill-lesson each way); accept/decline the offer
+                # addressed to you (an ATOMIC swap that runs only if both can pay).
+                "offer_trade", "accept_trade", "decline_trade",
+                # EM-231 — cooperation handshake + the ONE gated action: offer a
+                # co-located agent a partnership; accept the offer addressed to you
+                # (forms the active link); co_build a building with a co-located
+                # partner you've agreed to cooperate with (a bonus over solo build).
+                "offer_cooperation", "accept_cooperation", "co_build",
+                # EM-232 — Victory Arch: pitch your contribution (parks a pitch the
+                # periodic peer-judge cycle ranks + awards). Reflex, no target.
+                "pitch_contribution",
+                # EM-235 — boost queue: spend credits for an EXTRA scheduled turn
+                # (buy influence over the shared timeline). Reflex, no target.
+                "buy_turn",
                 # Wave K / EM-218–220 — the builders'-city reflex tools: place /
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
@@ -173,6 +195,8 @@ ACTION_SCHEMA = {
                             "remember", "propose_rule", "vote", "idle",
                             # EM-240 — offensive crime verbs (Task 6).
                             "heist", "extort", "vandalize",
+                            # EM-237 — harm-surface finishers.
+                            "intimidate", "deceive",
                             # EM-240 — economy & corruption verbs (Task 7).
                             "launder", "bribe",
                             # EM-240 — conspiracy verbs (Task 8).
@@ -185,6 +209,16 @@ ACTION_SCHEMA = {
                             # Wave I / EM-210+211 — The Atelier reflex tools.
                             "create_image", "post_image",
                             "adopt", "feed_pet",
+                            # EM-228 — teach / request skills (cooperation lever).
+                            "teach_skill", "request_skill",
+                            # EM-230 — real trade: offer / accept / decline.
+                            "offer_trade", "accept_trade", "decline_trade",
+                            # EM-231 — cooperation handshake + co_build.
+                            "offer_cooperation", "accept_cooperation", "co_build",
+                            # EM-232 — Victory Arch: pitch your contribution.
+                            "pitch_contribution",
+                            # EM-235 — boost queue: buy an extra scheduled turn.
+                            "buy_turn",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
@@ -313,6 +347,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "heist":            {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_stealing"},
     "extort":           {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_extortion"},
     "vandalize":        {"tier": "reflex", "location_gate": "@building",     "agreement_gate": "ban_vandalism"},
+    # EM-237 — harm-surface finishers. Both target a co-located/visible agent (the
+    # co-location gate lives in _validate_world like extort — a relationship rule,
+    # not a place rule). No agreement_gate: no governance rule guards them yet.
+    # Reflex — they ride the existing turn, zero extra LLM calls.
+    "intimidate":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "deceive":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-240 — economy & corruption verbs (Task 7). launder cools your own heat
     # for a cut (no target, no gate); bribe pays a co-located enforcer (target =
     # the enforcer) — co-location is enforced in _validate_world like steal.
@@ -366,6 +406,47 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # only when a co-located eligible animal exists (see _assemble_context).
     "adopt":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "feed_pet":         {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-228 — cooperation lever reflex tools. No location_gate / agreement_gate:
+    # the CO-LOCATION gate (teacher must outrank; both must be present) lives in
+    # _validate_world (a relationship rule, not a place rule), exactly like the
+    # EM-240 recruit verb. Offered only when a plausible co-located target exists
+    # (see _assemble_context). Zero extra LLM calls — they ride the existing turn.
+    "teach_skill":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "request_skill":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-230 — real-trade reflex tools. offer_trade targets a co-located agent (the
+    # co-location gate lives in _validate_world, like teach_skill — a relationship
+    # rule, not a place rule). accept_trade / decline_trade take NO target (the open
+    # offer is keyed by the accepting agent's id, like accept_contract) and are
+    # gated on "an offer is addressed to you". All reflex — the swap rides the
+    # existing turn, zero extra LLM calls.
+    "offer_trade":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "accept_trade":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "decline_trade":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-231 — cooperation handshake + the ONE gated action. offer_cooperation
+    # targets a co-located agent (the co-location gate lives in _validate_world,
+    # like teach_skill — a relationship rule). accept_cooperation takes NO target
+    # (the open offer is keyed by the accepting agent's id, like accept_contract).
+    # co_build gates to the building's OWN place ("@building", resolved per-turn,
+    # like build_step) PLUS a COOPERATION gate (an active handshake + a co-located
+    # partner) enforced in _validate_world. All reflex — they ride the existing
+    # turn, zero extra LLM calls.
+    "offer_cooperation":  {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
+    "accept_cooperation": {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
+    "co_build":           {"tier": "reflex", "location_gate": "@building",   "agreement_gate": None},
+    # EM-232 — Victory Arch pitch reflex tool. No location_gate / agreement_gate:
+    # an agent may pitch their contribution from anywhere (the pitch text rides the
+    # existing turn, zero extra LLM calls). Offered in the menu only when the
+    # Victory Arch is configured ON (see _assemble_context), so a default world's
+    # em161 golden is byte-identical. action_pitch_contribution parks it keyed by
+    # the pitcher; the periodic cycle judges + clears the queue.
+    "pitch_contribution": {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
+    # EM-235 — boost queue reflex tool. No location_gate / agreement_gate: an agent
+    # may buy an extra turn from anywhere (the buy rides the existing turn, zero
+    # extra LLM calls; action_buy_turn charges credits + queues the extra slot).
+    # Offered in the menu only when the boost queue is configured ON AND the agent
+    # can afford it (see _assemble_context), so a default world's em161 golden is
+    # byte-identical.
+    "buy_turn":           {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
     # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
     # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
     # co-location gate is prop-specific and enforced in _validate_world). demolish
@@ -398,6 +479,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
 TIER_GATED_ACTIONS = frozenset({
     "propose_project", "build_step", "contribute_funds", "propose_rule",
 })
+# EM-231 NOTE: co_build is NOT tier-gated — like the other REFLEX building verbs
+# (repair / arson / take_offline) it stays open to every tier. Its real gate is
+# the COOPERATION handshake (an active link + a co-located partner), enforced in
+# _validate_world; the tier-pinning test (test_tier_gated_constant_shape) is left
+# byte-stable.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -563,6 +649,211 @@ def _planning_enabled(params: Any) -> bool:
     Disabled ⇒ no plan block, no plan invite, plan_revision ignored: the prompt
     and snapshot are byte-identical to pre-EM-223."""
     return bool(_world_block_get(params, "planning", "enabled", False))
+
+
+def _universalization_enabled(params: Any) -> bool:
+    """EM-234 — config gate `world.universalization.enabled` (default False).
+    Disabled ⇒ NO universalization block in the prompt: the turn context is
+    byte-identical to pre-EM-234 (the em161 lawful-citizen golden holds). When
+    enabled, every agent's prompt gets the GovSim commons-reasoning scaffold.
+    Carries no state, so snapshots are unaffected either way."""
+    return bool(_world_block_get(params, "universalization", "enabled", False))
+
+
+def _coherence_enabled(params: Any) -> bool:
+    """EM-224 — config gate `world.coherence.enabled` (default False).
+    Disabled ⇒ the coherence bottleneck is a no-op: the turn's actions[] apply
+    exactly as pre-EM-224. EM-224 adds NO prompt block and NO agent/world state,
+    so the em161 golden and EM-155 snapshots are byte-identical either way."""
+    return bool(_world_block_get(params, "coherence", "enabled", False))
+
+
+def _coherence_strategy(params: Any) -> str:
+    """EM-224 — the configured contradiction-handling strategy
+    (`world.coherence.strategy`); 'annotate' (keep both, stamp) is the default,
+    'drop' suppresses the contradicting step. Unknown ⇒ 'annotate'."""
+    strat = _world_block_get(params, "coherence", "strategy", "annotate")
+    return strat if strat in ("annotate", "drop") else "annotate"
+
+
+# EM-224 — the verbs that HARM a target (the coherence bottleneck flags a
+# friendly speech act followed by one of these toward the SAME target). Pulled
+# from the offensive crime/harm surface (EM-240 + EM-237) plus the base
+# steal/attack/insult. A purely structural set — no state, no randomness.
+_HARM_VERBS = frozenset({
+    "steal", "attack", "insult", "intimidate", "deceive",
+    "extort", "vandalize", "heist",
+})
+
+# EM-224 — verbs that HELP a target (used for the mirror case: a hostile speech
+# act then a helpful act toward the same target is the inverse contradiction).
+_HELP_VERBS = frozenset({"give", "teach_skill", "feed_pet"})
+
+# EM-224 — deterministic stance lexicon for the first speech act. A turn's intent
+# toward a named target is `friendly` if its speech carries a cooperative cue and
+# no hostile cue, `hostile` if it carries a hostile cue, else `neutral`. Pure
+# substring matching on the lowercased text — no LLM, no randomness, no clock.
+_FRIENDLY_CUES = frozenset({
+    "help", "give", "gift", "for you", "take these", "take this", "welcome",
+    "friend", "thank", "trust", "share", "please", "happy to", "glad to",
+    "support", "here you go", "let me help", "i'll help", "i will help",
+})
+_HOSTILE_CUES = frozenset({
+    "hate", "kill", "destroy", "fool", "trick", "rob", "idiot", "enemy",
+    "ruin", "crush", "i'll take", "i will take", "give me everything",
+    "hand it over", "or else", "you'll regret", "threat",
+})
+
+
+def _coherence_target(args: dict, agent_names: dict) -> str | None:
+    """The agent-id target of a harm/help step, if present and known. Steps are
+    normalized BEFORE the coherence pass, so `args['target']` is already an id."""
+    tgt = args.get("target") if isinstance(args, dict) else None
+    if isinstance(tgt, str) and tgt in agent_names:
+        return tgt
+    return None
+
+
+def _name_in_text(low: str, name: str | None) -> bool:
+    """Whether an agent name (full, or its first token) appears in lowercased
+    text. e.g. 'Bram the Bold' matches on 'bram'."""
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    if name in low:
+        return True
+    parts = name.split()
+    return bool(parts) and parts[0] in low
+
+
+def _speech_addresses(text: str, target_name: str | None,
+                      other_names: tuple[str, ...] = ()) -> bool:
+    """EM-224 — does the speech act actually address `target_name`? A stance is
+    DIRECTED at a target, so a friendly/hostile remark only bears on a harm/help
+    step toward that SAME target. True when the target's name appears in the
+    text, OR the speech is a direct second-person address ('you'/'your') that is
+    not claimed by a DIFFERENT named agent. Naming another agent ('…you, Cara!')
+    binds the second person to that named addressee, so a 'you' alone no longer
+    counts as addressing this target. Pure substring match — no LLM/clock/random."""
+    low = (text or "").lower()
+    if _name_in_text(low, target_name):
+        return True
+    if "you" in low or "your" in low:
+        # second-person address — but only this target's, not one explicitly
+        # redirected to a different named agent in the same line.
+        names_another = any(_name_in_text(low, n) for n in other_names)
+        return not names_another
+    return False
+
+
+def _speech_stance(text: str, target_name: str | None,
+                   other_names: tuple[str, ...] = ()) -> str:
+    """EM-224 — classify a speech act's stance ('friendly'/'hostile'/'neutral')
+    TOWARD `target_name`. Deterministic substring match on the lexicons, but the
+    stance is asserted ONLY when the speech actually addresses the target (its
+    name or an unredirected second-person 'you'). A friendly/hostile remark about
+    a DIFFERENT agent leaves this target's stance 'neutral', so it cannot
+    contradict an action toward this target (EM-224 target-blind regression)."""
+    if not _speech_addresses(text, target_name, other_names):
+        return "neutral"
+    low = (text or "").lower()
+    has_friendly = any(cue in low for cue in _FRIENDLY_CUES)
+    has_hostile = any(cue in low for cue in _HOSTILE_CUES)
+    if has_hostile:
+        return "hostile"
+    if has_friendly:
+        return "friendly"
+    return "neutral"
+
+
+def _coherence_resolve(
+    steps: list[dict],
+    thought: str,
+    strategy: str,
+    agent_names: dict,
+    actor_id: str | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """EM-224 — the PIANO coherence bottleneck (deterministic, zero-LLM).
+
+    Derive ONE intent from the turn's FIRST speech act (the single decision),
+    then reconcile every later harm/help step against it (the broadcast):
+
+    - friendly speech toward target T, then a HARM verb toward the same T → a
+      contradiction;
+    - hostile speech toward T, then a HELP verb toward the same T → the mirror
+      contradiction.
+
+    `strategy`:
+      'annotate' — leave the step in place but stamp it with a `_coherence`
+        marker (`{"intent": <stance>, "contradicted": True}`) that _apply_steps
+        surfaces onto the resulting event (text + payload.coherence); the world
+        still mutates, the hypocrisy is just legible.
+      'drop' — remove the contradicting step from the list and return a
+        synthetic `coherence_note` record so the caller can emit ONE note event
+        in its place.
+
+    Returns (resolved_steps, drop_notes). drop_notes is always empty for
+    'annotate'. Pure function: no random/clock/uuid, same input ⇒ same output."""
+    # The single decision: the FIRST speech act's stance toward its addressed
+    # target. v1 reads the target from the FIRST subsequent harm/help step (the
+    # speech rarely names an id; the action does). If no speech act and no
+    # harm/help step coexist, there is no intent to enforce → no-op.
+    first_speech = next(
+        (s for s in steps if s.get("action") in ("say", "whisper")), None
+    )
+    if first_speech is None:
+        return steps, []
+    speech_text = ""
+    sargs = first_speech.get("args")
+    if isinstance(sargs, dict):
+        speech_text = str(sargs.get("text") or "")
+
+    resolved: list[dict] = []
+    drop_notes: list[dict] = []
+    speech_idx = steps.index(first_speech)
+    for idx, step in enumerate(steps):
+        action = step.get("action")
+        # Only LATER steps (after the speech) are reconciled against the intent.
+        if idx <= speech_idx or action not in _HARM_VERBS and action not in _HELP_VERBS:
+            resolved.append(step)
+            continue
+        target = _coherence_target(step.get("args") or {}, agent_names)
+        if target is None:
+            resolved.append(step)
+            continue
+        # A self-targeted harm/help after friendly speech is not hypocrisy toward
+        # another agent → never a contradiction (EM-224 self-harm regression).
+        if actor_id is not None and target == actor_id:
+            resolved.append(step)
+            continue
+        # The stance must be directed at THIS target: a second-person 'you' is
+        # claimed by any OTHER agent the speech names, so it cannot bind here.
+        target_name = agent_names.get(target)
+        other_names = tuple(
+            n for aid, n in agent_names.items() if aid != target and n
+        )
+        stance = _speech_stance(speech_text, target_name, other_names)
+        contradicted = (
+            (stance == "friendly" and action in _HARM_VERBS)
+            or (stance == "hostile" and action in _HELP_VERBS)
+        )
+        if not contradicted:
+            resolved.append(step)
+            continue
+        if strategy == "drop":
+            drop_notes.append({
+                "intent": stance,
+                "dropped_action": action,
+                "target_id": target,
+                "target_name": agent_names.get(target),
+            })
+            # the step is suppressed: NOT appended to resolved
+            continue
+        # 'annotate' (and the reserved 'reorder' fallback): keep, but stamp.
+        marked = dict(step)
+        marked["_coherence"] = {"intent": stance, "contradicted": True}
+        resolved.append(marked)
+    return resolved, drop_notes
 
 
 def _rule_label(text: str, limit: int = 60) -> str:
@@ -997,7 +1288,25 @@ _TARGETED_ACTIONS = frozenset(
      # EM-240 (Task 10) — enforcer justice verbs resolve a co-located agent name
      # in args["target"] to a suspect id (investigate/accuse/detain), like steal.
      "heist", "extort", "bribe", "recruit",
-     "investigate", "accuse", "detain"}
+     # EM-237 — intimidate / deceive both target a co-located agent name in
+     # args["target"] (resolved to an id before dispatch, like extort). deceive's
+     # `about` arg is a free claim string and needs no resolution.
+     "intimidate", "deceive",
+     "investigate", "accuse", "detain",
+     # EM-228 — teach_skill / request_skill both target a co-located agent name in
+     # args["target"] (resolved to an id before dispatch, like steal). The `skill`
+     # arg is a free string and needs no resolution.
+     "teach_skill", "request_skill",
+     # EM-230 — offer_trade targets a co-located agent name in args["target"]
+     # (resolved to an id, like give). accept_trade / decline_trade take NO target
+     # (the offer is keyed by the accepting agent's id), so they are EXCLUDED here.
+     # The give/get term dicts are free args and need no resolution.
+     "offer_trade",
+     # EM-231 — offer_cooperation targets a co-located agent name in args["target"]
+     # (resolved to an id, like give). accept_cooperation takes NO target (the offer
+     # is keyed by the accepting agent's id) and co_build takes a building_id, not an
+     # agent — so both are EXCLUDED here.
+     "offer_cooperation"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1289,6 +1598,22 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             "the billboard, and voting"
         )
 
+    # ── EM-227 — skill gate. A high-value action named in the configured skill
+    # LIBRARY requires the gating skill at >= its min level; an agent without it
+    # gets a CLEAR rejection. Survival verbs are never in any library, so they are
+    # never gated. config-absent / EMPTY library ⇒ skill_gate_for returns None ⇒
+    # NOTHING gated (pre-EM-227 byte-identical + the em161 golden, whose default
+    # WorldParams has no library). The menu agrees (see _assemble_context's
+    # _skill_ok), so this rejection only fires on an off-menu invention.
+    _gate = world.skill_gate_for(action) if hasattr(world, "skill_gate_for") else None
+    if _gate is not None:
+        _skill, _min = _gate
+        if agent.skill_level(_skill) < _min:
+            return (
+                f"you lack the {_skill} skill (need level {_min}) to {action} — "
+                f"learn it by doing simpler work or have someone teach you"
+            )
+
     if action == "work":
         place = world.places.get(agent.location)
         if place is None or place.kind != "work":
@@ -1333,6 +1658,20 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if target_error:
             return target_error
 
+    elif action in ("intimidate", "deceive"):
+        # EM-237 — harm-surface finishers target a co-located/visible agent
+        # (resolved like extort). The world action re-checks self-target +
+        # visibility + (intimidate) the mark having something to give / (deceive)
+        # a non-empty claim, so this front gate only ensures a reachable target —
+        # a clear rejection lets the model self-correct.
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
+        if action == "deceive":
+            about = args.get("about")
+            if not isinstance(about, str) or not about.strip():
+                return "deceive requires a claim (args.about)"
+
     elif action == "vandalize":
         # EM-240 — building-targeted crime; the @building co-location gate +
         # building_id resolution mirror arson (handled at dispatch / by the world).
@@ -1360,6 +1699,81 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # unless an open pact is addressed to this agent.
         if agent.id not in getattr(world, "pending_crime_offers", {}):
             return "no criminal pact has been offered to you"
+
+    elif action in ("teach_skill", "request_skill"):
+        # EM-228 — both verbs target a co-located agent (resolved like steal). The
+        # world action re-checks co-location + self-target + (for teach) the
+        # outrank rule, so this front gate only ensures a reachable target + a
+        # named skill; a clear rejection here lets the model self-correct.
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
+        skill = args.get("skill")
+        if not isinstance(skill, str) or not skill.strip():
+            return f"{action} requires a skill name (args.skill)"
+
+    elif action == "offer_trade":
+        # EM-230 — offer_trade targets a co-located agent (resolved like give). The
+        # world action re-checks co-location + self-target + that the deal is
+        # non-empty and the offerer can back any pledged credits, so this front gate
+        # only ensures a reachable target — a clear rejection lets the model
+        # self-correct. The give/get terms are validated in the world method.
+        target_error = _validate_target(args, agent, world, "offer_trade")
+        if target_error:
+            return target_error
+
+    elif action in ("accept_trade", "decline_trade"):
+        # EM-230 — accept_trade / decline_trade take no target; reject up front
+        # (clear message) unless an open offer is addressed to this agent. The
+        # world method re-checks affordability atomically at settle time.
+        if agent.id not in getattr(world, "pending_trade_offers", {}):
+            return "no trade offer has been made to you"
+
+    elif action == "offer_cooperation":
+        # EM-231 — offer_cooperation targets a co-located agent (resolved like give).
+        # The world action re-checks co-location + self-target + an existing
+        # partnership, so this front gate only ensures a reachable target — a clear
+        # rejection lets the model self-correct.
+        target_error = _validate_target(args, agent, world, "offer_cooperation")
+        if target_error:
+            return target_error
+
+    elif action == "accept_cooperation":
+        # EM-231 — accept_cooperation takes no target; reject up front (clear
+        # message) unless a handshake offer is addressed to this agent. The world
+        # method re-checks the offerer is alive + co-located at settle time.
+        if agent.id not in getattr(world, "pending_cooperation_offers", {}):
+            return "no partnership offer has been made to you"
+
+    elif action == "co_build":
+        # EM-231 — THE cooperation-gated action (EW's hard mechanic). It unlocks
+        # ONLY when this agent has an ACTIVE handshake with a CO-LOCATED partner:
+        # a solo attempt gets a clear rejection so the model knows to offer/accept
+        # cooperation first. After the gate, the building checks mirror build_step.
+        partner_here = getattr(world, "cooperation_partner_here", None)
+        partner = partner_here(agent) if callable(partner_here) else None
+        if partner is None:
+            return ("co_build needs an agreed cooperation partner here — "
+                    "offer_cooperation to a co-located agent (and have them accept) "
+                    "first, then build together")
+        building_id = args.get("building_id")
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status == "planned":
+            committed = _building_field(building, "funds_committed", 0)
+            required = _building_field(building, "funds_required", 0)
+            if committed < required:
+                return (
+                    f"building '{building_id}' is planned but not fully funded "
+                    f"({committed}/{required}) — contribute_funds first"
+                )
+        elif status != "under_construction":
+            return f"building '{building_id}' is {status}, not under_construction"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to co_build"
 
     elif action in ("investigate", "accuse", "detain"):
         # EM-240 (Task 10) — justice verbs are reserved for enforcers (a role
@@ -1825,6 +2239,18 @@ def _assemble_context(
             return bool(callable(billboard_here) and billboard_here(agent.location))
         return place_kind == loc
 
+    def _skill_ok(action: str) -> bool:
+        """EM-227 — offer this gated action on the menu? Mirrors the resolution-
+        time skill gate (_validate_world) so the menu and the validator AGREE
+        (EM-108: no dead turns). config-absent / EMPTY library ⇒ skill_gate_for
+        returns None ⇒ always True (every action offered, the em161 golden's
+        default-WorldParams path)."""
+        gate = world.skill_gate_for(action) if hasattr(world, "skill_gate_for") else None
+        if gate is None:
+            return True
+        skill, min_level = gate
+        return agent.skill_level(skill) >= min_level
+
     valid_actions: list[str] = []
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
@@ -1839,11 +2265,73 @@ def _assemble_context(
         target_names = ", ".join(a.name for a in co_located)
         valid_actions.append(f"whisper (target, text) - private to one of: {target_names}")
         valid_actions.append(f"give (target, amount) - transfer credits to: {target_names}")
+        # EM-230 — real trade: a two-sided negotiated deal (beyond one-way give).
+        # Offered to any co-located agent (the deal can be credits and/or a skill
+        # lesson each way); the target perceives + accepts/declines on their turn.
+        # GATED on an active skills library — the headline value of offer_trade over
+        # plain give is the skill economy (skill-for-credit / skill-for-skill), and
+        # in a skill-less default world give/steal already cover credit moves. An
+        # empty library (every pre-Wave-M world, AND the em161 golden fixture) yields
+        # no offer_trade line ⇒ the em161 lawful-citizen golden is byte-identical.
+        if world.skill_library():
+            valid_actions.append(
+                "offer_trade (target, give, get) - propose a two-sided deal to: "
+                f"{target_names} — give/get are {{credits, skill}} dicts "
+                "(e.g. give {credits 10}, get {skill farming})")
+        # EM-231 — cooperation handshake invite: offer a co-located peer you are
+        # NOT already partnered with a partnership (unlocks the co_build joint
+        # action). GATED on an active skills library (the Wave-M2 cooperation
+        # economy ships together with skills/professions; the live config enables
+        # both). An empty library — every pre-Wave-M world AND the em161 golden
+        # fixture — yields no offer_cooperation line ⇒ the lawful-citizen golden is
+        # byte-identical. Offered only to peers not yet linked (a re-offer is a
+        # no-op), and only when a willing partner is actually present.
+        if world.skill_library():
+            _coop_targets = [
+                a for a in co_located
+                if not (hasattr(world, "are_cooperating")
+                        and world.are_cooperating(agent.id, a.id))
+            ]
+            if _coop_targets:
+                valid_actions.append(
+                    "offer_cooperation (target) - propose a partnership to: "
+                    + ", ".join(a.name for a in _coop_targets)
+                    + " — once they accept_cooperation you can co_build together")
         valid_actions.append(f"insult (target) - insult: {target_names}")
         valid_actions.append(f"attack (target) - attack: {target_names}")
         valid_actions.append(f"set_relationship (target, type) - ally|rival|neutral|friend|enemy")
         if _gate_ok("steal"):
             valid_actions.append(f"steal (target) - steal from: {target_names}")
+        # ── EM-228 — cooperation lever. teach_skill is offered only when this agent
+        # holds a skill at a STRICTLY higher level than some co-located peer (a real
+        # transfer is possible); request_skill only when a co-located peer outranks
+        # this agent in some skill (a mentor exists). Both stay silent for a
+        # skill-less lone-class agent ⇒ the em161 golden is unaffected (the default
+        # WorldParams library is empty AND default agents are skill-less, so neither
+        # branch fires). getattr keeps callers safe if the seam is ever absent.
+        _my_skills = getattr(agent, "skills", None) or {}
+        if _my_skills:
+            teachable = [
+                a for a in co_located
+                if any(agent.skill_level(s) > a.skill_level(s) for s in _my_skills)
+            ]
+            if teachable:
+                valid_actions.append(
+                    "teach_skill (target, skill) - lift a less-skilled peer one "
+                    "level in a skill you outrank them in: "
+                    + ", ".join(a.name for a in teachable))
+        # A mentor is anyone here who holds SOME skill above this agent's level.
+        mentors = [
+            a for a in co_located
+            if (getattr(a, "skills", None) or {})
+            and any(a.skill_level(s) > agent.skill_level(s)
+                    for s in (getattr(a, "skills", None) or {}))
+        ]
+        if mentors:
+            valid_actions.append(
+                "request_skill (target, skill) - ask a more-skilled peer to teach "
+                "you (parks a request they will see): "
+                + ", ".join(a.name for a in mentors))
     # EM-240 — crime menu, only for the inclined (validator still allows all, so a
     # lawful agent CAN emit an off-menu crime; the menu just doesn't invite it).
     if getattr(agent, "disposition", "lawful") in ("opportunist", "criminal"):
@@ -1853,6 +2341,11 @@ def _assemble_context(
                 valid_actions.append(f"heist (target) - big-score theft from: {tnames}")
             if _gate_ok("extort"):
                 valid_actions.append(f"extort (target) - shake down for credits: {tnames}")
+            # EM-237 — harm-surface finishers: threaten via fear; lie to manipulate.
+            if _gate_ok("intimidate"):
+                valid_actions.append(f"intimidate (target) - coerce via fear, no contact: {tnames}")
+            if _gate_ok("deceive"):
+                valid_actions.append(f"deceive (target, about) - plant a false belief in: {tnames}")
             # EM-240 (Task 8) — recruit a co-located agent into a criminal pact.
             if _gate_ok("recruit"):
                 valid_actions.append(f"recruit (target) - pitch a criminal pact to: {tnames}")
@@ -1881,13 +2374,38 @@ def _assemble_context(
         valid_actions.append(f"investigate (target) - question witnesses about: {tnames}")
         valid_actions.append(f"accuse (target) - publicly accuse: {tnames}")
         valid_actions.append(f"detain (target) - jail a wanted suspect: {tnames}")
+    # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
+    # (a positive cadence). The default-OFF world (the absent block, AND the em161
+    # golden fixture) never shows this line ⇒ the lawful-citizen golden is
+    # byte-identical. Ungated otherwise — an agent may pitch from anywhere. getattr
+    # keeps callers safe if the seam is ever absent.
+    if getattr(world, "victory_arch_enabled", None) and world.victory_arch_enabled():
+        valid_actions.append(
+            "pitch_contribution (text) - pitch your contribution to the Victory "
+            "Arch; the periodic peer-judge cycle awards credits to the top "
+            "contributors (funding, teaching, trading, building)")
+    # EM-235 — boost queue: offer buy_turn ONLY when the queue is configured ON (a
+    # positive cost) AND the agent can actually afford it (menu/resolution agree —
+    # no dangling line the validator would reject). The default-OFF world (the
+    # absent block, AND the em161 golden fixture) never shows this line ⇒ the
+    # lawful-citizen golden is byte-identical. getattr keeps callers safe if the
+    # seam is ever absent.
+    if getattr(world, "boost_enabled", None) and world.boost_enabled():
+        try:
+            _boost_cost = int(world._boost_param("cost", 0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            _boost_cost = 0
+        if _boost_cost > 0 and getattr(agent, "credits", 0) >= _boost_cost:
+            valid_actions.append(
+                f"buy_turn - spend {_boost_cost} credits to take an EXTRA turn this "
+                "round (buy more airtime on the shared timeline)")
     if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
         valid_actions.append("(work requires a work place)")
     # Governance actions are gated to a governance place. EM-163: PROPOSING is
     # tier-gated off the background menu (_tier_ok); voting stays for everyone.
-    if _gate_ok("propose_rule") and _tier_ok("propose_rule"):
+    if _gate_ok("propose_rule") and _tier_ok("propose_rule") and _skill_ok("propose_rule"):
         propose_line = ("propose_rule (effect, text) - effect: ban_stealing|ubi|"
                         "recharge_subsidy|work_bonus|ban_arson|name_town|demolish")
         propose_tail = ("name_town also needs name=<the town's new name>; demolish "
@@ -1921,13 +2439,27 @@ def _assemble_context(
                 propose_line += "|trial"
                 propose_tail += (f"; trial needs target=<the defendant's name or id> "
                                  f"to put them on trial by vote (e.g. {_defendant.name})")
+        # EM-236 — amend_constitution is offered to EVERY proposer (no role gate):
+        # add|edit|remove a foundational article by 70% supermajority. The tail
+        # names a concrete article_id for edit/remove ONLY when the constitution has
+        # one (so the menu never offers an edit with no target); add always works.
+        propose_line += "|amend_constitution"
+        propose_tail += ("; amend_constitution needs op=add|edit|remove plus "
+                         "text=<the article> (add/edit)")
+        _articles_now = getattr(world, "constitution", None) or []
+        if _articles_now:
+            _an_article = str(_articles_now[0].get("id", ""))
+            propose_tail += (f" and article_id=<an article's id, e.g. {_an_article}> "
+                             f"(edit/remove) — ratified on a 70% supermajority")
+        else:
+            propose_tail += " — ratified on a 70% supermajority"
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
 
     # ── W7 construction actions (offered per gates; EM-163 tier gate) ──────────
-    if _tier_ok("propose_project"):
+    if _tier_ok("propose_project") and _skill_ok("propose_project"):
         # Wave K / EM-217 — surface the build-type CATALOG in the prompt guidance
         # so the model picks from a real menu (kind stays PERMISSIVE — an off-menu
         # invention still resolves via the FE fuzzy match, never a dead turn).
@@ -1949,8 +2481,20 @@ def _assemble_context(
             status == "planned"
             and _building_field(b, "funds_committed", 0) >= _building_field(b, "funds_required", 0)
         )
-        if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step"):
+        if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step") and _skill_ok("build_step"):
             valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
+            # EM-231 — the cooperation-gated co_build: offered ONLY when this agent
+            # has an ACTIVE handshake with a co-located partner (cooperation_partner_here).
+            # A handshake-free world (every pre-EM-231 world AND the em161 golden) has
+            # no link ⇒ no co_build line ⇒ the lawful-citizen golden is byte-identical.
+            # The partner's NAME is surfaced so the invite is concrete (menu/resolution
+            # agree — the validator enforces the same gate).
+            _coop_partner = (world.cooperation_partner_here(agent)
+                             if hasattr(world, "cooperation_partner_here") else None)
+            if _coop_partner is not None:
+                valid_actions.append(
+                    f"co_build (building_id={bid}) - build TOGETHER with your partner "
+                    f"{_coop_partner.name} for a bonus over solo build_step")
         if status in ("damaged", "offline") and _gate_ok("repair"):
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
         if status != "destroyed" and _gate_ok("arson"):
@@ -2003,7 +2547,7 @@ def _assemble_context(
     # disabled (EM-210 credit kill switch — menu/resolution agree, EM-108);
     # post_image only at the board AND once the agent has painted something. The
     # lines are short (prompt-diet aware — EM-161).
-    if _world_block_get(params, "image_gen", "enabled", True):
+    if _world_block_get(params, "image_gen", "enabled", True) and _skill_ok("create_image"):
         valid_actions.append(
             "create_image (prompt) - paint art from a short text prompt for your town")
     _gallery = getattr(world, "gallery", []) or []
@@ -2136,6 +2680,26 @@ def _assemble_context(
             f"Recharge soon (cost {recharge_cost} credits — you have "
             f"{agent.credits}) or you will start dying."
         )
+    # ── EM-229 — three-needs psychology. The knowledge + influence drives ride
+    # alongside energy but NEVER kill; they surface a nudge ONLY when below the
+    # salience threshold (exactly like the energy starvation line above is
+    # conditional), so a full-needs agent's prompt is byte-identical to
+    # pre-EM-229 — the em161 protagonist golden is unaffected. getattr keeps
+    # callers safe if the engine seam is ever absent (default full ⇒ no line).
+    _know = getattr(agent, "knowledge", 100.0)
+    _infl = getattr(agent, "influence", 100.0)
+    _know_thresh = _world_block_get(params, "needs", "knowledge_salience_threshold", 40.0)
+    _infl_thresh = _world_block_get(params, "needs", "influence_salience_threshold", 40.0)
+    if _know < _know_thresh:
+        needs_lines.append(
+            f"Your KNOWLEDGE feels thin ({_know:.0f}/100) — you hunger to learn. "
+            f"Seek out who knows more, ask to be taught, gain a skill."
+        )
+    if _infl < _infl_thresh:
+        needs_lines.append(
+            f"Your INFLUENCE feels small ({_infl:.0f}/100) — you crave a say in "
+            f"things. Win people over, propose a rule, campaign, lead."
+        )
     needs_text = "\n".join(f"  {line}" for line in needs_lines)
 
     # ── W11b / EM-079 — active commitments (compact: text + age in ticks) ─────
@@ -2251,9 +2815,9 @@ def _assemble_context(
     if _disp in ("opportunist", "criminal"):
         _crime_lines.append(
             "You see angles others miss. Crime is on the table when the payoff is "
-            "right and no one is watching — steal, heist, extort, vandalize, "
-            "launder, or recruit an accomplice. Witnesses build your notoriety; "
-            "lie low to cool off."
+            "right and no one is watching — steal, heist, extort, intimidate, "
+            "deceive, vandalize, launder, or recruit an accomplice. Witnesses build "
+            "your notoriety; lie low to cool off."
         )
     if _role == "enforcer":
         _crime_lines.append(
@@ -2283,6 +2847,193 @@ def _assemble_context(
     if _crime_lines:
         crime_block = "\n=== ⚖ THE LAW & THE UNDERWORLD ===\n" + "\n".join(
             f"  {ln}" for ln in _crime_lines)
+
+    # ── EM-233 — soul: the agent's IMMUTABLE identity anchors, injected into
+    # EVERY prompt as who-you-are context. EMPTY (⇒ byte-identical prompt) when the
+    # agent has no soul — so the em161 lawful-citizen golden fixture is unaffected
+    # (default agents are soulless). Rides this turn — zero extra LLM calls. NEVER
+    # summarized by consolidation. (getattr keeps callers safe if the seam is ever
+    # absent.)
+    soul_block = ""
+    _soul = getattr(agent, "soul", None)
+    if _soul:
+        soul_lines = "\n".join(f"  - {s}" for s in _soul)
+        soul_block = f"""
+=== WHO YOU ARE (your core, unchanging) ===
+{soul_lines}
+  These are fixed truths of who you are. Let them anchor how you act and speak.
+"""
+
+    # ── EM-126 — generational depth: the agent's LIFE STAGE. Surfaces a one-line
+    # identity nudge ONLY when the agent is a child or an elder — an `adult` (the
+    # default, and EVERY agent when world.generations is OFF) gets NO line, so the
+    # em161 lawful-citizen golden fixture (a default-WorldParams adult hero) is
+    # byte-identical. Rides this turn — zero extra LLM calls. (getattr keeps callers
+    # safe if the engine seam is ever absent ⇒ default "adult" ⇒ no line.)
+    stage_block = ""
+    _stage = getattr(agent, "life_stage", "adult")
+    if _stage == "child":
+        stage_block = (
+            "\n=== YOUR LIFE STAGE ===\n"
+            "  You are a CHILD — young, learning the world. Lean on your elders, "
+            "ask to be taught, watch and grow before you lead.\n"
+        )
+    elif _stage == "elder":
+        stage_block = (
+            "\n=== YOUR LIFE STAGE ===\n"
+            "  You are an ELDER — long-lived, rich in memory. Mentor the young, "
+            "pass on what you know, steward what you have built.\n"
+        )
+
+    # ── EM-227 — skills & emergent professions. Surfaces the agent's held skills
+    # and (when a library gates anything) the high-value actions they are currently
+    # LOCKED OUT of, nudging them to specialize / learn / be taught. EMPTY (⇒
+    # byte-identical prompt) when the agent holds NO skills — so the em161
+    # lawful-citizen golden fixture (a skill-less hero under default WorldParams,
+    # which has an empty library) is unaffected. Rides this turn — zero extra LLM
+    # calls. Diet-aware (R6): background tier gets a one-line trim. (getattr/
+    # hasattr keep callers safe if the engine seam is ever absent.)
+    skills_block = ""
+    _skills = getattr(agent, "skills", None)
+    if _skills:
+        held = ", ".join(
+            f"{name} (lvl {agent.skill_level(name)})"
+            for name in sorted(_skills)
+        )
+        # What high-value actions is this agent still locked out of? (Only when a
+        # library gates them — config-absent yields nothing.)
+        locked: list[str] = []
+        if hasattr(world, "skill_library"):
+            library = world.skill_library()
+            for skill_name in sorted(library):
+                spec = library.get(skill_name) or {}
+                gates = spec.get("gates", []) if isinstance(spec, dict) else []
+                try:
+                    min_level = max(1, int(spec.get("min_level", 1))) \
+                        if isinstance(spec, dict) else 1
+                except (TypeError, ValueError):
+                    min_level = 1
+                if gates and agent.skill_level(skill_name) < min_level:
+                    locked.append(f"{', '.join(gates)} (needs {skill_name})")
+        if background:
+            skills_block = (
+                f"\n=== ☆ YOUR CRAFT ===\n  You are skilled in: {held}.\n"
+            )
+        else:
+            lines = [f"  You are skilled in: {held}."]
+            if locked:
+                lines.append(
+                    "  You cannot yet: " + "; ".join(locked)
+                    + " — practice or have someone teach you."
+                )
+            lines.append(
+                "  Lean into your craft — your skill grows the more you use it, "
+                "and you can teach it to others."
+            )
+            skills_block = "\n=== ☆ YOUR CRAFT & PROFESSION ===\n" + "\n".join(lines) + "\n"
+
+    # ── EM-228 — perceived learning request. When a co-located agent has asked
+    # THIS agent to teach them a skill (action_request_skill parks it keyed by the
+    # would-be teacher), surface "X wants to learn <skill> from you — use
+    # teach_skill". EMPTY (⇒ byte-identical prompt) when no request is addressed to
+    # this agent — so the em161 lawful-citizen golden is unaffected (a default
+    # world has no parked requests). Independent of whether this agent holds
+    # skills, so the ask always reaches its mark. (getattr keeps callers safe.)
+    request_block = ""
+    _requests = getattr(world, "pending_skill_requests", None)
+    _req = _requests.get(agent.id) if isinstance(_requests, dict) else None
+    if _req:
+        _asker = world.agents.get(_req.get("asker_id"))
+        _req_skill = str(_req.get("skill", "")).strip()
+        # Only surface while the asker is still co-located (a teach needs them here)
+        # and this agent actually outranks them — otherwise the ask is moot.
+        if (_asker is not None and _asker.alive and _req_skill
+                and _asker.location == agent.location
+                and agent.skill_level(_req_skill) > _asker.skill_level(_req_skill)):
+            request_block = (
+                f"\n=== ✎ A REQUEST TO LEARN ===\n"
+                f"  {_asker.name} wants to learn {_req_skill} from you. "
+                f"Use teach_skill (target {_asker.name}, skill {_req_skill}) to "
+                f"pass on your craft — or ignore it.\n"
+            )
+
+    # ── EM-230 — perceived trade OFFER. When a co-located agent has offered THIS
+    # agent a two-sided deal (action_offer_trade parks it keyed by the offeree),
+    # surface "X offers you … for … — use accept_trade or decline_trade". EMPTY
+    # (⇒ byte-identical prompt) when no offer is addressed to this agent — so the
+    # em161 lawful-citizen golden is unaffected (a default world parks no offers).
+    # Only surfaced while the offerer is still co-located (the swap needs them here)
+    # — a moved-away offerer's stale offer simply isn't shown (the validator's
+    # affordability re-check still fires if the agent tries anyway). (getattr keeps
+    # callers safe if the seam is ever absent.)
+    trade_block = ""
+    _offers = getattr(world, "pending_trade_offers", None)
+    _offer = _offers.get(agent.id) if isinstance(_offers, dict) else None
+    if _offer:
+        _offerer = world.agents.get(_offer.get("from_id"))
+        if (_offerer is not None and _offerer.alive
+                and _offerer.location == agent.location):
+            _give = _offer.get("give") or {}   # what the OFFERER gives YOU
+            _get = _offer.get("get") or {}     # what YOU give the offerer
+            _give_txt = world._describe_terms(_give)
+            _get_txt = world._describe_terms(_get)
+            trade_block = (
+                f"\n=== ⇄ A TRADE OFFER ===\n"
+                f"  {_offerer.name} offers you {_give_txt} in exchange for "
+                f"{_get_txt}. Use accept_trade to settle it (an atomic swap — only "
+                f"if you can both pay) or decline_trade to refuse.\n"
+            )
+
+    # ── EM-231 — perceived cooperation HANDSHAKE offer. When a co-located agent has
+    # offered THIS agent a partnership (action_offer_cooperation parks it keyed by
+    # the offeree), surface "X wants to partner with you — use accept_cooperation".
+    # EMPTY (⇒ byte-identical prompt) when no offer is addressed to this agent — so
+    # the em161 lawful-citizen golden is unaffected (a default world parks no
+    # handshake offers). Only surfaced while the offerer is still co-located (the
+    # handshake needs them here). (getattr keeps callers safe if the seam is absent.)
+    cooperation_block = ""
+    _coop_offers = getattr(world, "pending_cooperation_offers", None)
+    _coop_offer = _coop_offers.get(agent.id) if isinstance(_coop_offers, dict) else None
+    if _coop_offer:
+        _coop_offerer = world.agents.get(_coop_offer.get("from_id"))
+        if (_coop_offerer is not None and _coop_offerer.alive
+                and _coop_offerer.location == agent.location):
+            cooperation_block = (
+                f"\n=== 🤝 A PARTNERSHIP OFFER ===\n"
+                f"  {_coop_offerer.name} wants to partner with you. Use "
+                f"accept_cooperation to agree — together you can co_build projects "
+                f"faster than building alone.\n"
+            )
+
+    # ── EM-234 — universalization prompting (GovSim scaffold). The cheap
+    # cooperation lift: before an agent acts on a SHARED resource it is nudged to
+    # universalize the move — "what if EVERY agent did this?". ALWAYS-ON for every
+    # agent when enabled, so it is GATED behind world.universalization.enabled
+    # (DEFAULT OFF). Disabled/absent ⇒ EMPTY block ⇒ the em161 lawful-citizen
+    # golden is byte-identical (exactly the EM-223 default-off mechanism). Rides
+    # this turn — zero extra LLM calls. Diet-aware (R6): background tier gets a
+    # one-line trim; protagonists/supporting get the fuller scaffold.
+    universalization_block = ""
+    if _universalization_enabled(params):
+        if background:
+            universalization_block = (
+                "\n=== ✶ THE COMMONS ===\n"
+                "  Before you draw from a shared resource, ask: what if EVERY "
+                "agent did this? Take only what stays sustainable for all.\n"
+            )
+        else:
+            universalization_block = (
+                "\n=== ✶ REASONING ABOUT THE COMMONS ===\n"
+                "  Before you act on anything shared — a common harvest, public "
+                "funds, the town's trust, a finite resource — pause and "
+                "universalize the choice: ask what if EVERY agent made the same "
+                "move you are about to make.\n"
+                "  If everyone did it and the commons would still thrive, act "
+                "freely. If everyone did it and the commons would collapse, that "
+                "is your signal to restrain, share, or find a path that holds up "
+                "when universalized. You are free to decide — but decide with the "
+                "whole town in view.\n"
+            )
 
     # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
     # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
@@ -2344,8 +3095,35 @@ def _assemble_context(
     # consensus name_town). When the town is unnamed we say NOTHING: naming must be
     # emergent — an agent's own choice at the town hall, or a god *suggestion* via the
     # proclamation channel — never a standing directive pushed into every prompt.
+    # EM-206 — once named, flag the name as SETTLED so agents stop campaigning to
+    # (re-)name what they already hold (run-663: "Ledger's Folly" re-passed 119×).
+    # The marker rides ONLY when there IS a name, so an unnamed town adds nothing
+    # new and the em161 golden (a default agent, no town name) is byte-identical.
     _town = (getattr(world, "town_name", "") or "").strip()
-    town_line = f"\nTown: {_town}" if _town else ""
+    _town_display = f"{_town} (settled)" if _town else ""
+    town_line = f"\nTown: {_town_display}" if _town else ""
+
+    # ── EM-236 — the LIVING CONSTITUTION rides every prompt ONCE it has articles.
+    # The articled foundational document (grown by amend_constitution governance) is
+    # surfaced as a conditional block: an EMPTY constitution prints NOTHING, so the
+    # lawful-citizen em161 golden is byte-identical for a default (un-amended) world.
+    # Background tier gets the SAME compact list (it is short — one line per article).
+    # Zero extra LLM calls — it rides this turn. getattr keeps callers safe if the
+    # engine seam is ever absent.
+    constitution_block = ""
+    _articles = getattr(world, "constitution", None) or []
+    if _articles:
+        _article_lines = "\n".join(
+            f"  • {str(a.get('text', '')).strip()}"
+            for a in _articles if str(a.get("text", "")).strip()
+        )
+        if _article_lines:
+            constitution_block = f"""
+=== 📜 THE CONSTITUTION ({len(_articles)} article{"s" if len(_articles) != 1 else ""}) ===
+{_article_lines}
+  These are the town's ratified foundational articles. Amend them only by vote
+  (propose_rule effect=amend_constitution) — a 70% supermajority is required.
+"""
 
     # ── Wave D2 / EM-162 + Wave D3 / EM-171 — cache-key normalization
     # (BACKGROUND only): every displayed energy buckets to 10s, and the tick
@@ -2356,7 +3134,7 @@ def _assemble_context(
     # once per naming vote, not per tick. Protagonists/supporting render
     # exactly as before (byte-for-byte).
     if background:
-        clock_header = f"Town: {_town}\n" if _town else ""
+        clock_header = f"Town: {_town_display}\n" if _town else ""
         status_energy = _energy_display(agent.energy)
         _co_energy = lambda a: _energy_display(a.energy)  # noqa: E731
     else:
@@ -2458,7 +3236,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{proclamation_block}{whisper_block}{board_block}
+{soul_block}{stage_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -2476,7 +3254,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
 {project_text}
-
+{constitution_block}
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
 
@@ -3437,7 +4215,16 @@ class AgentRuntime:
         lane_reason: str | None = None
         effective = getattr(self.router, "effective_profile", None)
         if callable(effective):
+            # EM-167 — pass the cadence tier so the router can spill background/
+            # supporting turns to the off-critical-path overflow lane (Ollama).
+            # The tier kwarg is optional on the router signature, so duck-typed
+            # test routers without it stay unchanged.
+            tier = getattr(agent, "cadence_tier", "protagonist")
             try:
+                call_profile, lane_reason = effective(
+                    agent.id, profile_name, tier=tier)
+            except TypeError:
+                # Pre-EM-167 router (two-arg effective_profile) — fall back.
                 call_profile, lane_reason = effective(agent.id, profile_name)
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("effective_profile failed for %s: %s", agent.name, exc)
@@ -3698,10 +4485,50 @@ class AgentRuntime:
                 "%d (dropped %d)",
                 agent.name, len(steps) + dropped_steps, max_steps, dropped_steps,
             )
+        # EM-224 — PIANO coherence bottleneck (zero-LLM, deterministic). Runs
+        # AFTER the flatten and BEFORE apply: derive one intent from the turn's
+        # first speech act, reconcile later harm/help steps against it. Default
+        # OFF ⇒ no-op (byte-identical to pre-EM-224). 'annotate' stamps the
+        # contradicting step (_apply_steps surfaces it); 'drop' suppresses it and
+        # we emit ONE coherence_note in its place below.
+        coherence_drop_events: list[dict] = []
+        if _coherence_enabled(self.world.params):
+            # Normalize targets to ids FIRST (idempotent — _apply_steps re-runs
+            # it) so the coherence pass sees `target` as an agent id even when the
+            # model named the agent. Then derive intent + reconcile.
+            for s in steps:
+                _normalize_args(s, agent, self.world)
+            agent_names = {a.id: a.name for a in self.world.agents.values()}
+            steps, _drop_notes = _coherence_resolve(
+                steps, action_dict.get("thought", ""),
+                _coherence_strategy(self.world.params), agent_names,
+                actor_id=agent.id,
+            )
+            for note in _drop_notes:
+                coherence_drop_events.append({
+                    "kind": "coherence_note",
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "text": (
+                        f"{agent.name}'s {note['dropped_action']} toward "
+                        f"{note['target_name']} was withheld — it belied their "
+                        f"{note['intent']} words this turn."
+                    ),
+                    "payload": {
+                        "coherence": {
+                            "intent": note["intent"],
+                            "dropped_action": note["dropped_action"],
+                            "target_id": note["target_id"],
+                        },
+                    },
+                })
         action_chain, step_results = self._apply_steps(
             agent, steps, profile_name, profile_color,
             action_dict.get("thought", ""),
         )
+        if coherence_drop_events:
+            action_chain.extend(coherence_drop_events)
         result_event = (
             {"_multi": action_chain} if len(action_chain) != 1 else action_chain[0]
         )
@@ -3972,6 +4799,12 @@ class AgentRuntime:
         elif lane_reason == "probe":
             span["requested_profile"] = requested_profile
             span["probe"] = True
+        elif lane_reason == "overflow":
+            # EM-167 — the turn spilled to the off-critical-path overflow lane
+            # (Ollama). Additive keys, same shape as detour/probe; a home-lane
+            # turn keeps the exact pre-EM-167 key set.
+            span["requested_profile"] = requested_profile
+            span["overflow"] = True
         return span
 
     async def _call_and_parse(
@@ -4287,6 +5120,15 @@ class AgentRuntime:
                 # exception path so a parked event never leaks onto the next
                 # agent's chain (dropped with the failed step, like _apply_action).
                 shifts = self.world.drain_relationship_events()
+            # EM-224 — surface a coherence annotation onto the primary event so
+            # a 'say-then-harm' contradiction is legible (the act still ran). The
+            # marker rides ONLY a real resolution (not a parse_failure); the
+            # world already mutated. Stamps text + payload.coherence.
+            marker = step.get("_coherence")
+            if marker and step_events:
+                primary = step_events[0]
+                if primary.get("kind") != "parse_failure":
+                    self._surface_coherence(primary, marker)
             chain.extend(step_events)
             if shifts and not raised:
                 tick = self.world.tick
@@ -4347,6 +5189,12 @@ class AgentRuntime:
             # them (the state change itself stands; only its feed echo is
             # lost — strictly better than mis-attributing it to a stranger).
             shifts = self.world.drain_relationship_events()
+        # EM-227 — learn-by-doing: a SUCCESSFUL gated action grants the gating
+        # skill xp (a level-up replenishes the EM-229 knowledge need). The gate
+        # already guaranteed the agent HAD the skill, so this deepens a profession
+        # the more it is practiced. Skipped on a failed/parse_failure result and
+        # when no library gates the action (config-absent = no-op, golden-safe).
+        self._grant_use_xp(agent, action_dict, result)
         # Surface the agent's inner thought onto the feed line so the world's
         # reasoning is legible at a glance instead of buried in payload.thought.
         # Appended once to the primary action event (never the drained
@@ -4361,6 +5209,31 @@ class AgentRuntime:
                 result = {"_multi": [result] + decorated}
         return result
 
+    def _grant_use_xp(self, agent: AgentState, action_dict: dict, result: dict) -> None:
+        """EM-227 — grant the gating skill xp for a SUCCESSFUL gated action. The
+        action's result must be a real outcome (not a parse_failure) — a rejected
+        verb earns nothing. No library gates the action ⇒ no-op (config-absent =
+        no-op). Pure threshold arithmetic in world.grant_skill_xp (no random/clock).
+        Robust to the _multi chain shape (the primary event is _multi[0])."""
+        world = self.world
+        if not hasattr(world, "skill_gate_for"):
+            return
+        action = action_dict.get("action")
+        if not isinstance(action, str):
+            return
+        gate = world.skill_gate_for(action)
+        if gate is None:
+            return
+        primary = result["_multi"][0] if isinstance(result, dict) and "_multi" in result else result
+        if not isinstance(primary, dict) or primary.get("kind") == "parse_failure":
+            return
+        skill, _min = gate
+        try:
+            xp = int(world._skills_param("xp_per_use", 10))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            xp = 10
+        world.grant_skill_xp(agent, skill, xp)
+
     @staticmethod
     def _surface_thought(result: dict, thought: str) -> None:
         """Append the agent's one-sentence inner thought to the primary action
@@ -4374,6 +5247,21 @@ class AgentRuntime:
         text = primary.get("text")
         if text:
             primary["text"] = f"{text}  💭 {thought}"
+
+    @staticmethod
+    def _surface_coherence(event: dict, marker: dict) -> None:
+        """EM-224 — stamp a contradicting action's event so the say-then-harm
+        dissonance is legible: append a ⚠/💢 coherence note to the feed text and
+        attach `payload.coherence`. ADDITIVE, only on a flagged event (the
+        'annotate' strategy keeps the act — the world still mutated). No-op on a
+        textless event."""
+        event.setdefault("payload", {})["coherence"] = {
+            "intent": marker.get("intent"),
+            "contradicted": True,
+        }
+        text = event.get("text")
+        if text:
+            event["text"] = f"{text}  💢 (belying their {marker.get('intent')} words)"
 
     def _apply_action_inner(
         self,
@@ -4492,6 +5380,42 @@ class AgentRuntime:
                     "text": f"{agent.name} tried to extort but: {reason}",
                     "payload": {"error": reason}}
 
+        # EM-237 — harm-surface finishers. intimidate resolves an agent target and
+        # returns (ok, reason, amount) like extort; deceive resolves a target +
+        # reads the `about` claim and returns (ok, reason).
+        elif action == "intimidate":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to intimidate but target not found",
+                        "payload": {"error": "target_not_found"}}
+            ok, reason, amount = self.world.action_intimidate(agent, target)
+            if ok:
+                return {**base, "kind": "intimidate", "target_id": target.id,
+                        "text": f"{agent.name} menaces {target.name} into handing over {amount} credits!",
+                        "payload": {"action": "intimidate", "amount": amount,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to intimidate but: {reason}",
+                    "payload": {"error": reason}}
+
+        elif action == "deceive":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to deceive but target not found",
+                        "payload": {"error": "target_not_found"}}
+            about = str(args.get("about", "")).strip()
+            ok, reason = self.world.action_deceive(agent, target, about)
+            if ok:
+                return {**base, "kind": "deceive", "target_id": target.id,
+                        "text": f"{agent.name} feeds {target.name} a lie.",
+                        "payload": {"action": "deceive", "about": about,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to deceive but: {reason}",
+                    "payload": {"error": reason}}
+
         elif action == "vandalize":
             result = self.world.action_vandalize(agent, args.get("building_id", ""))
             return _emit_world_result(result, base, thought)
@@ -4545,6 +5469,78 @@ class AgentRuntime:
             return {**base, "kind": "parse_failure",
                     "text": f"{agent.name} tried to accept a contract but: {reason}",
                     "payload": {"error": reason}}
+
+        # EM-228 — cooperation lever. teach_skill resolves a co-located target and
+        # returns a ready event dict (skill_taught on success, teach_failed
+        # otherwise — both via teach_skill_event); request_skill parks a pending
+        # request and returns a ready event dict (skill_requested / a fail event).
+        elif action == "teach_skill":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to teach but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.teach_skill_event(agent, target, args.get("skill", "")),
+                base, thought)
+
+        elif action == "request_skill":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to ask but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_request_skill(agent, target, args.get("skill", "")),
+                base, thought)
+
+        # EM-230 — real trade. offer_trade resolves a co-located target and parks an
+        # offer (ready event dict: trade_offered / a fail event). accept_trade settles
+        # the open offer addressed to this agent via the ATOMIC swap (trade_settled /
+        # trade_failed via settle_trade_event). decline_trade drops it (trade_declined
+        # / a fail event). accept/decline take NO target (keyed by this agent's id).
+        elif action == "offer_trade":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to offer a trade but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_offer_trade(
+                    agent, target, args.get("give"), args.get("get")),
+                base, thought)
+
+        elif action == "accept_trade":
+            return _emit_world_result(
+                self.world.settle_trade_event(agent), base, thought)
+
+        elif action == "decline_trade":
+            return _emit_world_result(
+                self.world.action_decline_trade(agent), base, thought)
+
+        # EM-231 — cooperation handshake + the ONE gated action. offer_cooperation
+        # resolves a co-located target and parks a handshake offer (ready event:
+        # cooperation_offered / a fail event). accept_cooperation forms the active
+        # link (cooperation_formed / a fail event); it takes NO target (keyed by
+        # this agent's id). co_build advances a building with a co-located partner
+        # this agent has agreed to cooperate with (co_built / a fail event).
+        elif action == "offer_cooperation":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to offer a partnership but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_offer_cooperation(agent, target), base, thought)
+
+        elif action == "accept_cooperation":
+            return _emit_world_result(
+                self.world.action_accept_cooperation(agent), base, thought)
+
+        elif action == "co_build":
+            return _emit_world_result(
+                self.world.action_co_build(agent, args.get("building_id")),
+                base, thought)
 
         # EM-240 — enforcer justice verbs (Task 10). investigate returns a
         # (ok, reason, count) tuple like steal; accuse returns a ready event dict
@@ -4682,6 +5678,26 @@ class AgentRuntime:
                     "text": f"{agent.name} remembers: \"{args.get('fact', '')}\"",
                     "payload": {"action": "remember", "fact": args.get("fact"), "thought": thought}}
 
+        # EM-232 — Victory Arch: pitch_contribution parks this agent's pitch keyed
+        # by their id (a contribution_pitched event / a fail event on blank text);
+        # the periodic peer-judge cycle ranks + awards. Reflex, no target — the
+        # pitch text rides this turn (zero extra LLM calls). The text arg is read
+        # from `text` (or a `pitch` alias) so a model's loose JSON still lands.
+        elif action == "pitch_contribution":
+            return _emit_world_result(
+                self.world.action_pitch_contribution(
+                    agent, args.get("text") or args.get("pitch") or ""),
+                base, thought)
+
+        # EM-235 — boost queue: buy_turn charges world.boost.cost credits + queues
+        # an EXTRA scheduled turn for this agent (a turn_boosted event / a fail
+        # event when OFF, too poor, or over the per-round cap). Reflex, no args —
+        # the buy rides this turn (zero extra LLM calls); the extra turn it grants
+        # is a real new scheduled slot honored by the world scheduler.
+        elif action == "buy_turn":
+            return _emit_world_result(
+                self.world.action_buy_turn(agent), base, thought)
+
         elif action == "move_to":
             place_id = args.get("place")
             if place_id in self.world.places:
@@ -4706,8 +5722,14 @@ class AgentRuntime:
             target = args.get("target") or args.get("building_id")
             # Wave I / EM-212 — promote_image carries the gallery image id.
             image_id = args.get("image_id")
+            # EM-236 — amend_constitution carries op (add|edit|remove) + an optional
+            # article_id (for edit/remove). article_id also arrives via the generic
+            # `target` arg (the model may reuse it), so accept either.
+            op = args.get("op")
+            article_id = args.get("article_id") or (
+                args.get("target") if effect == "amend_constitution" else None)
             ok, reason, rule = self.world.action_propose_rule(
-                agent, effect, text, name, target, image_id)
+                agent, effect, text, name, target, image_id, op, article_id)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)

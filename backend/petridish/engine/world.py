@@ -4,6 +4,7 @@ World state: pure data model.  No I/O, no asyncio.  Testable in isolation.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import re
@@ -23,6 +24,113 @@ def _block_get(block: Any, key: str, default: Any) -> Any:
     if isinstance(block, dict):
         return block.get(key, default)
     return getattr(block, key, default)
+
+
+def _clamp_need(value: Any, default: float = 100.0) -> float:
+    """EM-229 — coerce a restored need (knowledge/influence) to a float clamped
+    to 0..100. Absent (None) or malformed → the full default (fail-safe: a
+    pre-EM-229 snapshot restores full needs). Mirrors the crime notoriety clamp
+    on the restore path."""
+    if value is None:
+        return default
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_soul(value: Any, cap: int = 3) -> list[str]:
+    """EM-233 — coerce a restored/seed soul into a bounded list of non-blank
+    identity-anchor strings, truncated to `cap`. Absent (None) or malformed
+    (non-list, non-str entries) → [] / dropped (fail-safe: a tampered or pre-EM-233
+    snapshot restores an empty soul). Pure/total: never raises, no clock, no RNG.
+    Shared by the restore path (from_snapshot) and the seed path (seed_soul) so a
+    soul round-trips byte-stably (EM-155)."""
+    if not isinstance(value, list):
+        return []
+    try:
+        cap = max(0, int(cap))
+    except (TypeError, ValueError):
+        cap = 3
+    out: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        text = entry.strip()
+        if text:
+            out.append(text)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _coerce_skills(value: Any) -> dict:
+    """EM-227 — coerce a restored/seed skills map into {str: int>=0}. Absent
+    (None) or malformed (non-dict, non-str keys, non-int/negative levels) →
+    {} / dropped entries (fail-safe: a tampered or pre-EM-227 snapshot restores
+    a skill-less agent). Pure/total: never raises, no clock, no RNG. A 0-level
+    entry is DROPPED so a skills map round-trips byte-stably (EM-155): the
+    canonical form holds only positive levels, matching to_dict's `if self.skills`
+    only-when-non-empty emit."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    for skill, level in value.items():
+        if not isinstance(skill, str):
+            continue
+        try:
+            lvl = int(level)
+        except (TypeError, ValueError):
+            continue
+        if lvl > 0:
+            out[skill] = lvl
+    return out
+
+
+def _coerce_contributions(value: Any) -> dict:
+    """EM-232 — coerce a restored contribution ledger into {str: int>0}. Absent
+    (None) or malformed (non-dict, non-str keys, non-int/non-positive counts) →
+    {} / dropped entries (fail-safe: a tampered or pre-EM-232 snapshot restores a
+    contributionless agent). Pure/total: never raises, no clock, no RNG. A 0-count
+    entry is DROPPED so the ledger round-trips byte-stably (EM-155): the canonical
+    form holds only positive counts, matching to_dict's only-when-non-empty emit."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    for kind, count in value.items():
+        if not isinstance(kind, str):
+            continue
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[kind] = n
+    return out
+
+
+def _json_safe_events(value: Any) -> list[dict]:
+    """EM-190 — coerce a list of parked OUTBOX event dicts into a JSON-stable,
+    byte-round-trippable list (for pending_spawn_events / pending_relationship_
+    events serialization). Each entry is a ready-to-emit event dict already
+    destined for the JSON event pipeline; we deep-copy it through a json round-trip
+    so the serialized form is canonical (and so a non-JSON-serializable or non-dict
+    entry is DROPPED rather than crashing to_snapshot/from_snapshot). Absent (None)
+    or non-list input → []. Pure/total: never raises, no clock, no RNG, fail-safe —
+    a tampered or pre-EM-190 snapshot restores a drained (empty) outbox."""
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            clone = json.loads(json.dumps(entry))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(clone, dict):
+            out.append(clone)
+    return out
 
 
 def _truncate(text: str, limit: int = 60) -> str:
@@ -194,8 +302,112 @@ class AgentState:
     crime_status: str | None = None          # None|wanted|detained|jailed|exiled
     crime_status_until_tick: int = 0         # release tick for detained/jailed
     rap_sheet: list[dict] = field(default_factory=list)  # capped crime record
+    # EM-229 — three-needs psychology. Two decaying drives alongside `energy`
+    # (floats 0..100). ADDITIVE with default 100.0; serialized in to_dict ONLY
+    # when < 100 and restored defensively (absent/garbage → 100.0, clamped
+    # 0..100), so a full-needs agent — and every pre-EM-229 snapshot — keeps the
+    # exact prior dict shape (the EM-155 byte-identical guarantee). UNLIKE energy
+    # these NEVER kill (check_death reads only energy); a low need only biases
+    # behavior via a salience-gated prompt line. Knowledge is replenished by
+    # learning (teach/skill-gain, EM-227/228); influence by governance/social
+    # wins — see replenish_knowledge / replenish_influence.
+    knowledge: float = 100.0
+    influence: float = 100.0
+    # EM-233 — soul: a tiny IMMUTABLE list of identity anchors (seeded from a
+    # persona at spawn if configured, ≤ memory.soul_cap entries). NEVER summarized
+    # by consolidation; injected into every prompt as who-you-are context.
+    # ADDITIVE with default [] → serialized in to_dict ONLY when non-empty and
+    # restored defensively (absent/garbage → [], over-cap truncated), so a
+    # soulless agent — and every pre-EM-233 snapshot — keeps the exact prior dict
+    # shape (the EM-155 byte-identical guarantee + the em161 golden, since an
+    # empty soul yields no prompt block). Seed via World.seed_soul.
+    soul: list[str] = field(default_factory=list)
+    # EM-227 — skills & emergent professions: {skill name → level}. ADDITIVE with
+    # default {} → serialized in to_dict ONLY when non-empty and restored
+    # defensively (absent/garbage → {}, non-str keys + non-positive levels
+    # dropped), so a skill-less agent — and every pre-EM-227 snapshot — keeps the
+    # exact prior dict shape (the EM-155 byte-identical guarantee + the em161
+    # golden, since an empty skills map + an absent library yields no prompt block
+    # and gates nothing). A level is GAINED via World.grant_skill_xp (doing /
+    # teaching) and a starting spread via World.seed_skills (deterministic). The
+    # canonical form holds only POSITIVE levels (see _coerce_skills).
+    skills: dict[str, int] = field(default_factory=dict)
+    # EM-232 — peer-judged credit economy / Victory Arch. TWO additive fields feed
+    # the pitch->judge->award cycle:
+    #   contributions — a DURABLE per-agent ledger {kind → count} of the four
+    #     pro-social acts the arch judges by (skill_taught / trade_settled /
+    #     project_funded / project_built), bumped at each act's success site via
+    #     World.record_contribution. The deterministic contribution score
+    #     (World.contribution_score) is a weighted sum of this ledger — pure
+    #     arithmetic, no random/clock (EM-155). ADDITIVE with default {} →
+    #     serialized in to_dict ONLY when non-empty and restored defensively
+    #     (absent/garbage → {}, non-str keys + non-positive counts dropped), so a
+    #     contributionless agent — and every pre-EM-232 snapshot — keeps the exact
+    #     prior dict shape (the byte-identical guarantee + the em161 golden, since
+    #     an empty ledger surfaces no prompt block and the default cadence never
+    #     fires a cycle).
+    contributions: dict[str, int] = field(default_factory=dict)
+    #   renown — a DURABLE reputation-through-contribution counter bumped when this
+    #     agent WINS a Victory Arch cycle (the inequality story: repeat winners
+    #     pull ahead). UNLIKE the EM-120 DERIVED `reputation` (mean incoming trust,
+    #     zero storage), renown is an earned, persisted score. ADDITIVE with
+    #     default 0 → serialized in to_dict ONLY when non-zero and restored
+    #     defensively (absent/garbage → 0, clamped >= 0), so an unawarded agent —
+    #     and every pre-EM-232 snapshot — keeps the exact prior dict shape.
+    renown: int = 0
+    # EM-235 — boost queue: how many EXTRA scheduled turns this agent has bought
+    # but not yet consumed (EW's ComputeCredits — the agent literally purchases
+    # influence over the shared timeline). A DURABLE counter (not a transient
+    # outbox): buy_turn bumps it (after charging world.boost.cost credits, bounded
+    # by world.boost.max_per_round per round) and the scheduler decrements it as it
+    # grants each extra slot (sorted by id for determinism). ADDITIVE with default
+    # 0 → serialized in to_dict ONLY when > 0 and restored defensively (absent/
+    # garbage/negative → 0), so a boost-free agent — and every pre-EM-235 snapshot —
+    # keeps the exact prior dict shape (the EM-155 byte-identical guarantee + the
+    # em161 golden, since the default-OFF boost surfaces no prompt line and gates
+    # nothing). A parked boost survives a fork/resume (EM-190) because it is plain
+    # agent state, not a separate outbox dict.
+    boosted_turns: int = 0
+    # EM-126 — generational depth. TWO additive fields drive life stages:
+    #   life_stage — child | adult | elder. Pre-EM-126 worlds (and the default
+    #     `world.generations.enabled=False`) leave EVERY agent `adult`, so the
+    #     life-stage layer is inert: serialized in to_dict ONLY when != "adult"
+    #     and restored defensively (absent/unknown → "adult"), so an all-adult
+    #     world — and every pre-EM-126 snapshot — keeps the exact prior dict shape
+    #     (the EM-155 byte-identical guarantee + the em161 golden, since the stage
+    #     prompt block is empty under default conditions and gates nothing).
+    #   age_ticks — rounds this agent has lived. Increments once per round in
+    #     World.age_agents (ONLY when generations is enabled); thresholds promote
+    #     child→adult→elder via world.generations (child_until / elder_after).
+    #     ADDITIVE with default 0 → serialized in to_dict ONLY when > 0 and
+    #     restored defensively (absent/garbage/negative → 0), so a fresh (age 0)
+    #     agent — and every pre-EM-126 snapshot — keeps the exact prior dict shape.
+    # Aging + heir selection are PURE (world.tick + sorted ids) — no random/clock
+    # (EM-155). Inheritance (credits → heirs on death) is ALSO gated behind
+    # world.generations.enabled, so EM-114 children keep working unchanged when
+    # generations is off.
+    life_stage: str = "adult"
+    age_ticks: int = 0
+    # EM-126 — set True by World.apply_inheritance once this (deceased) agent's
+    # estate has been settled, so a second call on the same corpse (a defensive
+    # double-invoke, or a resume/fork that re-walks the death path) is a no-op
+    # instead of emitting a spurious credits=0 `inherited` event. ADDITIVE with
+    # default False → serialized in to_dict ONLY when True and restored defensively
+    # (absent/garbage → False), so a living/never-inherited agent — and every
+    # pre-EM-126 snapshot — keeps the exact prior dict shape (EM-155 byte-identical
+    # + em161 golden; gates nothing in the prompt, surfaces no line).
+    inheritance_settled: bool = False
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
+
+    def skill_level(self, skill: str) -> int:
+        """EM-227 — this agent's level in `skill` (0 if unknown/unheld). The
+        single read used by the gate, the prompt, and grant_skill_xp so a missing
+        skill is never a KeyError."""
+        try:
+            return max(0, int(self.skills.get(skill, 0)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 0
 
     def to_dict(self, profile_color: str = "#888888") -> dict:
         d = {
@@ -254,6 +466,50 @@ class AgentState:
             d["crime_status_until_tick"] = self.crime_status_until_tick
         if self.rap_sheet:
             d["rap_sheet"] = [dict(e) for e in self.rap_sheet]
+        # EM-229 — needs serialized ONLY when below full, so a full-needs agent
+        # (and every pre-EM-229 snapshot) keeps the exact prior dict shape.
+        if self.knowledge < 100.0:
+            d["knowledge"] = round(self.knowledge, 2)
+        if self.influence < 100.0:
+            d["influence"] = round(self.influence, 2)
+        # EM-233 — soul serialized ONLY when non-empty, so a soulless agent (and
+        # every pre-EM-233 snapshot) keeps the exact prior dict shape.
+        if self.soul:
+            d["soul"] = list(self.soul)
+        # EM-227 — skills serialized ONLY when non-empty, so a skill-less agent
+        # (and every pre-EM-227 snapshot) keeps the exact prior dict shape. The
+        # map already holds only positive levels (grant/seed enforce it), so the
+        # round-trip is byte-stable.
+        if self.skills:
+            d["skills"] = dict(self.skills)
+        # EM-232 — contribution ledger + renown serialized ONLY when non-default, so
+        # a contributionless / unawarded agent (and every pre-EM-232 snapshot) keeps
+        # the exact prior dict shape (the em161 golden + the byte-identical
+        # guarantee). The ledger already holds only positive counts (record_contribution
+        # enforces it) so the round-trip is byte-stable.
+        if self.contributions:
+            d["contributions"] = dict(self.contributions)
+        if self.renown:
+            d["renown"] = self.renown
+        # EM-235 — parked boost count serialized ONLY when non-zero, so a boost-free
+        # agent (and every pre-EM-235 snapshot) keeps the exact prior dict shape (the
+        # em161 golden + the byte-identical guarantee). A parked boost survives a
+        # fork/resume (EM-190) — it is durable agent state, not a transient outbox.
+        if self.boosted_turns:
+            d["boosted_turns"] = self.boosted_turns
+        # EM-126 — life stage + age serialized ONLY when non-default, so an
+        # all-adult / age-0 agent (and every pre-EM-126 snapshot) keeps the exact
+        # prior dict shape (the em161 golden + the byte-identical guarantee). With
+        # generations OFF nothing ages, so both stay at their defaults and are
+        # never emitted.
+        if self.life_stage != "adult":
+            d["life_stage"] = self.life_stage
+        if self.age_ticks:
+            d["age_ticks"] = self.age_ticks
+        # EM-126 — the inheritance-settled flag rides along ONLY when set (a
+        # settled corpse), so a living agent keeps the exact prior dict shape.
+        if self.inheritance_settled:
+            d["inheritance_settled"] = True
         return d
 
 
@@ -796,23 +1052,110 @@ class World:
         # governance}` event here; the runtime/api layer drains it after a vote and
         # emits it through the normal event pipeline. Keeps action_vote's signature
         # intact while letting the spawn happen world-side (single source of truth).
+        # Also carries EM-114 births, EM-211 memory events, and the name_town/
+        # demolish/promote_image vote effects. EM-190: this outbox IS now serialized
+        # snapshot-safe (only-when-non-empty, restored defensively) so a fork taken
+        # before the drain doesn't silently drop a parked spawn/birth; in the live
+        # tick path it drains at the turn head (_flush_spawn_events) BEFORE the
+        # per-turn snapshot, so a default world still round-trips byte-identically.
         self.pending_spawn_events: list[dict] = []
         # Wave I / EM-210 — transient image-fetch outbox (NOT snapshotted). Each
         # entry {"image_id","prompt","url"} parked by action_create_image at turn
         # time; the loop drains it each tick into bounded best-effort PNG fetches
-        # (semaphore, skip-under-load). Same transient class as pending_spawn_events
-        # — never serialized (the PNG is an external side-artifact; EM-190).
+        # (semaphore, skip-under-load). EM-190 audit: UNLIKE pending_spawn_events /
+        # pending_relationship_events (now serialized), this one stays deliberately
+        # off the replay surface — the PNG is an external side-artifact, not world
+        # state; the gallery record + image_posted event are already emitted
+        # synchronously, so a fork merely re-attempts (or skips) the PNG fetch.
         self.pending_image_fetches: list[dict] = []
         # Wave E / EM-113 — relationship_changed outbox. Reflex type transitions
         # (and accepted set_relationship type changes) park their ready-to-emit
         # event dicts here; the runtime drains them at the end of _apply_action
         # so they ride the SAME action `_multi` chain (same turn_id) as the
-        # action that mutated trust. NOT serialized: drained within the turn.
+        # action that mutated trust. EM-190: this outbox IS now serialized
+        # snapshot-safe (only-when-non-empty, restored defensively) so a fork
+        # taken before the drain doesn't silently drop a parked transition; in the
+        # live tick path it drains within the turn (BEFORE the per-turn snapshot),
+        # so a default world still round-trips byte-identically.
         self.pending_relationship_events: list[dict] = []
         # EM-240 — open recruit offers, keyed by TARGET agent id → {recruiter_id,
         # tick}. Posted by action_recruit; consumed on the target's
-        # accept_contract turn. NOT snapshotted (ephemeral, like whispers).
+        # accept_contract turn. EM-190: this two-turn pact outbox IS serialized
+        # snapshot-safe (only-when-non-empty, restored defensively) — like the
+        # trade/cooperation offers, an offer parked between recruit and
+        # accept_contract survives a fork/resume instead of being silently dropped;
+        # an offer-free world round-trips byte-identically.
         self.pending_crime_offers: dict[str, dict] = {}
+        # EM-228 — open skill-learning requests, keyed by the would-be TEACHER's
+        # agent id → {asker_id, skill, tick}. Posted by action_request_skill (the
+        # explicit cooperation ASK); the target perceives "X wants to learn <skill>
+        # from you" on its next prompt; cleared when that teacher teaches the asker
+        # (action_teach_skill drains a matching open request). Like the recruit /
+        # trade / cooperation pacts, this outbox IS serialized snapshot-safe (EM-190
+        # / the Wave-M pending-state rule): only when non-empty, restored
+        # defensively, so a request-free world round-trips byte-identically. One open
+        # request per teacher (a later ask overwrites the prior — freshest wins).
+        self.pending_skill_requests: dict[str, dict] = {}
+        # EM-230 — open trade offers, keyed by the OFFEREE's (target's) agent id →
+        # {from_id, give, get, tick}, where give/get are normalized term dicts
+        # {"credits": int>=0, "skill": str|None}. Posted by action_offer_trade (the
+        # two-turn negotiation OFFER); the target perceives "X offers you … for …"
+        # on its next prompt; consumed by action_accept_trade (the ATOMIC two-sided
+        # swap, only if BOTH sides can still pay) or dropped by action_decline_trade.
+        # Like pending_skill_requests this Wave-M outbox IS serialized snapshot-safe
+        # (EM-190): only when non-empty, restored defensively, so an offer-free world
+        # round-trips byte-identically. One open offer per offeree (a later offer
+        # overwrites the prior — the freshest deal on the table wins).
+        self.pending_trade_offers: dict[str, dict] = {}
+        # EM-231 — cooperation handshakes. TWO additive, snapshot-safe Wave-M
+        # outboxes (EM-190): a world that never forms a handshake has NEITHER, so
+        # to_snapshot omits both keys and the round-trip is byte-identical.
+        #   pending_cooperation_offers: open handshake OFFERS keyed by the OFFEREE's
+        #     (target's) agent id → {from_id, tick}. Posted by action_offer_cooperation
+        #     (the R4 two-turn OFFER); the target perceives "X wants to partner with
+        #     you" on its next prompt; consumed by action_accept_cooperation (which
+        #     re-checks co-location at settle) or simply left to expire. One open
+        #     offer per offeree (a later offer overwrites — the freshest invite wins).
+        self.pending_cooperation_offers: dict[str, dict] = {}
+        #   cooperations: the ACTIVE handshakes — a SYMMETRIC link between a pair,
+        #     keyed by the sorted id-pair "lo|hi" → {a: lo, b: hi, tick}. are_cooperating
+        #     reads it order-independently. The ONE cooperation-gated action co_build
+        #     requires an active link with a CO-LOCATED partner (gated in _validate_world).
+        self.cooperations: dict[str, dict] = {}
+        # EM-232 — open Victory-Arch pitches, keyed by the PITCHER's agent id →
+        # {text, tick}. Posted by action_pitch_contribution (a reflex verb); ranked
+        # + drained by run_victory_arch_cycle at a cycle boundary. Like the M2
+        # outboxes this Wave-M pending state IS serialized snapshot-safe (EM-190):
+        # only when non-empty, restored defensively, so a pitch-free world
+        # round-trips byte-identically and a pitch parked between pitch and cycle
+        # survives a fork/resume. One open pitch per agent (a later pitch overwrites
+        # the prior — the freshest pitch on the wall wins).
+        self.pending_pitches: dict[str, dict] = {}
+        # EM-232 — the last Victory-Arch cadence BOUNDARY the cycle has fired at (a
+        # multiple of every_n_ticks; 0 = never fired). run_victory_arch_cycle is
+        # invoked once per ROUND from _apply_round_start, but world.tick advances per
+        # TURN and a round spans a VARYING number of turns (EM-158 tiers + births/
+        # deaths). An exact `tick % every_n == 0` gate therefore SKIPS any cadence
+        # multiple that falls mid-round (the cycle fires irregularly / never). This
+        # tracker drives CATCH-UP: at each round boundary the cycle fires when tick
+        # has reached/passed the NEXT due multiple since the last fire, then advances
+        # to the highest crossed boundary (one judge per boundary — the queue is
+        # single-cycle). Serialized snapshot-safe (EM-155) ONLY when set (>0), so a
+        # never-fired / pre-EM-232 world round-trips byte-identically; restored
+        # defensively (absent/garbage → 0). Durable so a fork/resume never re-fires
+        # an already-judged boundary (no double award). No clock — pure tick math.
+        self._last_arch_tick: int = 0
+        # EM-235 — per-agent buys THIS round {agent_id: count}, the backing for the
+        # world.boost.max_per_round cap. Reset at each round boundary
+        # (_start_new_round) — a within-round budget. Snapshots fire per tick
+        # (routinely MID-round), so it IS serialized snapshot-safe (only-when-non-
+        # empty, restored defensively): a snapshot taken mid-round preserves the
+        # remaining budget, so an already-capped agent can't buy max_per_round MORE
+        # in the same round after a resume (cap bypass) and a fork/replay schedules
+        # the SAME boosted turns the continuous run had (EM-155 determinism). The
+        # DURABLE boosts already bought (AgentState.boosted_turns) are serialized
+        # separately and survive the round-trip too.
+        self._boosts_this_round: dict[str, int] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -869,6 +1212,19 @@ class World:
         # frontend renders a procedural fallback). Serialized in to_snapshot() only
         # when non-empty so pre-Wave-I snapshots restore byte-identically.
         self.plaza_banner_ref: str = ""
+        # EM-236 — the LIVING CONSTITUTION: an amendable, ARTICLED foundational
+        # document layered over the flat rule list. A list of articles, each
+        # {id, text, ratified_tick}; grown ONLY through governance (an
+        # amend_constitution proposal that ratifies on a 70% supermajority, like
+        # demolish — see action_propose_rule / _evaluate_rule / _on_rule_activated).
+        # Article ids derive from ratified_tick + an ordinal (deterministic, no
+        # uuid/clock — replay-safe, EM-155). Serialized in to_snapshot() ONLY when
+        # non-empty (the factions/active_miracles only-when-non-empty pattern), so
+        # an un-amended world — and every pre-EM-236 snapshot — round-trips
+        # byte-identically; restored defensively in from_snapshot. Surfaced in the
+        # prompt ONLY when non-empty (conditional block ⇒ em161 golden byte-identical
+        # for a default empty-constitution world).
+        self.constitution: list[dict] = []
         # EM-137 (god console) — one-shot god whispers awaiting delivery, keyed
         # by agent id. post_whisper_as_god queues lines here; the runtime pops
         # the target's queue into its NEXT prompt exactly once. EM-145: queued
@@ -1107,6 +1463,11 @@ class World:
                 break
         self._turn_order = due
         self._turn_index = 0
+        # EM-235 — a fresh round resets the per-agent boost-buy budget (the
+        # world.boost.max_per_round cap is PER round). Durable boosts already
+        # bought (AgentState.boosted_turns) are untouched — only the within-round
+        # purchase counter clears.
+        self._boosts_this_round = {}
 
     def next_agent(self) -> AgentState | None:
         """Return the next agent whose turn it is, advancing the pointer.
@@ -1124,6 +1485,20 @@ class World:
         if self._turn_index >= len(self._turn_order):
             self._round_start = True
 
+        # EM-235 — boost queue: before the round rolls over, honor any parked extra
+        # turns. When THIS round's due rotation is exhausted (the round is about to
+        # roll) but a living agent still holds a bought boost, append the boosted
+        # slots (sorted by id for determinism) to THIS round's rotation and CANCEL
+        # the rollover — the agent acts an extra time before round R+1 begins (the
+        # north-star: MORE turns). Each appended slot consumes one unit of that
+        # agent's durable counter; the per-round buy budget (and so the cap) only
+        # resets when the round genuinely rolls. Done AFTER _rebuild_turn_order so a
+        # dead agent's boost is already pruned (no phantom turn) and the append
+        # lands strictly AFTER the due set, at/after the pointer — never disturbing
+        # the EM-172 mid-round-death pointer math or the EM-158 cadence tiers.
+        if self._round_start and self._append_boost_slots() > 0:
+            self._round_start = False
+
         if self._round_start:
             self._start_new_round()
             self._round_start = False
@@ -1139,6 +1514,106 @@ class World:
 
         return agent
 
+    def _append_boost_slots(self) -> int:
+        """EM-235 — append parked boosted turns to the CURRENT round's rotation.
+
+        For every LIVING agent holding a bought boost (`boosted_turns` > 0), append
+        ONE extra slot (its id) to `_turn_order`, in SORTED-id order so same-seed
+        runs schedule identically (no random/clock — EM-155). Each appended slot
+        consumes one unit of that agent's durable counter. Returns the number of
+        slots appended (0 ⇒ the round may roll over normally).
+
+        Called from next_agent only when the due rotation is already exhausted, so
+        the appended slots land strictly AFTER the due set, at/after the pointer —
+        never disturbing the EM-172 mid-round-death pointer math or the EM-158
+        cadence tiers. A dead agent's boost is never honored (it was pruned by
+        _rebuild_turn_order before this runs, and the living_agents filter here is a
+        second guard). One slot per agent per call, so multi-boosts drain over
+        successive calls (each materializes the next slot as the prior is consumed).
+
+        Only appends when a real round's rotation was already in progress (a
+        non-empty `_turn_order` with the pointer at its end). At init / a restore /
+        a post-rollover empty rotation it returns 0, so next_agent builds the normal
+        round FIRST and the boost is honored at THAT round's end — a boosted agent
+        never pre-empts the due set."""
+        if not self._turn_order or self._turn_index < len(self._turn_order):
+            return 0
+        appended = 0
+        for agent in self.living_agents():
+            if getattr(agent, "boosted_turns", 0) > 0:
+                self._turn_order.append(agent.id)
+                agent.boosted_turns -= 1
+                appended += 1
+        # Stable, replay-deterministic order: the slots just appended are re-sorted
+        # by id over the boosted tail so the grant order never depends on dict
+        # insertion order (living_agents follows self.agents insertion order).
+        if appended:
+            head = self._turn_order[:-appended]
+            tail = sorted(self._turn_order[-appended:])
+            self._turn_order = head + tail
+        return appended
+
+    def boost_enabled(self) -> bool:
+        """EM-235 — True when the boost queue is configured ON: a positive
+        `world.boost.cost`. The OFF state (default, and any world.yaml without the
+        block) rejects every buy_turn, gates the prompt line off, and leaves the
+        scheduler untouched, so a boost-free default world is golden + snapshot
+        byte-identical."""
+        try:
+            return int(self._boost_param("cost", 0)) > 0
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return False
+
+    def action_buy_turn(self, agent: AgentState) -> dict:
+        """EM-235 — the reflex BUY (R3): spend `world.boost.cost` credits to queue
+        ONE extra scheduled turn for this agent (EW's ComputeCredits — buying
+        influence over the shared timeline; the north-star: MORE turns/LLM calls).
+        Zero extra LLM calls at purchase — the buy rides the agent's existing turn;
+        the EXTRA turn it grants is a real new scheduled slot honored by next_agent.
+
+        Returns a ready-to-emit `turn_boosted` event dict, or a fail event when:
+          * the boost queue is OFF (cost <= 0 — config-absent no-op), or
+          * the agent can't afford the cost, or
+          * the agent already hit `world.boost.max_per_round` this round.
+        Deterministic — pure arithmetic + a per-round counter (no random/clock)."""
+        if not self.boost_enabled():
+            return self._fail_event(agent.id, "buy_turn", "boost disabled",
+                                    f"{agent.name} reached for an extra turn, but the boost queue is closed.")
+        try:
+            cost = int(self._boost_param("cost", 0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            cost = 0
+        try:
+            cap = max(1, int(self._boost_param("max_per_round", 2)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            cap = 2
+        if cost <= 0:  # pragma: no cover - boost_enabled already guards this
+            return self._fail_event(agent.id, "buy_turn", "boost disabled",
+                                    f"{agent.name} reached for an extra turn, but the boost queue is closed.")
+        bought = int(self._boosts_this_round.get(agent.id, 0))
+        if bought >= cap:
+            return self._fail_event(
+                agent.id, "buy_turn", "round cap reached",
+                f"{agent.name} has already bought {bought} extra turn(s) this round (cap {cap}).")
+        if agent.credits < cost:
+            return self._fail_event(
+                agent.id, "buy_turn", "insufficient credits",
+                f"{agent.name} can't afford an extra turn ({cost} credits, has {agent.credits}).")
+        agent.credits -= cost
+        agent.boosted_turns += 1
+        self._boosts_this_round[agent.id] = bought + 1
+        return {
+            "kind": "turn_boosted",
+            "actor_id": agent.id,
+            "text": f"{agent.name} buys an extra turn ({cost} credits).",
+            "payload": {
+                "action": "buy_turn",
+                "cost": cost,
+                "boosted_turns": agent.boosted_turns,
+                "credits": agent.credits,
+            },
+        }
+
     def _apply_round_start(self) -> None:
         """Apply per-round effects (UBI etc.)."""
         self.round += 1
@@ -1146,6 +1621,12 @@ class World:
         if ubi_rule:
             for agent in self.living_agents():
                 agent.credits += self.params.ubi_amount
+        # EM-126 — snapshot the roster BEFORE the birth check so the aging sweep
+        # below ages only agents that already existed this round; a child born in
+        # check_births is excluded (it ages from 0 NEXT round, not the round it is
+        # born — the invariant this method's tail documents). Cheap id-set copy;
+        # generations OFF makes the sweep a no-op regardless.
+        pre_birth_ids = set(self.agents)
         # Wave E / EM-114 — the once-per-round birth check (contract: "hook
         # beside the existing per-round effects"). At most ONE birth per
         # round; events park in pending_spawn_events and are drained by the
@@ -1159,6 +1640,36 @@ class World:
         # newborn's family edges count toward this round's clusters. Diff-
         # driven events park in the same pending_spawn_events outbox.
         self.recompute_factions()
+        # EM-233 — the once-per-round memory consolidation ("sleep"), AFTER births
+        # so a newborn (whose only belief is its birth line) is well under the
+        # ceiling and untouched. Each over-ceiling living agent rolls its oldest
+        # beliefs into one digest line; the `memory` events park in the SAME
+        # pending_spawn_events outbox (drained + emitted by the tick loop's
+        # existing _flush_spawn_events, like births/factions). Deterministic +
+        # clock/RNG-free; a small cast under the ceiling is a no-op (golden-safe).
+        self.consolidate_memories()
+        # EM-232 — the Victory-Arch cycle, checked at the round boundary AFTER
+        # consolidation. When the arch is ON and this tick is a cycle boundary, the
+        # parked pitches are judged + the top_n awarded; the `arch_award` events
+        # park in the SAME pending_spawn_events outbox (drained + emitted by the
+        # tick loop's _flush_spawn_events, like births/factions/consolidation). OFF
+        # (the default cadence) / an off-boundary tick / no pitches ⇒ a no-op that
+        # parks nothing (golden-safe). Deterministic — no random/clock.
+        arch_events = self.run_victory_arch_cycle()
+        if arch_events:
+            self.pending_spawn_events.extend(arch_events)
+        # EM-126 — the once-per-round aging sweep, LAST so it ages a newborn from
+        # 0 next round (not the round it is born). Every living agent's age_ticks
+        # bumps one round; a stage promotion (child→adult→elder) parks an `aged`
+        # event in the SAME pending_spawn_events outbox (drained + emitted by the
+        # tick loop's _flush_spawn_events, like births/factions/consolidation/arch).
+        # Gated behind world.generations.enabled: OFF (the default) ⇒ a no-op that
+        # parks nothing and ages no one (golden-safe + EM-114 children untouched).
+        # Deterministic — no random/clock. Only the pre-birth roster ages — a
+        # child born above is held out so it ages from 0 next round (not its own).
+        aged_events = self.age_agents(pre_birth_ids)
+        if aged_events:
+            self.pending_spawn_events.extend(aged_events)
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -1377,6 +1888,118 @@ class World:
                 pass
         agent.energy = max(0.0, agent.energy - decay)
 
+    def apply_needs_decay(self, agent: AgentState) -> None:
+        """EM-229 — decay the knowledge + influence needs one turn. Runs beside
+        apply_energy_decay on every turn (loop.py / run.py). Pure arithmetic,
+        floored at 0; UNLIKE energy these NEVER kill — check_death reads only
+        energy. The decay rates come from the optional `world.needs` block via the
+        defensive accessor (absent ⇒ dataclass defaults ⇒ no behavior change)."""
+        # Literal call-site defaults MUST match NeedsParams defaults (the
+        # _crime_param convention): an absent key falls back here, an absent
+        # block makes EVERY key fall back here ⇒ pre-EM-229 behavior.
+        k_decay = float(self._needs_param("knowledge_decay_per_turn", 0.5))
+        i_decay = float(self._needs_param("influence_decay_per_turn", 0.4))
+        agent.knowledge = max(0.0, agent.knowledge - k_decay)
+        agent.influence = max(0.0, agent.influence - i_decay)
+
+    def replenish_knowledge(self, agent: AgentState, amount: float) -> None:
+        """EM-229 — top up the knowledge need (clamped 0..100). Call-site hook for
+        learning: a successful skill-gain / being-taught (EM-227/228) replenishes
+        knowledge. Wave M2 wires the teach_skill / skill-level-up paths to this."""
+        if amount <= 0:
+            return
+        agent.knowledge = max(0.0, min(100.0, agent.knowledge + float(amount)))
+
+    def replenish_influence(self, agent: AgentState, amount: float) -> None:
+        """EM-229 — top up the influence need (clamped 0..100). Call-site hook for
+        governance/social wins: a passed rule, a won trial, a forged alliance
+        replenishes influence. Wave M2/M3 governance paths wire to this."""
+        if amount <= 0:
+            return
+        agent.influence = max(0.0, min(100.0, agent.influence + float(amount)))
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-233 — memory consolidation ("sleep") + soul entries.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def seed_soul(self, agent: AgentState, anchors: list[str]) -> None:
+        """EM-233 — seed an agent's IMMUTABLE soul (identity anchors) ONCE from a
+        persona at spawn. Blank entries drop; the list truncates to memory.soul_cap.
+        Immutable: a second call on an already-souled agent is a no-op (the soul is
+        a fixed core, never rewritten). Pure — no clock, no RNG; safe in the engine
+        path. An empty seed leaves the soul [] ⇒ no prompt block ⇒ golden-safe."""
+        if agent.soul:
+            return  # already seeded — soul is fixed
+        cap = int(self._memory_param("soul_cap", 3))
+        agent.soul = _coerce_soul(list(anchors or []), cap)
+
+    def consolidate_memory(self, agent: AgentState) -> dict | None:
+        """EM-233 — "sleep": deterministically roll an agent's OLDEST beliefs into
+        ONE digest line when the beliefs count exceeds `memory.consolidate_at`,
+        keeping the `consolidate_keep_recent` most-recent beliefs verbatim.
+
+        v1 is a STRUCTURED ROLLUP — NO LLM: the digest records how many memories
+        were folded plus a truncated, ordered join of their text, so a fixed
+        belief list always produces the byte-identical digest (determinism /
+        replay-safe, EM-155). The soul is NEVER touched. Returns a `memory` feed
+        event dict on a consolidation, or None when below the ceiling (no-op).
+
+        An optional cheap-LLM summary is a documented FUTURE hook: a caller could
+        replace the rollup string with a one-line model summary of `old`, keeping
+        the same shape — but the engine path stays clock/RNG-free by default."""
+        ceiling = int(self._memory_param("consolidate_at", 20))
+        keep = int(self._memory_param("consolidate_keep_recent", 8))
+        # Defensive: keep must leave room for the digest under the ceiling.
+        keep = max(0, min(keep, max(0, ceiling - 1)))
+        if ceiling <= 0 or len(agent.beliefs) <= ceiling:
+            return None
+        recent = agent.beliefs[len(agent.beliefs) - keep:] if keep else []
+        old = agent.beliefs[: len(agent.beliefs) - keep] if keep else list(agent.beliefs)
+        if not old:
+            return None  # nothing to fold (keep >= count) — no-op
+        digest = self._memory_digest(old)
+        agent.beliefs = [digest] + recent
+        return {
+            "kind": "memory",
+            "actor_id": agent.id,
+            "actor_type": "agent",
+            "text": f"{agent.name} consolidated {len(old)} older memories while resting.",
+            "payload": {
+                "agent_id": agent.id,
+                "consolidated": len(old),
+                "kept": len(recent),
+                "digest": digest,
+            },
+        }
+
+    def consolidate_memories(self) -> list[dict]:
+        """EM-233 — the round-boundary sweep: consolidate every over-ceiling living
+        agent's beliefs (deterministic sorted-id order so the parked event order is
+        replay-stable) and park each `memory` event in pending_spawn_events for the
+        tick loop to drain + emit. Returns the parked events (also useful in tests).
+        A cast entirely under the ceiling parks nothing — byte-identical."""
+        events: list[dict] = []
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            if not agent.alive:
+                continue
+            evt = self.consolidate_memory(agent)
+            if evt is not None:
+                events.append(evt)
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
+    @staticmethod
+    def _memory_digest(old: list[str]) -> str:
+        """EM-233 — the deterministic structured rollup of folded beliefs into one
+        digest line. Pure string work (no clock, no RNG): a fixed `old` list always
+        yields the byte-identical digest. Caps the joined body so the digest never
+        unbounds the belief text."""
+        joined = "; ".join(str(b).strip() for b in old if str(b).strip())
+        body = joined if len(joined) <= 180 else joined[:179] + "…"
+        return f"[consolidated {len(old)} earlier memories] {body}"
+
     def check_death(self, agent: AgentState) -> bool:
         """Increment zero_energy counter; return True if agent should die."""
         if agent.energy <= 0:
@@ -1546,6 +2169,68 @@ class World:
                              int(self._crime_param("extort_notoriety", 12)))
         return True, "ok", amount
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-237 — harm-surface finishers: intimidate, deceive. Two reflex verbs atop
+    # the EM-240 crime path (contracts/wave-m.md §3 Wave M3). Both reuse the shared
+    # witness-scaling + rap_sheet + wanted machinery via _register_crime (like
+    # extort) and snap the victim's view to at least rival — the snapshot-durable
+    # "fear marker" is the relationship trust crater (relationships ARE serialized,
+    # unlike beliefs). Deterministic: no random/clock; the coerced sum is a fixed
+    # fraction of the mark's purse, so same-seed runs are identical.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_intimidate(self, agent: AgentState, target: AgentState) -> tuple[bool, str, int]:
+        """EM-237 — threaten WITHOUT contact: coerce a small sum via fear (a
+        FRACTION of the mark's purse, capped at intimidate_max), crater the
+        victim's trust + snap them to rival. Needs the target VISIBLE (same place,
+        like extort) but no physical contact beyond that. Heavier on fear/trust,
+        lighter on take than extort; notoriety from intimidate_notoriety."""
+        if agent.id == target.id:
+            return False, "cannot intimidate yourself", 0
+        if agent.location != target.location:
+            return False, "target not visible", 0
+        if target.credits <= 0:
+            return False, "target has nothing to give", 0
+        frac = float(self._crime_param("intimidate_take_fraction", 0.25))
+        cap = int(self._crime_param("intimidate_max", 10))
+        amount = min(target.credits, cap, max(1, int(target.credits * frac)))
+        target.credits -= amount
+        agent.credits += amount
+        # The fear marker: a deep trust crater on the victim's view (snapshot-
+        # durable, unlike a planted belief). Heavier than extort's -18.
+        self._update_trust(target, agent, -22)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "intimidate", target.id,
+                             int(self._crime_param("intimidate_notoriety", 14)))
+        return True, "ok", amount
+
+    def action_deceive(self, agent: AgentState, target: AgentState,
+                       about: str) -> tuple[bool, str]:
+        """EM-237 — lying as a first-class act: plant a FALSE belief in a co-located
+        target (best-effort manipulation; beliefs are transient memory) and crater
+        the deceiver↔victim trust (the reputation-gaming axis). The snapshot-durable
+        effect is the trust hit (relationships ARE serialized); the planted belief is
+        in-the-moment manipulation. Notoriety from deceive_notoriety."""
+        if agent.id == target.id:
+            return False, "cannot deceive yourself"
+        if agent.location != target.location:
+            return False, "target not here"
+        claim = (about or "").strip()
+        if not claim:
+            return False, "deceive requires a claim (args.about)"
+        # Plant the lie in the target's memory (FIFO-capped like action_remember).
+        lie = f"{agent.name} told me: {claim}"
+        if lie not in target.beliefs:
+            target.beliefs.append(lie)
+            if len(target.beliefs) > 20:
+                target.beliefs.pop(0)
+        # Trust craters when manipulated (the victim's view sours toward the liar).
+        self._update_trust(target, agent, -12)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "deceive", target.id,
+                             int(self._crime_param("deceive_notoriety", 8)))
+        return True, "ok"
+
     def action_vandalize(self, agent: AgentState, building_id: str) -> dict:
         """EM-240 — damage a building short of arson: a short blackout at its place,
         no health destruction. Witnesses lose trust (like arson)."""
@@ -1670,6 +2355,541 @@ class World:
             who.rap_sheet.append({"tick": self.tick, "crime": "conspiracy",
                                   "victim_id": None, "witnessed": False})
         return True, "ok"
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-228 — teach_skill / request_skill: the explicit cooperation lever, atop
+    # the EM-227 skills system. teach is a co-located transfer (teacher outranks);
+    # request parks a pending ask the target perceives. Both reflex-tier (zero
+    # extra LLM calls — they ride the existing turn).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_teach_skill(
+        self, teacher: AgentState, student: AgentState, skill: str
+    ) -> tuple[bool, str, int]:
+        """EM-228 — a CO-LOCATED skill transfer. The teacher must hold `skill` at a
+        STRICTLY higher level than the student; the student gains a BOUNDED step:
+        +1 level toward the teacher, capped one below the teacher (a single lesson
+        never makes a student an equal). The lesson replenishes BOTH agents'
+        EM-229 knowledge need (curiosity sated by teaching AND by learning) and
+        raises MUTUAL trust (_update_trust both directions). A matching open
+        request to this teacher (action_request_skill) is consumed.
+
+        Returns (ok, reason, levels_gained). DETERMINISTIC: pure level arithmetic
+        + the EM-227 grant_skill_xp threshold path — no random, no clock (EM-155).
+        Config-absent (no skill library) is a no-op-shaped success: teaching can
+        still introduce/raise a level, it just gates nothing downstream."""
+        if not isinstance(skill, str) or not skill.strip():
+            return False, "no skill named", 0
+        skill = skill.strip()
+        if teacher.id == student.id:
+            return False, "you cannot teach yourself", 0
+        if teacher.location != student.location:
+            return False, "you are not co-located with the student", 0
+        t_level = teacher.skill_level(skill)
+        s_level = student.skill_level(skill)
+        if t_level <= 0:
+            return False, f"you do not have the {skill} skill to teach", 0
+        if t_level <= s_level:
+            # The teacher must outrank — an equal/lower teacher has nothing to give.
+            return False, (
+                f"you must hold {skill} at a higher level than the student "
+                f"(you {t_level}, them {s_level})"
+            ), 0
+        # Bounded gain: one step toward the teacher, but never reaching them. The
+        # student lands at min(s_level + 1, t_level - 1) — so a lvl-2 teacher can
+        # only lift a student to lvl 1, never to 2.
+        new_level = min(s_level + 1, t_level - 1)
+        gained = new_level - s_level
+        if gained > 0:
+            # Route the level through grant_skill_xp so the EM-229 knowledge
+            # replenishment + the per-agent xp ledger stay consistent. Grant exactly
+            # `gained` levels' worth of xp from the student's current baseline.
+            per_level = max(1, int(self._skills_param("xp_per_level", 30)))
+            self.grant_skill_xp(student, skill, per_level * gained)
+        else:  # pragma: no cover - defensive (s_level == t_level-1 already)
+            # No level to give (student already one below the teacher) but the
+            # lesson still happened — sate both curiosities below.
+            pass
+        # Teaching sates the TEACHER's knowledge need too (the EM-229 curiosity
+        # drive: passing on craft is its own learning). The student's was already
+        # topped up by grant_skill_xp; give the teacher a comparable bump.
+        teach_replenish = float(self._skills_param("xp_per_use", 10)) / 2.0
+        self.replenish_knowledge(teacher, teach_replenish)
+        if gained <= 0:
+            # grant_skill_xp didn't run, so the student got no top-up — give one.
+            self.replenish_knowledge(student, teach_replenish)
+        # Mutual trust: a lesson is a cooperative bond (both directions warmed).
+        bump = int(self._skills_param("teach_trust", 4))
+        self._update_trust(teacher, student, bump)
+        self._update_trust(student, teacher, bump)
+        # Consume an open request addressed to this teacher (the ask is answered).
+        self.pending_skill_requests.pop(teacher.id, None)
+        return True, "ok", gained
+
+    def teach_skill_event(
+        self, teacher: AgentState, student: AgentState, skill: str
+    ) -> dict:
+        """EM-228 — the dispatch-facing wrapper: run action_teach_skill and return a
+        ready-to-emit event dict (a `skill_taught` event on success, a non-emitting
+        failure dict otherwise). Mirrors the action_* event shape the runtime spreads
+        base metadata onto."""
+        ok, reason, gained = self.action_teach_skill(teacher, student, skill)
+        if ok:
+            new_level = student.skill_level(skill)
+            # EM-232 — a successful lesson is a judged contribution (the teacher's).
+            self.record_contribution(teacher, "skill_taught")
+            return {
+                "kind": "skill_taught",
+                "actor_id": teacher.id,
+                "target_id": student.id,
+                "text": (
+                    f"{teacher.name} teaches {student.name} the ways of {skill} "
+                    f"(now level {new_level})."
+                ),
+                "payload": {
+                    "action": "teach_skill",
+                    "skill": skill,
+                    "new_level": new_level,
+                    "levels_gained": gained,
+                },
+            }
+        return {
+            "kind": "teach_failed",
+            "actor_id": teacher.id,
+            "target_id": student.id,
+            "text": f"{teacher.name} could not teach {student.name}: {reason}",
+            "payload": {"action": "teach_skill", "error": reason},
+        }
+
+    def action_request_skill(
+        self, asker: AgentState, target: AgentState, skill: str
+    ) -> dict:
+        """EM-228 — the ASK (R4 pending-request half). Parks an open learning
+        request keyed by the would-be TEACHER (`target`) so the target perceives
+        "X wants to learn <skill> from you" on its next prompt. THE explicit
+        cooperation lever. Co-located only; returns a ready-to-emit event dict.
+        The pending dict is serialized snapshot-safe (EM-190)."""
+        if not isinstance(skill, str) or not skill.strip():
+            return self._fail_event(asker.id, "request_skill", "no skill named",
+                                    f"{asker.name} asked to learn nothing.")
+        skill = skill.strip()
+        if asker.id == target.id:
+            return self._fail_event(asker.id, "request_skill", "self",
+                                    f"{asker.name} cannot ask themselves.")
+        if asker.location != target.location:
+            return self._fail_event(asker.id, "request_skill", "not co-located",
+                                    f"{asker.name} found no mentor here to ask.")
+        self.pending_skill_requests[target.id] = {
+            "asker_id": asker.id, "skill": skill, "tick": self.tick,
+        }
+        return {
+            "kind": "skill_requested",
+            "actor_id": asker.id,
+            "target_id": target.id,
+            "text": f"{asker.name} asks {target.name} to teach them {skill}.",
+            "payload": {"action": "request_skill", "skill": skill},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-230 — real trade: offer_trade → accept_trade / decline_trade. A two-turn
+    # NEGOTIATED exchange (R4) beyond today's one-way give + steal. The offer parks
+    # a pending record keyed by the OFFEREE; accept performs the ATOMIC two-sided
+    # swap (credits both ways + any skill-teach via the EM-228 path) ONLY if BOTH
+    # sides can still pay; decline drops it. Reflex-tier (zero extra LLM calls). The
+    # pending dict is serialized snapshot-safe (EM-190). All deterministic — pure
+    # arithmetic + the EM-228 teach path; no random, no clock (EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_trade_terms(raw: Any) -> dict:
+        """EM-230 — coerce a give/get arg into the canonical term shape
+        {"credits": int>=0, "skill": str|None}. Tolerant of a model's loose JSON:
+        a non-dict, a negative/garbage credits, a blank skill all collapse to the
+        empty term {"credits": 0, "skill": None}. The substrate is credits + a
+        skill-teach (the only fungible economy primitives — agents hold no item
+        inventory); a `resource`/`item` key is intentionally NOT honored (there is
+        no resource state to move) so a trade never silently no-ops on a phantom arm.
+        """
+        credits = 0
+        skill = None
+        if isinstance(raw, dict):
+            try:
+                credits = max(0, int(raw.get("credits", 0) or 0))
+            except (TypeError, ValueError):
+                credits = 0
+            s = raw.get("skill")
+            if isinstance(s, str) and s.strip():
+                skill = s.strip()
+        return {"credits": credits, "skill": skill}
+
+    @staticmethod
+    def _trade_terms_empty(terms: dict) -> bool:
+        """EM-230 — True when a normalized term carries nothing (no credits, no
+        skill) — an empty side has nothing to swap."""
+        return not terms.get("credits") and not terms.get("skill")
+
+    def action_offer_trade(
+        self, offerer: AgentState, target: AgentState, give: Any, get: Any
+    ) -> dict:
+        """EM-230 — park a trade OFFER (R4 negotiation half). `give` is what the
+        offerer pledges to the target; `get` is what the offerer asks in return —
+        each a term dict that may carry {credits:int} and/or {skill:name}. Keyed by
+        the TARGET so they perceive "X offers you … in exchange for …" on their next
+        prompt. Co-located only; rejects an empty deal and a hollow credit pledge
+        the offerer can't currently back (a clear reason lets the model self-correct;
+        the accepter still re-checks at settle time, so a later loss is caught too).
+        Returns a ready-to-emit event dict. The pending dict is serialized
+        snapshot-safe (EM-190). A later offer to the same target overwrites the
+        prior (freshest deal wins)."""
+        if offerer.id == target.id:
+            return self._fail_event(offerer.id, "offer_trade", "self",
+                                    f"{offerer.name} cannot trade with themselves.")
+        if offerer.location != target.location:
+            return self._fail_event(offerer.id, "offer_trade", "not co-located",
+                                    f"{offerer.name} found no one here to trade with.")
+        give_t = self._normalize_trade_terms(give)
+        get_t = self._normalize_trade_terms(get)
+        if self._trade_terms_empty(give_t) and self._trade_terms_empty(get_t):
+            return self._fail_event(offerer.id, "offer_trade", "empty deal",
+                                    f"{offerer.name} offered nothing for nothing.")
+        # Don't let an offerer pledge credits they don't hold — a hollow offer would
+        # only fail later and clutter the target's prompt. (Skill arms are validated
+        # at settle time, since a level can change before acceptance.)
+        if give_t["credits"] > offerer.credits:
+            return self._fail_event(
+                offerer.id, "offer_trade", "cannot back the offer",
+                f"{offerer.name} cannot back an offer of {give_t['credits']} "
+                f"credits (holds {offerer.credits}).")
+        self.pending_trade_offers[target.id] = {
+            "from_id": offerer.id,
+            "give": give_t,
+            "get": get_t,
+            "tick": self.tick,
+        }
+        return {
+            "kind": "trade_offered",
+            "actor_id": offerer.id,
+            "target_id": target.id,
+            "text": (
+                f"{offerer.name} offers {target.name} a trade: "
+                f"{self._describe_terms(give_t)} for {self._describe_terms(get_t)}."
+            ),
+            "payload": {
+                "action": "offer_trade",
+                "give": dict(give_t),
+                "get": dict(get_t),
+            },
+        }
+
+    @staticmethod
+    def _describe_terms(terms: dict) -> str:
+        """EM-230 — a short human phrase for a term dict (for event text + the
+        perceived-offer prompt line)."""
+        parts = []
+        if terms.get("credits"):
+            parts.append(f"{int(terms['credits'])} credits")
+        if terms.get("skill"):
+            parts.append(f"a {terms['skill']} lesson")
+        return " + ".join(parts) if parts else "nothing"
+
+    def _can_teach(self, teacher: AgentState, student: AgentState, skill: str) -> bool:
+        """EM-230 — would a teach of `skill` from teacher→student actually transfer
+        a level right now? Mirrors action_teach_skill's gates (co-located + the
+        teacher STRICTLY outranks) WITHOUT mutating, so the atomic accept_trade
+        pre-check can reject a skill arm that would otherwise fail mid-swap (e.g.
+        the pair drifted apart after the offer was parked) — guaranteeing no partial
+        swap."""
+        return (teacher.location == student.location
+                and teacher.skill_level(skill) > student.skill_level(skill))
+
+    def action_accept_trade(self, accepter: AgentState) -> tuple[bool, str, dict | None]:
+        """EM-230 — ATOMICALLY settle the open offer addressed to `accepter`. The
+        offerer GIVES its `give` terms to the accepter and GETS the `get` terms from
+        the accepter (so from the accepter's seat: pay `get`, receive `give`). The
+        swap runs ONLY if BOTH sides can pay — every credit/skill arm is validated
+        FIRST; if any fails, NOTHING moves and the offer stays parked (the model can
+        retry once it can afford it). Returns (ok, reason, offer|None).
+
+        DETERMINISTIC: pure credit arithmetic + the EM-228 grant_skill_xp teach path
+        (no random, no clock). On success the offer is consumed."""
+        offer = self.pending_trade_offers.get(accepter.id)
+        if not offer:
+            return False, "no trade offer has been made to you", None
+        offerer = self.agents.get(offer.get("from_id"))
+        if offerer is None or not offerer.alive:
+            # The counterparty is gone — drop the stale offer.
+            self.pending_trade_offers.pop(accepter.id, None)
+            return False, "the offerer is gone", None
+        give = offer.get("give") or {}   # offerer → accepter
+        get = offer.get("get") or {}     # accepter → offerer
+        give_credits = int(give.get("credits", 0) or 0)
+        get_credits = int(get.get("credits", 0) or 0)
+        give_skill = give.get("skill")
+        get_skill = get.get("skill")
+        # ── Affordability pre-check (atomic gate — validate ALL before moving any) ──
+        if give_credits > offerer.credits:
+            return False, (
+                f"{offerer.name} can no longer afford {give_credits} credits "
+                f"(holds {offerer.credits})"), None
+        if get_credits > accepter.credits:
+            return False, (
+                f"you cannot afford {get_credits} credits (you hold "
+                f"{accepter.credits})"), None
+        if give_skill and not self._can_teach(offerer, accepter, give_skill):
+            return False, (
+                f"{offerer.name} cannot teach you {give_skill} now (not co-located "
+                f"or they do not outrank you)"), None
+        if get_skill and not self._can_teach(accepter, offerer, get_skill):
+            return False, (
+                f"you cannot teach {get_skill} now (not co-located or you do not "
+                f"outrank {offerer.name})"), None
+        # ── All arms validated → perform the swap (no further failure path) ──
+        if give_credits:
+            offerer.credits -= give_credits
+            accepter.credits += give_credits
+        if get_credits:
+            accepter.credits -= get_credits
+            offerer.credits += get_credits
+        if give_skill:
+            # offerer teaches the accepter (EM-228 bounded transfer + knowledge
+            # replenish + mutual trust + consumes any matching open skill request).
+            self.action_teach_skill(offerer, accepter, give_skill)
+        if get_skill:
+            self.action_teach_skill(accepter, offerer, get_skill)
+        # A settled trade warms both sides (cooperation, like give).
+        self._update_trust(offerer, accepter, +5)
+        self._update_trust(accepter, offerer, +5)
+        self.pending_trade_offers.pop(accepter.id, None)
+        return True, "ok", offer
+
+    def settle_trade_event(self, accepter: AgentState) -> dict:
+        """EM-230 — dispatch-facing wrapper: run action_accept_trade and return a
+        ready-to-emit event dict (a `trade_settled` event on success, a non-emitting
+        failure dict otherwise). Mirrors the action_* event shape."""
+        ok, reason, offer = self.action_accept_trade(accepter)
+        if ok and offer is not None:
+            # EM-232 — a settled trade is a judged contribution for BOTH parties
+            # (a mutual exchange — each side made the deal happen).
+            self.record_contribution(accepter, "trade_settled")
+            _offerer = self.agents.get(offer.get("from_id"))
+            if _offerer is not None:
+                self.record_contribution(_offerer, "trade_settled")
+            offerer = self.agents.get(offer.get("from_id"))
+            offerer_name = offerer.name if offerer is not None else offer.get("from_id")
+            give = offer.get("give") or {}
+            get = offer.get("get") or {}
+            return {
+                "kind": "trade_settled",
+                "actor_id": accepter.id,
+                "target_id": offer.get("from_id"),
+                "text": (
+                    f"{accepter.name} and {offerer_name} settle a trade: "
+                    f"{self._describe_terms(give)} for {self._describe_terms(get)}."
+                ),
+                "payload": {
+                    "action": "accept_trade",
+                    "from_id": offer.get("from_id"),
+                    "give": dict(give),
+                    "get": dict(get),
+                },
+            }
+        return {
+            "kind": "trade_failed",
+            "actor_id": accepter.id,
+            "text": f"{accepter.name} could not settle the trade: {reason}",
+            "payload": {"action": "accept_trade", "error": reason},
+        }
+
+    def action_decline_trade(self, accepter: AgentState) -> dict:
+        """EM-230 — drop the open offer addressed to `accepter` (the polite no).
+        Returns a ready-to-emit `trade_declined` event, or a fail event when there
+        is nothing to decline."""
+        offer = self.pending_trade_offers.pop(accepter.id, None)
+        if not offer:
+            return self._fail_event(accepter.id, "decline_trade", "no offer",
+                                    f"{accepter.name} had no trade to decline.")
+        offerer = self.agents.get(offer.get("from_id"))
+        offerer_name = offerer.name if offerer is not None else offer.get("from_id")
+        return {
+            "kind": "trade_declined",
+            "actor_id": accepter.id,
+            "target_id": offer.get("from_id"),
+            "text": f"{accepter.name} declines {offerer_name}'s trade offer.",
+            "payload": {"action": "decline_trade"},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-231 — cooperation-gated tools. EW's hard mechanic: a class of high-value
+    # action unlocks ONLY when both partners have AGREED to cooperate. A co-located
+    # pair forms a HANDSHAKE (offer_cooperation → accept_cooperation, the R4 two-turn
+    # pattern); the ONE gated action co_build requires that active handshake + a
+    # co-located partner, advancing a building by the cooperation bonus over a solo
+    # build_step. All deterministic — pure dict bookkeeping + the build_step path; no
+    # random, no clock (EM-155). Both the pending OFFER outbox and the ACTIVE link
+    # are serialized snapshot-safe (EM-190): a handshake-free world round-trips
+    # byte-identically (both keys absent).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _coop_key(a_id: str, b_id: str) -> str:
+        """EM-231 — the canonical key for a SYMMETRIC cooperation link: the two ids
+        sorted and joined, so are_cooperating(a, b) == are_cooperating(b, a) and a
+        pair has exactly ONE entry regardless of who offered."""
+        lo, hi = sorted((str(a_id), str(b_id)))
+        return f"{lo}|{hi}"
+
+    def are_cooperating(self, a_id: str, b_id: str) -> bool:
+        """EM-231 — True when an ACTIVE cooperation handshake links this pair
+        (order-independent). The single read used by the co_build gate, the prompt,
+        and the offer no-op guard."""
+        if a_id == b_id:
+            return False
+        return self._coop_key(a_id, b_id) in self.cooperations
+
+    def cooperation_partner_here(self, agent: AgentState) -> AgentState | None:
+        """EM-231 — a living, CO-LOCATED agent this agent has an active handshake
+        with, or None. This is the unlock condition for co_build: the gate requires
+        not just an active link but a partner standing HERE (deterministic: returns
+        the first such partner in sorted-id order so the choice is replay-stable)."""
+        for other in sorted(self.agents_at(agent.location), key=lambda a: a.id):
+            if (other.id != agent.id and other.alive
+                    and self.are_cooperating(agent.id, other.id)):
+                return other
+        return None
+
+    def action_offer_cooperation(self, offerer: AgentState, target: AgentState) -> dict:
+        """EM-231 — park a cooperation HANDSHAKE offer (R4 negotiation half). Keyed
+        by the TARGET so they perceive "X wants to partner with you" on their next
+        prompt. Co-located only; rejects a self-offer and a re-offer to an existing
+        partner (a clear reason lets the model self-correct). Returns a ready-to-emit
+        event dict. The pending dict is serialized snapshot-safe (EM-190). A later
+        offer to the same target overwrites the prior (freshest invite wins)."""
+        if offerer.id == target.id:
+            return self._fail_event(offerer.id, "offer_cooperation", "self",
+                                    f"{offerer.name} cannot partner with themselves.")
+        if offerer.location != target.location:
+            return self._fail_event(
+                offerer.id, "offer_cooperation", "not co-located",
+                f"{offerer.name} found no one here to partner with.")
+        if self.are_cooperating(offerer.id, target.id):
+            return self._fail_event(
+                offerer.id, "offer_cooperation", "already partnered",
+                f"{offerer.name} and {target.name} already cooperate.")
+        self.pending_cooperation_offers[target.id] = {
+            "from_id": offerer.id,
+            "tick": self.tick,
+        }
+        return {
+            "kind": "cooperation_offered",
+            "actor_id": offerer.id,
+            "target_id": target.id,
+            "text": f"{offerer.name} offers to partner with {target.name}.",
+            "payload": {"action": "offer_cooperation"},
+        }
+
+    def action_accept_cooperation(self, accepter: AgentState) -> dict:
+        """EM-231 — seal the open handshake offer addressed to `accepter` into an
+        ACTIVE symmetric cooperation link. Runs ONLY if the offerer still exists, is
+        alive, and is CO-LOCATED at settle time (a drifted pair cannot shake hands).
+        On success the offer is consumed, the link is recorded, and both sides warm
+        (cooperation, like a settled trade). Returns a ready-to-emit event dict.
+        DETERMINISTIC — pure dict bookkeeping + _update_trust; no random, no clock."""
+        offer = self.pending_cooperation_offers.get(accepter.id)
+        if not offer:
+            return self._fail_event(
+                accepter.id, "accept_cooperation", "no offer",
+                f"{accepter.name} had no partnership offer to accept.")
+        offerer = self.agents.get(offer.get("from_id"))
+        if offerer is None or not offerer.alive:
+            self.pending_cooperation_offers.pop(accepter.id, None)
+            return self._fail_event(
+                accepter.id, "accept_cooperation", "offerer gone",
+                f"{accepter.name}'s would-be partner is gone.")
+        if offerer.location != accepter.location:
+            # A drifted pair can't seal the handshake; leave the offer parked so it
+            # can be accepted if they reconvene (mirrors the trade co-location guard).
+            return self._fail_event(
+                accepter.id, "accept_cooperation", "not co-located",
+                f"{offerer.name} is no longer here to partner with {accepter.name}.")
+        self.pending_cooperation_offers.pop(accepter.id, None)
+        self.cooperations[self._coop_key(offerer.id, accepter.id)] = {
+            "a": min(offerer.id, accepter.id),
+            "b": max(offerer.id, accepter.id),
+            "tick": self.tick,
+        }
+        # A formed partnership warms both sides (cooperation, like a settled trade).
+        self._update_trust(offerer, accepter, +5)
+        self._update_trust(accepter, offerer, +5)
+        return {
+            "kind": "cooperation_formed",
+            "actor_id": accepter.id,
+            "target_id": offerer.id,
+            "text": (f"{accepter.name} and {offerer.name} agree to cooperate — "
+                     f"they can now co_build together."),
+            "payload": {"action": "accept_cooperation", "partner_id": offerer.id},
+        }
+
+    def action_co_build(self, agent: AgentState, building_id: str) -> dict:
+        """EM-231 — THE cooperation-gated action. Advances a building like build_step
+        but by the larger co_build_bonus_step — the payoff for a JOINT build — and
+        ONLY when `agent` has an ACTIVE handshake with a CO-LOCATED partner. Without
+        a partner here it is cleanly rejected (the gate is enforced in _validate_world
+        too; this re-check keeps the world method safe if called directly). Emits a
+        `co_built` event naming the partner; completion reuses the build_step path."""
+        partner = self.cooperation_partner_here(agent)
+        if partner is None:
+            return self._fail_event(
+                agent.id, "co_build", "no cooperation partner here",
+                f"{agent.name} needs an agreed cooperation partner here to co_build.")
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(
+                agent.id, "co_build", "building_not_found",
+                f"{agent.name} tried to co-build an unknown project.")
+        if building.status in ("operational", "destroyed", "abandoned"):
+            return self._fail_event(
+                agent.id, "co_build", f"cannot build a {building.status} structure",
+                f"{agent.name} cannot co-build {building.name} ({building.status}).")
+        if building.location != agent.location:
+            return self._fail_event(
+                agent.id, "co_build", "not here",
+                f"{agent.name} must be at {building.name}'s place to co-build it.")
+
+        events: list[dict] = []
+        # A first co_build on a fully-funded planned building begins construction,
+        # exactly like build_step (so the joint build is a real substitute for it).
+        if (building.status == "planned"
+                and building.funds_committed >= building.funds_required):
+            building.status = "under_construction"
+            events.append(self._structure_state_changed_event(
+                building, "planned", "under_construction",
+                "joint construction begun", agent.id))
+        if building.status != "under_construction":
+            return self._fail_event(
+                agent.id, "co_build", "project is not under construction",
+                f"{agent.name} cannot co-build {building.name} yet (not funded).")
+
+        step = int(self._coop_param("co_build_bonus_step", 35))
+        building.progress = min(100, building.progress + step)
+        building.last_progress_tick = self.tick
+        building.updated_tick = self.tick
+        events.append({
+            "kind": "co_built",
+            "actor_id": agent.id,
+            "target_id": building.id,
+            "text": (f"{agent.name} and {partner.name} build {building.name} together "
+                     f"({building.progress}% built)."),
+            "payload": {
+                "action": "co_build",
+                "building_id": building.id,
+                "partner_id": partner.id,
+                "progress": building.progress,
+                "step": step,
+            },
+        })
+        if building.progress >= 100:
+            events.extend(self._complete_construction(building, "completed", agent.id))
+        return {"_multi": events}
 
     # ──────────────────────────────────────────────────────────────────────────
     # EM-240 (Task 10) — enforcer justice verbs. investigate confirms a suspect's
@@ -2230,6 +3450,7 @@ class World:
         self, agent: AgentState, effect: str, text: str,
         name: str | None = None, target: str | None = None,
         image_id: str | None = None,
+        op: str | None = None, article_id: str | None = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -2248,9 +3469,14 @@ class World:
         # the payload (like demolish's target) and reuses the existing vote
         # machinery (NO new tally code) — a passing vote convicts, a rejected one
         # acquits (see _on_rule_activated / action_vote).
+        # EM-236 — amend_constitution is a governance effect (R5, modelled on
+        # demolish/trial): it carries {op, article_id?, text} on its payload and
+        # ratifies on a 70% supermajority (like demolish — see _evaluate_rule). The
+        # passing vote add/edit/removes an article in _on_rule_activated.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
-                         "name_town", "demolish", "promote_image", "trial"}
+                         "name_town", "demolish", "promote_image", "trial",
+                         "amend_constitution"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -2263,8 +3489,14 @@ class World:
             # run-663 — reject a no-op rename to the name the town already has,
             # so the SAME naming can't re-pass forever (the live run renamed the
             # town "Ledger's Folly" 119 times — 53% of all "laws" were no-ops).
+            # EM-206 — surface the name as SETTLED in the rejection (and the prompt
+            # marks it DECIDED, see _assemble_context) so agents stop campaigning
+            # for the name they already hold. Keeps the EM-200 "already named"
+            # substring (its test pins it) and adds the settled flag.
             if name.lower() == str(self.town_name or "").strip().lower():
-                return False, f"the town is already named {self.town_name!r}", None
+                return False, (f"the town is already named {self.town_name!r} "
+                               f"(settled) — propose a NEW name or legislate "
+                               f"something else"), None
             payload = {"name": name}
         # Wave K / EM-219 — demolish carries the TARGET building id on the payload
         # (like admit_agent's spec); a demolish proposal without a real, standing
@@ -2318,6 +3550,27 @@ class World:
             if defendant.crime_status in ("detained", "jailed"):
                 return False, f"{defendant.name} is already in custody", None
             payload = {"defendant_id": defendant.id, "charges": str(text)[:200]}
+        # EM-236 — amend_constitution carries {op, article_id?, text} on its payload
+        # (op ∈ add|edit|remove). Validate it like demolish's target: a malformed op,
+        # a missing text on add/edit, or an edit/remove of an unknown article is
+        # meaningless — reject it BEFORE a vote opens. The per-(op,article) duplicate
+        # guard lives in the OPEN-proposal loop below (mirrors demolish/trial).
+        if effect == "amend_constitution":
+            op = str(op or "").strip().lower()
+            if op not in ("add", "edit", "remove"):
+                return False, (f"amend_constitution requires op add|edit|remove "
+                               f"(got {op!r})"), None
+            text = str(text or "").strip()
+            article_id = str(article_id or "").strip()
+            if op in ("add", "edit") and not text:
+                return False, f"amend_constitution {op} requires article text", None
+            if op in ("edit", "remove"):
+                if self._find_article(article_id) is None:
+                    return False, (f"amend_constitution {op} requires a real "
+                                   f"article_id (got {article_id!r})"), None
+            payload = {"op": op, "text": text[:300]}
+            if article_id:
+                payload["article_id"] = article_id
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -2342,6 +3595,21 @@ class World:
                 if (rule.payload or {}).get("defendant_id") == payload.get("defendant_id"):
                     return False, f"{payload.get('defendant_id')!r} already has an open trial", None
                 continue
+            # EM-236 — amend_constitution is scoped per (op, article_id): two
+            # distinct ADD proposals may have open votes at once (each adds a NEW
+            # article, so they never collide), but a duplicate EDIT/REMOVE of the
+            # SAME article is blocked (mirrors demolish-per-target). An add (no
+            # article_id) never duplicates another add.
+            if effect == "amend_constitution":
+                op_here = payload.get("op")
+                if op_here == "add":
+                    continue
+                if ((rule.payload or {}).get("op") == op_here
+                        and (rule.payload or {}).get("article_id")
+                        == payload.get("article_id")):
+                    return False, (f"a {op_here} vote for article "
+                                   f"{payload.get('article_id')!r} is already open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -2351,10 +3619,32 @@ class World:
         # ACT (each targets a distinct building) — neither "renews"; each passing
         # vote is fresh. EM-240: trial is a one-shot ACT per defendant (same as
         # demolish) — a conviction/acquittal is applied once, never "renewed".
+        # EM-236: amend_constitution is a one-shot ACT (each amendment applies once,
+        # like demolish/trial) — it never "renews"; each passing vote mutates the
+        # constitution afresh, so it joins the no-renewal exclusion list.
         active = (
             self._active_rule(effect)
-            if effect not in ("name_town", "demolish", "promote_image", "trial") else None
+            if effect not in ("name_town", "demolish", "promote_image", "trial",
+                              "amend_constitution") else None
         )
+        # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
+        # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
+        # (max of created_tick / renewed_at). Within the window the renewal is
+        # rejected as "already active (settled)" so agents legislate something NEW
+        # instead of re-passing work_bonus/ubi/recharge_subsidy endlessly (run-663:
+        # 35×/27×/19×). DEFAULT cooldown 0 ⇒ this never fires ⇒ the W11b renewal
+        # ritual is byte-identical to pre-EM-203 (the accessor default matches the
+        # GovernanceParams default). No clock/random — pure tick arithmetic.
+        if active is not None:
+            cooldown = int(self._governance_param("renewal_cooldown_ticks", 0))
+            if cooldown > 0:
+                last_active = max([active.created_tick, *active.renewed_at])
+                if self.tick - last_active < cooldown:
+                    return False, (
+                        f"{effect!r} is already active (settled) — last passed at "
+                        f"tick {last_active}; it can't be renewed until tick "
+                        f"{last_active + cooldown}. Legislate something NEW instead."
+                    ), None
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
             effect=effect,
@@ -2396,7 +3686,8 @@ class World:
                 # it never "renews"; each passing guilty vote convicts afresh.
                 existing = (
                     self._active_rule(rule.effect)
-                    if rule.effect not in ("name_town", "promote_image", "trial") else None
+                    if rule.effect not in ("name_town", "promote_image", "trial",
+                                           "amend_constitution") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -2530,6 +3821,71 @@ class World:
                 "target_id": defendant.id,
                 "text": f"{defendant.name} is led to jail for {sentence} ticks.",
                 "payload": {"until_tick": defendant.crime_status_until_tick},
+            })
+            return
+        # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
+        # article in the living constitution. The op + payload were validated at
+        # propose time (action_propose_rule), so here we apply it idempotently
+        # (rule.applied) and park a `constitution_amended` event in the SAME outbox
+        # name_town/demolish use (drained + emitted by the loop's _flush_spawn_events).
+        # The proposer's influence need (EM-229) is replenished — a governance win.
+        if rule.effect == "amend_constitution":
+            rule.applied = True
+            spec = rule.payload or {}
+            op = str(spec.get("op", ""))
+            text = str(spec.get("text", "")).strip()
+            article_id = str(spec.get("article_id", "")).strip()
+            applied_id: str | None = None
+            if op == "add" and text:
+                applied_id = self._next_article_id()
+                self.constitution.append({
+                    "id": applied_id,
+                    "text": text[:300],
+                    "ratified_tick": self.tick,
+                })
+            elif op == "edit":
+                art = self._find_article(article_id)
+                if art is not None and text:
+                    art["text"] = text[:300]
+                    art["ratified_tick"] = self.tick
+                    applied_id = art["id"]
+            elif op == "remove":
+                art = self._find_article(article_id)
+                if art is not None:
+                    self.constitution = [
+                        a for a in self.constitution if a.get("id") != article_id]
+                    applied_id = article_id
+            # EM-236 — a CONTENDING no-op (the article this edit/remove targets
+            # vanished before this amendment ratified — e.g. a separate `remove`
+            # for the same article ratified first; ops differ so the propose-time
+            # per-(op,article) guard let both open) leaves applied_id None. Guard
+            # the side effects on it just as demolish/promote_image guard a
+            # vanished target: no influence replenish, and NO phantom
+            # `constitution_amended` event (nothing actually changed).
+            if applied_id is None:
+                return
+            # Replenish the proposer's influence on a successful amendment (a
+            # governance win; the EM-229 hook). A vanished proposer is a no-op.
+            proposer = self.agents.get(rule.proposer_id)
+            if proposer is not None:
+                try:
+                    reward = float(self._constitution_param("influence_replenish", 15.0))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    reward = 15.0
+                self.replenish_influence(proposer, reward)
+            self.pending_spawn_events.append({
+                "kind": "constitution_amended",
+                "actor_id": "system",
+                "actor_type": "system",
+                "text": (f"📜 By vote, the constitution is amended "
+                         f"({op}{f': {text[:80]}' if text else ''})."),
+                "payload": {
+                    "op": op,
+                    "article_id": applied_id,
+                    "text": text[:300],
+                    "proposal_id": rule.id,
+                    "proposer_id": rule.proposer_id,
+                },
             })
             return
         if rule.effect != "admit_agent":
@@ -2670,8 +4026,21 @@ class World:
         # than the simple strict majority ordinary rules pass on (the user's locked
         # decision + design spec + contract wave-k.md §3). Ordinary effects keep
         # their existing bar.
-        if rule.effect == "demolish":
-            yes_needed = math.ceil(0.7 * living_count)
+        # EM-236 — amend_constitution edits the town's FOUNDATIONAL document, a
+        # weightier act than an ordinary law, so it shares the demolish-grade
+        # supermajority bar (the fraction is `world.constitution.ratify_threshold`,
+        # default 0.7 == the demolish bar; demolish itself stays a fixed 0.7).
+        if rule.effect in ("demolish", "amend_constitution"):
+            if rule.effect == "amend_constitution":
+                try:
+                    frac = float(self._constitution_param("ratify_threshold", 0.7))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    frac = 0.7
+                if not (0.0 < frac <= 1.0):  # pragma: no cover - defensive
+                    frac = 0.7
+            else:
+                frac = 0.7
+            yes_needed = math.ceil(frac * living_count)
             if yes_votes >= yes_needed:
                 return "active"
             # The vote fails once a yes-supermajority is mathematically out of reach
@@ -2910,6 +4279,9 @@ class World:
         if agent.id not in building.contributors:
             building.contributors.append(agent.id)
         building.updated_tick = self.tick
+        # EM-232 — funding a public project is a judged contribution (buildings
+        # funded). Recorded per successful contribution (each credit infusion).
+        self.record_contribution(agent, "project_funded")
 
         clamp_note = (
             f" (offered {amount}; clamped at the remaining gap)"
@@ -3024,6 +4396,8 @@ class World:
         events.append(built_evt)
 
         if building.progress >= 100:
+            # EM-232 — finishing a project is a judged contribution (projects built).
+            self.record_contribution(agent, "project_built")
             events.extend(self._complete_construction(building, "completed", agent.id))
         return {"_multi": events}
 
@@ -3962,6 +5336,663 @@ class World:
         the block, so keep these call-site defaults == CrimeParams defaults."""
         return _block_get(getattr(self.params, "crime", None), name, default)
 
+    def _needs_param(self, name: str, default: Any) -> Any:
+        """EM-229 — defensive accessor for the `world.needs` config block
+        (NeedsParams dataclass OR dict OR absent — EM-155 conventions, like
+        _crime_param). An absent block ⇒ every default ⇒ pre-EM-229 worlds run
+        unchanged. `default` is only a fallback for a key missing from the block,
+        so keep these call-site defaults == NeedsParams defaults."""
+        return _block_get(getattr(self.params, "needs", None), name, default)
+
+    def _memory_param(self, name: str, default: Any) -> Any:
+        """EM-233 — defensive accessor for the `world.memory` config block
+        (MemoryParams dataclass OR dict OR absent — EM-155 conventions, like
+        _needs_param). An absent block ⇒ every default ⇒ pre-EM-233 worlds run
+        unchanged. `default` is only a fallback for a key missing from the block,
+        so keep these call-site defaults == MemoryParams defaults."""
+        return _block_get(getattr(self.params, "memory", None), name, default)
+
+    def _skills_param(self, name: str, default: Any) -> Any:
+        """EM-227 — defensive accessor for the `world.skills` config block
+        (SkillsParams dataclass OR dict OR absent — EM-155 conventions, like
+        _memory_param). An absent block ⇒ every default ⇒ an EMPTY library ⇒
+        NOTHING gated (pre-EM-227 byte-identical + the em161 golden). `default`
+        is only a fallback for a key missing from the block, so keep these
+        call-site defaults == SkillsParams defaults."""
+        return _block_get(getattr(self.params, "skills", None), name, default)
+
+    def _coop_param(self, name: str, default: Any) -> Any:
+        """EM-231 — defensive accessor for the `world.cooperation` config block
+        (CooperationParams dataclass OR dict OR absent — EM-155 conventions, like
+        _skills_param). An absent block ⇒ every default ⇒ pre-EM-231 worlds run
+        unchanged. `default` is only a fallback for a key missing from the block,
+        so keep these call-site defaults == CooperationParams defaults."""
+        return _block_get(getattr(self.params, "cooperation", None), name, default)
+
+    def _arch_param(self, name: str, default: Any) -> Any:
+        """EM-232 — defensive accessor for the `world.victory_arch` config block
+        (VictoryArchParams dataclass OR dict OR absent — EM-155 conventions, like
+        _coop_param). An absent block ⇒ every default ⇒ every_n_ticks 0 ⇒ the
+        cycle never fires (pre-EM-232 byte-identical + the em161 golden). `default`
+        is only a fallback for a key missing from the block, so keep these
+        call-site defaults == VictoryArchParams defaults."""
+        return _block_get(getattr(self.params, "victory_arch", None), name, default)
+
+    def _boost_param(self, name: str, default: Any) -> Any:
+        """EM-235 — defensive accessor for the `world.boost` config block
+        (BoostParams dataclass OR dict OR absent — EM-155 conventions, like
+        _arch_param). An absent block ⇒ every default ⇒ cost 0 ⇒ every buy_turn is
+        rejected and the scheduler is untouched (pre-EM-235 byte-identical + the
+        em161 golden). `default` is only a fallback for a key missing from the
+        block, so keep these call-site defaults == BoostParams defaults."""
+        return _block_get(getattr(self.params, "boost", None), name, default)
+
+    def _constitution_param(self, name: str, default: Any) -> Any:
+        """EM-236 — defensive accessor for the `world.constitution` config block
+        (ConstitutionParams dataclass OR dict OR absent — EM-155 conventions, like
+        _boost_param). An absent block ⇒ every default ⇒ the demolish-grade 0.7
+        ratify bar + a 15.0 influence reward, with the constitution simply empty
+        until an amendment ratifies (pre-EM-236 byte-identical + the em161 golden).
+        `default` is only a fallback for a key missing from the block, so keep these
+        call-site defaults == ConstitutionParams defaults."""
+        return _block_get(getattr(self.params, "constitution", None), name, default)
+
+    def _governance_param(self, name: str, default: Any) -> Any:
+        """EM-203 — defensive accessor for the `world.governance` config block
+        (GovernanceParams dataclass OR dict OR absent — EM-155 conventions, like
+        _constitution_param). An absent block ⇒ every default ⇒ renewal_cooldown_ticks
+        0 ⇒ the W11b renewal ritual is untouched (pre-EM-203 byte-identical). `default`
+        is only a fallback for a key missing from the block, so keep these call-site
+        defaults == GovernanceParams defaults."""
+        return _block_get(getattr(self.params, "governance", None), name, default)
+
+    def _generations_param(self, name: str, default: Any) -> Any:
+        """EM-126 — defensive accessor for the `world.generations` config block
+        (GenerationsParams dataclass OR dict OR absent — EM-155 conventions, like
+        _governance_param). An absent block ⇒ every default ⇒ enabled False ⇒ NO
+        aging, NO inheritance (pre-EM-126 byte-identical + the em161 golden + the
+        EM-114 children mechanic untouched). `default` is only a fallback for a key
+        missing from the block, so keep these call-site defaults ==
+        GenerationsParams defaults."""
+        return _block_get(getattr(self.params, "generations", None), name, default)
+
+    def _generations_enabled(self) -> bool:
+        """EM-126 — master gate for the BEHAVIORAL generational layer (aging
+        promotion + inheritance). DEFAULT OFF: an absent block ⇒ False ⇒ zero
+        behavioral change (no agent ages, every agent stays adult, death drops no
+        estate), so the em161 golden + every pre-EM-126 snapshot stay byte-
+        identical and EM-114 children keep working unchanged."""
+        return bool(self._generations_param("enabled", False))
+
+    def life_stage_for(self, age_ticks: int) -> str:
+        """EM-126 — the life stage (child|adult|elder) for a given age in ROUNDS.
+        PURE arithmetic over the world.generations thresholds (no random, no clock
+        — replay-safe). age_ticks < child_until ⇒ child; >= elder_after ⇒ elder;
+        otherwise adult. With generations OFF this is never consulted (age_agents
+        is a no-op, so every age stays 0 ⇒ adult by the default thresholds)."""
+        child_until = int(self._generations_param("child_until", 6))
+        elder_after = max(child_until, int(self._generations_param("elder_after", 60)))
+        age = max(0, int(age_ticks))
+        if age < child_until:
+            return "child"
+        if age >= elder_after:
+            return "elder"
+        return "adult"
+
+    def age_agents(self, only_ids: set[str] | None = None) -> list[dict]:
+        """EM-126 — the once-per-round aging sweep (hooked in _apply_round_start
+        AFTER births so a newborn ages from 0 next round, not the round it is
+        born). For every LIVING agent: bump age_ticks by one round, then derive
+        the life stage from the new age. A stage PROMOTION (child→adult→elder)
+        parks an `aged` event in deterministic sorted-id order (replay-stable);
+        an unchanged stage emits nothing. PURE — no random, no clock (EM-155).
+
+        `only_ids` restricts the sweep to a roster snapshot — _apply_round_start
+        passes the agents present BEFORE this round's birth check so a just-born
+        child is NOT aged the very round it appears (it would otherwise go
+        0→1 and park a spurious backwards `aged` event, contradicting the
+        round-boundary invariant). Absent ⇒ every agent ages (the test/standalone
+        path). An id no longer in self.agents is skipped defensively.
+
+        Gated behind world.generations.enabled: OFF (the default / absent block) ⇒
+        a no-op that touches nothing and parks nothing, so every agent stays at
+        age_ticks 0 / adult — byte-identical pre-EM-126 + the em161 golden + the
+        EM-114 children mechanic untouched. Returns the parked events (also useful
+        in tests)."""
+        if not self._generations_enabled():
+            return []
+        ids = sorted(self.agents) if only_ids is None else sorted(only_ids)
+        events: list[dict] = []
+        for aid in ids:
+            agent = self.agents.get(aid)
+            if agent is None or not agent.alive:
+                continue
+            prior = agent.life_stage
+            agent.age_ticks = max(0, int(agent.age_ticks)) + 1
+            stage = self.life_stage_for(agent.age_ticks)
+            if stage != prior:
+                agent.life_stage = stage
+                events.append({
+                    "kind": "aged",
+                    "actor_id": agent.id,
+                    "actor_type": "agent",
+                    "text": f"{agent.name} is now a{'n' if stage == 'elder' else ''} {stage}.",
+                    "payload": {
+                        "agent_id": agent.id,
+                        "from_stage": prior,
+                        "to_stage": stage,
+                        "age_ticks": agent.age_ticks,
+                    },
+                })
+        return events
+
+    def lineage(self, agent_id: str) -> dict:
+        """EM-126 — read the agent's lineage from the EM-114 `parents` field
+        (already serialized). Returns {parents, children} — the agent's direct
+        parents (its own `parents` list) and direct children (every agent whose
+        `parents` includes this id), both as sorted id lists (deterministic; an
+        unknown id yields empty lists). PURE lookup — no clock/random. The
+        inspector's lineage tree is a FRONTEND concern (out of scope here, tracked
+        as a follow-up); this is the backend accessor it would read."""
+        aid = str(agent_id)
+        agent = self.agents.get(aid)
+        parents = sorted(agent.parents) if agent and agent.parents else []
+        children = sorted(
+            other.id for other in self.agents.values()
+            if aid in (other.parents or []))
+        return {"parents": parents, "children": children}
+
+    def _heirs_for(self, agent: AgentState) -> list[str]:
+        """EM-126 — the ordered heir candidates for a deceased agent, derived
+        PURELY from the EM-114 lineage: living children first (sorted by id), then
+        living parents (sorted by id). The deceased agent itself is never an heir.
+        Pure sorted-id selection — no random, no clock (replay-safe). An agent
+        with no living kin yields [] (no heir ⇒ inheritance is a no-op)."""
+        line = self.lineage(agent.id)
+        ordered: list[str] = []
+        for tier in (line["children"], line["parents"]):
+            for hid in tier:  # already sorted by id
+                if hid == agent.id or hid in ordered:
+                    continue
+                heir = self.agents.get(hid)
+                if heir is not None and heir.alive:
+                    ordered.append(hid)
+        return ordered
+
+    def apply_inheritance(self, agent: AgentState) -> dict | None:
+        """EM-126 — pass a just-deceased agent's estate down its EM-114 lineage to
+        an HEIR, returning an `inherited` event dict (or None on a no-op). Called
+        from the death path in the tick loop (loop.py) AND the headless runner
+        (run.py) the moment check_death flips an agent dead.
+
+        Deterministic heir pick: the lowest-id LIVING child, else the lowest-id
+        LIVING parent (_heirs_for). With inherit_credits ON, ALL the deceased's
+        credits transfer to the heir (a transfer, not a sink — the estate is
+        conserved); with inherit_relationships ON, the deceased's relationships/
+        grudges the heir does not already hold are copied too. Pure — no random,
+        no clock (EM-155).
+
+        Gated behind world.generations.enabled: OFF (the default / absent block) ⇒
+        a no-op that returns None and moves nothing — so a default world's death
+        path is byte-identical to pre-EM-126 (credits simply vanish with the agent,
+        as the EM-114 mechanic has always done). No living heir ⇒ also a no-op.
+
+        IDEMPOTENT: a settled corpse is marked (`inheritance_settled`), so a second
+        call on the SAME deceased (a defensive double-invoke, or a resume/fork that
+        re-walks the death path) returns None instead of re-moving an empty estate
+        and emitting a spurious credits=0 `inherited` event."""
+        if not self._generations_enabled():
+            return None
+        if agent.inheritance_settled:
+            return None
+        heirs = self._heirs_for(agent)
+        if not heirs:
+            return None
+        heir_id = heirs[0]
+        heir = self.agents[heir_id]
+        transferred = 0
+        if bool(self._generations_param("inherit_credits", True)):
+            transferred = max(0, int(agent.credits))
+            if transferred:
+                heir.credits += transferred
+                agent.credits = 0
+        copied_relationships = 0
+        if bool(self._generations_param("inherit_relationships", False)):
+            for other_id, rel in sorted(agent.relationships.items()):
+                if other_id == heir_id or other_id in heir.relationships:
+                    continue
+                heir.relationships[other_id] = RelationshipState(
+                    type=rel.type,
+                    trust=rel.trust,
+                    interactions=rel.interactions,
+                    since_tick=rel.since_tick,
+                )
+                copied_relationships += 1
+        # Mark the corpse settled so a re-walk of the death path (defensive
+        # double-invoke / resume / fork) does not re-emit a spurious `inherited`.
+        agent.inheritance_settled = True
+        return {
+            "kind": "inherited",
+            "actor_id": heir_id,
+            "actor_type": "agent",
+            "text": (
+                f"{heir.name} inherited {transferred} credits from {agent.name}."
+                if transferred
+                else f"{heir.name} inherited {agent.name}'s estate."
+            ),
+            "payload": {
+                "heir_id": heir_id,
+                "deceased_id": agent.id,
+                "credits": transferred,
+                "relationships_copied": copied_relationships,
+                "tick": self.tick,
+            },
+        }
+
+    def _find_article(self, article_id: str) -> dict | None:
+        """EM-236 — return the constitution article with this id, or None. Pure
+        lookup over the durable list (no clock/random)."""
+        if not article_id:
+            return None
+        return next(
+            (a for a in self.constitution if a.get("id") == str(article_id)), None)
+
+    def _next_article_id(self) -> str:
+        """EM-236 — a DETERMINISTIC article id: `art-<ratified_tick>-<ordinal>`,
+        where the ordinal is the count of articles already ratified at THIS tick
+        (so two amendments ratified on the same tick get distinct ids). No uuid, no
+        clock read — derived purely from world.tick + the current article list, so
+        the same amendment sequence yields identical ids on replay/fork (EM-155).
+        Defensive against a (hand-crafted) collision: bump the ordinal until free."""
+        prefix = f"art-{self.tick}-"
+        ordinal = sum(
+            1 for a in self.constitution
+            if str(a.get("id", "")).startswith(prefix))
+        candidate = f"{prefix}{ordinal}"
+        while self._find_article(candidate) is not None:
+            ordinal += 1
+            candidate = f"{prefix}{ordinal}"
+        return candidate
+
+    def victory_arch_enabled(self) -> bool:
+        """EM-232 — True when the Victory Arch is configured ON: a positive cycle
+        cadence (`every_n_ticks` > 0). The OFF state (default, and any world.yaml
+        without the block) gates the pitch_contribution prompt line off and makes
+        run_victory_arch_cycle a no-op, so a pitch-free default world is golden +
+        snapshot byte-identical."""
+        try:
+            return int(self._arch_param("every_n_ticks", 0)) > 0
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return False
+
+    # EM-232 — the weight each judged contribution kind carries in the
+    # deterministic score. Equal weights in v1 (each pro-social act counts once);
+    # the per-kind table lets a future config tune emphasis without touching the
+    # ranking. Pure data — no random, no clock.
+    _CONTRIBUTION_WEIGHTS: dict[str, int] = {
+        "skill_taught": 1,
+        "trade_settled": 1,
+        "project_funded": 1,
+        "project_built": 1,
+    }
+
+    def record_contribution(self, agent: AgentState, kind: str) -> None:
+        """EM-232 — bump an agent's DURABLE contribution ledger by one for `kind`
+        (one of the judged pro-social acts: skill_taught / trade_settled /
+        project_funded / project_built). Called at each act's success site. The
+        ledger holds only positive counts (the canonical, byte-stable form). Pure
+        bookkeeping — no random, no clock (EM-155). An unknown kind still records
+        (forward-compatible) but only WEIGHTED kinds count toward the score."""
+        if not isinstance(kind, str) or not kind.strip():
+            return
+        kind = kind.strip()
+        agent.contributions[kind] = int(agent.contributions.get(kind, 0)) + 1
+
+    def contribution_score(self, agent: AgentState) -> int:
+        """EM-232 — the DETERMINISTIC peer-judge score: the weighted sum of an
+        agent's contribution ledger over the judged kinds. Pure arithmetic over
+        durable state — no random, no clock — so same-seed runs rank identically
+        (EM-155). An agent with an empty ledger scores 0."""
+        total = 0
+        for kind, count in agent.contributions.items():
+            total += self._CONTRIBUTION_WEIGHTS.get(kind, 0) * int(count)
+        return total
+
+    def action_pitch_contribution(self, agent: AgentState, text: str) -> dict:
+        """EM-232 — the reflex PITCH (R3): park this agent's case for the Victory
+        Arch keyed by the pitcher id, to be judged at the next cycle boundary.
+        Zero extra LLM calls — the pitch text rides the agent's existing turn.
+        Returns a ready-to-emit `contribution_pitched` event dict (or a fail event
+        on blank text). The pending dict is serialized snapshot-safe (EM-190). One
+        open pitch per agent — a later pitch overwrites the prior."""
+        if not isinstance(text, str) or not text.strip():
+            return self._fail_event(agent.id, "pitch_contribution", "no text",
+                                    f"{agent.name} stepped up to pitch but said nothing.")
+        text = text.strip()
+        self.pending_pitches[agent.id] = {"text": text, "tick": self.tick}
+        return {
+            "kind": "contribution_pitched",
+            "actor_id": agent.id,
+            "text": f"{agent.name} pitches their contribution to the Victory Arch.",
+            "payload": {"action": "pitch_contribution", "pitch": text},
+        }
+
+    def run_victory_arch_cycle(self) -> list[dict]:
+        """EM-232 — the periodic pitch -> peer-judge -> award cycle, checked at the
+        round boundary (invoked once per ROUND from _apply_round_start). When the
+        Victory Arch is ON (`every_n_ticks` > 0) AND the tick has reached/passed the
+        next DUE cadence boundary since the last fire, rank the PARKED pitches by the
+        DETERMINISTIC contribution_score (descending), TIE-BREAK by agent id
+        (ascending) so same-seed runs are identical, and award the top_n pitchers
+        each `award` credits + a `reputation_bonus` renown bump + an
+        `influence_replenish` (the EM-229 hook). Emits one `arch_award` event per
+        winner; CLEARS the pitch queue regardless of how many won.
+
+        CATCH-UP cadence (the fix for the round-vs-tick mismatch): world.tick
+        advances per TURN and a round spans a VARYING number of turns (EM-158 tiers +
+        births/deaths), so a round boundary rarely lands EXACTLY on a multiple of
+        `every_n_ticks`. Instead of the old exact `tick % every_n == 0` gate (which
+        silently skipped any cadence multiple falling mid-round — firing irregularly
+        / never), the cycle fires whenever `tick` has reached the next due multiple
+        after `_last_arch_tick`, then advances the tracker to the HIGHEST crossed
+        boundary. One judge per round boundary (the queue is single-cycle); a
+        boundary that has leapt past several multiples still judges once and skips
+        straight to the highest. Durable + snapshot-safe so a fork/resume never
+        re-fires an already-judged boundary (no double award).
+
+        OFF (the default cadence), a tick that has not yet reached the next due
+        boundary, or an empty pitch queue is a NO-OP that returns [] and clears
+        nothing (pitches simply accumulate until a boundary is crossed). Pure
+        arithmetic + sorting — no random, no clock (EM-155)."""
+        if not self.victory_arch_enabled():
+            return []
+        try:
+            cadence = int(self._arch_param("every_n_ticks", 0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return []
+        if cadence <= 0 or self.tick <= 0:
+            return []
+        # The next DUE cadence boundary is the smallest multiple of `cadence` strictly
+        # greater than the last-fired boundary. The cycle is due iff the current tick
+        # has reached/passed it. (`_last_arch_tick` is always a multiple of cadence or
+        # 0, so `last + cadence` is the next multiple — pure tick math, no clock.)
+        last_fired = max(0, int(getattr(self, "_last_arch_tick", 0)))
+        next_due = last_fired + cadence
+        if self.tick < next_due:
+            return []
+        # Advance the tracker to the HIGHEST crossed boundary (<= tick) before any
+        # early return below, so a boundary with no pitches (or with all pitchers
+        # gone) still consumes the crossing and does not re-fire next round.
+        self._last_arch_tick = (self.tick // cadence) * cadence
+        if not self.pending_pitches:
+            return []
+        try:
+            award = max(0, int(self._arch_param("award", 50)))
+            top_n = max(1, int(self._arch_param("top_n", 1)))
+            rep_bonus = max(0, int(self._arch_param("reputation_bonus", 5)))
+            influence = max(0.0, float(self._arch_param("influence_replenish", 25.0)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            award, top_n, rep_bonus, influence = 50, 1, 5, 25.0
+        # Rank the pitchers: highest contribution_score first, ties broken by agent
+        # id (ascending) — a stable, replay-deterministic order (no random/clock).
+        # Only pitchers that still exist as living agents are eligible (a pitcher
+        # who died/left between pitch and cycle is skipped, fail-safe).
+        candidates = [
+            (self.contribution_score(self.agents[pid]), pid)
+            for pid in self.pending_pitches
+            if pid in self.agents and self.agents[pid].alive
+        ]
+        ranked = sorted(candidates, key=lambda sp: (-sp[0], sp[1]))
+        events: list[dict] = []
+        for score, pid in ranked[:top_n]:
+            agent = self.agents[pid]
+            agent.credits += award
+            agent.renown += rep_bonus
+            self.replenish_influence(agent, influence)
+            pitch = self.pending_pitches.get(pid) or {}
+            events.append({
+                "kind": "arch_award",
+                "actor_id": agent.id,
+                "text": (
+                    f"The Victory Arch honors {agent.name} for their contribution "
+                    f"(+{award} credits)."
+                ),
+                "payload": {
+                    "action": "arch_award",
+                    "award": award,
+                    "score": int(score),
+                    "renown": agent.renown,
+                    "pitch": str(pitch.get("text", "")),
+                },
+            })
+        # The queue clears every cycle (pitches are single-cycle; next cycle judges
+        # a fresh round of pitches).
+        self.pending_pitches = {}
+        return events
+
+    def skill_library(self) -> dict:
+        """EM-227 — the configured skill library {skill: {gates, min_level}}, or
+        {} when no `world.skills` block is set (the off state — gates nothing)."""
+        lib = self._skills_param("library", {})
+        return lib if isinstance(lib, dict) else {}
+
+    def skill_gate_for(self, action: str) -> tuple[str, int] | None:
+        """EM-227 — the (skill, min_level) that gates `action`, or None when no
+        configured skill gates it (so the action stays open — config-absent =
+        no-op). The FIRST skill (sorted for determinism) whose `gates` lists the
+        action wins; survival verbs are never listed, so they never gate."""
+        for skill in sorted(self.skill_library()):
+            spec = self.skill_library()[skill]
+            gates = _block_get(spec, "gates", []) if spec is not None else []
+            if isinstance(gates, list) and action in gates:
+                try:
+                    min_level = max(1, int(_block_get(spec, "min_level", 1)))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    min_level = 1
+                return (skill, min_level)
+        return None
+
+    def grant_skill_xp(self, agent: AgentState, skill: str, xp: int) -> bool:
+        """EM-227 — learn-by-doing / teaching hook: grant `xp` toward `skill` and
+        level the agent up each time the accumulated xp crosses `xp_per_level`,
+        capped at `max_level`. Returns True if a level was gained.
+
+        DETERMINISTIC: pure threshold arithmetic — no random, no clock (EM-155).
+        xp accumulates in a private per-agent ledger (NOT snapshotted — only the
+        resulting LEVEL is durable state; a fork/restore keeps the level and
+        restarts the partial-xp clock at 0, a documented, harmless rounding).
+        Gaining xp ALWAYS replenishes the EM-229 knowledge need (curiosity sated
+        by learning); a level-up replenishes more. A skill the library does not
+        name still levels (teaching can introduce one), but only NAMED skills
+        gate anything. Called by gated-action success (runtime) and EM-228 teach."""
+        if xp <= 0:
+            return False
+        try:
+            per_level = max(1, int(self._skills_param("xp_per_level", 30)))
+            max_level = max(0, int(self._skills_param("max_level", 5)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            per_level, max_level = 30, 5
+        ledger = getattr(self, "_skill_xp", None)
+        if not isinstance(ledger, dict):
+            ledger = {}
+            self._skill_xp = ledger
+        key = (agent.id, skill)
+        before = agent.skill_level(skill)
+        if before >= max_level:
+            # Already capped — still sate curiosity, but no level.
+            self.replenish_knowledge(agent, float(self._skills_param("xp_per_use", 10)) / 2.0)
+            return False
+        # Seed the partial-xp ledger from the agent's CURRENT level the first time
+        # we touch it (a seeded / snapshot-restored level N implies N*per_level xp),
+        # so granting one xp_per_level worth always advances exactly one level. The
+        # ledger never decreases — it only accumulates past the baseline.
+        baseline = before * per_level
+        total = max(ledger.get(key, 0), baseline) + int(xp)
+        ledger[key] = total
+        new_level = min(max_level, total // per_level)
+        leveled = new_level > before
+        if new_level > 0:
+            agent.skills[skill] = new_level
+        # Learning sates the knowledge need: a flat top-up for any xp, plus a
+        # bonus on a level-up. Both clamp 0..100 in replenish_knowledge.
+        self.replenish_knowledge(agent, float(self._skills_param("xp_per_use", 10)) / 2.0)
+        if leveled:
+            self.replenish_knowledge(agent, float(per_level) / 2.0)
+        return leveled
+
+    def seed_skills(self, agent: AgentState, archetype: str) -> None:
+        """EM-227 — seed an agent's STARTING skills ONCE from a persona archetype
+        so identical agents start with a differentiation gradient. The base levels
+        come from the configured `archetypes` table; a small DETERMINISTIC spread
+        (derived from a sha1 of city_seed + agent id/name + archetype — never the
+        `random` module, never a clock) nudges one library skill by +1 so two
+        agents of the SAME archetype still diverge. Idempotent: a second call on an
+        already-skilled agent is a no-op. No library / no archetype ⇒ a no-op seed
+        (skill-less, golden-safe). Pure — safe in the engine path (EM-155)."""
+        if agent.skills:
+            return  # already seeded
+        lib = self.skill_library()
+        if not lib:
+            return  # off state — no skills exist
+        table = self._skills_param("archetypes", {})
+        base = table.get(archetype) if isinstance(table, dict) else None
+        seeded: dict[str, int] = {}
+        if isinstance(base, dict):
+            for skill, level in base.items():
+                try:
+                    lvl = max(0, int(level))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    continue
+                if lvl > 0:
+                    seeded[skill] = lvl
+        if not seeded:
+            return  # unknown archetype ⇒ no seed (golden-safe)
+        # A deterministic +1 nudge on ONE library skill so same-archetype agents
+        # diverge. The chosen skill is a stable hash pick over the sorted library.
+        names = sorted(lib)
+        if names:
+            # EM-227 fix — key off the STABLE identity (lowercased name +
+            # city_seed), NOT agent.id: boot ids carry a uuid4 suffix
+            # (`agent_<name>_<uuid>`), so hashing the id would make the same
+            # agent seed DIFFERENT skills on each same-seed boot, breaking
+            # EM-155 determinism. Names are unique per EM-200 disambiguation.
+            key = f"{self._stable_identity(agent)}:{archetype}".encode()
+            pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(names)
+            chosen = names[pick]
+            try:
+                max_level = max(1, int(self._skills_param("max_level", 5)))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                max_level = 5
+            seeded[chosen] = min(max_level, seeded.get(chosen, 0) + 1)
+        agent.skills = {k: v for k, v in seeded.items() if v > 0}
+
+    def _stable_identity(self, agent: AgentState) -> str:
+        """EM-227 fix — a boot-stable identity string for deterministic seeding:
+        city_seed + the agent's lowercased NAME, deliberately EXCLUDING agent.id.
+        Boot ids are minted as `agent_<name>_<uuid4()[:6]>` (world.spawn_agent),
+        so the id changes on every boot even when the config + city_seed are
+        identical; hashing it would seed DIFFERENT professions per boot and break
+        EM-155 determinism (the seeding docstrings claim 'no random'). Names are
+        unique per EM-200 disambiguation, so name+city_seed is a stable key. The
+        ':' is reserved by callers to namespace their own suffix."""
+        return f"{self.city_seed}:name:{str(agent.name).strip().lower()}"
+
+    def _auto_archetype(self, agent: AgentState) -> str | None:
+        """EM-227 — deterministically assign one of the configured archetypes to an
+        agent that carries no explicit archetype, from a stable hash of city_seed +
+        the agent's NAME (NOT its uuid-bearing id — see _stable_identity). Returns
+        None when no archetypes are configured (so the auto-seed is a no-op —
+        golden-safe). The spread is reproducible across same-seed runs (EM-155):
+        no random, no clock."""
+        table = self._skills_param("archetypes", {})
+        if not isinstance(table, dict) or not table:
+            return None
+        names = sorted(table)
+        key = f"{self._stable_identity(agent)}:archetype".encode()
+        pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(names)
+        return names[pick]
+
+    def seed_skills_auto(self, agent: AgentState) -> None:
+        """EM-227 — seed an agent whose persona declares NO explicit archetype: pick
+        a configured archetype deterministically (so identical agents still diverge
+        by id/name) and seed from it. No library / no archetypes ⇒ a no-op. Used by
+        the boot path so live runs start with a profession gradient and are not all
+        locked out of the gated high-value actions (the north-star: do MORE)."""
+        if agent.skills:
+            return
+        arch = self._auto_archetype(agent)
+        if arch is not None:
+            self.seed_skills(agent, arch)
+
+    def _gating_skill_levels(self) -> dict[str, int]:
+        """EM-227 — every library skill that GATES at least one action, mapped to
+        the highest min_level any of its gated actions requires. Survival verbs are
+        never listed in any `gates`, so they never appear here (they stay open).
+        Empty when no library is configured (golden/pre-EM-227 worlds)."""
+        out: dict[str, int] = {}
+        for skill in sorted(self.skill_library()):
+            spec = self.skill_library()[skill]
+            gates = _block_get(spec, "gates", []) if spec is not None else []
+            if not (isinstance(gates, list) and gates):
+                continue
+            try:
+                min_level = max(1, int(_block_get(spec, "min_level", 1)))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                min_level = 1
+            out[skill] = min_level
+        return out
+
+    def _ensure_gating_coverage(self) -> None:
+        """EM-227 fix — GUARANTEE that every gating skill is reachable: for each
+        skill that gates an action, ensure >=1 LIVING agent holds it at >= the
+        gate's min_level. If none does, deterministically grant it to one living
+        agent so the town is never locked out of a gated capability (e.g. rhetoric
+        gates propose_rule / amend_constitution with no other bootstrap path — xp
+        needs a successful gated action (chicken-and-egg) and teaching needs an
+        existing holder, so a zero-holder boot could NEVER legislate).
+
+        DETERMINISTIC (EM-155): the recipient is chosen by a stable sha1 of
+        (city_seed, skill) over the sorted-by-id living roster (no random, no
+        clock); ties resolve by id. The grant only raises an agent UP to min_level
+        (never lowers a higher self-seeded level), and survival actions stay
+        ungated because they are absent from every `gates` list."""
+        gating = self._gating_skill_levels()
+        if not gating:
+            return
+        for skill in sorted(gating):
+            min_level = gating[skill]
+            living = sorted(
+                (a for a in self.agents.values() if a.alive),
+                key=lambda a: a.id,
+            )
+            if not living:
+                return  # nobody to grant to — nothing we can do
+            if any(a.skill_level(skill) >= min_level for a in living):
+                continue  # already covered
+            # Rotate the recipient deterministically over the living roster so
+            # multiple uncovered skills don't all pile onto the lowest id.
+            key = f"{self.city_seed}:cover:{skill}".encode()
+            pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(living)
+            recipient = living[pick]
+            # Raise UP to the gate min (never lower a higher existing level).
+            recipient.skills[skill] = max(recipient.skill_level(skill), min_level)
+
+    def seed_all_skills(self) -> None:
+        """EM-227 — seed every living, unskilled agent at boot (deterministic id
+        order), THEN guarantee gating-skill coverage so no boot locks the town out
+        of a gated capability. A no-op when no library/archetypes are configured
+        (golden/pre-EM-227 worlds), so it is always safe to call. Idempotent:
+        already-skilled agents are skipped, so a re-seed never re-rolls, and the
+        coverage pass only grants when a gating skill has zero living holder."""
+        if not self.skill_library():
+            return
+        for aid in sorted(self.agents):
+            self.seed_skills_auto(self.agents[aid])
+        # After the per-agent spread, backfill any gating skill that ended up with
+        # no living holder (the orator/rhetoric lockout) so the town can always
+        # reach every gated action. Deterministic — no random/clock (EM-155).
+        self._ensure_gating_coverage()
+
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
 
@@ -4307,22 +6338,75 @@ class World:
                 return events  # world cooldown: at most ONE birth per round
         return []
 
+    def _births_at_tick(self, tick: int) -> int:
+        """Per-tick birth ordinal source: how many children were already born
+        at `tick` (the family-tie since_tick stamped at birth, the same seam
+        _latest_pair_child_tick reads). Two births at the SAME tick (two pairs,
+        two check_births calls) get ordinals 0, 1, … so their seeded ids never
+        collide. Derived state — no clock, no counter, survives snapshots."""
+        seen: set[str] = set()
+        for child in self.agents.values():
+            if not child.parents:
+                continue
+            rel = (child.relationships.get(child.parents[0])
+                   or (child.relationships.get(child.parents[1])
+                       if len(child.parents) > 1 else None))
+            if rel is not None and rel.since_tick == tick:
+                seen.add(child.id)
+        return len(seen)
+
+    def _child_id(self, parents: list[str], tick: int, ordinal: int,
+                  name: str) -> str:
+        """Wave M4 / EM-189 — a SEEDED, replay/fork-stable child agent id
+        (NEVER uuid4). Mirrors _image_id / _prop_id: a sha256 of
+        (sorted parents, birth tick, per-tick ordinal, city_seed) via the
+        animal layer's _seed_int. Format-compatible with the historical
+        `agent_<name>_<hash>` shape (a hex suffix), so id consumers that split
+        on '_' or match the prefix keep working. `ordinal` disambiguates two
+        children born at the SAME tick; `tick` keeps ids unique across the run's
+        full history (a later child of the same pair can never alias an
+        earlier one). Fully replay-safe — tick/parents/ordinal are deterministic
+        in replay + fork."""
+        from ..animals.runtime import _seed_int
+        slug = name.lower().replace(" ", "_") or "child"
+        seed = _seed_int(
+            "child", self.city_seed, *sorted(parents), tick, ordinal)
+        return f"agent_{slug}_{format(seed % (16 ** 10), '010x')}"
+
     def _spawn_child(
         self, p1: AgentState, p2: AgentState, personas: list[dict], cost: int
     ) -> list[dict]:
         """Create the child for a qualified pair (check_births gates). Returns
         the ready-to-emit [child_spawned, agent_spawned] event dicts."""
         name, card_personality = self._pick_child_persona(personas)
+        # EM-189 — derive the child id from a SEEDED birth hash (sorted parents
+        # + birth tick + per-tick ordinal + city_seed) so same-seed runs mint
+        # IDENTICAL births that A/B diffs can align. Passed into spawn_agent
+        # (which otherwise uuid4s for free/operator spawns).
+        child_id = self._child_id(
+            sorted((p1.id, p2.id)), self.tick, self._births_at_tick(self.tick),
+            name)
         child = self.spawn_agent(
             name=name,
             personality=self._child_personality(card_personality, p1, p2),
             profile=self._pick_child_profile(),
             location=p1.location,           # the birth home
             cadence_tier="background",      # free-scale law
+            agent_id=child_id,
         )
         child.energy = 70.0
         child.credits = 0
         child.parents = sorted((p1.id, p2.id))
+        # EM-126 — with the generational layer ON, a BORN agent enters at the
+        # `child` stage so the child→adult→elder cadence runs in the right order
+        # (spawn_agent leaves life_stage at the AgentState `adult` default, which
+        # would otherwise make every newborn start an adult). age_ticks stays 0 —
+        # life_stage_for(0) is `child` under the default thresholds, so the two
+        # stay consistent. Gated behind generations: with it OFF (the default) the
+        # field is untouched (adult), keeping EM-114 births + snapshots byte-
+        # identical. A newborn is NOT aged its birth round (see age_agents).
+        if self._generations_enabled():
+            child.life_stage = "child"
         # Both parents pay — a credits sink, not a transfer.
         p1.credits -= cost
         p2.credits -= cost
@@ -4607,9 +6691,14 @@ class World:
         cadence_tier: str = "protagonist",
         disposition: str = "lawful",
         role: str = "citizen",
+        agent_id: str | None = None,
     ) -> AgentState:
         name = self._unique_agent_name(name)
-        agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
+        # EM-189 — a caller may pass a pre-derived, SEEDED id (the child-spawn
+        # path does, for replay/fork-stable births). Absent ⇒ the historical
+        # uuid4-suffixed id for free/operator spawns (no determinism contract).
+        if agent_id is None:
+            agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
         agent = AgentState(
             id=agent_id,
             name=name,
@@ -4961,6 +7050,100 @@ class World:
                  "until_tick": int(m.get("until_tick", 0))}
                 for m in self.active_miracles
             ]
+        # EM-228 — open skill-learning requests {teacher_id: {asker_id, skill,
+        # tick}}. Serialized ONLY when non-empty (the cap_demotions pattern), so a
+        # request-free world — and every pre-EM-228 snapshot — keeps the exact
+        # prior key set (absent ⇒ {} on restore). UNLIKE pending_crime_offers, this
+        # Wave-M pending outbox IS snapshot-safe (EM-190): a request parked between
+        # ask and answer survives a fork/resume instead of being silently dropped.
+        if self.pending_skill_requests:
+            snap["pending_skill_requests"] = {
+                str(tid): {
+                    "asker_id": str(r.get("asker_id", "")),
+                    "skill": str(r.get("skill", "")),
+                    "tick": int(r.get("tick", 0)),
+                }
+                for tid, r in self.pending_skill_requests.items()
+            }
+        # EM-230 — open trade offers {offeree_id: {from_id, give, get, tick}}.
+        # Serialized ONLY when non-empty (the cap_demotions pattern), so an
+        # offer-free world — and every pre-EM-230 snapshot — keeps the exact prior
+        # key set (absent ⇒ {} on restore). Like pending_skill_requests this
+        # Wave-M pending outbox IS snapshot-safe (EM-190): an offer parked between
+        # offer and accept survives a fork/resume instead of being silently dropped.
+        # give/get re-emit in their canonical term shape for a byte-stable round-trip.
+        if self.pending_trade_offers:
+            snap["pending_trade_offers"] = {
+                str(tid): {
+                    "from_id": str(o.get("from_id", "")),
+                    "give": self._normalize_trade_terms(o.get("give")),
+                    "get": self._normalize_trade_terms(o.get("get")),
+                    "tick": int(o.get("tick", 0)),
+                }
+                for tid, o in self.pending_trade_offers.items()
+            }
+        # EM-231 — open cooperation handshake OFFERS {offeree_id: {from_id, tick}}.
+        # Serialized ONLY when non-empty (the cap_demotions pattern), so an
+        # offer-free world — and every pre-EM-231 snapshot — keeps the exact prior
+        # key set (absent ⇒ {} on restore). Snapshot-safe (EM-190): an offer parked
+        # between offer and accept survives a fork/resume instead of being dropped.
+        if self.pending_cooperation_offers:
+            snap["pending_cooperation_offers"] = {
+                str(tid): {
+                    "from_id": str(o.get("from_id", "")),
+                    "tick": int(o.get("tick", 0)),
+                }
+                for tid, o in self.pending_cooperation_offers.items()
+            }
+        # EM-240 / EM-190 — open recruit offers {target_id: {recruiter_id, tick}}.
+        # Audit-surfaced (EM-190): recruit -> accept_contract is a TWO-turn pact —
+        # the target accepts on a LATER turn — so a parked offer can straddle a
+        # snapshot boundary exactly like a trade/cooperation offer, and was being
+        # silently dropped on fork/resume. Now serialized ONLY when non-empty (the
+        # cap_demotions / Wave-M outbox pattern), so an offer-free world — and every
+        # pre-EM-190 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore), restored defensively (missing/self recruiter dropped).
+        if self.pending_crime_offers:
+            snap["pending_crime_offers"] = {
+                str(tid): {
+                    "recruiter_id": str(o.get("recruiter_id", "")),
+                    "tick": int(o.get("tick", 0)),
+                }
+                for tid, o in self.pending_crime_offers.items()
+            }
+        # EM-231 — ACTIVE cooperation links, emitted in sorted-key order as a LIST
+        # of {a, b, tick} so the round-trip is byte-stable. Serialized ONLY when
+        # non-empty, so a handshake-free world — and every pre-EM-231 snapshot —
+        # keeps the exact prior key set (absent ⇒ {} on restore). Snapshot-safe
+        # (EM-190): an active partnership survives a fork/resume.
+        if self.cooperations:
+            snap["cooperations"] = [
+                {
+                    "a": str(self.cooperations[k].get("a", "")),
+                    "b": str(self.cooperations[k].get("b", "")),
+                    "tick": int(self.cooperations[k].get("tick", 0)),
+                }
+                for k in sorted(self.cooperations)
+            ]
+        # EM-232 — open Victory-Arch pitches {pitcher_id: {text, tick}}. Serialized
+        # ONLY when non-empty (the cap_demotions pattern), so a pitch-free world —
+        # and every pre-EM-232 snapshot — keeps the exact prior key set (absent ⇒
+        # {} on restore). Snapshot-safe (EM-190): a pitch parked between pitch and
+        # cycle survives a fork/resume instead of being silently dropped.
+        if self.pending_pitches:
+            snap["pending_pitches"] = {
+                str(pid): {
+                    "text": str(p.get("text", "")),
+                    "tick": int(p.get("tick", 0)),
+                }
+                for pid, p in self.pending_pitches.items()
+            }
+        # EM-232 — the catch-up cadence tracker (last fired arch boundary). Serialized
+        # ONLY when set (>0; the cap_demotions pattern), so a never-fired world — and
+        # every pre-EM-232 snapshot — keeps the exact prior key set (absent ⇒ 0 on
+        # restore). Durable so a fork/resume never re-fires an already-judged boundary.
+        if getattr(self, "_last_arch_tick", 0):
+            snap["last_arch_tick"] = int(self._last_arch_tick)
         # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
         # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
         # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
@@ -4980,6 +7163,59 @@ class World:
                 self.neighborhoods[nid].to_dict()
                 for nid in sorted(self.neighborhoods)
             ]
+        # EM-236 — the living constitution: a list of articles {id, text,
+        # ratified_tick}, emitted in their durable order. Serialized ONLY when
+        # non-empty (the factions/active_miracles only-when-non-empty pattern), so
+        # an un-amended world — and every pre-EM-236 snapshot — keeps the exact prior
+        # key set (absent ⇒ [] on restore). A ratified amendment survives a
+        # fork/replay byte-identically (article ids are deterministic, EM-155).
+        if self.constitution:
+            snap["constitution"] = [
+                {
+                    "id": str(a.get("id", "")),
+                    "text": str(a.get("text", "")),
+                    "ratified_tick": int(a.get("ratified_tick", 0)),
+                }
+                for a in self.constitution
+            ]
+        # EM-190 — the PRE-EXISTING transient outboxes. pending_spawn_events
+        # (W7/EM-062 governance spawn + EM-114 births + EM-211 memory events +
+        # the name_town/demolish/promote_image vote effects) and
+        # pending_relationship_events (EM-113 reflex relationship_changed
+        # transitions) park ready-to-emit event dicts between the action that
+        # mints them and the loop's drain. In the live tick path they drain
+        # BEFORE the per-turn snapshot (spawns via _flush_spawn_events at the
+        # turn head, relationship events via drain_relationship_events inside
+        # _apply_action), so a default snapshot omits BOTH keys and round-trips
+        # byte-identically — but a fork taken at ANY other point (an out-of-band
+        # broadcast/persist) would silently DROP a parked event without this.
+        # Serialized ONLY when non-empty (the cap_demotions / Wave-M outbox
+        # pattern), JSON-cloned for a byte-stable round-trip, restored defensively
+        # (non-dict/garbage entries dropped). pending_image_fetches (the PNG
+        # side-artifact outbox) stays deliberately NOT serialized — a transient
+        # side-artifact queue off the replay surface.
+        if self.pending_spawn_events:
+            snap["pending_spawn_events"] = _json_safe_events(self.pending_spawn_events)
+        if self.pending_relationship_events:
+            snap["pending_relationship_events"] = _json_safe_events(
+                self.pending_relationship_events)
+        # EM-235 — the per-round boost-buy budget (the backing for the
+        # world.boost.max_per_round cap). Snapshots fire per tick — routinely
+        # MID-round — so a snapshot/restore that lost this counter would RESET the
+        # budget and let an already-capped agent buy max_per_round MORE this same
+        # round (cap bypass), AND a forked/resumed world would schedule EXTRA
+        # boosted turns the continuous run never had (EM-155 fork/replay
+        # determinism). Serialized ONLY when non-empty (the cap_demotions /
+        # only-when-non-default pattern), so a boost-free world — and every
+        # pre-EM-235 snapshot — keeps the exact prior key set and round-trips
+        # byte-identically; restored defensively (non-positive / garbage counts
+        # dropped). It still resets at the round boundary in _start_new_round —
+        # this only persists it ACROSS a mid-round snapshot.
+        if self._boosts_this_round:
+            snap["_boosts_this_round"] = {
+                str(aid): int(n)
+                for aid, n in self._boosts_this_round.items()
+            }
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -5095,6 +7331,55 @@ class World:
                               in ("wanted", "detained", "jailed", "exiled") else None),
                 crime_status_until_tick=_int(d.get("crime_status_until_tick")),
                 rap_sheet=[dict(e) for e in (d.get("rap_sheet") or []) if isinstance(e, dict)],
+                # EM-229 — needs: additive. Pre-EM-229 snapshots lack the keys
+                # and restore the full default (100.0); a present value is clamped
+                # 0..100 and a malformed value fails safe to 100.0. Byte-stable
+                # round-trip (EM-155): a full need is never re-emitted.
+                knowledge=_clamp_need(d.get("knowledge")),
+                influence=_clamp_need(d.get("influence")),
+                # EM-233 — soul: additive. Pre-EM-233 snapshots lack the key and
+                # restore []; a present value is coerced to a list of non-blank
+                # strings and truncated to the configured soul_cap (defensive
+                # restore: a tampered over-cap soul never grows past the cap).
+                # Byte-stable round-trip (EM-155): an empty soul is never
+                # re-emitted, so a soulless agent's dict is unchanged.
+                soul=_coerce_soul(
+                    d.get("soul"),
+                    _block_get(getattr(params, "memory", None), "soul_cap", 3),
+                ),
+                # EM-227 — skills: additive. Pre-EM-227 snapshots lack the key
+                # and restore {}; a present value is coerced to {str: int>0}
+                # (non-str keys + non-positive levels dropped, fail-safe). Byte-
+                # stable round-trip (EM-155): an empty skills map is never
+                # re-emitted, so a skill-less agent's dict is unchanged.
+                skills=_coerce_skills(d.get("skills")),
+                # EM-232 — contribution ledger + renown: additive. Pre-EM-232
+                # snapshots lack the keys and restore {} / 0; a present ledger is
+                # coerced to {str: int>0} (garbage dropped, fail-safe) and renown
+                # is clamped >= 0. Byte-stable round-trip (EM-155): an empty ledger
+                # / zero renown is never re-emitted, so the agent's dict is unchanged.
+                contributions=_coerce_contributions(d.get("contributions")),
+                renown=max(0, _int(d.get("renown"))),
+                # EM-235 — parked boost count: additive. Pre-EM-235 snapshots lack
+                # the key and restore 0; a present value is clamped >= 0 and a
+                # malformed/negative value fails safe to 0 (never a "negative
+                # boost"). Byte-stable round-trip (EM-155): a zero count is never
+                # re-emitted, so a boost-free agent's dict is unchanged.
+                boosted_turns=max(0, _int(d.get("boosted_turns"))),
+                # EM-126 — life stage + age: additive. Pre-EM-126 snapshots lack
+                # the keys and restore the adult / age-0 defaults; an unknown
+                # life_stage fails safe to "adult" and age_ticks is clamped >= 0
+                # (a malformed/negative value never breaks the restore). Byte-
+                # stable round-trip (EM-155): an adult / age-0 agent is never
+                # re-emitted, so the agent's dict is unchanged.
+                life_stage=(str(d.get("life_stage")) if d.get("life_stage")
+                            in ("child", "adult", "elder") else "adult"),
+                age_ticks=max(0, _int(d.get("age_ticks"))),
+                # EM-126 — the inheritance-settled flag: additive. Absent/garbage
+                # → False (a living/never-inherited agent), so a settled corpse
+                # that was already serialized restores as already-settled (no
+                # re-inherit on resume/fork) and everything else is unchanged.
+                inheritance_settled=bool(d.get("inheritance_settled", False)),
             )
             a.relationships = {
                 str(aid): RelationshipState(
@@ -5309,4 +7594,163 @@ class World:
             for aid, lines in (state.get("pending_whispers") or {}).items()
             if str(aid) in world.agents and lines
         }
+        # EM-228 — restore open skill-learning requests (snapshot-safe, EM-190).
+        # Defensive: keep only well-formed entries whose teacher AND asker both
+        # still exist and that name a non-empty skill (unknown/garbage → dropped).
+        restored_requests: dict[str, dict] = {}
+        for tid, r in (state.get("pending_skill_requests") or {}).items():
+            if not isinstance(r, dict):
+                continue
+            teacher_id = str(tid)
+            asker_id = str(r.get("asker_id", ""))
+            skill = str(r.get("skill", "")).strip()
+            if (teacher_id in world.agents and asker_id in world.agents
+                    and skill and asker_id != teacher_id):
+                restored_requests[teacher_id] = {
+                    "asker_id": asker_id,
+                    "skill": skill,
+                    "tick": _int(r.get("tick")),
+                }
+        world.pending_skill_requests = restored_requests
+        # EM-230 — restore open trade offers (snapshot-safe, EM-190). Defensive:
+        # keep only well-formed entries whose offeree AND offerer both still exist,
+        # are distinct, and that carry a non-empty deal (a non-dict entry, a missing
+        # agent, a self-offer, or an empty give+get → dropped). give/get are
+        # re-normalized so a garbage term collapses to its canonical empty form.
+        restored_offers: dict[str, dict] = {}
+        for tid, o in (state.get("pending_trade_offers") or {}).items():
+            if not isinstance(o, dict):
+                continue
+            offeree_id = str(tid)
+            from_id = str(o.get("from_id", ""))
+            give_t = World._normalize_trade_terms(o.get("give"))
+            get_t = World._normalize_trade_terms(o.get("get"))
+            if (offeree_id in world.agents and from_id in world.agents
+                    and from_id != offeree_id
+                    and not (World._trade_terms_empty(give_t)
+                             and World._trade_terms_empty(get_t))):
+                restored_offers[offeree_id] = {
+                    "from_id": from_id,
+                    "give": give_t,
+                    "get": get_t,
+                    "tick": _int(o.get("tick")),
+                }
+        world.pending_trade_offers = restored_offers
+        # EM-231 — restore open cooperation OFFERS (snapshot-safe, EM-190).
+        # Defensive: keep only well-formed entries whose offeree AND offerer both
+        # still exist and are distinct (a non-dict entry, a missing agent, or a
+        # self-offer → dropped).
+        restored_coop_offers: dict[str, dict] = {}
+        for tid, o in (state.get("pending_cooperation_offers") or {}).items():
+            if not isinstance(o, dict):
+                continue
+            offeree_id = str(tid)
+            from_id = str(o.get("from_id", ""))
+            if (offeree_id in world.agents and from_id in world.agents
+                    and from_id != offeree_id):
+                restored_coop_offers[offeree_id] = {
+                    "from_id": from_id,
+                    "tick": _int(o.get("tick")),
+                }
+        world.pending_cooperation_offers = restored_coop_offers
+        # EM-240 / EM-190 — restore open recruit offers (snapshot-safe). Defensive:
+        # keep only well-formed entries whose target AND recruiter both still exist
+        # and are distinct (a non-dict entry, a missing agent, or a self-offer →
+        # dropped). Absent key (pre-EM-190 snapshot) → {} (a drained pact list).
+        restored_crime_offers: dict[str, dict] = {}
+        for tid, o in (state.get("pending_crime_offers") or {}).items():
+            if not isinstance(o, dict):
+                continue
+            target_id = str(tid)
+            recruiter_id = str(o.get("recruiter_id", ""))
+            if (target_id in world.agents and recruiter_id in world.agents
+                    and recruiter_id != target_id):
+                restored_crime_offers[target_id] = {
+                    "recruiter_id": recruiter_id,
+                    "tick": _int(o.get("tick")),
+                }
+        world.pending_crime_offers = restored_crime_offers
+        # EM-231 — restore ACTIVE cooperation links (snapshot-safe, EM-190).
+        # Defensive: keep only links whose BOTH ends still exist and are distinct
+        # (a non-dict entry, a missing agent, or a self-link → dropped). Re-keyed
+        # through _coop_key so the stored shape is canonical regardless of input.
+        restored_coops: dict[str, dict] = {}
+        for entry in (state.get("cooperations") or []):
+            if not isinstance(entry, dict):
+                continue
+            a_id = str(entry.get("a", ""))
+            b_id = str(entry.get("b", ""))
+            if (a_id in world.agents and b_id in world.agents and a_id != b_id):
+                lo, hi = sorted((a_id, b_id))
+                restored_coops[World._coop_key(a_id, b_id)] = {
+                    "a": lo, "b": hi, "tick": _int(entry.get("tick")),
+                }
+        world.cooperations = restored_coops
+        # EM-232 — restore open Victory-Arch pitches (snapshot-safe, EM-190).
+        # Defensive: keep only well-formed entries whose pitcher still exists and
+        # that carry non-blank text (a non-dict entry, a missing agent, or a blank
+        # pitch → dropped).
+        restored_pitches: dict[str, dict] = {}
+        for pid, p in (state.get("pending_pitches") or {}).items():
+            if not isinstance(p, dict):
+                continue
+            pitcher_id = str(pid)
+            text = str(p.get("text", "")).strip()
+            if pitcher_id in world.agents and text:
+                restored_pitches[pitcher_id] = {
+                    "text": text,
+                    "tick": _int(p.get("tick")),
+                }
+        world.pending_pitches = restored_pitches
+        # EM-232 — restore the catch-up cadence tracker (last fired arch boundary).
+        # Additive: a pre-EM-232 / never-fired snapshot lacks the key and restores 0,
+        # so a fork/replay keeps the exact prior schedule byte-identically. Defensive:
+        # garbage / negative → 0 (fail-safe). Durable so a resume never re-fires an
+        # already-judged boundary (no double award).
+        world._last_arch_tick = max(0, _int(state.get("last_arch_tick")))
+        # EM-236 — restore the living constitution (additive: pre-EM-236 snapshots
+        # lack the key and restore [], so a fork/replay of an un-amended world keeps
+        # the empty constitution byte-identically). Defensive: keep only well-formed
+        # articles with a non-empty id AND non-blank text (a non-dict entry, a
+        # missing id, or blank text → dropped), preserving the durable order.
+        restored_constitution: list[dict] = []
+        for a in (state.get("constitution") or []):
+            if not isinstance(a, dict):
+                continue
+            art_id = str(a.get("id", "")).strip()
+            art_text = str(a.get("text", "")).strip()
+            if art_id and art_text:
+                restored_constitution.append({
+                    "id": art_id,
+                    "text": art_text[:300],
+                    "ratified_tick": _int(a.get("ratified_tick")),
+                })
+        world.constitution = restored_constitution
+        # EM-190 — restore the pre-existing transient outboxes (snapshot-safe).
+        # Additive: a pre-EM-190 snapshot lacks both keys and restores []
+        # (the drained state), so a fork/replay of a world whose outboxes were
+        # already drained keeps the empty outboxes byte-identically. Defensive:
+        # _json_safe_events drops any non-dict / non-JSON entry, so a tampered or
+        # corrupted snapshot can never crash the restore — at worst a malformed
+        # parked event is silently dropped (fail-safe, like every other restore).
+        world.pending_spawn_events = _json_safe_events(
+            state.get("pending_spawn_events"))
+        world.pending_relationship_events = _json_safe_events(
+            state.get("pending_relationship_events"))
+        # EM-235 — restore the per-round boost-buy budget (snapshot-safe). Additive:
+        # a pre-EM-235 snapshot (or any boost-free world) lacks the key and restores
+        # {}, so a fork/replay of an un-boosted world keeps the empty budget
+        # byte-identically. Defensive: keep only well-formed POSITIVE counts keyed by
+        # a still-living agent (a non-dict, an unknown id, or a non-positive / garbage
+        # count → dropped), so a tampered snapshot can never grant a phantom budget or
+        # crash the restore (fail-safe, like every other restore).
+        restored_boosts: dict[str, int] = {}
+        raw_boosts = state.get("_boosts_this_round")
+        if isinstance(raw_boosts, dict):
+            for aid, n in raw_boosts.items():
+                aid = str(aid)
+                count = _int(n)
+                if aid in world.agents and count > 0:
+                    restored_boosts[aid] = count
+        world._boosts_this_round = restored_boosts
         return world
