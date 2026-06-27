@@ -56,9 +56,12 @@ function history(): WorldEvent[] {
 }
 
 function renderAnnex(h: WorldEvent[]) {
-  return render(
-    <InspectorLayout world={null} history={h} mockMode={true} />,
-  );
+  const r = render(<InspectorLayout world={null} history={h} mockMode={true} />);
+  // EM-204: SocialGraph lives under the Society tab; switch to it so the panel
+  // mounts and starts recording the `events` ref it receives. (This also proves
+  // the EM-204 invariant that the shared scrub drives a non-default-tab panel.)
+  fireEvent.click(screen.getByRole('tab', { name: /society/i }));
+  return r;
 }
 
 function scrubTo(tick: number) {

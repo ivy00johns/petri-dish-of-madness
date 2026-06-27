@@ -75,6 +75,27 @@ import AWIDashboard from './AWIDashboard';
 import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
 
+// ── Wave M (EM-204) — the tabbed IA ──────────────────────────────────────────
+// Four sections group the formerly-flat 9-panel grid. The order is the reading
+// order: Forensics (what happened + why) → Society (who + welfare + law) →
+// Chaos (the critter sideshow) → Runs (the archive). Only the active tab's
+// panels mount; the shared scrub above the tab body drives them all.
+type InspectorTab = 'forensics' | 'society' | 'chaos' | 'runs';
+
+interface InspectorTabDef {
+  id: InspectorTab;
+  label: string;
+  /** One-line tooltip: which panels live under this tab. */
+  hint: string;
+}
+
+const INSPECTOR_TABS: readonly InspectorTabDef[] = [
+  { id: 'forensics', label: 'Forensics', hint: 'Replay map + decision trace' },
+  { id: 'society', label: 'Society', hint: 'Social graph + governance + welfare (AWI)' },
+  { id: 'chaos', label: 'Chaos', hint: 'Animal chaos feed' },
+  { id: 'runs', label: 'Runs', hint: 'Run browser + archive mode' },
+];
+
 interface InspectorLayoutProps {
   /** Live world projection (run summary strip + agents/profiles/places). */
   world: WorldState | null;
@@ -130,6 +151,16 @@ export function InspectorLayout({
   const buildings = useMemo(() => world?.buildings ?? [], [world]);
   // W8/D4: the animal roster — the replay fold's position fallback.
   const animals = useMemo(() => world?.animals ?? [], [world]);
+
+  // ── Wave M (EM-204) — tabbed IA ─────────────────────────────────────────────
+  // The 9-panel grid was a wall: every panel mounted at once, dense and dim.
+  // The panels are now grouped into four TABS (forensics / society / chaos /
+  // runs); only the active tab's panel column-stack is mounted. Crucially the
+  // scrub state + projectors + panelProps all live at THIS layout level (above
+  // the tab body), so a panel that unmounts when you leave its tab re-mounts
+  // with the SAME scrubbed projection on return — the scrub keeps driving every
+  // panel regardless of which tab is shown.
+  const [tab, setTab] = useState<InspectorTab>('forensics');
 
   // ── Archive mode (W11a EM-086, contract §8) ─────────────────────────────────
   // null = live (everything below behaves exactly as pre-W11a). Selecting a
@@ -379,6 +410,9 @@ export function InspectorLayout({
     [panelEvents, currentTick],
   );
 
+  // The active tab descriptor (for the tabpanel's accessible name).
+  const activeTab = INSPECTOR_TABS.find((t) => t.id === tab) ?? INSPECTOR_TABS[0];
+
   return (
     // EM-082 a11y: the annex is the route's main landmark (the live route's
     // <main> is the world view inside LiveLayout).
@@ -521,7 +555,9 @@ export function InspectorLayout({
       </div>
 
       {/* Scrub strip — FIXED chrome (wave G): drives the shared currentTick.
-          It reads the UNSCOPED merged pool so the marker rail spans the run. */}
+          It reads the UNSCOPED merged pool so the marker rail spans the run.
+          It sits ABOVE the tab bar so the scrub is shared across every tab
+          (EM-204): switching tabs never moves the playhead. */}
       <ErrorBoundary name="Replay Scrubber">
         <ReplayScrubber
           events={mergedEvents}
@@ -531,46 +567,114 @@ export function InspectorLayout({
         />
       </ErrorBoundary>
 
-      {/* ── The panel grid (wave G, EM-197) ──────────────────────────────────
-          Sized to the REMAINING viewport. ≥1280px: three balanced columns —
-          [map+social+runs | trace+chaos | governance+AWI]; 1024–1279px: two
-          columns with the governance/AWI pair as a bottom band; <1024px:
-          panels stack and ONLY here may the area scroll (the small-screen
-          fallback — the app's MinWidthGate already gates this range).
-          Every panel is a cell with INTERNAL overflow; each mounts inside its
-          own ErrorBoundary (wave F, EM-151) so one crash never blanks the
-          annex. Each column is a flex stack so a collapsed empty panel's
-          space is reclaimed by its siblings. */}
+      {/* ── Tab bar (wave M, EM-204) — FIXED chrome ──────────────────────────
+          The dense 9-panel wall is grouped into four tabs; only the active
+          tab's panels mount. Live count badges keep the off-tab signal
+          visible (e.g. chaos events accumulating while you read Forensics). */}
+      <div
+        role="tablist"
+        aria-label="Inspector sections"
+        className="flex items-stretch gap-1 px-2 pt-1 border-b border-lab-border bg-lab-surface shrink-0"
+      >
+        {INSPECTOR_TABS.map((t) => (
+          <InspectorTabButton
+            key={t.id}
+            tab={t}
+            active={tab === t.id}
+            badge={t.id === 'chaos' ? chaosEventCount : t.id === 'society' ? govEventCount : 0}
+            onSelect={setTab}
+          />
+        ))}
+      </div>
+
+      {/* ── The active tab's panel column-stack (wave M, EM-204) ─────────────
+          Sized to the REMAINING viewport. Each tab keeps the wave-G law:
+          ≥1024px the area NEVER page-scrolls (lg:overflow-hidden) and every
+          panel scrolls internally; <1024px (behind MinWidthGate) the stack
+          page-scrolls. Each panel mounts in its own ErrorBoundary (EM-151) so
+          one crash never blanks the annex. data-testid kept so the structural
+          layout guards (EM-197) still pin the no-page-scroll law per tab. */}
       <div
         data-testid="inspector-grid"
-        className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3
-                   lg:grid-rows-[minmax(0,3fr)_minmax(0,2fr)] xl:grid-rows-[minmax(0,1fr)]
-                   gap-2 p-2 overflow-y-auto lg:overflow-hidden"
+        role="tabpanel"
+        aria-label={`${activeTab.label} panels`}
+        className="flex-1 min-h-0 grid grid-cols-1 gap-2 p-2 overflow-y-auto lg:overflow-hidden"
       >
-        {/* Column A — replay map + social graph + run browser. */}
-        <div className="flex flex-col gap-2 min-h-0 min-w-0">
-          <PanelCell weight="lg:flex-[3]">
-            <ErrorBoundary name="Replay Map">
-              <ReplayMapPanel
-                events={mergedEvents}
-                agents={effAgents}
-                profiles={profiles}
-                places={effPlaces}
-                buildings={scrubberBuildings}
-                animals={effAnimals}
-                currentTick={currentTick}
-                maxTick={maxTick}
-                snapshots={replaySnapshots}
-              />
+        {tab === 'forensics' && (
+          // Forensics — the replay map (where) beside the decision trace (why).
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
+            <PanelCell weight="">
+              <ErrorBoundary name="Replay Map">
+                <ReplayMapPanel
+                  events={mergedEvents}
+                  agents={effAgents}
+                  profiles={profiles}
+                  places={effPlaces}
+                  buildings={scrubberBuildings}
+                  animals={effAnimals}
+                  currentTick={currentTick}
+                  maxTick={maxTick}
+                  snapshots={replaySnapshots}
+                />
+              </ErrorBoundary>
+            </PanelCell>
+            <PanelCell weight="">
+              <ErrorBoundary name="Decision Trace">
+                <DecisionTrace {...panelProps} />
+              </ErrorBoundary>
+            </PanelCell>
+          </div>
+        )}
+
+        {tab === 'society' && (
+          // Society — the relationship web + the welfare dashboard, with the
+          // governance timeline (collapses to a slim strip when no laws yet).
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
+            <div className="flex flex-col gap-2 min-h-0 min-w-0">
+              <PanelCell weight="lg:flex-[4]">
+                <ErrorBoundary name="Social Graph">
+                  <SocialGraph {...panelProps} />
+                </ErrorBoundary>
+              </PanelCell>
+              <CollapsibleCell
+                title="Governance · Laws"
+                count={govEventCount}
+                empty={govEventCount === 0}
+                zeroNote="no laws yet — proposals from Town Hall appear here"
+                weight="lg:flex-[3]"
+              >
+                <ErrorBoundary name="Governance History">
+                  <GovernanceHistory {...panelProps} />
+                </ErrorBoundary>
+              </CollapsibleCell>
+            </div>
+            <PanelCell weight="">
+              <ErrorBoundary name="AWI Dashboard">
+                <AWIDashboard {...panelProps} />
+              </ErrorBoundary>
+            </PanelCell>
+          </div>
+        )}
+
+        {tab === 'chaos' && (
+          // Chaos — the critter mischief stream gets the whole viewport; it
+          // collapses to a slim strip while no animal has acted yet.
+          <CollapsibleCell
+            title="Animal Chaos Feed"
+            count={chaosEventCount}
+            empty={chaosEventCount === 0}
+            zeroNote="no critter mischief yet — the cat & dog's antics stream here"
+            weight=""
+          >
+            <ErrorBoundary name="Animal Chaos Feed">
+              <AnimalChaosFeed {...panelProps} />
             </ErrorBoundary>
-          </PanelCell>
-          <PanelCell weight="lg:flex-[4]">
-            <ErrorBoundary name="Social Graph">
-              <SocialGraph {...panelProps} />
-            </ErrorBoundary>
-          </PanelCell>
-          <PanelCell weight="lg:flex-[3]">
-            {/* W11a (EM-086): past runs, archive mode entry, cross-run AWI. */}
+          </CollapsibleCell>
+        )}
+
+        {tab === 'runs' && (
+          // Runs — past-run browser + archive-mode entry + cross-run AWI.
+          <PanelCell weight="">
             <ErrorBoundary name="Run Browser">
               <RunBrowser
                 mockMode={mockMode}
@@ -579,50 +683,7 @@ export function InspectorLayout({
               />
             </ErrorBoundary>
           </PanelCell>
-        </div>
-
-        {/* Column B — decision trace + the chaos feed. */}
-        <div className="flex flex-col gap-2 min-h-0 min-w-0">
-          <PanelCell weight="lg:flex-[3]">
-            <ErrorBoundary name="Decision Trace">
-              <DecisionTrace {...panelProps} />
-            </ErrorBoundary>
-          </PanelCell>
-          <CollapsibleCell
-            title="Animal Chaos Feed"
-            count={chaosEventCount}
-            empty={chaosEventCount === 0}
-            zeroNote="no critter mischief yet — the cat & dog's antics stream here"
-            weight="lg:flex-[2]"
-          >
-            <ErrorBoundary name="Animal Chaos Feed">
-              <AnimalChaosFeed {...panelProps} />
-            </ErrorBoundary>
-          </CollapsibleCell>
-        </div>
-
-        {/* Column C — governance + AWI. At the 2-column breakpoint this column
-            becomes the bottom band (spanning both columns); at ≥1280px it is
-            the third column. Stacked in BOTH cases so a collapsed governance
-            strip stays slim and AWI reclaims the full band. */}
-        <div className="flex flex-col gap-2 min-h-0 min-w-0 lg:col-span-2 xl:col-span-1">
-          <CollapsibleCell
-            title="Governance · Laws"
-            count={govEventCount}
-            empty={govEventCount === 0}
-            zeroNote="no laws yet — proposals from Town Hall appear here"
-            weight="lg:flex-[2]"
-          >
-            <ErrorBoundary name="Governance History">
-              <GovernanceHistory {...panelProps} />
-            </ErrorBoundary>
-          </CollapsibleCell>
-          <PanelCell weight="lg:flex-[3]">
-            <ErrorBoundary name="AWI Dashboard">
-              <AWIDashboard {...panelProps} />
-            </ErrorBoundary>
-          </PanelCell>
-        </div>
+        )}
       </div>
     </main>
   );
@@ -639,6 +700,47 @@ const CELL_BASE =
 /** A fixed grid/flex cell: the panel inside scrolls internally. */
 function PanelCell({ weight, children }: { weight: string; children: ReactNode }) {
   return <div className={`${CELL_BASE} ${weight}`}>{children}</div>;
+}
+
+/**
+ * A single tab in the Inspector's section bar (wave M, EM-204). The active tab
+ * takes the acid accent + an underline; an optional count badge keeps the
+ * off-tab signal alive (chaos events / governance proposals accumulating while
+ * you read another section). It is a real <button role="tab"> with
+ * aria-selected so the tablist is navigable.
+ */
+function InspectorTabButton({
+  tab,
+  active,
+  badge,
+  onSelect,
+}: {
+  tab: InspectorTabDef;
+  active: boolean;
+  badge: number;
+  onSelect: (id: InspectorTab) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      title={tab.hint}
+      onClick={() => onSelect(tab.id)}
+      className={`flex items-center gap-1.5 px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-wider border-b-2 -mb-px transition-colors cursor-pointer ${
+        active
+          ? 'border-lab-acid text-lab-acid'
+          : 'border-transparent text-lab-muted hover:text-lab-text'
+      }`}
+    >
+      <span>{tab.label}</span>
+      {badge > 0 && (
+        <span className="font-mono text-[9px] tabular-nums px-1 rounded-sm bg-lab-acid/15 text-lab-acid">
+          {badge > 999 ? '999+' : badge}
+        </span>
+      )}
+    </button>
+  );
 }
 
 // Governance lifecycle kinds — drives the empty-collapse signal.
