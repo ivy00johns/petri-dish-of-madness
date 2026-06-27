@@ -761,6 +761,16 @@ class CrimeParams:
     vandalize_notoriety: int = 10
     heist_notoriety: int = 18
     extort_notoriety: int = 12
+    # EM-237 — harm-surface finishers (intimidate / deceive). Two reflex verbs
+    # atop the EM-240 crime path; their witnessed-notoriety bases live here so an
+    # absent `crime` block (city25 / the embedded mirror) still scores them at
+    # these exact defaults via _crime_param (config-absent = no-op). intimidate
+    # coerces a fraction of the mark's purse (lighter take than extort_max=15,
+    # heavier fear); deceive moves no credits (it plants a lie + sours trust).
+    intimidate_notoriety: int = 14
+    deceive_notoriety: int = 8
+    intimidate_take_fraction: float = 0.25
+    intimidate_max: int = 10
     steal_notoriety: int = 6
     arson_notoriety: int = 22
     bribe_efficacy: float = 0.75
@@ -1883,6 +1893,11 @@ def _parse_crime(raw: dict | None) -> CrimeParams:
         vandalize_notoriety=_int("vandalize_notoriety", d.vandalize_notoriety),
         heist_notoriety=_int("heist_notoriety", d.heist_notoriety),
         extort_notoriety=_int("extort_notoriety", d.extort_notoriety),
+        intimidate_notoriety=_int("intimidate_notoriety", d.intimidate_notoriety),
+        deceive_notoriety=_int("deceive_notoriety", d.deceive_notoriety),
+        intimidate_take_fraction=_float(
+            "intimidate_take_fraction", d.intimidate_take_fraction),
+        intimidate_max=_int("intimidate_max", d.intimidate_max),
         steal_notoriety=_int("steal_notoriety", d.steal_notoriety),
         arson_notoriety=_int("arson_notoriety", d.arson_notoriety),
         bribe_efficacy=_float("bribe_efficacy", d.bribe_efficacy),

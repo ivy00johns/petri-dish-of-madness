@@ -129,6 +129,10 @@ world:
     vandalize_notoriety: 10
     heist_notoriety: 18
     extort_notoriety: 12
+    intimidate_notoriety: 14       # EM-237 — threaten without contact (fear)
+    deceive_notoriety: 8           # EM-237 — plant a false belief (lying)
+    intimidate_take_fraction: 0.25 # EM-237 — fraction of the mark's purse coerced
+    intimidate_max: 10             # EM-237 — cap on a single coerced sum (< extort)
     steal_notoriety: 6             # folded into existing steal
     arson_notoriety: 22            # folded into existing arson
     bribe_efficacy: 0.75           # fraction of payer notoriety wiped

@@ -2050,6 +2050,68 @@ class World:
                              int(self._crime_param("extort_notoriety", 12)))
         return True, "ok", amount
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-237 — harm-surface finishers: intimidate, deceive. Two reflex verbs atop
+    # the EM-240 crime path (contracts/wave-m.md §3 Wave M3). Both reuse the shared
+    # witness-scaling + rap_sheet + wanted machinery via _register_crime (like
+    # extort) and snap the victim's view to at least rival — the snapshot-durable
+    # "fear marker" is the relationship trust crater (relationships ARE serialized,
+    # unlike beliefs). Deterministic: no random/clock; the coerced sum is a fixed
+    # fraction of the mark's purse, so same-seed runs are identical.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_intimidate(self, agent: AgentState, target: AgentState) -> tuple[bool, str, int]:
+        """EM-237 — threaten WITHOUT contact: coerce a small sum via fear (a
+        FRACTION of the mark's purse, capped at intimidate_max), crater the
+        victim's trust + snap them to rival. Needs the target VISIBLE (same place,
+        like extort) but no physical contact beyond that. Heavier on fear/trust,
+        lighter on take than extort; notoriety from intimidate_notoriety."""
+        if agent.id == target.id:
+            return False, "cannot intimidate yourself", 0
+        if agent.location != target.location:
+            return False, "target not visible", 0
+        if target.credits <= 0:
+            return False, "target has nothing to give", 0
+        frac = float(self._crime_param("intimidate_take_fraction", 0.25))
+        cap = int(self._crime_param("intimidate_max", 10))
+        amount = min(target.credits, cap, max(1, int(target.credits * frac)))
+        target.credits -= amount
+        agent.credits += amount
+        # The fear marker: a deep trust crater on the victim's view (snapshot-
+        # durable, unlike a planted belief). Heavier than extort's -18.
+        self._update_trust(target, agent, -22)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "intimidate", target.id,
+                             int(self._crime_param("intimidate_notoriety", 14)))
+        return True, "ok", amount
+
+    def action_deceive(self, agent: AgentState, target: AgentState,
+                       about: str) -> tuple[bool, str]:
+        """EM-237 — lying as a first-class act: plant a FALSE belief in a co-located
+        target (best-effort manipulation; beliefs are transient memory) and crater
+        the deceiver↔victim trust (the reputation-gaming axis). The snapshot-durable
+        effect is the trust hit (relationships ARE serialized); the planted belief is
+        in-the-moment manipulation. Notoriety from deceive_notoriety."""
+        if agent.id == target.id:
+            return False, "cannot deceive yourself"
+        if agent.location != target.location:
+            return False, "target not here"
+        claim = (about or "").strip()
+        if not claim:
+            return False, "deceive requires a claim (args.about)"
+        # Plant the lie in the target's memory (FIFO-capped like action_remember).
+        lie = f"{agent.name} told me: {claim}"
+        if lie not in target.beliefs:
+            target.beliefs.append(lie)
+            if len(target.beliefs) > 20:
+                target.beliefs.pop(0)
+        # Trust craters when manipulated (the victim's view sours toward the liar).
+        self._update_trust(target, agent, -12)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "deceive", target.id,
+                             int(self._crime_param("deceive_notoriety", 8)))
+        return True, "ok"
+
     def action_vandalize(self, agent: AgentState, building_id: str) -> dict:
         """EM-240 — damage a building short of arson: a short blackout at its place,
         no health destruction. Witnesses lose trust (like arson)."""

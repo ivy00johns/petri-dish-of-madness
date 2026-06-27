@@ -114,6 +114,9 @@ ACTION_SCHEMA = {
                 # EM-240 — offensive crime verbs (Task 6): big-score theft, a
                 # shakedown for credits, and building sabotage short of arson.
                 "heist", "extort", "vandalize",
+                # EM-237 — harm-surface finishers: threaten without contact (fear);
+                # lie as a first-class act (plant a false belief).
+                "intimidate", "deceive",
                 # EM-240 — economy & corruption verbs (Task 7): cool your own heat
                 # for a cut; pay a co-located enforcer to drop it (catchable).
                 "launder", "bribe",
@@ -192,6 +195,8 @@ ACTION_SCHEMA = {
                             "remember", "propose_rule", "vote", "idle",
                             # EM-240 — offensive crime verbs (Task 6).
                             "heist", "extort", "vandalize",
+                            # EM-237 — harm-surface finishers.
+                            "intimidate", "deceive",
                             # EM-240 — economy & corruption verbs (Task 7).
                             "launder", "bribe",
                             # EM-240 — conspiracy verbs (Task 8).
@@ -342,6 +347,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "heist":            {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_stealing"},
     "extort":           {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_extortion"},
     "vandalize":        {"tier": "reflex", "location_gate": "@building",     "agreement_gate": "ban_vandalism"},
+    # EM-237 — harm-surface finishers. Both target a co-located/visible agent (the
+    # co-location gate lives in _validate_world like extort — a relationship rule,
+    # not a place rule). No agreement_gate: no governance rule guards them yet.
+    # Reflex — they ride the existing turn, zero extra LLM calls.
+    "intimidate":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "deceive":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-240 — economy & corruption verbs (Task 7). launder cools your own heat
     # for a cut (no target, no gate); bribe pays a co-located enforcer (target =
     # the enforcer) — co-location is enforced in _validate_world like steal.
@@ -1081,6 +1092,10 @@ _TARGETED_ACTIONS = frozenset(
      # EM-240 (Task 10) — enforcer justice verbs resolve a co-located agent name
      # in args["target"] to a suspect id (investigate/accuse/detain), like steal.
      "heist", "extort", "bribe", "recruit",
+     # EM-237 — intimidate / deceive both target a co-located agent name in
+     # args["target"] (resolved to an id before dispatch, like extort). deceive's
+     # `about` arg is a free claim string and needs no resolution.
+     "intimidate", "deceive",
      "investigate", "accuse", "detain",
      # EM-228 — teach_skill / request_skill both target a co-located agent name in
      # args["target"] (resolved to an id before dispatch, like steal). The `skill`
@@ -1446,6 +1461,20 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         target_error = _validate_target(args, agent, world, action)
         if target_error:
             return target_error
+
+    elif action in ("intimidate", "deceive"):
+        # EM-237 — harm-surface finishers target a co-located/visible agent
+        # (resolved like extort). The world action re-checks self-target +
+        # visibility + (intimidate) the mark having something to give / (deceive)
+        # a non-empty claim, so this front gate only ensures a reachable target —
+        # a clear rejection lets the model self-correct.
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
+        if action == "deceive":
+            about = args.get("about")
+            if not isinstance(about, str) or not about.strip():
+                return "deceive requires a claim (args.about)"
 
     elif action == "vandalize":
         # EM-240 — building-targeted crime; the @building co-location gate +
@@ -2116,6 +2145,11 @@ def _assemble_context(
                 valid_actions.append(f"heist (target) - big-score theft from: {tnames}")
             if _gate_ok("extort"):
                 valid_actions.append(f"extort (target) - shake down for credits: {tnames}")
+            # EM-237 — harm-surface finishers: threaten via fear; lie to manipulate.
+            if _gate_ok("intimidate"):
+                valid_actions.append(f"intimidate (target) - coerce via fear, no contact: {tnames}")
+            if _gate_ok("deceive"):
+                valid_actions.append(f"deceive (target, about) - plant a false belief in: {tnames}")
             # EM-240 (Task 8) — recruit a co-located agent into a criminal pact.
             if _gate_ok("recruit"):
                 valid_actions.append(f"recruit (target) - pitch a criminal pact to: {tnames}")
@@ -2585,9 +2619,9 @@ def _assemble_context(
     if _disp in ("opportunist", "criminal"):
         _crime_lines.append(
             "You see angles others miss. Crime is on the table when the payoff is "
-            "right and no one is watching — steal, heist, extort, vandalize, "
-            "launder, or recruit an accomplice. Witnesses build your notoriety; "
-            "lie low to cool off."
+            "right and no one is watching — steal, heist, extort, intimidate, "
+            "deceive, vandalize, launder, or recruit an accomplice. Witnesses build "
+            "your notoriety; lie low to cool off."
         )
     if _role == "enforcer":
         _crime_lines.append(
@@ -5043,6 +5077,42 @@ class AgentRuntime:
                         "payload": {"action": "extort", "amount": amount, "thought": thought}}
             return {**base, "kind": "parse_failure",
                     "text": f"{agent.name} tried to extort but: {reason}",
+                    "payload": {"error": reason}}
+
+        # EM-237 — harm-surface finishers. intimidate resolves an agent target and
+        # returns (ok, reason, amount) like extort; deceive resolves a target +
+        # reads the `about` claim and returns (ok, reason).
+        elif action == "intimidate":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to intimidate but target not found",
+                        "payload": {"error": "target_not_found"}}
+            ok, reason, amount = self.world.action_intimidate(agent, target)
+            if ok:
+                return {**base, "kind": "intimidate", "target_id": target.id,
+                        "text": f"{agent.name} menaces {target.name} into handing over {amount} credits!",
+                        "payload": {"action": "intimidate", "amount": amount,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to intimidate but: {reason}",
+                    "payload": {"error": reason}}
+
+        elif action == "deceive":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to deceive but target not found",
+                        "payload": {"error": "target_not_found"}}
+            about = str(args.get("about", "")).strip()
+            ok, reason = self.world.action_deceive(agent, target, about)
+            if ok:
+                return {**base, "kind": "deceive", "target_id": target.id,
+                        "text": f"{agent.name} feeds {target.name} a lie.",
+                        "payload": {"action": "deceive", "about": about,
+                                    "thought": thought}}
+            return {**base, "kind": "parse_failure",
+                    "text": f"{agent.name} tried to deceive but: {reason}",
                     "payload": {"error": reason}}
 
         elif action == "vandalize":
