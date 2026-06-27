@@ -162,6 +162,23 @@ world:
     knowledge_salience_threshold: 40   # below → prompt nudges toward learning
     influence_salience_threshold: 40   # below → prompt nudges toward politics
 
+  # EM-233 — memory consolidation ("sleep") + soul entries (contracts/wave-m.md
+  # §3 Wave M1). At each ROUND boundary an agent whose `beliefs` count exceeds
+  # consolidate_at has its OLDEST beliefs deterministically rolled into ONE digest
+  # line (a structured rollup, NO LLM in v1), keeping the consolidate_keep_recent
+  # most-recent beliefs verbatim; a `memory` event fires. This bounds the belief
+  # list at the ceiling so long-lived agents stay coherent. `soul` is a tiny
+  # IMMUTABLE list of identity anchors (≤ soul_cap entries, seeded from a persona
+  # at spawn if configured) injected into every prompt as who-you-are context and
+  # NEVER summarized by consolidation. A soulless agent + a small belief list are
+  # byte-identical to pre-EM-233 (no `enabled` flag needed). Absent ⇒ engine
+  # defaults (no behavior change). MUST stay in sync with the MemoryParams mirror
+  # in backend/petridish/config/loader.py.
+  memory:
+    consolidate_at: 20          # beliefs count ceiling → round-boundary rollup
+    consolidate_keep_recent: 8  # most-recent beliefs kept verbatim (< consolidate_at)
+    soul_cap: 3                 # max identity anchors per agent
+
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
   # the B1 consent mechanic) co-located at a home-kind place for a birth.

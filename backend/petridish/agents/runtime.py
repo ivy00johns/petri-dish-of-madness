@@ -2304,6 +2304,22 @@ def _assemble_context(
         crime_block = "\n=== ⚖ THE LAW & THE UNDERWORLD ===\n" + "\n".join(
             f"  {ln}" for ln in _crime_lines)
 
+    # ── EM-233 — soul: the agent's IMMUTABLE identity anchors, injected into
+    # EVERY prompt as who-you-are context. EMPTY (⇒ byte-identical prompt) when the
+    # agent has no soul — so the em161 lawful-citizen golden fixture is unaffected
+    # (default agents are soulless). Rides this turn — zero extra LLM calls. NEVER
+    # summarized by consolidation. (getattr keeps callers safe if the seam is ever
+    # absent.)
+    soul_block = ""
+    _soul = getattr(agent, "soul", None)
+    if _soul:
+        soul_lines = "\n".join(f"  - {s}" for s in _soul)
+        soul_block = f"""
+=== WHO YOU ARE (your core, unchanging) ===
+{soul_lines}
+  These are fixed truths of who you are. Let them anchor how you act and speak.
+"""
+
     # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
     # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
     # proclamation is injected here so the god's word reaches every agent each turn
@@ -2478,7 +2494,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{proclamation_block}{whisper_block}{board_block}
+{soul_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 

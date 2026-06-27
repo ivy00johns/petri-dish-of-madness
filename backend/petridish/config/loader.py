@@ -113,6 +113,19 @@ world:
     influence_decay_per_turn: 0.4
     knowledge_salience_threshold: 40
     influence_salience_threshold: 40
+  # EM-233 — memory consolidation ("sleep") + soul entries. At each round
+  # boundary an agent whose `beliefs` count exceeds consolidate_at has its OLDEST
+  # beliefs deterministically rolled into ONE digest line (a structured rollup,
+  # NO LLM), keeping consolidate_keep_recent most-recent beliefs verbatim; emits a
+  # `memory` event. `soul` is a tiny immutable list of identity anchors (≤ soul_cap,
+  # seeded from a persona at spawn if configured) injected into every prompt and
+  # NEVER summarized. Soulless agents + a small belief list are byte-identical to
+  # pre-EM-233. MUST stay in sync with config/world.yaml. Absent ⇒ these exact
+  # defaults (no behavior change).
+  memory:
+    consolidate_at: 20
+    consolidate_keep_recent: 8
+    soul_cap: 3
   # Wave E / EM-114 — lightweight children: once per round boundary, mutual
   # partners (are_partners) co-located at a home may have a child — a NEW
   # agent at background tier, only into vacancies under max_population AND
@@ -698,6 +711,42 @@ class NeedsParams:
 
 
 @dataclass
+class MemoryParams:
+    """EM-233 — Memory consolidation ("sleep") + soul entries (config
+    `world.memory`). Two cognition pieces ride on AgentState:
+
+      * SOUL — a tiny IMMUTABLE list of identity anchors (`soul`), seeded from a
+        persona at spawn if configured, capped at `soul_cap`. NEVER summarized;
+        injected into every prompt. An empty soul (the default) ⇒ no prompt block
+        ⇒ the em161 lawful-citizen golden is byte-identical.
+      * CONSOLIDATION — at the round boundary, an agent whose `beliefs` count
+        exceeds `consolidate_at` has its OLDEST beliefs deterministically rolled
+        into ONE digest line (a structured rollup, NO LLM in v1), keeping the
+        `consolidate_keep_recent` most-recent beliefs verbatim. Emits a `memory`
+        event. Pure arithmetic/string work — no random, no clock (EM-155).
+
+    The engine reads this block via the defensive `_memory_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `memory` block consolidates at
+    exactly these values (no KeyError, no crash) and a soulless agent stays
+    byte-identical to pre-EM-233. NO `enabled` flag by design: consolidation only
+    fires above the count ceiling (a small cast under it is untouched), and the
+    soul block is empty by default — both additive, both golden-safe.
+
+      consolidate_at          — beliefs count above which the round-boundary
+                                consolidation rolls up the oldest beliefs. The
+                                belief list is bounded at this ceiling.
+      consolidate_keep_recent — how many of the most-recent beliefs survive a
+                                consolidation verbatim (the rest fold into the
+                                single digest line). MUST be < consolidate_at.
+      soul_cap                — max identity anchors per agent (seed + restore
+                                both truncate to this).
+    """
+    consolidate_at: int = 20
+    consolidate_keep_recent: int = 8
+    soul_cap: int = 3
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -978,6 +1027,11 @@ class WorldParams:
     # so a world.yaml without the `needs` block keeps the em161 golden + restores
     # pre-EM-229 snapshots byte-identical (needs default 100.0, omitted at 100).
     needs: NeedsParams = field(default_factory=NeedsParams)
+    # EM-233 — memory consolidation + soul entries. Additive with engine-matching
+    # defaults; consolidation only fires above the count ceiling and the soul
+    # block is empty by default, so a world.yaml without the `memory` block keeps
+    # the em161 golden + restores pre-EM-233 snapshots byte-identical.
+    memory: MemoryParams = field(default_factory=MemoryParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1564,6 +1618,30 @@ def _parse_needs(raw: dict | None) -> NeedsParams:
     )
 
 
+def _parse_memory(raw: dict | None) -> MemoryParams:
+    """Parse the optional `world.memory` block (EM-233).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_needs`; all fields are ints clamped to >= 0 (a negative ceiling would
+    consolidate every turn — never intended)."""
+    if not isinstance(raw, dict):
+        return MemoryParams()
+    d = MemoryParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return MemoryParams(
+        consolidate_at=_int("consolidate_at", d.consolidate_at),
+        consolidate_keep_recent=_int(
+            "consolidate_keep_recent", d.consolidate_keep_recent),
+        soul_cap=_int("soul_cap", d.soul_cap),
+    )
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -1742,6 +1820,7 @@ def _parse_world(
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),
         needs=_parse_needs(w.get("needs")),
+        memory=_parse_memory(w.get("memory")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),

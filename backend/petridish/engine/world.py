@@ -38,6 +38,31 @@ def _clamp_need(value: Any, default: float = 100.0) -> float:
         return default
 
 
+def _coerce_soul(value: Any, cap: int = 3) -> list[str]:
+    """EM-233 — coerce a restored/seed soul into a bounded list of non-blank
+    identity-anchor strings, truncated to `cap`. Absent (None) or malformed
+    (non-list, non-str entries) → [] / dropped (fail-safe: a tampered or pre-EM-233
+    snapshot restores an empty soul). Pure/total: never raises, no clock, no RNG.
+    Shared by the restore path (from_snapshot) and the seed path (seed_soul) so a
+    soul round-trips byte-stably (EM-155)."""
+    if not isinstance(value, list):
+        return []
+    try:
+        cap = max(0, int(cap))
+    except (TypeError, ValueError):
+        cap = 3
+    out: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        text = entry.strip()
+        if text:
+            out.append(text)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _truncate(text: str, limit: int = 60) -> str:
     """Truncate feed text on a budget, with an ellipsis (EM-100 rule labels)."""
     text = str(text or "")
@@ -218,6 +243,15 @@ class AgentState:
     # wins — see replenish_knowledge / replenish_influence.
     knowledge: float = 100.0
     influence: float = 100.0
+    # EM-233 — soul: a tiny IMMUTABLE list of identity anchors (seeded from a
+    # persona at spawn if configured, ≤ memory.soul_cap entries). NEVER summarized
+    # by consolidation; injected into every prompt as who-you-are context.
+    # ADDITIVE with default [] → serialized in to_dict ONLY when non-empty and
+    # restored defensively (absent/garbage → [], over-cap truncated), so a
+    # soulless agent — and every pre-EM-233 snapshot — keeps the exact prior dict
+    # shape (the EM-155 byte-identical guarantee + the em161 golden, since an
+    # empty soul yields no prompt block). Seed via World.seed_soul.
+    soul: list[str] = field(default_factory=list)
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -284,6 +318,10 @@ class AgentState:
             d["knowledge"] = round(self.knowledge, 2)
         if self.influence < 100.0:
             d["influence"] = round(self.influence, 2)
+        # EM-233 — soul serialized ONLY when non-empty, so a soulless agent (and
+        # every pre-EM-233 snapshot) keeps the exact prior dict shape.
+        if self.soul:
+            d["soul"] = list(self.soul)
         return d
 
 
@@ -1189,6 +1227,14 @@ class World:
         # newborn's family edges count toward this round's clusters. Diff-
         # driven events park in the same pending_spawn_events outbox.
         self.recompute_factions()
+        # EM-233 — the once-per-round memory consolidation ("sleep"), AFTER births
+        # so a newborn (whose only belief is its birth line) is well under the
+        # ceiling and untouched. Each over-ceiling living agent rolls its oldest
+        # beliefs into one digest line; the `memory` events park in the SAME
+        # pending_spawn_events outbox (drained + emitted by the tick loop's
+        # existing _flush_spawn_events, like births/factions). Deterministic +
+        # clock/RNG-free; a small cast under the ceiling is a no-op (golden-safe).
+        self.consolidate_memories()
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -1436,6 +1482,88 @@ class World:
         if amount <= 0:
             return
         agent.influence = max(0.0, min(100.0, agent.influence + float(amount)))
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-233 — memory consolidation ("sleep") + soul entries.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def seed_soul(self, agent: AgentState, anchors: list[str]) -> None:
+        """EM-233 — seed an agent's IMMUTABLE soul (identity anchors) ONCE from a
+        persona at spawn. Blank entries drop; the list truncates to memory.soul_cap.
+        Immutable: a second call on an already-souled agent is a no-op (the soul is
+        a fixed core, never rewritten). Pure — no clock, no RNG; safe in the engine
+        path. An empty seed leaves the soul [] ⇒ no prompt block ⇒ golden-safe."""
+        if agent.soul:
+            return  # already seeded — soul is fixed
+        cap = int(self._memory_param("soul_cap", 3))
+        agent.soul = _coerce_soul(list(anchors or []), cap)
+
+    def consolidate_memory(self, agent: AgentState) -> dict | None:
+        """EM-233 — "sleep": deterministically roll an agent's OLDEST beliefs into
+        ONE digest line when the beliefs count exceeds `memory.consolidate_at`,
+        keeping the `consolidate_keep_recent` most-recent beliefs verbatim.
+
+        v1 is a STRUCTURED ROLLUP — NO LLM: the digest records how many memories
+        were folded plus a truncated, ordered join of their text, so a fixed
+        belief list always produces the byte-identical digest (determinism /
+        replay-safe, EM-155). The soul is NEVER touched. Returns a `memory` feed
+        event dict on a consolidation, or None when below the ceiling (no-op).
+
+        An optional cheap-LLM summary is a documented FUTURE hook: a caller could
+        replace the rollup string with a one-line model summary of `old`, keeping
+        the same shape — but the engine path stays clock/RNG-free by default."""
+        ceiling = int(self._memory_param("consolidate_at", 20))
+        keep = int(self._memory_param("consolidate_keep_recent", 8))
+        # Defensive: keep must leave room for the digest under the ceiling.
+        keep = max(0, min(keep, max(0, ceiling - 1)))
+        if ceiling <= 0 or len(agent.beliefs) <= ceiling:
+            return None
+        recent = agent.beliefs[len(agent.beliefs) - keep:] if keep else []
+        old = agent.beliefs[: len(agent.beliefs) - keep] if keep else list(agent.beliefs)
+        if not old:
+            return None  # nothing to fold (keep >= count) — no-op
+        digest = self._memory_digest(old)
+        agent.beliefs = [digest] + recent
+        return {
+            "kind": "memory",
+            "actor_id": agent.id,
+            "actor_type": "agent",
+            "text": f"{agent.name} consolidated {len(old)} older memories while resting.",
+            "payload": {
+                "agent_id": agent.id,
+                "consolidated": len(old),
+                "kept": len(recent),
+                "digest": digest,
+            },
+        }
+
+    def consolidate_memories(self) -> list[dict]:
+        """EM-233 — the round-boundary sweep: consolidate every over-ceiling living
+        agent's beliefs (deterministic sorted-id order so the parked event order is
+        replay-stable) and park each `memory` event in pending_spawn_events for the
+        tick loop to drain + emit. Returns the parked events (also useful in tests).
+        A cast entirely under the ceiling parks nothing — byte-identical."""
+        events: list[dict] = []
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            if not agent.alive:
+                continue
+            evt = self.consolidate_memory(agent)
+            if evt is not None:
+                events.append(evt)
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
+    @staticmethod
+    def _memory_digest(old: list[str]) -> str:
+        """EM-233 — the deterministic structured rollup of folded beliefs into one
+        digest line. Pure string work (no clock, no RNG): a fixed `old` list always
+        yields the byte-identical digest. Caps the joined body so the digest never
+        unbounds the belief text."""
+        joined = "; ".join(str(b).strip() for b in old if str(b).strip())
+        body = joined if len(joined) <= 180 else joined[:179] + "…"
+        return f"[consolidated {len(old)} earlier memories] {body}"
 
     def check_death(self, agent: AgentState) -> bool:
         """Increment zero_energy counter; return True if agent should die."""
@@ -4030,6 +4158,14 @@ class World:
         so keep these call-site defaults == NeedsParams defaults."""
         return _block_get(getattr(self.params, "needs", None), name, default)
 
+    def _memory_param(self, name: str, default: Any) -> Any:
+        """EM-233 — defensive accessor for the `world.memory` config block
+        (MemoryParams dataclass OR dict OR absent — EM-155 conventions, like
+        _needs_param). An absent block ⇒ every default ⇒ pre-EM-233 worlds run
+        unchanged. `default` is only a fallback for a key missing from the block,
+        so keep these call-site defaults == MemoryParams defaults."""
+        return _block_get(getattr(self.params, "memory", None), name, default)
+
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
 
@@ -5169,6 +5305,16 @@ class World:
                 # round-trip (EM-155): a full need is never re-emitted.
                 knowledge=_clamp_need(d.get("knowledge")),
                 influence=_clamp_need(d.get("influence")),
+                # EM-233 — soul: additive. Pre-EM-233 snapshots lack the key and
+                # restore []; a present value is coerced to a list of non-blank
+                # strings and truncated to the configured soul_cap (defensive
+                # restore: a tampered over-cap soul never grows past the cap).
+                # Byte-stable round-trip (EM-155): an empty soul is never
+                # re-emitted, so a soulless agent's dict is unchanged.
+                soul=_coerce_soul(
+                    d.get("soul"),
+                    _block_get(getattr(params, "memory", None), "soul_cap", 3),
+                ),
             )
             a.relationships = {
                 str(aid): RelationshipState(
