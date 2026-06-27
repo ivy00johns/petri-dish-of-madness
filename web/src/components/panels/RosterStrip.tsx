@@ -92,6 +92,37 @@ export function TierChip({ tier, reflexStreak }: { tier?: string | null; reflexS
   );
 }
 
+// ── EM-202 (A/B persona-across-models) ────────────────────────────────────────
+// A/B variants share a base name; the backend names each `${base}·${tag}` (the
+// `·` separator is the canonical signal). The roster correlates them by that
+// base: when ≥2 living-or-dead agents share a base, every variant in the group
+// wears an "A/B · {base}" chip and its `·tag` reads distinctly from the base, so
+// "Vesper·mistral" and "Vesper·groq" obviously belong to one model-vs-model
+// experiment (model chip already names WHICH model). Derived purely from the
+// snapshot — no new Agent field needed (the ab_group payload only rides the
+// agent_spawned event; the roster reads world.agents).
+
+/** Split a `${base}·${tag}` variant name; null when there's no `·` separator. */
+export function parseAbName(name: string): { base: string; tag: string } | null {
+  const i = name.indexOf('·');
+  if (i <= 0 || i >= name.length - 1) return null; // no separator, or empty side
+  return { base: name.slice(0, i), tag: name.slice(i + 1) };
+}
+
+/**
+ * Map base-name → count of `·`-tagged variants sharing it. A base with ≥2
+ * variants is an A/B group; lone `·` names (an agent that merely has a dot)
+ * are NOT a group and read normally.
+ */
+export function abGroupCounts(agents: Agent[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const a of agents) {
+    const parsed = parseAbName(a.name);
+    if (parsed) m.set(parsed.base, (m.get(parsed.base) ?? 0) + 1);
+  }
+  return m;
+}
+
 function EnergyBar({ value, color }: { value: number; color: string }) {
   const pct = Math.max(0, Math.min(100, value));
   const barColor =
@@ -149,11 +180,14 @@ function StripCard({
 function AgentCard({
   agent,
   world,
+  abGroupSize,
   selected,
   onSelect,
 }: {
   agent: Agent;
   world: WorldState;
+  /** EM-202: # of `·`-tagged variants sharing this agent's base name (≥2 ⇒ A/B). */
+  abGroupSize: number;
   selected: boolean;
   onSelect: (t: FocusTarget | null) => void;
 }) {
@@ -162,6 +196,9 @@ function AgentCard({
   const dying =
     agent.alive && agent.energy <= 0 && typeof turnsLeft === 'number' && turnsLeft >= 0;
   const placeName = world.places.find((p) => p.id === agent.location)?.name ?? agent.location;
+  // EM-202: render this card as an A/B variant only when ≥2 variants share its
+  // base (a lone `·` name is just a name, not a group).
+  const ab = abGroupSize >= 2 ? parseAbName(agent.name) : null;
 
   const topRels = Object.entries(agent.relationships)
     .sort((a, b) => Math.abs(b[1].trust) - Math.abs(a[1].trust))
@@ -193,9 +230,29 @@ function AgentCard({
             >
               {agent.name.slice(0, 2).toUpperCase()}
             </span>
-            <span className="font-mono text-[11px] font-semibold text-lab-text truncate">
-              {agent.name}
-            </span>
+            {ab ? (
+              // EM-202: the base reads as the persona, the `·tag` as the variant
+              // distinction — so the A/B siblings scan as one group.
+              <span
+                className="font-mono text-[11px] font-semibold text-lab-text truncate"
+                title={`A/B variant of "${ab.base}" — running ${agent.profile}`}
+              >
+                {ab.base}
+                <span className="text-lab-muted">·{ab.tag}</span>
+              </span>
+            ) : (
+              <span className="font-mono text-[11px] font-semibold text-lab-text truncate">
+                {agent.name}
+              </span>
+            )}
+            {ab && (
+              <span
+                className="font-mono text-[8px] font-bold text-lab-acid border border-lab-acid/50 bg-lab-acid/10 px-1 rounded-sm shrink-0 uppercase tracking-wider"
+                title={`A/B group "${ab.base}" — ${abGroupSize} variants compared across models`}
+              >
+                A/B
+              </span>
+            )}
             {!agent.alive && (
               <span className="font-mono text-[8px] text-lab-danger border border-lab-danger px-1 shrink-0">
                 DEAD
@@ -424,6 +481,8 @@ export function RosterStrip({ world, history, animalModels, selected, onSelect }
     return a.name.localeCompare(b.name);
   });
   const animals = world.animals ?? [];
+  // EM-202: how many `·`-tagged variants share each base name (≥2 ⇒ A/B group).
+  const abCounts = abGroupCounts(world.agents);
 
   return (
     <div
@@ -435,15 +494,19 @@ export function RosterStrip({ world, history, animalModels, selected, onSelect }
       {agents.length === 0 ? (
         <span className="font-mono text-xs text-lab-dim self-center px-2">no agents yet</span>
       ) : (
-        agents.map((agent) => (
-          <AgentCard
-            key={agent.id}
-            agent={agent}
-            world={world}
-            selected={selected?.type === 'agent' && selected.id === agent.id}
-            onSelect={onSelect}
-          />
-        ))
+        agents.map((agent) => {
+          const parsed = parseAbName(agent.name);
+          return (
+            <AgentCard
+              key={agent.id}
+              agent={agent}
+              world={world}
+              abGroupSize={parsed ? (abCounts.get(parsed.base) ?? 0) : 0}
+              selected={selected?.type === 'agent' && selected.id === agent.id}
+              onSelect={onSelect}
+            />
+          );
+        })
       )}
 
       <GroupLabel text="Critters" />

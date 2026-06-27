@@ -454,6 +454,13 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
   // W11b (EM-087): a renewal of an already-active law (rule_passed carrying
   // payload.renewed) renders RENEWED, distinct from a fresh PASSED.
   const renewed = event.kind === 'rule_passed' && event.payload?.renewed === true;
+  // EM-202 (A/B persona-across-models): an agent_spawned variant carries
+  // payload.ab_group (the shared base name) — surface a chip so the variant
+  // reads as part of the model-vs-model group, correlated with the model chip.
+  const abGroup =
+    event.kind === 'agent_spawned' && typeof event.payload?.ab_group === 'string'
+      ? (event.payload.ab_group as string)
+      : null;
   const color = animal
     ? ANIMAL_MAGENTA
     : godPost
@@ -539,6 +546,19 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
             title={speech ? `spoken by a ${event.profile} villager` : `decided by ${event.profile}`}
           >
             {event.profile}
+          </span>
+        )}
+
+        {/* EM-202: the A/B group chip — names the shared base persona so a
+            spawned variant reads as one of a model-vs-model group (the model
+            chip above already names WHICH model this variant runs). */}
+        {abGroup && (
+          <span
+            className="ml-1.5 font-mono text-[9px] font-bold px-1 py-px border rounded-sm align-middle whitespace-nowrap uppercase tracking-wider"
+            style={{ color: 'var(--lab-acid)', borderColor: 'var(--lab-acid)' }}
+            title={`A/B group “${abGroup}” — the same persona spawned across models to compare them`}
+          >
+            ⚗ A/B · {abGroup}
           </span>
         )}
 
