@@ -299,7 +299,11 @@ def test_seed_skills_assigns_archetype_levels():
     a = _agent()
     w = _world([a], params=_skilled_params())
     w.seed_skills(a, "builder")
-    assert a.skill_level("building") == 2
+    # The builder archetype's base building:2 is applied. The deterministic +1
+    # differentiation nudge MAY land on building (raising it to 3) depending on
+    # the stable name/seed hash, so assert the base is present, not an exact
+    # value — matching the sibling test_seed_skills_differs_by_archetype's `>=`.
+    assert a.skill_level("building") >= 2
 
 
 def test_seed_skills_deterministic_and_reproducible():
@@ -387,6 +391,113 @@ def test_seed_all_skills_seeds_every_agent_and_is_idempotent():
 def test_seed_all_skills_noop_without_library():
     a = _agent()
     w = _world([a])  # default params
+    w.seed_all_skills()
+    assert a.skills == {}
+
+
+# ── (6b) EM-227 fix — STABLE-identity seeding (uuid-suffixed boot ids) ─────────
+
+def _gated_skills(world):
+    """Every (skill, min_level) that gates at least one configured action."""
+    out = {}
+    for skill, spec in world.skill_library().items():
+        gates = spec.get("gates") if isinstance(spec, dict) else None
+        if isinstance(gates, list) and gates:
+            out[skill] = max(1, int(spec.get("min_level", 1)))
+    return out
+
+
+def test_seed_is_stable_across_uuid_boot_ids_same_name_seed():
+    # REGRESSION (bug 1): boot ids are f"agent_{name}_{uuid4()[:6]}", so two
+    # same-config / same-city_seed boots of an agent with the SAME name carry
+    # DIFFERENT ids. Seeding keyed on the uuid-bearing id breaks EM-155
+    # determinism (different professions per boot). The seed must derive from a
+    # STABLE identity (name + city_seed), so per-agent skills are IDENTICAL.
+    p1 = _skilled_params()
+    p2 = _skilled_params()
+    # Distinct uuid-style ids, identical name + (default) city_seed.
+    a1 = _agent(id="agent_ada_abc123", name="Ada")
+    a2 = _agent(id="agent_ada_xyz789", name="Ada")
+    w1 = _world([a1], params=p1)
+    w2 = _world([a2], params=p2)
+    w1.seed_all_skills()
+    w2.seed_all_skills()
+    assert a1.skills == a2.skills
+    assert a1.skills  # non-empty differentiation gradient
+
+
+def test_full_cast_seed_identical_across_uuid_boots():
+    # The whole town reproduces byte-for-byte across two boots even though every
+    # boot id carries a fresh uuid suffix.
+    names = ["Ada", "Bo", "Cy", "Di", "Ed"]
+    def boot(tag):
+        agents = [_agent(id=f"agent_{n.lower()}_uu{tag}{i}", name=n)
+                  for i, n in enumerate(names)]
+        w = _world(agents, params=_skilled_params())
+        w.seed_all_skills()
+        return {a.name: dict(a.skills) for a in w.agents.values()}
+    assert boot("AA") == boot("BB")
+
+
+# ── (6c) EM-227 fix — coverage guarantee (no town-wide gating lockout) ─────────
+
+def test_every_gating_skill_covered_across_many_seeds():
+    # REGRESSION (bug 2): with only the 'orator' archetype granting rhetoric,
+    # ~1/3 of boots seed ZERO holders of a gating skill (rhetoric gates
+    # propose_rule / amend_constitution with no other bootstrap path) → the town
+    # can NEVER legislate. After seed_all_skills EVERY gating skill must be held
+    # by >=1 LIVING agent at >= its gate min_level, for EVERY city_seed.
+    names = ["Ada", "Bo", "Cy"]  # small cast → lockout is common pre-fix
+    for seed in range(60):
+        p = _skilled_params()
+        p.city_seed = seed
+        agents = [_agent(id=f"agent_{n.lower()}_uu{seed:02d}{i}", name=n)
+                  for i, n in enumerate(names)]
+        w = _world(agents, params=p)
+        w.seed_all_skills()
+        gated = _gated_skills(w)
+        for skill, min_level in gated.items():
+            holders = [a for a in w.living_agents()
+                       if a.skill_level(skill) >= min_level]
+            assert holders, (
+                f"seed={seed}: gating skill {skill!r} has no living holder "
+                f"at level>={min_level} (town-wide lockout)")
+
+
+def test_coverage_guarantee_is_deterministic():
+    # The coverage backfill itself must be deterministic (no random/clock): two
+    # boots with the same city_seed + identical names produce identical skills,
+    # backfilled holders included.
+    names = ["Ada", "Bo", "Cy"]
+    def boot():
+        p = _skilled_params()
+        p.city_seed = 11  # a seed that locks out a gating skill pre-fix
+        agents = [_agent(id=f"agent_{n.lower()}_{n}", name=n) for n in names]
+        w = _world(agents, params=p)
+        w.seed_all_skills()
+        return {a.name: dict(a.skills) for a in w.agents.values()}
+    assert boot() == boot()
+
+
+def test_coverage_grants_only_to_living_agents():
+    # A dead agent never satisfies coverage; the backfill must land on a LIVING
+    # holder so the gated action is actually reachable.
+    p = _skilled_params()
+    p.city_seed = 11
+    names = ["Ada", "Bo", "Cy"]
+    agents = [_agent(id=f"agent_{n.lower()}_{n}", name=n) for n in names]
+    agents[0].alive = False  # kill one before seeding
+    w = _world(agents, params=p)
+    w.seed_all_skills()
+    for skill, min_level in _gated_skills(w).items():
+        holders = [a for a in w.living_agents() if a.skill_level(skill) >= min_level]
+        assert holders, f"{skill}: no LIVING holder after coverage backfill"
+
+
+def test_coverage_noop_without_library():
+    # No library configured ⇒ no gating ⇒ no backfill (golden-safe, skill-less).
+    a = _agent()
+    w = _world([a])  # default params, empty library
     w.seed_all_skills()
     assert a.skills == {}
 

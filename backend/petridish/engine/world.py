@@ -5781,7 +5781,12 @@ class World:
         # diverge. The chosen skill is a stable hash pick over the sorted library.
         names = sorted(lib)
         if names:
-            key = f"{self.city_seed}:{agent.id}:{agent.name}:{archetype}".encode()
+            # EM-227 fix — key off the STABLE identity (lowercased name +
+            # city_seed), NOT agent.id: boot ids carry a uuid4 suffix
+            # (`agent_<name>_<uuid>`), so hashing the id would make the same
+            # agent seed DIFFERENT skills on each same-seed boot, breaking
+            # EM-155 determinism. Names are unique per EM-200 disambiguation.
+            key = f"{self._stable_identity(agent)}:{archetype}".encode()
             pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(names)
             chosen = names[pick]
             try:
@@ -5791,17 +5796,29 @@ class World:
             seeded[chosen] = min(max_level, seeded.get(chosen, 0) + 1)
         agent.skills = {k: v for k, v in seeded.items() if v > 0}
 
+    def _stable_identity(self, agent: AgentState) -> str:
+        """EM-227 fix — a boot-stable identity string for deterministic seeding:
+        city_seed + the agent's lowercased NAME, deliberately EXCLUDING agent.id.
+        Boot ids are minted as `agent_<name>_<uuid4()[:6]>` (world.spawn_agent),
+        so the id changes on every boot even when the config + city_seed are
+        identical; hashing it would seed DIFFERENT professions per boot and break
+        EM-155 determinism (the seeding docstrings claim 'no random'). Names are
+        unique per EM-200 disambiguation, so name+city_seed is a stable key. The
+        ':' is reserved by callers to namespace their own suffix."""
+        return f"{self.city_seed}:name:{str(agent.name).strip().lower()}"
+
     def _auto_archetype(self, agent: AgentState) -> str | None:
         """EM-227 — deterministically assign one of the configured archetypes to an
         agent that carries no explicit archetype, from a stable hash of city_seed +
-        the agent's id/name. Returns None when no archetypes are configured (so the
-        auto-seed is a no-op — golden-safe). The spread is reproducible across
-        same-seed runs (EM-155): no random, no clock."""
+        the agent's NAME (NOT its uuid-bearing id — see _stable_identity). Returns
+        None when no archetypes are configured (so the auto-seed is a no-op —
+        golden-safe). The spread is reproducible across same-seed runs (EM-155):
+        no random, no clock."""
         table = self._skills_param("archetypes", {})
         if not isinstance(table, dict) or not table:
             return None
         names = sorted(table)
-        key = f"{self.city_seed}:archetype:{agent.id}:{agent.name}".encode()
+        key = f"{self._stable_identity(agent)}:archetype".encode()
         pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(names)
         return names[pick]
 
@@ -5817,15 +5834,74 @@ class World:
         if arch is not None:
             self.seed_skills(agent, arch)
 
+    def _gating_skill_levels(self) -> dict[str, int]:
+        """EM-227 — every library skill that GATES at least one action, mapped to
+        the highest min_level any of its gated actions requires. Survival verbs are
+        never listed in any `gates`, so they never appear here (they stay open).
+        Empty when no library is configured (golden/pre-EM-227 worlds)."""
+        out: dict[str, int] = {}
+        for skill in sorted(self.skill_library()):
+            spec = self.skill_library()[skill]
+            gates = _block_get(spec, "gates", []) if spec is not None else []
+            if not (isinstance(gates, list) and gates):
+                continue
+            try:
+                min_level = max(1, int(_block_get(spec, "min_level", 1)))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                min_level = 1
+            out[skill] = min_level
+        return out
+
+    def _ensure_gating_coverage(self) -> None:
+        """EM-227 fix — GUARANTEE that every gating skill is reachable: for each
+        skill that gates an action, ensure >=1 LIVING agent holds it at >= the
+        gate's min_level. If none does, deterministically grant it to one living
+        agent so the town is never locked out of a gated capability (e.g. rhetoric
+        gates propose_rule / amend_constitution with no other bootstrap path — xp
+        needs a successful gated action (chicken-and-egg) and teaching needs an
+        existing holder, so a zero-holder boot could NEVER legislate).
+
+        DETERMINISTIC (EM-155): the recipient is chosen by a stable sha1 of
+        (city_seed, skill) over the sorted-by-id living roster (no random, no
+        clock); ties resolve by id. The grant only raises an agent UP to min_level
+        (never lowers a higher self-seeded level), and survival actions stay
+        ungated because they are absent from every `gates` list."""
+        gating = self._gating_skill_levels()
+        if not gating:
+            return
+        for skill in sorted(gating):
+            min_level = gating[skill]
+            living = sorted(
+                (a for a in self.agents.values() if a.alive),
+                key=lambda a: a.id,
+            )
+            if not living:
+                return  # nobody to grant to — nothing we can do
+            if any(a.skill_level(skill) >= min_level for a in living):
+                continue  # already covered
+            # Rotate the recipient deterministically over the living roster so
+            # multiple uncovered skills don't all pile onto the lowest id.
+            key = f"{self.city_seed}:cover:{skill}".encode()
+            pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(living)
+            recipient = living[pick]
+            # Raise UP to the gate min (never lower a higher existing level).
+            recipient.skills[skill] = max(recipient.skill_level(skill), min_level)
+
     def seed_all_skills(self) -> None:
         """EM-227 — seed every living, unskilled agent at boot (deterministic id
-        order). A no-op when no library/archetypes are configured (golden/pre-EM-227
-        worlds), so it is always safe to call. Idempotent: already-skilled agents
-        are skipped, so a re-seed never re-rolls."""
+        order), THEN guarantee gating-skill coverage so no boot locks the town out
+        of a gated capability. A no-op when no library/archetypes are configured
+        (golden/pre-EM-227 worlds), so it is always safe to call. Idempotent:
+        already-skilled agents are skipped, so a re-seed never re-rolls, and the
+        coverage pass only grants when a gating skill has zero living holder."""
         if not self.skill_library():
             return
         for aid in sorted(self.agents):
             self.seed_skills_auto(self.agents[aid])
+        # After the per-agent spread, backfill any gating skill that ended up with
+        # no living holder (the orator/rhetoric lockout) so the town can always
+        # reach every gated action. Deterministic — no random/clock (EM-155).
+        self._ensure_gating_coverage()
 
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
