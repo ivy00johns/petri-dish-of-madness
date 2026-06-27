@@ -291,6 +291,30 @@ world:
     enabled: true                # EM-223 live tuning run (2026-06-21)
     max_steps: 5
     reflex_bias: true
+  # EM-227 — skills & emergent professions. MUST stay byte-equal to the world.yaml
+  # skills block (the city25 variant changes only the cast). Each named skill GATES
+  # high-value actions on a min level; skills are gained by doing + teaching;
+  # archetypes seed a deterministic starting spread. Survival verbs are never gated.
+  skills:
+    xp_per_use: 10
+    xp_per_level: 30
+    max_level: 5
+    library:
+      building:
+        gates: [propose_project, build_step]
+        min_level: 1
+      art:
+        gates: [create_image]
+        min_level: 1
+      rhetoric:
+        gates: [propose_rule]
+        min_level: 1
+    archetypes:
+      builder: {building: 2}
+      artist: {art: 2}
+      orator: {rhetoric: 2}
+      farmer: {building: 1}
+      healer: {art: 1}
   # EM-234 — universalization prompting (GovSim scaffold). MUST stay byte-equal to
   # the world.yaml universalization block (the city25 variant changes only the
   # cast). Injects the always-on "what if EVERY agent did this?" commons-reasoning

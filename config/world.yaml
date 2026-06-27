@@ -179,6 +179,37 @@ world:
     consolidate_keep_recent: 8  # most-recent beliefs kept verbatim (< consolidate_at)
     soul_cap: 3                 # max identity anchors per agent
 
+  # EM-227 — skills & emergent professions (contracts/wave-m.md §3 Wave M2). The
+  # skill LIBRARY: each named skill GATES a list of high-value actions on a min
+  # level, so specialists emerge (only a builder proposes/builds, only an artist
+  # paints, only an orator legislates). Skills are GAINED by doing (xp_per_use per
+  # successful gated action; a level each xp_per_level, capped at max_level) and by
+  # teaching (EM-228). SURVIVAL verbs (move/work/forage/say/whisper/recharge/idle/
+  # remember) are NEVER gated. `archetypes` seeds a deterministic starting spread
+  # per persona so identical agents diverge. An EMPTY library gates NOTHING
+  # (byte-identical pre-EM-227 + the em161 golden). MUST stay in sync with the
+  # SkillsParams mirror in backend/petridish/config/loader.py.
+  skills:
+    xp_per_use: 10              # xp for ONE successful gated action (learn-by-doing)
+    xp_per_level: 30            # xp per level (deterministic threshold)
+    max_level: 5                # level ceiling
+    library:
+      building:
+        gates: [propose_project, build_step]
+        min_level: 1
+      art:
+        gates: [create_image]
+        min_level: 1
+      rhetoric:
+        gates: [propose_rule]
+        min_level: 1
+    archetypes:                 # deterministic starting spread per persona archetype
+      builder: {building: 2}
+      artist: {art: 2}
+      orator: {rhetoric: 2}
+      farmer: {building: 1}
+      healer: {art: 1}
+
   # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
   # Wave M1). When enabled, EVERY agent's turn context gets a single block that
   # asks them to reason about the commons by universalizing — "before acting on a

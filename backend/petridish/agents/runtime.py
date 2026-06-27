@@ -1298,6 +1298,22 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             "the billboard, and voting"
         )
 
+    # ── EM-227 — skill gate. A high-value action named in the configured skill
+    # LIBRARY requires the gating skill at >= its min level; an agent without it
+    # gets a CLEAR rejection. Survival verbs are never in any library, so they are
+    # never gated. config-absent / EMPTY library ⇒ skill_gate_for returns None ⇒
+    # NOTHING gated (pre-EM-227 byte-identical + the em161 golden, whose default
+    # WorldParams has no library). The menu agrees (see _assemble_context's
+    # _skill_ok), so this rejection only fires on an off-menu invention.
+    _gate = world.skill_gate_for(action) if hasattr(world, "skill_gate_for") else None
+    if _gate is not None:
+        _skill, _min = _gate
+        if agent.skill_level(_skill) < _min:
+            return (
+                f"you lack the {_skill} skill (need level {_min}) to {action} — "
+                f"learn it by doing simpler work or have someone teach you"
+            )
+
     if action == "work":
         place = world.places.get(agent.location)
         if place is None or place.kind != "work":
@@ -1834,6 +1850,18 @@ def _assemble_context(
             return bool(callable(billboard_here) and billboard_here(agent.location))
         return place_kind == loc
 
+    def _skill_ok(action: str) -> bool:
+        """EM-227 — offer this gated action on the menu? Mirrors the resolution-
+        time skill gate (_validate_world) so the menu and the validator AGREE
+        (EM-108: no dead turns). config-absent / EMPTY library ⇒ skill_gate_for
+        returns None ⇒ always True (every action offered, the em161 golden's
+        default-WorldParams path)."""
+        gate = world.skill_gate_for(action) if hasattr(world, "skill_gate_for") else None
+        if gate is None:
+            return True
+        skill, min_level = gate
+        return agent.skill_level(skill) >= min_level
+
     valid_actions: list[str] = []
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
@@ -1896,7 +1924,7 @@ def _assemble_context(
         valid_actions.append("(work requires a work place)")
     # Governance actions are gated to a governance place. EM-163: PROPOSING is
     # tier-gated off the background menu (_tier_ok); voting stays for everyone.
-    if _gate_ok("propose_rule") and _tier_ok("propose_rule"):
+    if _gate_ok("propose_rule") and _tier_ok("propose_rule") and _skill_ok("propose_rule"):
         propose_line = ("propose_rule (effect, text) - effect: ban_stealing|ubi|"
                         "recharge_subsidy|work_bonus|ban_arson|name_town|demolish")
         propose_tail = ("name_town also needs name=<the town's new name>; demolish "
@@ -1936,7 +1964,7 @@ def _assemble_context(
         valid_actions.append(f"vote (rule_id, choice) - vote on: {rule_list}")
 
     # ── W7 construction actions (offered per gates; EM-163 tier gate) ──────────
-    if _tier_ok("propose_project"):
+    if _tier_ok("propose_project") and _skill_ok("propose_project"):
         # Wave K / EM-217 — surface the build-type CATALOG in the prompt guidance
         # so the model picks from a real menu (kind stays PERMISSIVE — an off-menu
         # invention still resolves via the FE fuzzy match, never a dead turn).
@@ -1958,7 +1986,7 @@ def _assemble_context(
             status == "planned"
             and _building_field(b, "funds_committed", 0) >= _building_field(b, "funds_required", 0)
         )
-        if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step"):
+        if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step") and _skill_ok("build_step"):
             valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
         if status in ("damaged", "offline") and _gate_ok("repair"):
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
@@ -2012,7 +2040,7 @@ def _assemble_context(
     # disabled (EM-210 credit kill switch — menu/resolution agree, EM-108);
     # post_image only at the board AND once the agent has painted something. The
     # lines are short (prompt-diet aware — EM-161).
-    if _world_block_get(params, "image_gen", "enabled", True):
+    if _world_block_get(params, "image_gen", "enabled", True) and _skill_ok("create_image"):
         valid_actions.append(
             "create_image (prompt) - paint art from a short text prompt for your town")
     _gallery = getattr(world, "gallery", []) or []
@@ -2329,6 +2357,53 @@ def _assemble_context(
   These are fixed truths of who you are. Let them anchor how you act and speak.
 """
 
+    # ── EM-227 — skills & emergent professions. Surfaces the agent's held skills
+    # and (when a library gates anything) the high-value actions they are currently
+    # LOCKED OUT of, nudging them to specialize / learn / be taught. EMPTY (⇒
+    # byte-identical prompt) when the agent holds NO skills — so the em161
+    # lawful-citizen golden fixture (a skill-less hero under default WorldParams,
+    # which has an empty library) is unaffected. Rides this turn — zero extra LLM
+    # calls. Diet-aware (R6): background tier gets a one-line trim. (getattr/
+    # hasattr keep callers safe if the engine seam is ever absent.)
+    skills_block = ""
+    _skills = getattr(agent, "skills", None)
+    if _skills:
+        held = ", ".join(
+            f"{name} (lvl {agent.skill_level(name)})"
+            for name in sorted(_skills)
+        )
+        # What high-value actions is this agent still locked out of? (Only when a
+        # library gates them — config-absent yields nothing.)
+        locked: list[str] = []
+        if hasattr(world, "skill_library"):
+            library = world.skill_library()
+            for skill_name in sorted(library):
+                spec = library.get(skill_name) or {}
+                gates = spec.get("gates", []) if isinstance(spec, dict) else []
+                try:
+                    min_level = max(1, int(spec.get("min_level", 1))) \
+                        if isinstance(spec, dict) else 1
+                except (TypeError, ValueError):
+                    min_level = 1
+                if gates and agent.skill_level(skill_name) < min_level:
+                    locked.append(f"{', '.join(gates)} (needs {skill_name})")
+        if background:
+            skills_block = (
+                f"\n=== ☆ YOUR CRAFT ===\n  You are skilled in: {held}.\n"
+            )
+        else:
+            lines = [f"  You are skilled in: {held}."]
+            if locked:
+                lines.append(
+                    "  You cannot yet: " + "; ".join(locked)
+                    + " — practice or have someone teach you."
+                )
+            lines.append(
+                "  Lean into your craft — your skill grows the more you use it, "
+                "and you can teach it to others."
+            )
+            skills_block = "\n=== ☆ YOUR CRAFT & PROFESSION ===\n" + "\n".join(lines) + "\n"
+
     # ── EM-234 — universalization prompting (GovSim scaffold). The cheap
     # cooperation lift: before an agent acts on a SHARED resource it is nudged to
     # universalize the move — "what if EVERY agent did this?". ALWAYS-ON for every
@@ -2533,7 +2608,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{skills_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -4422,6 +4497,12 @@ class AgentRuntime:
             # them (the state change itself stands; only its feed echo is
             # lost — strictly better than mis-attributing it to a stranger).
             shifts = self.world.drain_relationship_events()
+        # EM-227 — learn-by-doing: a SUCCESSFUL gated action grants the gating
+        # skill xp (a level-up replenishes the EM-229 knowledge need). The gate
+        # already guaranteed the agent HAD the skill, so this deepens a profession
+        # the more it is practiced. Skipped on a failed/parse_failure result and
+        # when no library gates the action (config-absent = no-op, golden-safe).
+        self._grant_use_xp(agent, action_dict, result)
         # Surface the agent's inner thought onto the feed line so the world's
         # reasoning is legible at a glance instead of buried in payload.thought.
         # Appended once to the primary action event (never the drained
@@ -4435,6 +4516,31 @@ class AgentRuntime:
             else:
                 result = {"_multi": [result] + decorated}
         return result
+
+    def _grant_use_xp(self, agent: AgentState, action_dict: dict, result: dict) -> None:
+        """EM-227 — grant the gating skill xp for a SUCCESSFUL gated action. The
+        action's result must be a real outcome (not a parse_failure) — a rejected
+        verb earns nothing. No library gates the action ⇒ no-op (config-absent =
+        no-op). Pure threshold arithmetic in world.grant_skill_xp (no random/clock).
+        Robust to the _multi chain shape (the primary event is _multi[0])."""
+        world = self.world
+        if not hasattr(world, "skill_gate_for"):
+            return
+        action = action_dict.get("action")
+        if not isinstance(action, str):
+            return
+        gate = world.skill_gate_for(action)
+        if gate is None:
+            return
+        primary = result["_multi"][0] if isinstance(result, dict) and "_multi" in result else result
+        if not isinstance(primary, dict) or primary.get("kind") == "parse_failure":
+            return
+        skill, _min = gate
+        try:
+            xp = int(world._skills_param("xp_per_use", 10))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            xp = 10
+        world.grant_skill_xp(agent, skill, xp)
 
     @staticmethod
     def _surface_thought(result: dict, thought: str) -> None:

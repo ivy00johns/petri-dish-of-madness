@@ -126,6 +126,35 @@ world:
     consolidate_at: 20
     consolidate_keep_recent: 8
     soul_cap: 3
+  # EM-227 — skills & emergent professions. The skill LIBRARY: each named skill
+  # GATES a list of high-value actions on a min level, so specialists emerge
+  # (only a builder proposes/builds; only an artist paints; only an orator
+  # legislates). Skills are GAINED by doing (xp_per_use per successful gated
+  # action; xp_per_level per level, capped at max_level) and by teaching (EM-228).
+  # SURVIVAL verbs (move/work/forage/say/whisper/recharge/idle/remember) are NEVER
+  # gated. `archetypes` seeds a deterministic starting spread per persona so
+  # identical agents diverge. An EMPTY library gates NOTHING (byte-identical
+  # pre-EM-227 + the em161 golden). MUST stay in sync with config/world.yaml.
+  skills:
+    xp_per_use: 10
+    xp_per_level: 30
+    max_level: 5
+    library:
+      building:
+        gates: [propose_project, build_step]
+        min_level: 1
+      art:
+        gates: [create_image]
+        min_level: 1
+      rhetoric:
+        gates: [propose_rule]
+        min_level: 1
+    archetypes:
+      builder: {building: 2}
+      artist: {art: 2}
+      orator: {rhetoric: 2}
+      farmer: {building: 1}
+      healer: {art: 1}
   # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
   # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
   # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
@@ -777,6 +806,43 @@ class MemoryParams:
 
 
 @dataclass
+class SkillsParams:
+    """EM-227 — Skills & emergent professions (config `world.skills`). A
+    per-agent `skills: dict[str, int]` (skill name → level) rides on every
+    AgentState; THIS block is the world's skill LIBRARY plus the xp/level math
+    and the per-archetype seed table.
+
+      library    — {skill_name: {gates: [action, ...], min_level: int}}. Each
+                   named skill GATES a list of high-value actions: an agent
+                   attempting a gated action whose level < min_level is rejected
+                   ("you lack the <skill> skill"). An EMPTY library (the default,
+                   and any world.yaml without the block) gates NOTHING — every
+                   existing action stays open, so a pre-EM-227 world (and the
+                   em161 golden) behaves byte-identically. Survival verbs
+                   (move/work/forage/say/whisper/recharge/idle/remember) are
+                   NEVER listed here — they are always open by contract.
+      archetypes — {archetype_name: {skill: starting_level}}. The deterministic
+                   seed table: World.seed_skills(agent, archetype) grants these
+                   starting levels so identical agents diverge by archetype. No
+                   archetype / no library ⇒ a no-op seed (skill-less, golden-safe).
+      xp_per_use   — xp granted for ONE successful gated action (learn-by-doing).
+      xp_per_level — xp needed per level (a level is gained each time the
+                     accumulated xp crosses a multiple of this). Deterministic
+                     arithmetic — no random, no clock (EM-155).
+      max_level    — the level ceiling (xp past it grants no further levels).
+
+    The engine reads this block via the defensive `_skills_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `skills` block is a complete
+    no-op (no KeyError, no gating, no prompt block). NO `enabled` flag by design:
+    an empty library IS the off state (additive, golden-safe)."""
+    library: dict = field(default_factory=dict)
+    archetypes: dict = field(default_factory=dict)
+    xp_per_use: int = 10
+    xp_per_level: int = 30
+    max_level: int = 5
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -1062,6 +1128,12 @@ class WorldParams:
     # block is empty by default, so a world.yaml without the `memory` block keeps
     # the em161 golden + restores pre-EM-233 snapshots byte-identical.
     memory: MemoryParams = field(default_factory=MemoryParams)
+    # EM-227 — skills & emergent professions. Additive with an EMPTY library by
+    # default, so a world.yaml without the `skills` block gates NOTHING (every
+    # existing action open) — byte-identical pre-EM-227 + the em161 golden. A
+    # populated `library` gates its listed high-value actions on a min skill
+    # level; `archetypes` seeds a deterministic starting spread per persona.
+    skills: SkillsParams = field(default_factory=SkillsParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1693,6 +1765,65 @@ def _parse_memory(raw: dict | None) -> MemoryParams:
     )
 
 
+def _parse_skills(raw: dict | None) -> SkillsParams:
+    """Parse the optional `world.skills` block (EM-227).
+    Absent/empty/malformed -> a SkillsParams with an EMPTY library (gates
+    nothing — byte-identical pre-EM-227 + the em161 golden). Each key falls back
+    to its default individually; the library/archetypes are deep-coerced so a
+    malformed skill/archetype entry is dropped rather than breaking the block."""
+    if not isinstance(raw, dict):
+        return SkillsParams()
+    d = SkillsParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    library: dict = {}
+    raw_lib = raw.get("library")
+    if isinstance(raw_lib, dict):
+        for name, spec in raw_lib.items():
+            if not isinstance(name, str) or not isinstance(spec, dict):
+                continue
+            gates = spec.get("gates")
+            gate_list = [str(g) for g in gates if isinstance(g, str)] \
+                if isinstance(gates, list) else []
+            try:
+                min_level = max(1, int(spec.get("min_level", 1)))
+            except (TypeError, ValueError):
+                min_level = 1
+            library[name] = {"gates": gate_list, "min_level": min_level}
+
+    archetypes: dict = {}
+    raw_arch = raw.get("archetypes")
+    if isinstance(raw_arch, dict):
+        for arch, table in raw_arch.items():
+            if not isinstance(arch, str) or not isinstance(table, dict):
+                continue
+            seeded: dict = {}
+            for skill, level in table.items():
+                if not isinstance(skill, str):
+                    continue
+                try:
+                    lvl = max(0, int(level))
+                except (TypeError, ValueError):
+                    continue
+                if lvl > 0:
+                    seeded[skill] = lvl
+            if seeded:
+                archetypes[arch] = seeded
+
+    return SkillsParams(
+        library=library,
+        archetypes=archetypes,
+        xp_per_use=_int("xp_per_use", d.xp_per_use),
+        xp_per_level=max(1, _int("xp_per_level", d.xp_per_level)),
+        max_level=_int("max_level", d.max_level),
+    )
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -1872,6 +2003,7 @@ def _parse_world(
         crime=_parse_crime(w.get("crime")),
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
+        skills=_parse_skills(w.get("skills")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),

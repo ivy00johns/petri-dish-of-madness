@@ -440,6 +440,14 @@ class TickLoop:
         # world.procgen.enabled (no-op for the hand-authored town).
         self._world.apply_procgen()
 
+        # EM-227 — seed each agent's STARTING skills from a deterministic
+        # per-archetype spread so the cast begins differentiated (and is NOT all
+        # locked out of the gated high-value actions). A no-op when no skill
+        # library/archetypes are configured (pre-EM-227 / golden worlds).
+        seed_all_skills = getattr(self._world, "seed_all_skills", None)
+        if callable(seed_all_skills):
+            seed_all_skills()
+
         # Clear agent memories + W11b cognition state (commitments, importance
         # accumulators, pending overheard lines).
         reset_state = getattr(self._runtime, "reset_state", None)
@@ -491,6 +499,12 @@ class TickLoop:
         # EM-222 — hand the runtime the repo + active run so relevance-scored
         # memory retrieval can read the persisted event log of THIS run.
         self._wire_runtime_run_context()
+        # EM-227 — seed each agent's STARTING skills from a deterministic
+        # per-archetype spread BEFORE the tick-0 save, so the persisted base run
+        # carries the profession gradient. A no-op without a configured library.
+        seed_all_skills = getattr(self._world, "seed_all_skills", None)
+        if callable(seed_all_skills):
+            seed_all_skills()
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)

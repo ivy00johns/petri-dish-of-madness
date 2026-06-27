@@ -63,6 +63,29 @@ def _coerce_soul(value: Any, cap: int = 3) -> list[str]:
     return out
 
 
+def _coerce_skills(value: Any) -> dict:
+    """EM-227 — coerce a restored/seed skills map into {str: int>=0}. Absent
+    (None) or malformed (non-dict, non-str keys, non-int/negative levels) →
+    {} / dropped entries (fail-safe: a tampered or pre-EM-227 snapshot restores
+    a skill-less agent). Pure/total: never raises, no clock, no RNG. A 0-level
+    entry is DROPPED so a skills map round-trips byte-stably (EM-155): the
+    canonical form holds only positive levels, matching to_dict's `if self.skills`
+    only-when-non-empty emit."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    for skill, level in value.items():
+        if not isinstance(skill, str):
+            continue
+        try:
+            lvl = int(level)
+        except (TypeError, ValueError):
+            continue
+        if lvl > 0:
+            out[skill] = lvl
+    return out
+
+
 def _truncate(text: str, limit: int = 60) -> str:
     """Truncate feed text on a budget, with an ellipsis (EM-100 rule labels)."""
     text = str(text or "")
@@ -252,8 +275,27 @@ class AgentState:
     # shape (the EM-155 byte-identical guarantee + the em161 golden, since an
     # empty soul yields no prompt block). Seed via World.seed_soul.
     soul: list[str] = field(default_factory=list)
+    # EM-227 — skills & emergent professions: {skill name → level}. ADDITIVE with
+    # default {} → serialized in to_dict ONLY when non-empty and restored
+    # defensively (absent/garbage → {}, non-str keys + non-positive levels
+    # dropped), so a skill-less agent — and every pre-EM-227 snapshot — keeps the
+    # exact prior dict shape (the EM-155 byte-identical guarantee + the em161
+    # golden, since an empty skills map + an absent library yields no prompt block
+    # and gates nothing). A level is GAINED via World.grant_skill_xp (doing /
+    # teaching) and a starting spread via World.seed_skills (deterministic). The
+    # canonical form holds only POSITIVE levels (see _coerce_skills).
+    skills: dict[str, int] = field(default_factory=dict)
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
+
+    def skill_level(self, skill: str) -> int:
+        """EM-227 — this agent's level in `skill` (0 if unknown/unheld). The
+        single read used by the gate, the prompt, and grant_skill_xp so a missing
+        skill is never a KeyError."""
+        try:
+            return max(0, int(self.skills.get(skill, 0)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 0
 
     def to_dict(self, profile_color: str = "#888888") -> dict:
         d = {
@@ -322,6 +364,12 @@ class AgentState:
         # every pre-EM-233 snapshot) keeps the exact prior dict shape.
         if self.soul:
             d["soul"] = list(self.soul)
+        # EM-227 — skills serialized ONLY when non-empty, so a skill-less agent
+        # (and every pre-EM-227 snapshot) keeps the exact prior dict shape. The
+        # map already holds only positive levels (grant/seed enforce it), so the
+        # round-trip is byte-stable.
+        if self.skills:
+            d["skills"] = dict(self.skills)
         return d
 
 
@@ -4166,6 +4214,162 @@ class World:
         so keep these call-site defaults == MemoryParams defaults."""
         return _block_get(getattr(self.params, "memory", None), name, default)
 
+    def _skills_param(self, name: str, default: Any) -> Any:
+        """EM-227 — defensive accessor for the `world.skills` config block
+        (SkillsParams dataclass OR dict OR absent — EM-155 conventions, like
+        _memory_param). An absent block ⇒ every default ⇒ an EMPTY library ⇒
+        NOTHING gated (pre-EM-227 byte-identical + the em161 golden). `default`
+        is only a fallback for a key missing from the block, so keep these
+        call-site defaults == SkillsParams defaults."""
+        return _block_get(getattr(self.params, "skills", None), name, default)
+
+    def skill_library(self) -> dict:
+        """EM-227 — the configured skill library {skill: {gates, min_level}}, or
+        {} when no `world.skills` block is set (the off state — gates nothing)."""
+        lib = self._skills_param("library", {})
+        return lib if isinstance(lib, dict) else {}
+
+    def skill_gate_for(self, action: str) -> tuple[str, int] | None:
+        """EM-227 — the (skill, min_level) that gates `action`, or None when no
+        configured skill gates it (so the action stays open — config-absent =
+        no-op). The FIRST skill (sorted for determinism) whose `gates` lists the
+        action wins; survival verbs are never listed, so they never gate."""
+        for skill in sorted(self.skill_library()):
+            spec = self.skill_library()[skill]
+            gates = _block_get(spec, "gates", []) if spec is not None else []
+            if isinstance(gates, list) and action in gates:
+                try:
+                    min_level = max(1, int(_block_get(spec, "min_level", 1)))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    min_level = 1
+                return (skill, min_level)
+        return None
+
+    def grant_skill_xp(self, agent: AgentState, skill: str, xp: int) -> bool:
+        """EM-227 — learn-by-doing / teaching hook: grant `xp` toward `skill` and
+        level the agent up each time the accumulated xp crosses `xp_per_level`,
+        capped at `max_level`. Returns True if a level was gained.
+
+        DETERMINISTIC: pure threshold arithmetic — no random, no clock (EM-155).
+        xp accumulates in a private per-agent ledger (NOT snapshotted — only the
+        resulting LEVEL is durable state; a fork/restore keeps the level and
+        restarts the partial-xp clock at 0, a documented, harmless rounding).
+        Gaining xp ALWAYS replenishes the EM-229 knowledge need (curiosity sated
+        by learning); a level-up replenishes more. A skill the library does not
+        name still levels (teaching can introduce one), but only NAMED skills
+        gate anything. Called by gated-action success (runtime) and EM-228 teach."""
+        if xp <= 0:
+            return False
+        try:
+            per_level = max(1, int(self._skills_param("xp_per_level", 30)))
+            max_level = max(0, int(self._skills_param("max_level", 5)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            per_level, max_level = 30, 5
+        ledger = getattr(self, "_skill_xp", None)
+        if not isinstance(ledger, dict):
+            ledger = {}
+            self._skill_xp = ledger
+        key = (agent.id, skill)
+        before = agent.skill_level(skill)
+        if before >= max_level:
+            # Already capped — still sate curiosity, but no level.
+            self.replenish_knowledge(agent, float(self._skills_param("xp_per_use", 10)) / 2.0)
+            return False
+        # Seed the partial-xp ledger from the agent's CURRENT level the first time
+        # we touch it (a seeded / snapshot-restored level N implies N*per_level xp),
+        # so granting one xp_per_level worth always advances exactly one level. The
+        # ledger never decreases — it only accumulates past the baseline.
+        baseline = before * per_level
+        total = max(ledger.get(key, 0), baseline) + int(xp)
+        ledger[key] = total
+        new_level = min(max_level, total // per_level)
+        leveled = new_level > before
+        if new_level > 0:
+            agent.skills[skill] = new_level
+        # Learning sates the knowledge need: a flat top-up for any xp, plus a
+        # bonus on a level-up. Both clamp 0..100 in replenish_knowledge.
+        self.replenish_knowledge(agent, float(self._skills_param("xp_per_use", 10)) / 2.0)
+        if leveled:
+            self.replenish_knowledge(agent, float(per_level) / 2.0)
+        return leveled
+
+    def seed_skills(self, agent: AgentState, archetype: str) -> None:
+        """EM-227 — seed an agent's STARTING skills ONCE from a persona archetype
+        so identical agents start with a differentiation gradient. The base levels
+        come from the configured `archetypes` table; a small DETERMINISTIC spread
+        (derived from a sha1 of city_seed + agent id/name + archetype — never the
+        `random` module, never a clock) nudges one library skill by +1 so two
+        agents of the SAME archetype still diverge. Idempotent: a second call on an
+        already-skilled agent is a no-op. No library / no archetype ⇒ a no-op seed
+        (skill-less, golden-safe). Pure — safe in the engine path (EM-155)."""
+        if agent.skills:
+            return  # already seeded
+        lib = self.skill_library()
+        if not lib:
+            return  # off state — no skills exist
+        table = self._skills_param("archetypes", {})
+        base = table.get(archetype) if isinstance(table, dict) else None
+        seeded: dict[str, int] = {}
+        if isinstance(base, dict):
+            for skill, level in base.items():
+                try:
+                    lvl = max(0, int(level))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    continue
+                if lvl > 0:
+                    seeded[skill] = lvl
+        if not seeded:
+            return  # unknown archetype ⇒ no seed (golden-safe)
+        # A deterministic +1 nudge on ONE library skill so same-archetype agents
+        # diverge. The chosen skill is a stable hash pick over the sorted library.
+        names = sorted(lib)
+        if names:
+            key = f"{self.city_seed}:{agent.id}:{agent.name}:{archetype}".encode()
+            pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(names)
+            chosen = names[pick]
+            try:
+                max_level = max(1, int(self._skills_param("max_level", 5)))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                max_level = 5
+            seeded[chosen] = min(max_level, seeded.get(chosen, 0) + 1)
+        agent.skills = {k: v for k, v in seeded.items() if v > 0}
+
+    def _auto_archetype(self, agent: AgentState) -> str | None:
+        """EM-227 — deterministically assign one of the configured archetypes to an
+        agent that carries no explicit archetype, from a stable hash of city_seed +
+        the agent's id/name. Returns None when no archetypes are configured (so the
+        auto-seed is a no-op — golden-safe). The spread is reproducible across
+        same-seed runs (EM-155): no random, no clock."""
+        table = self._skills_param("archetypes", {})
+        if not isinstance(table, dict) or not table:
+            return None
+        names = sorted(table)
+        key = f"{self.city_seed}:archetype:{agent.id}:{agent.name}".encode()
+        pick = int.from_bytes(hashlib.sha1(key).digest()[:8], "big") % len(names)
+        return names[pick]
+
+    def seed_skills_auto(self, agent: AgentState) -> None:
+        """EM-227 — seed an agent whose persona declares NO explicit archetype: pick
+        a configured archetype deterministically (so identical agents still diverge
+        by id/name) and seed from it. No library / no archetypes ⇒ a no-op. Used by
+        the boot path so live runs start with a profession gradient and are not all
+        locked out of the gated high-value actions (the north-star: do MORE)."""
+        if agent.skills:
+            return
+        arch = self._auto_archetype(agent)
+        if arch is not None:
+            self.seed_skills(agent, arch)
+
+    def seed_all_skills(self) -> None:
+        """EM-227 — seed every living, unskilled agent at boot (deterministic id
+        order). A no-op when no library/archetypes are configured (golden/pre-EM-227
+        worlds), so it is always safe to call. Idempotent: already-skilled agents
+        are skipped, so a re-seed never re-rolls."""
+        if not self.skill_library():
+            return
+        for aid in sorted(self.agents):
+            self.seed_skills_auto(self.agents[aid])
+
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
 
@@ -5315,6 +5519,12 @@ class World:
                     d.get("soul"),
                     _block_get(getattr(params, "memory", None), "soul_cap", 3),
                 ),
+                # EM-227 — skills: additive. Pre-EM-227 snapshots lack the key
+                # and restore {}; a present value is coerced to {str: int>0}
+                # (non-str keys + non-positive levels dropped, fail-safe). Byte-
+                # stable round-trip (EM-155): an empty skills map is never
+                # re-emitted, so a skill-less agent's dict is unchanged.
+                skills=_coerce_skills(d.get("skills")),
             )
             a.relationships = {
                 str(aid): RelationshipState(
