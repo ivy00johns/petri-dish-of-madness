@@ -251,6 +251,18 @@ world:
     birth_cost_credits: 6
     birth_chance: 0.25
     pair_cooldown_ticks: 600
+  # EM-126 — generational depth: life stages (child→adult→elder, aged once per
+  # round) + inheritance of credits (and optionally relationships) to an EM-114
+  # lineage heir on death. DEFAULT OFF here so this embedded mirror stays byte-
+  # identical to pre-EM-126 (no aging, no estate, EM-114 children untouched). The
+  # live config/world.yaml flips enabled:true. MUST stay in sync with
+  # config/world.yaml. Thresholds are in ROUNDS (= age_ticks).
+  generations:
+    enabled: false
+    child_until: 6
+    elder_after: 60
+    inherit_credits: true
+    inherit_relationships: false
   # Wave E / EM-120 — factions, feuds & reputation: at each round boundary
   # (after the birth check) connected components over MUTUAL warm edges
   # (both directions ally|friend|partner|family AND both trusts >=
@@ -1174,6 +1186,53 @@ class ChildrenParams:
 
 
 @dataclass
+class GenerationsParams:
+    """EM-126 — generational depth (config `world.generations`). Builds on the
+    EM-114 children mechanic: agents pass through LIFE STAGES (child → adult →
+    elder) as they age, and on death pass their estate (credits, optionally
+    relationships/grudges) down the EM-114 parents/children lineage to an heir.
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-126 — no agent ages
+    (age_ticks stays 0), every agent stays `adult`, and death drops no estate
+    (the EM-114 children mechanic is untouched). So the protagonist prompt golden
+    file and the snapshot key set are unchanged, and EM-114 children keep working
+    exactly as before. The engine reads this block via the defensive
+    `_generations_param` accessor with IDENTICAL defaults, so a world.yaml WITHOUT
+    a `generations` block — and an absent block — behaves the same (config-absent
+    = OFF). Flip `enabled: true` for the live runs to get life stages + inheritance.
+
+    Aging cadence (when enabled): `age_ticks` increments ONCE per round in
+    World.age_agents (hooked at the round boundary). The thresholds are measured in
+    ROUNDS (= age_ticks): an agent with age_ticks < child_until is a `child`, with
+    age_ticks >= elder_after an `elder`, otherwise an `adult`. Promotion is PURE
+    arithmetic over age_ticks (no random, no clock — EM-155 / replay-safe).
+
+    Inheritance (when enabled): on death, the estate passes to the deceased's HEIR
+    — selected deterministically from the EM-114 lineage (living children first,
+    then living parents; the lowest-id heir among the closest tier wins, a pure
+    sorted-id pick). `inherit_credits` (default ON) transfers all the deceased's
+    credits to the heir; `inherit_relationships` (default OFF) additionally copies
+    the deceased's relationships/grudges the heir does not already hold. Emits an
+    `inherited` event. No heir ⇒ a no-op (credits simply vanish, as today).
+
+      enabled               — master toggle (default False = zero behavioral
+                              change; EM-114 children unaffected).
+      child_until           — age_ticks (rounds) below which an agent is a child.
+                              Clamped >= 0; default 6.
+      elder_after           — age_ticks (rounds) at/above which an agent is an
+                              elder. Clamped >= child_until; default 60.
+      inherit_credits       — pass the deceased's credits to the heir (default ON).
+      inherit_relationships — also copy the deceased's relationships/grudges the
+                              heir lacks (default OFF — a smaller, safer estate).
+    """
+    enabled: bool = False
+    child_until: int = 6
+    elder_after: int = 60
+    inherit_credits: bool = True
+    inherit_relationships: bool = False
+
+
+@dataclass
 class FactionParams:
     """Wave E / EM-120 — factions, feuds & reputation (config `world.factions`).
     At each ROUND boundary (after the EM-114 birth check — contract order:
@@ -1472,6 +1531,14 @@ class WorldParams:
     # without partners (every pre-E world) behaves byte-identically.
     # `enabled: false` skips the birth check entirely.
     children: ChildrenParams = field(default_factory=ChildrenParams)
+    # EM-126 — generational depth. Additive with an engine-matching default;
+    # DEFAULT OFF, so a world.yaml without the `generations` block is byte-identical
+    # to pre-EM-126 (prompt golden + snapshot key set) — no agent ages, every agent
+    # stays adult, and death drops no estate, so the EM-114 children mechanic is
+    # untouched. `enabled: true` turns on life stages (child→adult→elder aging
+    # cadence) + inheritance of credits (and optionally relationships) to a lineage
+    # heir on death (emits an `inherited` event).
+    generations: GenerationsParams = field(default_factory=GenerationsParams)
     # Wave E / EM-184 — world-scale god miracles. Additive with
     # engine-matching defaults (default ON); `enabled: false` rejects the
     # world kinds only — targeted bless/grant stay byte-identical.
@@ -2367,6 +2434,35 @@ def _parse_children(raw: dict | None) -> ChildrenParams:
     )
 
 
+def _parse_generations(raw: dict | None) -> GenerationsParams:
+    """Parse the optional `world.generations` block (EM-126).
+    Absent/empty/malformed -> engine-matching defaults (enabled=False == zero
+    behavioral change == pre-EM-126: no aging, no inheritance, EM-114 children
+    untouched). Each key falls back to its default individually; the round
+    thresholds clamp to >= 0 and elder_after is held >= child_until (a malformed/
+    inverted pair never produces an impossible 'never adult' band)."""
+    if not isinstance(raw, dict):
+        return GenerationsParams()
+    d = GenerationsParams()
+
+    def _nonneg_int(key: str, default: int) -> int:
+        try:
+            return max(0, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    child_until = _nonneg_int("child_until", d.child_until)
+    elder_after = max(child_until, _nonneg_int("elder_after", d.elder_after))
+    return GenerationsParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        child_until=child_until,
+        elder_after=elder_after,
+        inherit_credits=bool(raw.get("inherit_credits", d.inherit_credits)),
+        inherit_relationships=bool(
+            raw.get("inherit_relationships", d.inherit_relationships)),
+    )
+
+
 def _parse_factions(raw: dict | None) -> FactionParams:
     """Parse the optional `world.factions` block (Wave E / EM-120).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -2524,6 +2620,7 @@ def _parse_world(
         constitution=_parse_constitution(w.get("constitution")),
         governance=_parse_governance(w.get("governance")),
         children=_parse_children(w.get("children")),
+        generations=_parse_generations(w.get("generations")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
         universalization=_parse_universalization(w.get("universalization")),

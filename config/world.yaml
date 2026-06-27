@@ -356,6 +356,28 @@ world:
     birth_chance: 0.25           # seeded per-pair unit-float gate per round
     pair_cooldown_ticks: 600     # min ticks between children of the same pair
 
+  # EM-126 — generational depth (contracts/wave-m.md §3 Wave M4). Builds on the
+  # EM-114 children mechanic: agents pass through LIFE STAGES as they age, and on
+  # death pass their estate down the parents/children lineage to an heir.
+  #   * Aging cadence: age_ticks increments once per ROUND (in World.age_agents,
+  #     hooked at the round boundary, ONLY when enabled). Thresholds are in rounds:
+  #     age_ticks < child_until ⇒ child; age_ticks >= elder_after ⇒ elder; else
+  #     adult. Promotion is PURE arithmetic — no random, no clock (replay-safe).
+  #   * Inheritance: on death the estate passes to the deceased's HEIR — chosen
+  #     deterministically from the lineage (living children first, then living
+  #     parents; lowest-id heir in the closest tier). inherit_credits transfers
+  #     all credits; inherit_relationships also copies relationships/grudges the
+  #     heir lacks. Emits an `inherited` event. No heir ⇒ a no-op.
+  # Set enabled:false (the default) for byte-identical pre-EM-126 behavior: no
+  # aging, no estate, the EM-114 children mechanic untouched. MUST stay in sync
+  # with the default-config mirror in backend/petridish/config/loader.py.
+  generations:
+    enabled: false
+    child_until: 6               # age_ticks (rounds) below which an agent is a child
+    elder_after: 60              # age_ticks (rounds) at/above which an agent is an elder
+    inherit_credits: true        # pass the deceased's credits to the heir
+    inherit_relationships: false # also copy relationships/grudges the heir lacks
+
   # Wave E / EM-120 — factions, feuds & reputation (contracts/wave-e.md B3).
   # At each ROUND boundary — after the EM-114 birth check (contract order:
   # births first, then factions) — the world recomputes candidate clusters:

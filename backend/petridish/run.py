@@ -279,6 +279,23 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             }
             collector(death_evt)
             repo.save_agent(loop_ctrl._run_id or 1, agent, world.tick)
+            # EM-126 — inheritance: pass the deceased's estate down its EM-114
+            # lineage to a deterministic heir (parity with the loop.py death path),
+            # emitting an `inherited` event. Gated behind world.generations.enabled:
+            # OFF (the default) ⇒ None ⇒ nothing moves (byte-identical pre-EM-126).
+            inherit_evt = world.apply_inheritance(agent)
+            if inherit_evt is not None:
+                stamped_inh = {
+                    "type": "event",
+                    "seq": i,
+                    "tick": world.tick,
+                    **inherit_evt,
+                }
+                collector(stamped_inh)
+                heir_id = inherit_evt.get("payload", {}).get("heir_id")
+                heir = world.agents.get(heir_id) if heir_id else None
+                if heir is not None:
+                    repo.save_agent(loop_ctrl._run_id or 1, heir, world.tick)
 
         repo.save_agent(loop_ctrl._run_id or 1, agent, world.tick)
 

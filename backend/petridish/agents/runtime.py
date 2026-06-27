@@ -2815,6 +2815,27 @@ def _assemble_context(
   These are fixed truths of who you are. Let them anchor how you act and speak.
 """
 
+    # ── EM-126 — generational depth: the agent's LIFE STAGE. Surfaces a one-line
+    # identity nudge ONLY when the agent is a child or an elder — an `adult` (the
+    # default, and EVERY agent when world.generations is OFF) gets NO line, so the
+    # em161 lawful-citizen golden fixture (a default-WorldParams adult hero) is
+    # byte-identical. Rides this turn — zero extra LLM calls. (getattr keeps callers
+    # safe if the engine seam is ever absent ⇒ default "adult" ⇒ no line.)
+    stage_block = ""
+    _stage = getattr(agent, "life_stage", "adult")
+    if _stage == "child":
+        stage_block = (
+            "\n=== YOUR LIFE STAGE ===\n"
+            "  You are a CHILD — young, learning the world. Lean on your elders, "
+            "ask to be taught, watch and grow before you lead.\n"
+        )
+    elif _stage == "elder":
+        stage_block = (
+            "\n=== YOUR LIFE STAGE ===\n"
+            "  You are an ELDER — long-lived, rich in memory. Mentor the young, "
+            "pass on what you know, steward what you have built.\n"
+        )
+
     # ── EM-227 — skills & emergent professions. Surfaces the agent's held skills
     # and (when a library gates anything) the high-value actions they are currently
     # LOCKED OUT of, nudging them to specialize / learn / be taught. EMPTY (⇒
@@ -3166,7 +3187,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{stage_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 

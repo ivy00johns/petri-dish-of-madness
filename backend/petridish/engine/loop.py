@@ -741,6 +741,19 @@ class TickLoop:
                 }
                 self._emit_event(death_evt)
                 self._repo.save_agent(run_id, agent, tick)
+                # EM-126 — inheritance: pass the deceased's estate (credits, and
+                # optionally relationships/grudges) down its EM-114 lineage to a
+                # deterministic heir, emitting an `inherited` event. Gated behind
+                # world.generations.enabled: OFF (the default) ⇒ None ⇒ nothing
+                # moves (byte-identical pre-EM-126 death path). On a transfer the
+                # heir's persisted state changes, so re-save it too.
+                inherit_evt = world.apply_inheritance(agent)
+                if inherit_evt is not None:
+                    self._emit_event(inherit_evt)
+                    heir_id = inherit_evt.get("payload", {}).get("heir_id")
+                    heir = world.agents.get(heir_id) if heir_id else None
+                    if heir is not None:
+                        self._repo.save_agent(run_id, heir, tick)
 
             # W9 / EM-070 — surface survival pressure (agent_starving events).
             self._emit_starving_events(agent, profile_name, profile_color, died)

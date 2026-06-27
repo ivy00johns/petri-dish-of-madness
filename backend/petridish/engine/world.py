@@ -368,6 +368,26 @@ class AgentState:
     # nothing). A parked boost survives a fork/resume (EM-190) because it is plain
     # agent state, not a separate outbox dict.
     boosted_turns: int = 0
+    # EM-126 — generational depth. TWO additive fields drive life stages:
+    #   life_stage — child | adult | elder. Pre-EM-126 worlds (and the default
+    #     `world.generations.enabled=False`) leave EVERY agent `adult`, so the
+    #     life-stage layer is inert: serialized in to_dict ONLY when != "adult"
+    #     and restored defensively (absent/unknown → "adult"), so an all-adult
+    #     world — and every pre-EM-126 snapshot — keeps the exact prior dict shape
+    #     (the EM-155 byte-identical guarantee + the em161 golden, since the stage
+    #     prompt block is empty under default conditions and gates nothing).
+    #   age_ticks — rounds this agent has lived. Increments once per round in
+    #     World.age_agents (ONLY when generations is enabled); thresholds promote
+    #     child→adult→elder via world.generations (child_until / elder_after).
+    #     ADDITIVE with default 0 → serialized in to_dict ONLY when > 0 and
+    #     restored defensively (absent/garbage/negative → 0), so a fresh (age 0)
+    #     agent — and every pre-EM-126 snapshot — keeps the exact prior dict shape.
+    # Aging + heir selection are PURE (world.tick + sorted ids) — no random/clock
+    # (EM-155). Inheritance (credits → heirs on death) is ALSO gated behind
+    # world.generations.enabled, so EM-114 children keep working unchanged when
+    # generations is off.
+    life_stage: str = "adult"
+    age_ticks: int = 0
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -468,6 +488,15 @@ class AgentState:
         # fork/resume (EM-190) — it is durable agent state, not a transient outbox.
         if self.boosted_turns:
             d["boosted_turns"] = self.boosted_turns
+        # EM-126 — life stage + age serialized ONLY when non-default, so an
+        # all-adult / age-0 agent (and every pre-EM-126 snapshot) keeps the exact
+        # prior dict shape (the em161 golden + the byte-identical guarantee). With
+        # generations OFF nothing ages, so both stay at their defaults and are
+        # never emitted.
+        if self.life_stage != "adult":
+            d["life_stage"] = self.life_stage
+        if self.age_ticks:
+            d["age_ticks"] = self.age_ticks
         return d
 
 
@@ -1593,6 +1622,17 @@ class World:
         arch_events = self.run_victory_arch_cycle()
         if arch_events:
             self.pending_spawn_events.extend(arch_events)
+        # EM-126 — the once-per-round aging sweep, LAST so it ages a newborn from
+        # 0 next round (not the round it is born). Every living agent's age_ticks
+        # bumps one round; a stage promotion (child→adult→elder) parks an `aged`
+        # event in the SAME pending_spawn_events outbox (drained + emitted by the
+        # tick loop's _flush_spawn_events, like births/factions/consolidation/arch).
+        # Gated behind world.generations.enabled: OFF (the default) ⇒ a no-op that
+        # parks nothing and ages no one (golden-safe + EM-114 children untouched).
+        # Deterministic — no random/clock.
+        aged_events = self.age_agents()
+        if aged_events:
+            self.pending_spawn_events.extend(aged_events)
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -5320,6 +5360,171 @@ class World:
         defaults == GovernanceParams defaults."""
         return _block_get(getattr(self.params, "governance", None), name, default)
 
+    def _generations_param(self, name: str, default: Any) -> Any:
+        """EM-126 — defensive accessor for the `world.generations` config block
+        (GenerationsParams dataclass OR dict OR absent — EM-155 conventions, like
+        _governance_param). An absent block ⇒ every default ⇒ enabled False ⇒ NO
+        aging, NO inheritance (pre-EM-126 byte-identical + the em161 golden + the
+        EM-114 children mechanic untouched). `default` is only a fallback for a key
+        missing from the block, so keep these call-site defaults ==
+        GenerationsParams defaults."""
+        return _block_get(getattr(self.params, "generations", None), name, default)
+
+    def _generations_enabled(self) -> bool:
+        """EM-126 — master gate for the BEHAVIORAL generational layer (aging
+        promotion + inheritance). DEFAULT OFF: an absent block ⇒ False ⇒ zero
+        behavioral change (no agent ages, every agent stays adult, death drops no
+        estate), so the em161 golden + every pre-EM-126 snapshot stay byte-
+        identical and EM-114 children keep working unchanged."""
+        return bool(self._generations_param("enabled", False))
+
+    def life_stage_for(self, age_ticks: int) -> str:
+        """EM-126 — the life stage (child|adult|elder) for a given age in ROUNDS.
+        PURE arithmetic over the world.generations thresholds (no random, no clock
+        — replay-safe). age_ticks < child_until ⇒ child; >= elder_after ⇒ elder;
+        otherwise adult. With generations OFF this is never consulted (age_agents
+        is a no-op, so every age stays 0 ⇒ adult by the default thresholds)."""
+        child_until = int(self._generations_param("child_until", 6))
+        elder_after = max(child_until, int(self._generations_param("elder_after", 60)))
+        age = max(0, int(age_ticks))
+        if age < child_until:
+            return "child"
+        if age >= elder_after:
+            return "elder"
+        return "adult"
+
+    def age_agents(self) -> list[dict]:
+        """EM-126 — the once-per-round aging sweep (hooked in _apply_round_start
+        AFTER births so a newborn ages from 0 next round, not the round it is
+        born). For every LIVING agent: bump age_ticks by one round, then derive
+        the life stage from the new age. A stage PROMOTION (child→adult→elder)
+        parks an `aged` event in deterministic sorted-id order (replay-stable);
+        an unchanged stage emits nothing. PURE — no random, no clock (EM-155).
+
+        Gated behind world.generations.enabled: OFF (the default / absent block) ⇒
+        a no-op that touches nothing and parks nothing, so every agent stays at
+        age_ticks 0 / adult — byte-identical pre-EM-126 + the em161 golden + the
+        EM-114 children mechanic untouched. Returns the parked events (also useful
+        in tests)."""
+        if not self._generations_enabled():
+            return []
+        events: list[dict] = []
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            if not agent.alive:
+                continue
+            prior = agent.life_stage
+            agent.age_ticks = max(0, int(agent.age_ticks)) + 1
+            stage = self.life_stage_for(agent.age_ticks)
+            if stage != prior:
+                agent.life_stage = stage
+                events.append({
+                    "kind": "aged",
+                    "actor_id": agent.id,
+                    "actor_type": "agent",
+                    "text": f"{agent.name} is now a{'n' if stage == 'elder' else ''} {stage}.",
+                    "payload": {
+                        "agent_id": agent.id,
+                        "from_stage": prior,
+                        "to_stage": stage,
+                        "age_ticks": agent.age_ticks,
+                    },
+                })
+        return events
+
+    def lineage(self, agent_id: str) -> dict:
+        """EM-126 — read the agent's lineage from the EM-114 `parents` field
+        (already serialized). Returns {parents, children} — the agent's direct
+        parents (its own `parents` list) and direct children (every agent whose
+        `parents` includes this id), both as sorted id lists (deterministic; an
+        unknown id yields empty lists). PURE lookup — no clock/random. The
+        inspector's lineage tree is a FRONTEND concern (out of scope here, tracked
+        as a follow-up); this is the backend accessor it would read."""
+        aid = str(agent_id)
+        agent = self.agents.get(aid)
+        parents = sorted(agent.parents) if agent and agent.parents else []
+        children = sorted(
+            other.id for other in self.agents.values()
+            if aid in (other.parents or []))
+        return {"parents": parents, "children": children}
+
+    def _heirs_for(self, agent: AgentState) -> list[str]:
+        """EM-126 — the ordered heir candidates for a deceased agent, derived
+        PURELY from the EM-114 lineage: living children first (sorted by id), then
+        living parents (sorted by id). The deceased agent itself is never an heir.
+        Pure sorted-id selection — no random, no clock (replay-safe). An agent
+        with no living kin yields [] (no heir ⇒ inheritance is a no-op)."""
+        line = self.lineage(agent.id)
+        ordered: list[str] = []
+        for tier in (line["children"], line["parents"]):
+            for hid in tier:  # already sorted by id
+                if hid == agent.id or hid in ordered:
+                    continue
+                heir = self.agents.get(hid)
+                if heir is not None and heir.alive:
+                    ordered.append(hid)
+        return ordered
+
+    def apply_inheritance(self, agent: AgentState) -> dict | None:
+        """EM-126 — pass a just-deceased agent's estate down its EM-114 lineage to
+        an HEIR, returning an `inherited` event dict (or None on a no-op). Called
+        from the death path in the tick loop (loop.py) AND the headless runner
+        (run.py) the moment check_death flips an agent dead.
+
+        Deterministic heir pick: the lowest-id LIVING child, else the lowest-id
+        LIVING parent (_heirs_for). With inherit_credits ON, ALL the deceased's
+        credits transfer to the heir (a transfer, not a sink — the estate is
+        conserved); with inherit_relationships ON, the deceased's relationships/
+        grudges the heir does not already hold are copied too. Pure — no random,
+        no clock (EM-155).
+
+        Gated behind world.generations.enabled: OFF (the default / absent block) ⇒
+        a no-op that returns None and moves nothing — so a default world's death
+        path is byte-identical to pre-EM-126 (credits simply vanish with the agent,
+        as the EM-114 mechanic has always done). No living heir ⇒ also a no-op."""
+        if not self._generations_enabled():
+            return None
+        heirs = self._heirs_for(agent)
+        if not heirs:
+            return None
+        heir_id = heirs[0]
+        heir = self.agents[heir_id]
+        transferred = 0
+        if bool(self._generations_param("inherit_credits", True)):
+            transferred = max(0, int(agent.credits))
+            if transferred:
+                heir.credits += transferred
+                agent.credits = 0
+        copied_relationships = 0
+        if bool(self._generations_param("inherit_relationships", False)):
+            for other_id, rel in sorted(agent.relationships.items()):
+                if other_id == heir_id or other_id in heir.relationships:
+                    continue
+                heir.relationships[other_id] = RelationshipState(
+                    type=rel.type,
+                    trust=rel.trust,
+                    interactions=rel.interactions,
+                    since_tick=rel.since_tick,
+                )
+                copied_relationships += 1
+        return {
+            "kind": "inherited",
+            "actor_id": heir_id,
+            "actor_type": "agent",
+            "text": (
+                f"{heir.name} inherited {transferred} credits from {agent.name}."
+                if transferred
+                else f"{heir.name} inherited {agent.name}'s estate."
+            ),
+            "payload": {
+                "heir_id": heir_id,
+                "deceased_id": agent.id,
+                "credits": transferred,
+                "relationships_copied": copied_relationships,
+                "tick": self.tick,
+            },
+        }
+
     def _find_article(self, article_id: str) -> dict | None:
         """EM-236 — return the constitution article with this id, or None. Pure
         lookup over the durable list (no clock/random)."""
@@ -6963,6 +7168,15 @@ class World:
                 # boost"). Byte-stable round-trip (EM-155): a zero count is never
                 # re-emitted, so a boost-free agent's dict is unchanged.
                 boosted_turns=max(0, _int(d.get("boosted_turns"))),
+                # EM-126 — life stage + age: additive. Pre-EM-126 snapshots lack
+                # the keys and restore the adult / age-0 defaults; an unknown
+                # life_stage fails safe to "adult" and age_ticks is clamped >= 0
+                # (a malformed/negative value never breaks the restore). Byte-
+                # stable round-trip (EM-155): an adult / age-0 agent is never
+                # re-emitted, so the agent's dict is unchanged.
+                life_stage=(str(d.get("life_stage")) if d.get("life_stage")
+                            in ("child", "adult", "elder") else "adult"),
+                age_ticks=max(0, _int(d.get("age_ticks"))),
             )
             a.relationships = {
                 str(aid): RelationshipState(
