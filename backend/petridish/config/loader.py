@@ -85,6 +85,18 @@ world:
     enabled: true
     sick_threshold: 3
     probe_every: 4
+  # EM-167 — Ollama overflow lane: background/supporting cadence-tier turns
+  # spill OFF FreeLLMAPI onto a local Ollama lane as an off-critical-path
+  # overflow (the animal-task pattern) — ~40% of background calls move off the
+  # free proxy. DEFAULT OFF: routing to Ollama changes behavior, and live-verify
+  # pends a running `ollama serve`. A missing/unavailable/sick `ollama` profile
+  # self-suppresses, so a turn never hard-fails if Ollama is down (it falls back
+  # to the home/EM-205-auto/EM-173-idle path). MUST stay in sync with
+  # config/world.yaml. enabled:false = byte-identical pre-EM-167 routing.
+  overflow_lane:
+    enabled: false
+    profile: ollama
+    tiers: [background, supporting]
   # Wave D3 / EM-168 — cap-pressure governor: a lane's usage_alert demotes its
   # agents one cadence tier until the alert tracker's UTC-day rollover. MUST
   # stay in sync with config/world.yaml. OFF since the 2026-06-12 EM-198
@@ -721,6 +733,35 @@ class LaneFailoverParams:
     enabled: bool = True
     sick_threshold: int = 3
     probe_every: int = 4
+
+
+@dataclass
+class OverflowLaneParams:
+    """EM-167 — Ollama overflow lane (config `world.overflow_lane`). Routes
+    background/supporting cadence-tier turns OFF FreeLLMAPI onto a local Ollama
+    lane as an off-critical-path overflow (the animal-task pattern): a slow,
+    non-survival lane that, if it stalls or is unreachable, falls back to the
+    existing routing WITHOUT ever hard-failing a turn. The router
+    (providers/router.py) reads this block via its defensive _ol_value accessor
+    with IDENTICAL defaults, so an absent block behaves exactly like these
+    values (byte-identical pre-EM-167 routing).
+
+      enabled — master toggle (default OFF). Routing to Ollama CHANGES behavior
+                for existing worlds, so `false`/absent ⇒ effective_profile never
+                considers the overflow path (no new spans, no detours). Flip
+                `true` once a real `ollama serve` is reachable. Live-verify of
+                the overflow lane pends a running Ollama.
+      profile — the overflow target profile name (must exist in profiles.yaml).
+                Default `ollama`; a missing / unavailable / sick target
+                self-suppresses (the turn falls back to home/failover routing).
+      tiers   — the cadence tiers whose turns spill to the overflow lane
+                (protagonist NEVER overflows — its traffic stays on the pinned
+                lane). Default background + supporting (~40% of background
+                calls move off FreeLLMAPI).
+    """
+    enabled: bool = False
+    profile: str = "ollama"
+    tiers: tuple[str, ...] = ("background", "supporting")
 
 
 @dataclass
@@ -1366,6 +1407,10 @@ class WorldParams:
     # router-matching defaults (default ON); `enabled: false` restores the
     # byte-identical pre-D3 routing.
     lane_failover: LaneFailoverParams = field(default_factory=LaneFailoverParams)
+    # EM-167 — Ollama overflow lane. Additive with router-matching defaults
+    # (default OFF); an absent block / `enabled: false` keeps the byte-identical
+    # pre-EM-167 routing (no overflow detours, no new spans).
+    overflow_lane: OverflowLaneParams = field(default_factory=OverflowLaneParams)
     # Wave D3 / EM-168 — cap-pressure governor. Additive with engine-matching
     # defaults (default ON); `enabled: false` keeps usage alerts alert-only
     # (byte-identical pre-D3 behavior).
@@ -1912,6 +1957,36 @@ def _parse_lane_failover(raw: dict | None) -> LaneFailoverParams:
     )
 
 
+def _parse_overflow_lane(raw: dict | None) -> OverflowLaneParams:
+    """Parse the optional `world.overflow_lane` block (EM-167). Absent/empty/
+    malformed -> router-matching defaults (overflow OFF). `profile` falls back
+    to the default when not a non-empty string; `tiers` falls back to the
+    default when not a list of strings (and is normalized to a tuple so the
+    config_json fork seam round-trips: asdict serializes a tuple to a list,
+    this reparses it to a tuple)."""
+    if not isinstance(raw, dict):
+        return OverflowLaneParams()
+    d = OverflowLaneParams()
+
+    profile = raw.get("profile", d.profile)
+    if not isinstance(profile, str) or not profile:
+        profile = d.profile
+
+    tiers_raw = raw.get("tiers", d.tiers)
+    if isinstance(tiers_raw, (list, tuple)) and all(
+        isinstance(t, str) for t in tiers_raw
+    ):
+        tiers = tuple(tiers_raw)
+    else:
+        tiers = d.tiers
+
+    return OverflowLaneParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        profile=profile,
+        tiers=tiers,
+    )
+
+
 def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
     """Parse the optional `world.cap_governor` block (Wave D3 / EM-168).
     Absent/empty/malformed -> engine-matching defaults (governor ON)."""
@@ -2436,6 +2511,7 @@ def _parse_world(
         cadence=_parse_cadence(w.get("cadence")),
         memory_retrieval=_parse_memory_retrieval(w.get("memory_retrieval")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
+        overflow_lane=_parse_overflow_lane(w.get("overflow_lane")),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),

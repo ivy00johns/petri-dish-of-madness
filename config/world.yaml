@@ -75,6 +75,21 @@ world:
     sick_threshold: 3    # timed_out entries in the 6-window that mark a lane sick
     probe_every: 4       # every Nth would-be-detour probes the home lane
 
+  # EM-167 — Ollama overflow lane. Background/supporting cadence-tier turns
+  # spill OFF FreeLLMAPI onto a local Ollama lane (profiles.yaml `ollama`) as an
+  # off-critical-path overflow — the animal-task pattern: a slow, non-survival
+  # lane that, if it stalls or is unreachable, falls back to the home/EM-205-
+  # auto/EM-173-idle path WITHOUT ever hard-failing a turn (protagonists NEVER
+  # overflow — their traffic stays pinned). ~40% of background calls move off
+  # the free proxy. A missing/unavailable/sick `ollama` profile self-suppresses.
+  # MUST stay in sync with the default-config mirror in
+  # backend/petridish/config/loader.py.
+  overflow_lane:
+    enabled: false                    # OFF: live-verify pends a running `ollama
+                                      # serve`; flip true once Ollama is reachable
+    profile: ollama                   # the overflow target (profiles.yaml)
+    tiers: [background, supporting]   # cadence tiers whose turns spill over
+
   # Wave D3 / EM-168 — cap-pressure governor. When a lane's usage_alert fires
   # (UsageAlertTracker crossed 70% of its rpd/tpd day cap, profiles.yaml),
   # every agent ASSIGNED to that lane is demoted ONE cadence tier

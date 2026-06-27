@@ -74,6 +74,9 @@ def build_world(cfg):
     router = Router(
         cfg.profiles,
         lane_failover=getattr(cfg.world, "lane_failover", None),
+        # EM-167 — thread the `world.overflow_lane` block too (defensive getattr:
+        # pre-EM-167 configs lack the field and get the OFF defaults).
+        overflow_lane=getattr(cfg.world, "overflow_lane", None),
         cache_enabled=bool(getattr(cache_cfg, "enabled", True)),
         cache_max=int(getattr(cache_cfg, "max_entries", 512)),
     )

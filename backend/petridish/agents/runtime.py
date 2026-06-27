@@ -4145,7 +4145,16 @@ class AgentRuntime:
         lane_reason: str | None = None
         effective = getattr(self.router, "effective_profile", None)
         if callable(effective):
+            # EM-167 — pass the cadence tier so the router can spill background/
+            # supporting turns to the off-critical-path overflow lane (Ollama).
+            # The tier kwarg is optional on the router signature, so duck-typed
+            # test routers without it stay unchanged.
+            tier = getattr(agent, "cadence_tier", "protagonist")
             try:
+                call_profile, lane_reason = effective(
+                    agent.id, profile_name, tier=tier)
+            except TypeError:
+                # Pre-EM-167 router (two-arg effective_profile) — fall back.
                 call_profile, lane_reason = effective(agent.id, profile_name)
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("effective_profile failed for %s: %s", agent.name, exc)
@@ -4719,6 +4728,12 @@ class AgentRuntime:
         elif lane_reason == "probe":
             span["requested_profile"] = requested_profile
             span["probe"] = True
+        elif lane_reason == "overflow":
+            # EM-167 — the turn spilled to the off-critical-path overflow lane
+            # (Ollama). Additive keys, same shape as detour/probe; a home-lane
+            # turn keeps the exact pre-EM-167 key set.
+            span["requested_profile"] = requested_profile
+            span["overflow"] = True
         return span
 
     async def _call_and_parse(
