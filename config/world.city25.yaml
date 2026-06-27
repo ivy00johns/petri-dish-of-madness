@@ -291,6 +291,12 @@ world:
     enabled: true                # EM-223 live tuning run (2026-06-21)
     max_steps: 5
     reflex_bias: true
+  # EM-234 — universalization prompting (GovSim scaffold). MUST stay byte-equal to
+  # the world.yaml universalization block (the city25 variant changes only the
+  # cast). Injects the always-on "what if EVERY agent did this?" commons-reasoning
+  # block into every turn (zero extra LLM calls).
+  universalization:
+    enabled: true                # EM-234 live run — inject the commons-reasoning scaffold into every turn
   district_growth:               # EM-123 — zoned districts deepen as megaprojects complete (zero LLM calls; EM-174-safe)
     enabled: true                # off ⇒ every district stays tier 1 (byte-identical pre-EM-123)
     completions_per_tier: 2      # completed collective buildings in a district per +1 tier

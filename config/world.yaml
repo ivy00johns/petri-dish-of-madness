@@ -179,6 +179,18 @@ world:
     consolidate_keep_recent: 8  # most-recent beliefs kept verbatim (< consolidate_at)
     soul_cap: 3                 # max identity anchors per agent
 
+  # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
+  # Wave M1). When enabled, EVERY agent's turn context gets a single block that
+  # asks them to reason about the commons by universalizing — "before acting on a
+  # shared resource, ask: what if EVERY agent did this?" — the cheap cooperation
+  # lift from the GovSim paper. It rides the SAME turn (zero extra LLM calls) and
+  # carries NO per-agent/world state (pure config-read prompt block), so flipping
+  # it leaves snapshots byte-identical. DEFAULT OFF in the dataclass keeps the
+  # em161 golden intact; this LIVE config flips enabled:true. MUST stay in sync
+  # with the UniversalizationParams mirror in backend/petridish/config/loader.py.
+  universalization:
+    enabled: true               # EM-234 live run — inject the commons-reasoning scaffold into every turn (zero extra calls)
+
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
   # the B1 consent mechanic) co-located at a home-kind place for a birth.

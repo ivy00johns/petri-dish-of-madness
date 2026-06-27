@@ -565,6 +565,15 @@ def _planning_enabled(params: Any) -> bool:
     return bool(_world_block_get(params, "planning", "enabled", False))
 
 
+def _universalization_enabled(params: Any) -> bool:
+    """EM-234 — config gate `world.universalization.enabled` (default False).
+    Disabled ⇒ NO universalization block in the prompt: the turn context is
+    byte-identical to pre-EM-234 (the em161 lawful-citizen golden holds). When
+    enabled, every agent's prompt gets the GovSim commons-reasoning scaffold.
+    Carries no state, so snapshots are unaffected either way."""
+    return bool(_world_block_get(params, "universalization", "enabled", False))
+
+
 def _rule_label(text: str, limit: int = 60) -> str:
     """EM-100 — the human-readable rule label for feed text (quoted by callers,
     truncated to ~60 chars). Never the bare uuid."""
@@ -2320,6 +2329,36 @@ def _assemble_context(
   These are fixed truths of who you are. Let them anchor how you act and speak.
 """
 
+    # ── EM-234 — universalization prompting (GovSim scaffold). The cheap
+    # cooperation lift: before an agent acts on a SHARED resource it is nudged to
+    # universalize the move — "what if EVERY agent did this?". ALWAYS-ON for every
+    # agent when enabled, so it is GATED behind world.universalization.enabled
+    # (DEFAULT OFF). Disabled/absent ⇒ EMPTY block ⇒ the em161 lawful-citizen
+    # golden is byte-identical (exactly the EM-223 default-off mechanism). Rides
+    # this turn — zero extra LLM calls. Diet-aware (R6): background tier gets a
+    # one-line trim; protagonists/supporting get the fuller scaffold.
+    universalization_block = ""
+    if _universalization_enabled(params):
+        if background:
+            universalization_block = (
+                "\n=== ✶ THE COMMONS ===\n"
+                "  Before you draw from a shared resource, ask: what if EVERY "
+                "agent did this? Take only what stays sustainable for all.\n"
+            )
+        else:
+            universalization_block = (
+                "\n=== ✶ REASONING ABOUT THE COMMONS ===\n"
+                "  Before you act on anything shared — a common harvest, public "
+                "funds, the town's trust, a finite resource — pause and "
+                "universalize the choice: ask what if EVERY agent made the same "
+                "move you are about to make.\n"
+                "  If everyone did it and the commons would still thrive, act "
+                "freely. If everyone did it and the commons would collapse, that "
+                "is your signal to restrain, share, or find a path that holds up "
+                "when universalized. You are free to decide — but decide with the "
+                "whole town in view.\n"
+            )
+
     # ── PROTOTYPE (god-channel) — the active god proclamation rides EVERY prompt.
     # The LOUD tier of the god↔town channel: unlike the opt-in billboard, an active
     # proclamation is injected here so the god's word reaches every agent each turn
@@ -2494,7 +2533,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 

@@ -126,6 +126,13 @@ world:
     consolidate_at: 20
     consolidate_keep_recent: 8
     soul_cap: 3
+  # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
+  # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
+  # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
+  # this embedded mirror stays byte-identical to pre-EM-234 (the live
+  # config/world.yaml flips enabled:true). MUST stay in sync with config/world.yaml.
+  universalization:
+    enabled: false
   # Wave E / EM-114 — lightweight children: once per round boundary, mutual
   # partners (are_partners) co-located at a home may have a child — a NEW
   # agent at background tier, only into vacancies under max_population AND
@@ -522,6 +529,29 @@ class PlanningParams:
     enabled: bool = False
     max_steps: int = 5
     reflex_bias: bool = True
+
+
+@dataclass
+class UniversalizationParams:
+    """EM-234 — Universalization prompting (config `world.universalization`).
+
+    The GovSim "universalization" scaffold — before acting on the commons, ask:
+    what if EVERY agent did this? — is a single ALWAYS-ON prompt block injected
+    into every agent's turn context. Because it changes the prompt for ALL agents
+    unconditionally, it would break the em161 lawful-citizen golden, so it is
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-234 — no block at all,
+    no per-agent state, so the protagonist prompt golden file and the snapshot key
+    set are unchanged (EM-234 carries NO AgentState/World state — it is a pure
+    config-read prompt block). The engine reads via the defensive
+    `_universalization_enabled` accessor with the IDENTICAL default, so an absent
+    block behaves the same (config-absent = OFF). Flip `enabled: true` for the
+    live runs to get the cheap cooperation lift (zero extra LLM calls — it rides
+    the existing turn).
+
+      enabled — master toggle (default False = zero behavioral change).
+    """
+    enabled: bool = False
 
 
 @dataclass
@@ -1050,6 +1080,14 @@ class WorldParams:
     # `planning` block is byte-identical to pre-EM-223 (prompt golden +
     # snapshot key set). `enabled: true` activates the plan layer.
     planning: PlanningParams = field(default_factory=PlanningParams)
+    # EM-234 — universalization prompting (GovSim scaffold). Additive with an
+    # engine-matching default; DEFAULT OFF, so a world.yaml without the
+    # `universalization` block is byte-identical to pre-EM-234 (prompt golden +
+    # snapshot key set — EM-234 carries NO per-agent/world state). `enabled: true`
+    # injects the always-on "what if EVERY agent did this?" commons-reasoning
+    # block into every turn (zero extra LLM calls — rides the existing turn).
+    universalization: UniversalizationParams = field(
+        default_factory=UniversalizationParams)
     # EM-123 — zoned districts that deepen as megaprojects complete. Additive
     # with engine-matching defaults (default ON); `enabled: false` keeps every
     # district at tier 1 (byte-identical pre-EM-123: no district_grew events,
@@ -1357,6 +1395,19 @@ def _parse_planning(raw: dict | None) -> PlanningParams:
         enabled=bool(raw.get("enabled", d.enabled)),
         max_steps=max_steps,
         reflex_bias=bool(raw.get("reflex_bias", d.reflex_bias)),
+    )
+
+
+def _parse_universalization(raw: dict | None) -> UniversalizationParams:
+    """Parse the optional `world.universalization` block (EM-234).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-234 (prompt golden +
+    snapshot key set)."""
+    if not isinstance(raw, dict):
+        return UniversalizationParams()
+    d = UniversalizationParams()
+    return UniversalizationParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
     )
 
 
@@ -1824,6 +1875,7 @@ def _parse_world(
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
+        universalization=_parse_universalization(w.get("universalization")),
         miracles=_parse_miracles(w.get("miracles")),
         district_growth=_parse_district_growth(w.get("district_growth")),
     )
