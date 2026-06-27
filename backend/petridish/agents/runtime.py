@@ -3025,8 +3025,13 @@ def _assemble_context(
     # consensus name_town). When the town is unnamed we say NOTHING: naming must be
     # emergent — an agent's own choice at the town hall, or a god *suggestion* via the
     # proclamation channel — never a standing directive pushed into every prompt.
+    # EM-206 — once named, flag the name as SETTLED so agents stop campaigning to
+    # (re-)name what they already hold (run-663: "Ledger's Folly" re-passed 119×).
+    # The marker rides ONLY when there IS a name, so an unnamed town adds nothing
+    # new and the em161 golden (a default agent, no town name) is byte-identical.
     _town = (getattr(world, "town_name", "") or "").strip()
-    town_line = f"\nTown: {_town}" if _town else ""
+    _town_display = f"{_town} (settled)" if _town else ""
+    town_line = f"\nTown: {_town_display}" if _town else ""
 
     # ── EM-236 — the LIVING CONSTITUTION rides every prompt ONCE it has articles.
     # The articled foundational document (grown by amend_constitution governance) is
@@ -3059,7 +3064,7 @@ def _assemble_context(
     # once per naming vote, not per tick. Protagonists/supporting render
     # exactly as before (byte-for-byte).
     if background:
-        clock_header = f"Town: {_town}\n" if _town else ""
+        clock_header = f"Town: {_town_display}\n" if _town else ""
         status_energy = _energy_display(agent.energy)
         _co_energy = lambda a: _energy_display(a.energy)  # noqa: E731
     else:

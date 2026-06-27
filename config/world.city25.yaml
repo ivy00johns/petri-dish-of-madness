@@ -339,6 +339,11 @@ world:
   # block into every turn (zero extra LLM calls).
   universalization:
     enabled: true                # EM-234 live run — inject the commons-reasoning scaffold into every turn
+  # EM-203 — governance renewal cooldown. MUST stay byte-equal to the world.yaml
+  # governance block (the city25 variant changes only the cast). Blocks re-passing
+  # an unchanged active rule within the window so agents legislate something NEW.
+  governance:
+    renewal_cooldown_ticks: 60   # ticks an unchanged ACTIVE rule can't be renewed for (0 = pre-EM-203)
   district_growth:               # EM-123 — zoned districts deepen as megaprojects complete (zero LLM calls; EM-174-safe)
     enabled: true                # off ⇒ every district stays tier 1 (byte-identical pre-EM-123)
     completions_per_tier: 2      # completed collective buildings in a district per +1 tier

@@ -278,6 +278,20 @@ world:
     ratify_threshold: 0.7       # YES-vote supermajority fraction an amendment needs to ratify (0.7 = 70%, the demolish bar)
     influence_replenish: 15     # influence (EM-229 need) topped up on the PROPOSER when an amendment ratifies, clamped 0..100
 
+  # EM-203 — governance renewal cooldown (contracts/wave-m.md §3 Wave M4). The
+  # W11b/EM-087 RENEWAL ritual lets agents re-pass a law identical to an ACTIVE
+  # rule (it refreshes the law instead of stacking a duplicate) — civic charm,
+  # but run-663 showed it degenerate into endless no-op re-passes of the SAME
+  # unchanged law (work_bonus ×35, ubi ×27, recharge_subsidy ×19). When
+  # renewal_cooldown_ticks > 0, a renewal of an active rule whose last activation
+  # is within the window is rejected as 'already active (settled)', nudging
+  # agents to legislate something NEW. 0 = no cooldown (pre-EM-203 behavior).
+  # ~3 in-world days at 20 turns/day keeps the ritual meaningful without spam.
+  # MUST stay in sync with the GovernanceParams mirror in
+  # backend/petridish/config/loader.py.
+  governance:
+    renewal_cooldown_ticks: 60  # ticks an unchanged ACTIVE rule can't be renewed for (0 = pre-EM-203; live run nudges new legislation)
+
   # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
   # Wave M1). When enabled, EVERY agent's turn context gets a single block that
   # asks them to reason about the commons by universalizing — "before acting on a

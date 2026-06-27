@@ -3370,8 +3370,14 @@ class World:
             # run-663 — reject a no-op rename to the name the town already has,
             # so the SAME naming can't re-pass forever (the live run renamed the
             # town "Ledger's Folly" 119 times — 53% of all "laws" were no-ops).
+            # EM-206 — surface the name as SETTLED in the rejection (and the prompt
+            # marks it DECIDED, see _assemble_context) so agents stop campaigning
+            # for the name they already hold. Keeps the EM-200 "already named"
+            # substring (its test pins it) and adds the settled flag.
             if name.lower() == str(self.town_name or "").strip().lower():
-                return False, f"the town is already named {self.town_name!r}", None
+                return False, (f"the town is already named {self.town_name!r} "
+                               f"(settled) — propose a NEW name or legislate "
+                               f"something else"), None
             payload = {"name": name}
         # Wave K / EM-219 — demolish carries the TARGET building id on the payload
         # (like admit_agent's spec); a demolish proposal without a real, standing
@@ -3502,6 +3508,24 @@ class World:
             if effect not in ("name_town", "demolish", "promote_image", "trial",
                               "amend_constitution") else None
         )
+        # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
+        # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
+        # (max of created_tick / renewed_at). Within the window the renewal is
+        # rejected as "already active (settled)" so agents legislate something NEW
+        # instead of re-passing work_bonus/ubi/recharge_subsidy endlessly (run-663:
+        # 35×/27×/19×). DEFAULT cooldown 0 ⇒ this never fires ⇒ the W11b renewal
+        # ritual is byte-identical to pre-EM-203 (the accessor default matches the
+        # GovernanceParams default). No clock/random — pure tick arithmetic.
+        if active is not None:
+            cooldown = int(self._governance_param("renewal_cooldown_ticks", 0))
+            if cooldown > 0:
+                last_active = max([active.created_tick, *active.renewed_at])
+                if self.tick - last_active < cooldown:
+                    return False, (
+                        f"{effect!r} is already active (settled) — last passed at "
+                        f"tick {last_active}; it can't be renewed until tick "
+                        f"{last_active + cooldown}. Legislate something NEW instead."
+                    ), None
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
             effect=effect,
@@ -5244,6 +5268,15 @@ class World:
         `default` is only a fallback for a key missing from the block, so keep these
         call-site defaults == ConstitutionParams defaults."""
         return _block_get(getattr(self.params, "constitution", None), name, default)
+
+    def _governance_param(self, name: str, default: Any) -> Any:
+        """EM-203 — defensive accessor for the `world.governance` config block
+        (GovernanceParams dataclass OR dict OR absent — EM-155 conventions, like
+        _constitution_param). An absent block ⇒ every default ⇒ renewal_cooldown_ticks
+        0 ⇒ the W11b renewal ritual is untouched (pre-EM-203 byte-identical). `default`
+        is only a fallback for a key missing from the block, so keep these call-site
+        defaults == GovernanceParams defaults."""
+        return _block_get(getattr(self.params, "governance", None), name, default)
 
     def _find_article(self, article_id: str) -> dict | None:
         """EM-236 — return the constitution article with this id, or None. Pure

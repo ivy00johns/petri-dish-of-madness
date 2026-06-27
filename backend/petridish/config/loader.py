@@ -199,6 +199,15 @@ world:
   constitution:
     ratify_threshold: 0.7
     influence_replenish: 15
+  # EM-203 — governance renewal cooldown. When > 0, re-proposing an effect
+  # identical to an ACTIVE rule whose last activation is within the window is
+  # rejected as 'already active (settled)' so agents legislate something NEW
+  # (run-663: work_bonus re-passed 35×, ubi 27×, recharge_subsidy 19×). DEFAULT 0
+  # here = no cooldown = byte-identical to pre-EM-203 (the W11b renewal ritual is
+  # untouched); the live config/world.yaml sets a positive window. MUST stay in
+  # sync with config/world.yaml.
+  governance:
+    renewal_cooldown_ticks: 0
   # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
   # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
   # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
@@ -1066,6 +1075,34 @@ class ConstitutionParams:
 
 
 @dataclass
+class GovernanceParams:
+    """EM-203 — governance renewal cooldown (config `world.governance`). A
+    settled-signal guard over the W11b/EM-087 RENEWAL ritual: re-proposing an
+    effect identical to an ACTIVE rule is normally allowed (it tags renewal_of
+    and refreshes the law on passing — civic charm). But run-663 showed agents
+    re-passing the SAME unchanged law endlessly (work_bonus ×35, ubi ×27,
+    recharge_subsidy ×19) instead of legislating anything NEW.
+
+    When `renewal_cooldown_ticks` > 0, a renewal of an active rule whose LAST
+    activation (max of created_tick / renewed_at) is within the cooldown is
+    rejected as 'already active (settled)', nudging agents to author new work.
+
+    The engine reads this via the defensive `_governance_param` accessor with an
+    IDENTICAL default, so a world.yaml WITHOUT a `governance` block behaves
+    exactly like pre-EM-203 — i.e. byte-identical. NO `enabled` flag: the DEFAULT
+    of 0 disables the cooldown (every renewal still allowed, the W11b ritual
+    intact), so an absent block and every pre-EM-203 snapshot stay byte-identical
+    without one — the live config sets a positive window.
+
+      renewal_cooldown_ticks — ticks an unchanged ACTIVE effect-rule cannot be
+                               renewed for, measured from its last activation.
+                               0 (default) = no cooldown (pre-EM-203 behavior).
+                               Clamped to >= 0 (a malformed value falls back to 0).
+    """
+    renewal_cooldown_ticks: int = 0
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -1379,6 +1416,12 @@ class WorldParams:
     # is byte-identical (no `enabled` flag: the document simply never grows). The
     # block only tunes the ratify supermajority + the proposer's influence reward.
     constitution: ConstitutionParams = field(default_factory=ConstitutionParams)
+    # EM-203 — governance renewal cooldown. Additive with an engine-matching
+    # default of 0 (no cooldown), so a world.yaml without the `governance` block —
+    # and every pre-EM-203 snapshot — is byte-identical (no `enabled` flag: 0
+    # leaves the W11b renewal ritual untouched). A positive value blocks re-passing
+    # an unchanged active rule within the window (the run-663 work_bonus/ubi spam).
+    governance: GovernanceParams = field(default_factory=GovernanceParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -2202,6 +2245,23 @@ def _parse_constitution(raw: dict | None) -> ConstitutionParams:
     return ConstitutionParams(ratify_threshold=thr, influence_replenish=infl)
 
 
+def _parse_governance(raw: dict | None) -> GovernanceParams:
+    """Parse the optional `world.governance` block (EM-203).
+    Absent/empty/malformed -> engine-matching defaults (renewal_cooldown_ticks 0
+    == no cooldown == pre-EM-203 behavior). The single key falls back to its
+    default individually and clamps to >= 0 (a negative/malformed value never
+    breaks the block)."""
+    if not isinstance(raw, dict):
+        return GovernanceParams()
+    d = GovernanceParams()
+    try:
+        cooldown = max(0, int(raw.get("renewal_cooldown_ticks",
+                                      d.renewal_cooldown_ticks)))
+    except (TypeError, ValueError):
+        cooldown = d.renewal_cooldown_ticks
+    return GovernanceParams(renewal_cooldown_ticks=cooldown)
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -2386,6 +2446,7 @@ def _parse_world(
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
         boost=_parse_boost(w.get("boost")),
         constitution=_parse_constitution(w.get("constitution")),
+        governance=_parse_governance(w.get("governance")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
