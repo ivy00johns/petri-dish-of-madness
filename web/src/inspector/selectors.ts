@@ -83,6 +83,95 @@ function ascending(events: WorldEvent[]): WorldEvent[] {
   return sortedBySeqAsc(events);
 }
 
+// Wave M (EM-195): SECONDARY scrub cache. While scrubbing, the layout's
+// `panelEvents` is `events.filter(e => e.tick <= currentTick)`. A useMemo there
+// keyed on currentTick recomputes — and so produces a FRESH array identity —
+// on every scrub tick, even when the projected slice is byte-identical (two
+// identity-equal scrubs land on the same tick). That fresh identity misses the
+// ascendingCache WeakMap above, so SocialGraph / GovernanceHistory / the trace
+// picker re-sort + re-fold the scoped slice EVERY tick.
+//
+// scopedSlice caches the filtered slice per (eventArrayRef, projecting,
+// currentTick): identical keys return the SAME array reference, so the slice's
+// identity is stable across identity-equal scrubs AND it then HITS the
+// ascendingCache (no re-sort, no re-fold). Keyed first on the events array ref
+// (WeakMap — a dropped history frees its whole sub-cache), then on a string
+// `${projecting}:${tick}`. The cached slice is the EXACT same filter the layout
+// ran, so fold output is unchanged (golden-equal to the full scoped fold).
+const scopedSliceCache = new WeakMap<WorldEvent[], Map<string, WorldEvent[]>>();
+
+/**
+ * The scrub-scoped slice of `events` at `currentTick`, with STABLE identity
+ * across identity-equal scrubs (EM-195).
+ *   • Not projecting → returns `events` unchanged (the live edge reads the
+ *     whole pool; identity passthrough, exactly as before).
+ *   • Projecting → `events.filter(e => e.tick <= currentTick)`, memoized per
+ *     (events ref, projecting, currentTick). Same key ⇒ same array reference.
+ * Pure: never mutates `events`; the slice is a fresh array the first time a key
+ * is seen and shared read-only thereafter (selectors only filter/map it).
+ */
+export function scopedSlice(
+  events: WorldEvent[],
+  projecting: boolean,
+  currentTick: number,
+): WorldEvent[] {
+  if (!projecting) return events;
+  let byKey = scopedSliceCache.get(events);
+  if (!byKey) {
+    byKey = new Map();
+    scopedSliceCache.set(events, byKey);
+  }
+  const key = `${projecting}:${currentTick}`;
+  const cached = byKey.get(key);
+  if (cached) return cached;
+  const sliced = events.filter((e) => e.tick <= currentTick);
+  byKey.set(key, sliced);
+  return sliced;
+}
+
+// Wave M (EM-195): insert-sorted WS merge for an out-of-order late event.
+//
+// The rolling history is NEWEST-FIRST (descending seq) and the incremental
+// scrub projectors (projections.ts) assume tick is non-decreasing in
+// seq-ASCENDING order. A late WS event that arrives out of order (a replay
+// delta, or a reconnect backfill whose seq lands BEFORE the current head) must
+// slot into its correct seq position rather than being blindly prepended —
+// prepending a low-seq event to a newest-first array corrupts the ordering the
+// scrubber rail and the projectors' monotone precondition both rely on.
+//
+// mergeNewestFirst dedupes incoming by seq (already-seen events are dropped)
+// and inserts the rest at the correct descending-seq position. Pure: returns a
+// fresh array only when something actually merges; otherwise returns `history`
+// unchanged (so a no-op merge keeps identity stable for the layout's memo).
+export function mergeNewestFirst(history: WorldEvent[], incoming: WorldEvent[]): WorldEvent[] {
+  if (incoming.length === 0) return history;
+  const seen = new Set<number>();
+  for (const e of history) seen.add(e.seq);
+  const fresh: WorldEvent[] = [];
+  for (const e of incoming) {
+    if (seen.has(e.seq)) continue;
+    seen.add(e.seq);
+    fresh.push(e);
+  }
+  if (fresh.length === 0) return history;
+  // Fast path: every fresh event is newer than the current head — a plain
+  // prepend keeps newest-first order (the common live-tail case).
+  const head = history.length > 0 ? history[0].seq : -Infinity;
+  fresh.sort((a, b) => b.seq - a.seq);
+  if (fresh[fresh.length - 1].seq > head) return [...fresh, ...history];
+  // Out-of-order: merge the two descending-seq runs into one.
+  const out: WorldEvent[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < fresh.length && j < history.length) {
+    if (fresh[i].seq >= history[j].seq) out.push(fresh[i++]);
+    else out.push(history[j++]);
+  }
+  while (i < fresh.length) out.push(fresh[i++]);
+  while (j < history.length) out.push(history[j++]);
+  return out;
+}
+
 /** Events at or before tick T (a scrub projection), oldest-first. */
 function upToTick(events: WorldEvent[], tick: number): WorldEvent[] {
   return ascending(events).filter((e) => e.tick <= tick);

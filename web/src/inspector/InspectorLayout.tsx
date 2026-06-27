@@ -52,6 +52,8 @@ import {
   activeRuleCount,
   dayAt,
   archiveAgents,
+  scopedSlice,
+  mergeNewestFirst,
 } from './selectors';
 import type { ReplaySnapshot } from './selectors';
 import {
@@ -233,18 +235,29 @@ export function InspectorLayout({
 
   // Full event pool: history merged with the replay delta, deduped by seq.
   // Unscoped — the scrubber's marker rail spans the whole run.
-  const mergedEvents = useMemo(() => {
-    const delta = replay?.events ?? [];
-    if (delta.length === 0) return effHistory;
-    const seen = new Set(effHistory.map((e) => e.seq));
-    const extra = delta.filter((e) => !seen.has(e.seq));
-    return extra.length > 0 ? [...extra, ...effHistory] : effHistory;
-  }, [effHistory, replay]);
+  //
+  // EM-195: the merge is INSERT-SORTED (mergeNewestFirst). A late replay-delta
+  // event whose seq lands BEFORE the current head (out-of-order arrival) must
+  // slot into its correct descending-seq position — a blind prepend would
+  // corrupt the newest-first order the scrubber rail reads and the projectors'
+  // seq-ascending monotone precondition relies on. A no-op merge returns the
+  // same `effHistory` reference, so identity stays stable for the memos below.
+  const mergedEvents = useMemo(
+    () => mergeNewestFirst(effHistory, replay?.events ?? []),
+    [effHistory, replay],
+  );
 
   // C8: while projecting the panels get a SCOPED slice (tick <= currentTick),
   // so the advancing live edge never grows into a replayed projection.
+  //
+  // EM-195: scopedSlice caches the filtered slice per (mergedEvents ref,
+  // projecting, currentTick), so two identity-equal scrub ticks return the
+  // SAME array reference — stable panelEvents identity. That stable ref then
+  // HITS the selectors' ascendingCache, so the non-projector panels stop
+  // re-sorting + re-folding the scoped slice every scrub tick. The slice is
+  // the exact same filter as before, so fold output is unchanged.
   const panelEvents = useMemo(
-    () => (projecting ? mergedEvents.filter((e) => e.tick <= currentTick) : mergedEvents),
+    () => scopedSlice(mergedEvents, projecting, currentTick),
     [mergedEvents, projecting, currentTick],
   );
 
