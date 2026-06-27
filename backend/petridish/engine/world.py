@@ -4,6 +4,7 @@ World state: pure data model.  No I/O, no asyncio.  Testable in isolation.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import re
@@ -105,6 +106,30 @@ def _coerce_contributions(value: Any) -> dict:
             continue
         if n > 0:
             out[kind] = n
+    return out
+
+
+def _json_safe_events(value: Any) -> list[dict]:
+    """EM-190 — coerce a list of parked OUTBOX event dicts into a JSON-stable,
+    byte-round-trippable list (for pending_spawn_events / pending_relationship_
+    events serialization). Each entry is a ready-to-emit event dict already
+    destined for the JSON event pipeline; we deep-copy it through a json round-trip
+    so the serialized form is canonical (and so a non-JSON-serializable or non-dict
+    entry is DROPPED rather than crashing to_snapshot/from_snapshot). Absent (None)
+    or non-list input → []. Pure/total: never raises, no clock, no RNG, fail-safe —
+    a tampered or pre-EM-190 snapshot restores a drained (empty) outbox."""
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            clone = json.loads(json.dumps(entry))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(clone, dict):
+            out.append(clone)
     return out
 
 
@@ -985,32 +1010,49 @@ class World:
         # governance}` event here; the runtime/api layer drains it after a vote and
         # emits it through the normal event pipeline. Keeps action_vote's signature
         # intact while letting the spawn happen world-side (single source of truth).
+        # Also carries EM-114 births, EM-211 memory events, and the name_town/
+        # demolish/promote_image vote effects. EM-190: this outbox IS now serialized
+        # snapshot-safe (only-when-non-empty, restored defensively) so a fork taken
+        # before the drain doesn't silently drop a parked spawn/birth; in the live
+        # tick path it drains at the turn head (_flush_spawn_events) BEFORE the
+        # per-turn snapshot, so a default world still round-trips byte-identically.
         self.pending_spawn_events: list[dict] = []
         # Wave I / EM-210 — transient image-fetch outbox (NOT snapshotted). Each
         # entry {"image_id","prompt","url"} parked by action_create_image at turn
         # time; the loop drains it each tick into bounded best-effort PNG fetches
-        # (semaphore, skip-under-load). Same transient class as pending_spawn_events
-        # — never serialized (the PNG is an external side-artifact; EM-190).
+        # (semaphore, skip-under-load). EM-190 audit: UNLIKE pending_spawn_events /
+        # pending_relationship_events (now serialized), this one stays deliberately
+        # off the replay surface — the PNG is an external side-artifact, not world
+        # state; the gallery record + image_posted event are already emitted
+        # synchronously, so a fork merely re-attempts (or skips) the PNG fetch.
         self.pending_image_fetches: list[dict] = []
         # Wave E / EM-113 — relationship_changed outbox. Reflex type transitions
         # (and accepted set_relationship type changes) park their ready-to-emit
         # event dicts here; the runtime drains them at the end of _apply_action
         # so they ride the SAME action `_multi` chain (same turn_id) as the
-        # action that mutated trust. NOT serialized: drained within the turn.
+        # action that mutated trust. EM-190: this outbox IS now serialized
+        # snapshot-safe (only-when-non-empty, restored defensively) so a fork
+        # taken before the drain doesn't silently drop a parked transition; in the
+        # live tick path it drains within the turn (BEFORE the per-turn snapshot),
+        # so a default world still round-trips byte-identically.
         self.pending_relationship_events: list[dict] = []
         # EM-240 — open recruit offers, keyed by TARGET agent id → {recruiter_id,
         # tick}. Posted by action_recruit; consumed on the target's
-        # accept_contract turn. NOT snapshotted (ephemeral, like whispers).
+        # accept_contract turn. EM-190: this two-turn pact outbox IS serialized
+        # snapshot-safe (only-when-non-empty, restored defensively) — like the
+        # trade/cooperation offers, an offer parked between recruit and
+        # accept_contract survives a fork/resume instead of being silently dropped;
+        # an offer-free world round-trips byte-identically.
         self.pending_crime_offers: dict[str, dict] = {}
         # EM-228 — open skill-learning requests, keyed by the would-be TEACHER's
         # agent id → {asker_id, skill, tick}. Posted by action_request_skill (the
         # explicit cooperation ASK); the target perceives "X wants to learn <skill>
         # from you" on its next prompt; cleared when that teacher teaches the asker
-        # (action_teach_skill drains a matching open request). UNLIKE
-        # pending_crime_offers, this outbox IS serialized snapshot-safe (EM-190 /
-        # the Wave-M pending-state rule): only when non-empty, restored defensively,
-        # so a request-free world round-trips byte-identically. One open request per
-        # teacher (a later ask overwrites the prior — the freshest invitation wins).
+        # (action_teach_skill drains a matching open request). Like the recruit /
+        # trade / cooperation pacts, this outbox IS serialized snapshot-safe (EM-190
+        # / the Wave-M pending-state rule): only when non-empty, restored
+        # defensively, so a request-free world round-trips byte-identically. One open
+        # request per teacher (a later ask overwrites the prior — freshest wins).
         self.pending_skill_requests: dict[str, dict] = {}
         # EM-230 — open trade offers, keyed by the OFFEREE's (target's) agent id →
         # {from_id, give, get, tick}, where give/get are normalized term dicts
@@ -6672,6 +6714,22 @@ class World:
                 }
                 for tid, o in self.pending_cooperation_offers.items()
             }
+        # EM-240 / EM-190 — open recruit offers {target_id: {recruiter_id, tick}}.
+        # Audit-surfaced (EM-190): recruit -> accept_contract is a TWO-turn pact —
+        # the target accepts on a LATER turn — so a parked offer can straddle a
+        # snapshot boundary exactly like a trade/cooperation offer, and was being
+        # silently dropped on fork/resume. Now serialized ONLY when non-empty (the
+        # cap_demotions / Wave-M outbox pattern), so an offer-free world — and every
+        # pre-EM-190 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore), restored defensively (missing/self recruiter dropped).
+        if self.pending_crime_offers:
+            snap["pending_crime_offers"] = {
+                str(tid): {
+                    "recruiter_id": str(o.get("recruiter_id", "")),
+                    "tick": int(o.get("tick", 0)),
+                }
+                for tid, o in self.pending_crime_offers.items()
+            }
         # EM-231 — ACTIVE cooperation links, emitted in sorted-key order as a LIST
         # of {a, b, tick} so the round-trip is byte-stable. Serialized ONLY when
         # non-empty, so a handshake-free world — and every pre-EM-231 snapshot —
@@ -6733,6 +6791,28 @@ class World:
                 }
                 for a in self.constitution
             ]
+        # EM-190 — the PRE-EXISTING transient outboxes. pending_spawn_events
+        # (W7/EM-062 governance spawn + EM-114 births + EM-211 memory events +
+        # the name_town/demolish/promote_image vote effects) and
+        # pending_relationship_events (EM-113 reflex relationship_changed
+        # transitions) park ready-to-emit event dicts between the action that
+        # mints them and the loop's drain. In the live tick path they drain
+        # BEFORE the per-turn snapshot (spawns via _flush_spawn_events at the
+        # turn head, relationship events via drain_relationship_events inside
+        # _apply_action), so a default snapshot omits BOTH keys and round-trips
+        # byte-identically — but a fork taken at ANY other point (an out-of-band
+        # broadcast/persist) would silently DROP a parked event without this.
+        # Serialized ONLY when non-empty (the cap_demotions / Wave-M outbox
+        # pattern), JSON-cloned for a byte-stable round-trip, restored defensively
+        # (non-dict/garbage entries dropped). pending_image_fetches (the PNG
+        # side-artifact outbox) and _boosts_this_round (a within-round budget)
+        # stay deliberately NOT serialized — both are documented transient
+        # side-state off the replay surface.
+        if self.pending_spawn_events:
+            snap["pending_spawn_events"] = _json_safe_events(self.pending_spawn_events)
+        if self.pending_relationship_events:
+            snap["pending_relationship_events"] = _json_safe_events(
+                self.pending_relationship_events)
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -7156,6 +7236,23 @@ class World:
                     "tick": _int(o.get("tick")),
                 }
         world.pending_cooperation_offers = restored_coop_offers
+        # EM-240 / EM-190 — restore open recruit offers (snapshot-safe). Defensive:
+        # keep only well-formed entries whose target AND recruiter both still exist
+        # and are distinct (a non-dict entry, a missing agent, or a self-offer →
+        # dropped). Absent key (pre-EM-190 snapshot) → {} (a drained pact list).
+        restored_crime_offers: dict[str, dict] = {}
+        for tid, o in (state.get("pending_crime_offers") or {}).items():
+            if not isinstance(o, dict):
+                continue
+            target_id = str(tid)
+            recruiter_id = str(o.get("recruiter_id", ""))
+            if (target_id in world.agents and recruiter_id in world.agents
+                    and recruiter_id != target_id):
+                restored_crime_offers[target_id] = {
+                    "recruiter_id": recruiter_id,
+                    "tick": _int(o.get("tick")),
+                }
+        world.pending_crime_offers = restored_crime_offers
         # EM-231 — restore ACTIVE cooperation links (snapshot-safe, EM-190).
         # Defensive: keep only links whose BOTH ends still exist and are distinct
         # (a non-dict entry, a missing agent, or a self-link → dropped). Re-keyed
@@ -7206,4 +7303,15 @@ class World:
                     "ratified_tick": _int(a.get("ratified_tick")),
                 })
         world.constitution = restored_constitution
+        # EM-190 — restore the pre-existing transient outboxes (snapshot-safe).
+        # Additive: a pre-EM-190 snapshot lacks both keys and restores []
+        # (the drained state), so a fork/replay of a world whose outboxes were
+        # already drained keeps the empty outboxes byte-identically. Defensive:
+        # _json_safe_events drops any non-dict / non-JSON entry, so a tampered or
+        # corrupted snapshot can never crash the restore — at worst a malformed
+        # parked event is silently dropped (fail-safe, like every other restore).
+        world.pending_spawn_events = _json_safe_events(
+            state.get("pending_spawn_events"))
+        world.pending_relationship_events = _json_safe_events(
+            state.get("pending_relationship_events"))
         return world
