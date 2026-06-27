@@ -929,6 +929,16 @@ class World:
         # tick}. Posted by action_recruit; consumed on the target's
         # accept_contract turn. NOT snapshotted (ephemeral, like whispers).
         self.pending_crime_offers: dict[str, dict] = {}
+        # EM-228 — open skill-learning requests, keyed by the would-be TEACHER's
+        # agent id → {asker_id, skill, tick}. Posted by action_request_skill (the
+        # explicit cooperation ASK); the target perceives "X wants to learn <skill>
+        # from you" on its next prompt; cleared when that teacher teaches the asker
+        # (action_teach_skill drains a matching open request). UNLIKE
+        # pending_crime_offers, this outbox IS serialized snapshot-safe (EM-190 /
+        # the Wave-M pending-state rule): only when non-empty, restored defensively,
+        # so a request-free world round-trips byte-identically. One open request per
+        # teacher (a later ask overwrites the prior — the freshest invitation wins).
+        self.pending_skill_requests: dict[str, dict] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -1906,6 +1916,138 @@ class World:
             who.rap_sheet.append({"tick": self.tick, "crime": "conspiracy",
                                   "victim_id": None, "witnessed": False})
         return True, "ok"
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-228 — teach_skill / request_skill: the explicit cooperation lever, atop
+    # the EM-227 skills system. teach is a co-located transfer (teacher outranks);
+    # request parks a pending ask the target perceives. Both reflex-tier (zero
+    # extra LLM calls — they ride the existing turn).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_teach_skill(
+        self, teacher: AgentState, student: AgentState, skill: str
+    ) -> tuple[bool, str, int]:
+        """EM-228 — a CO-LOCATED skill transfer. The teacher must hold `skill` at a
+        STRICTLY higher level than the student; the student gains a BOUNDED step:
+        +1 level toward the teacher, capped one below the teacher (a single lesson
+        never makes a student an equal). The lesson replenishes BOTH agents'
+        EM-229 knowledge need (curiosity sated by teaching AND by learning) and
+        raises MUTUAL trust (_update_trust both directions). A matching open
+        request to this teacher (action_request_skill) is consumed.
+
+        Returns (ok, reason, levels_gained). DETERMINISTIC: pure level arithmetic
+        + the EM-227 grant_skill_xp threshold path — no random, no clock (EM-155).
+        Config-absent (no skill library) is a no-op-shaped success: teaching can
+        still introduce/raise a level, it just gates nothing downstream."""
+        if not isinstance(skill, str) or not skill.strip():
+            return False, "no skill named", 0
+        skill = skill.strip()
+        if teacher.id == student.id:
+            return False, "you cannot teach yourself", 0
+        if teacher.location != student.location:
+            return False, "you are not co-located with the student", 0
+        t_level = teacher.skill_level(skill)
+        s_level = student.skill_level(skill)
+        if t_level <= 0:
+            return False, f"you do not have the {skill} skill to teach", 0
+        if t_level <= s_level:
+            # The teacher must outrank — an equal/lower teacher has nothing to give.
+            return False, (
+                f"you must hold {skill} at a higher level than the student "
+                f"(you {t_level}, them {s_level})"
+            ), 0
+        # Bounded gain: one step toward the teacher, but never reaching them. The
+        # student lands at min(s_level + 1, t_level - 1) — so a lvl-2 teacher can
+        # only lift a student to lvl 1, never to 2.
+        new_level = min(s_level + 1, t_level - 1)
+        gained = new_level - s_level
+        if gained > 0:
+            # Route the level through grant_skill_xp so the EM-229 knowledge
+            # replenishment + the per-agent xp ledger stay consistent. Grant exactly
+            # `gained` levels' worth of xp from the student's current baseline.
+            per_level = max(1, int(self._skills_param("xp_per_level", 30)))
+            self.grant_skill_xp(student, skill, per_level * gained)
+        else:  # pragma: no cover - defensive (s_level == t_level-1 already)
+            # No level to give (student already one below the teacher) but the
+            # lesson still happened — sate both curiosities below.
+            pass
+        # Teaching sates the TEACHER's knowledge need too (the EM-229 curiosity
+        # drive: passing on craft is its own learning). The student's was already
+        # topped up by grant_skill_xp; give the teacher a comparable bump.
+        teach_replenish = float(self._skills_param("xp_per_use", 10)) / 2.0
+        self.replenish_knowledge(teacher, teach_replenish)
+        if gained <= 0:
+            # grant_skill_xp didn't run, so the student got no top-up — give one.
+            self.replenish_knowledge(student, teach_replenish)
+        # Mutual trust: a lesson is a cooperative bond (both directions warmed).
+        bump = int(self._skills_param("teach_trust", 4))
+        self._update_trust(teacher, student, bump)
+        self._update_trust(student, teacher, bump)
+        # Consume an open request addressed to this teacher (the ask is answered).
+        self.pending_skill_requests.pop(teacher.id, None)
+        return True, "ok", gained
+
+    def teach_skill_event(
+        self, teacher: AgentState, student: AgentState, skill: str
+    ) -> dict:
+        """EM-228 — the dispatch-facing wrapper: run action_teach_skill and return a
+        ready-to-emit event dict (a `skill_taught` event on success, a non-emitting
+        failure dict otherwise). Mirrors the action_* event shape the runtime spreads
+        base metadata onto."""
+        ok, reason, gained = self.action_teach_skill(teacher, student, skill)
+        if ok:
+            new_level = student.skill_level(skill)
+            return {
+                "kind": "skill_taught",
+                "actor_id": teacher.id,
+                "target_id": student.id,
+                "text": (
+                    f"{teacher.name} teaches {student.name} the ways of {skill} "
+                    f"(now level {new_level})."
+                ),
+                "payload": {
+                    "action": "teach_skill",
+                    "skill": skill,
+                    "new_level": new_level,
+                    "levels_gained": gained,
+                },
+            }
+        return {
+            "kind": "teach_failed",
+            "actor_id": teacher.id,
+            "target_id": student.id,
+            "text": f"{teacher.name} could not teach {student.name}: {reason}",
+            "payload": {"action": "teach_skill", "error": reason},
+        }
+
+    def action_request_skill(
+        self, asker: AgentState, target: AgentState, skill: str
+    ) -> dict:
+        """EM-228 — the ASK (R4 pending-request half). Parks an open learning
+        request keyed by the would-be TEACHER (`target`) so the target perceives
+        "X wants to learn <skill> from you" on its next prompt. THE explicit
+        cooperation lever. Co-located only; returns a ready-to-emit event dict.
+        The pending dict is serialized snapshot-safe (EM-190)."""
+        if not isinstance(skill, str) or not skill.strip():
+            return self._fail_event(asker.id, "request_skill", "no skill named",
+                                    f"{asker.name} asked to learn nothing.")
+        skill = skill.strip()
+        if asker.id == target.id:
+            return self._fail_event(asker.id, "request_skill", "self",
+                                    f"{asker.name} cannot ask themselves.")
+        if asker.location != target.location:
+            return self._fail_event(asker.id, "request_skill", "not co-located",
+                                    f"{asker.name} found no mentor here to ask.")
+        self.pending_skill_requests[target.id] = {
+            "asker_id": asker.id, "skill": skill, "tick": self.tick,
+        }
+        return {
+            "kind": "skill_requested",
+            "actor_id": asker.id,
+            "target_id": target.id,
+            "text": f"{asker.name} asks {target.name} to teach them {skill}.",
+            "payload": {"action": "request_skill", "skill": skill},
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # EM-240 (Task 10) — enforcer justice verbs. investigate confirms a suspect's
@@ -5369,6 +5511,21 @@ class World:
                  "until_tick": int(m.get("until_tick", 0))}
                 for m in self.active_miracles
             ]
+        # EM-228 — open skill-learning requests {teacher_id: {asker_id, skill,
+        # tick}}. Serialized ONLY when non-empty (the cap_demotions pattern), so a
+        # request-free world — and every pre-EM-228 snapshot — keeps the exact
+        # prior key set (absent ⇒ {} on restore). UNLIKE pending_crime_offers, this
+        # Wave-M pending outbox IS snapshot-safe (EM-190): a request parked between
+        # ask and answer survives a fork/resume instead of being silently dropped.
+        if self.pending_skill_requests:
+            snap["pending_skill_requests"] = {
+                str(tid): {
+                    "asker_id": str(r.get("asker_id", "")),
+                    "skill": str(r.get("skill", "")),
+                    "tick": int(r.get("tick", 0)),
+                }
+                for tid, r in self.pending_skill_requests.items()
+            }
         # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
         # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
         # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
@@ -5739,4 +5896,22 @@ class World:
             for aid, lines in (state.get("pending_whispers") or {}).items()
             if str(aid) in world.agents and lines
         }
+        # EM-228 — restore open skill-learning requests (snapshot-safe, EM-190).
+        # Defensive: keep only well-formed entries whose teacher AND asker both
+        # still exist and that name a non-empty skill (unknown/garbage → dropped).
+        restored_requests: dict[str, dict] = {}
+        for tid, r in (state.get("pending_skill_requests") or {}).items():
+            if not isinstance(r, dict):
+                continue
+            teacher_id = str(tid)
+            asker_id = str(r.get("asker_id", ""))
+            skill = str(r.get("skill", "")).strip()
+            if (teacher_id in world.agents and asker_id in world.agents
+                    and skill and asker_id != teacher_id):
+                restored_requests[teacher_id] = {
+                    "asker_id": asker_id,
+                    "skill": skill,
+                    "tick": _int(r.get("tick")),
+                }
+        world.pending_skill_requests = restored_requests
         return world

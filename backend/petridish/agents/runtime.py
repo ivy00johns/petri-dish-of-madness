@@ -134,6 +134,10 @@ ACTION_SCHEMA = {
                 # Wave H4 / EM-209 — pets & bonds: adopt a co-located unowned
                 # animal, feed a co-located one (owner sustains a declining pet).
                 "adopt", "feed_pet",
+                # EM-228 — cooperation lever: teach a co-located lower-skilled
+                # agent a skill you outrank them in; ASK a more-skilled co-located
+                # agent to teach you one (parks a pending request they perceive).
+                "teach_skill", "request_skill",
                 # Wave K / EM-218–220 — the builders'-city reflex tools: place /
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
@@ -185,6 +189,8 @@ ACTION_SCHEMA = {
                             # Wave I / EM-210+211 — The Atelier reflex tools.
                             "create_image", "post_image",
                             "adopt", "feed_pet",
+                            # EM-228 — teach / request skills (cooperation lever).
+                            "teach_skill", "request_skill",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
@@ -366,6 +372,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # only when a co-located eligible animal exists (see _assemble_context).
     "adopt":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "feed_pet":         {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-228 — cooperation lever reflex tools. No location_gate / agreement_gate:
+    # the CO-LOCATION gate (teacher must outrank; both must be present) lives in
+    # _validate_world (a relationship rule, not a place rule), exactly like the
+    # EM-240 recruit verb. Offered only when a plausible co-located target exists
+    # (see _assemble_context). Zero extra LLM calls — they ride the existing turn.
+    "teach_skill":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "request_skill":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
     # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
     # co-location gate is prop-specific and enforced in _validate_world). demolish
@@ -1006,7 +1019,11 @@ _TARGETED_ACTIONS = frozenset(
      # EM-240 (Task 10) — enforcer justice verbs resolve a co-located agent name
      # in args["target"] to a suspect id (investigate/accuse/detain), like steal.
      "heist", "extort", "bribe", "recruit",
-     "investigate", "accuse", "detain"}
+     "investigate", "accuse", "detain",
+     # EM-228 — teach_skill / request_skill both target a co-located agent name in
+     # args["target"] (resolved to an id before dispatch, like steal). The `skill`
+     # arg is a free string and needs no resolution.
+     "teach_skill", "request_skill"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1385,6 +1402,18 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # unless an open pact is addressed to this agent.
         if agent.id not in getattr(world, "pending_crime_offers", {}):
             return "no criminal pact has been offered to you"
+
+    elif action in ("teach_skill", "request_skill"):
+        # EM-228 — both verbs target a co-located agent (resolved like steal). The
+        # world action re-checks co-location + self-target + (for teach) the
+        # outrank rule, so this front gate only ensures a reachable target + a
+        # named skill; a clear rejection here lets the model self-correct.
+        target_error = _validate_target(args, agent, world, action)
+        if target_error:
+            return target_error
+        skill = args.get("skill")
+        if not isinstance(skill, str) or not skill.strip():
+            return f"{action} requires a skill name (args.skill)"
 
     elif action in ("investigate", "accuse", "detain"):
         # EM-240 (Task 10) — justice verbs are reserved for enforcers (a role
@@ -1881,6 +1910,36 @@ def _assemble_context(
         valid_actions.append(f"set_relationship (target, type) - ally|rival|neutral|friend|enemy")
         if _gate_ok("steal"):
             valid_actions.append(f"steal (target) - steal from: {target_names}")
+        # ── EM-228 — cooperation lever. teach_skill is offered only when this agent
+        # holds a skill at a STRICTLY higher level than some co-located peer (a real
+        # transfer is possible); request_skill only when a co-located peer outranks
+        # this agent in some skill (a mentor exists). Both stay silent for a
+        # skill-less lone-class agent ⇒ the em161 golden is unaffected (the default
+        # WorldParams library is empty AND default agents are skill-less, so neither
+        # branch fires). getattr keeps callers safe if the seam is ever absent.
+        _my_skills = getattr(agent, "skills", None) or {}
+        if _my_skills:
+            teachable = [
+                a for a in co_located
+                if any(agent.skill_level(s) > a.skill_level(s) for s in _my_skills)
+            ]
+            if teachable:
+                valid_actions.append(
+                    "teach_skill (target, skill) - lift a less-skilled peer one "
+                    "level in a skill you outrank them in: "
+                    + ", ".join(a.name for a in teachable))
+        # A mentor is anyone here who holds SOME skill above this agent's level.
+        mentors = [
+            a for a in co_located
+            if (getattr(a, "skills", None) or {})
+            and any(a.skill_level(s) > agent.skill_level(s)
+                    for s in (getattr(a, "skills", None) or {}))
+        ]
+        if mentors:
+            valid_actions.append(
+                "request_skill (target, skill) - ask a more-skilled peer to teach "
+                "you (parks a request they will see): "
+                + ", ".join(a.name for a in mentors))
     # EM-240 — crime menu, only for the inclined (validator still allows all, so a
     # lawful agent CAN emit an off-menu crime; the menu just doesn't invite it).
     if getattr(agent, "disposition", "lawful") in ("opportunist", "criminal"):
@@ -2404,6 +2463,31 @@ def _assemble_context(
             )
             skills_block = "\n=== ☆ YOUR CRAFT & PROFESSION ===\n" + "\n".join(lines) + "\n"
 
+    # ── EM-228 — perceived learning request. When a co-located agent has asked
+    # THIS agent to teach them a skill (action_request_skill parks it keyed by the
+    # would-be teacher), surface "X wants to learn <skill> from you — use
+    # teach_skill". EMPTY (⇒ byte-identical prompt) when no request is addressed to
+    # this agent — so the em161 lawful-citizen golden is unaffected (a default
+    # world has no parked requests). Independent of whether this agent holds
+    # skills, so the ask always reaches its mark. (getattr keeps callers safe.)
+    request_block = ""
+    _requests = getattr(world, "pending_skill_requests", None)
+    _req = _requests.get(agent.id) if isinstance(_requests, dict) else None
+    if _req:
+        _asker = world.agents.get(_req.get("asker_id"))
+        _req_skill = str(_req.get("skill", "")).strip()
+        # Only surface while the asker is still co-located (a teach needs them here)
+        # and this agent actually outranks them — otherwise the ask is moot.
+        if (_asker is not None and _asker.alive and _req_skill
+                and _asker.location == agent.location
+                and agent.skill_level(_req_skill) > _asker.skill_level(_req_skill)):
+            request_block = (
+                f"\n=== ✎ A REQUEST TO LEARN ===\n"
+                f"  {_asker.name} wants to learn {_req_skill} from you. "
+                f"Use teach_skill (target {_asker.name}, skill {_req_skill}) to "
+                f"pass on your craft — or ignore it.\n"
+            )
+
     # ── EM-234 — universalization prompting (GovSim scaffold). The cheap
     # cooperation lift: before an agent acts on a SHARED resource it is nudged to
     # universalize the move — "what if EVERY agent did this?". ALWAYS-ON for every
@@ -2608,7 +2692,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{skills_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{skills_block}{request_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -4726,6 +4810,30 @@ class AgentRuntime:
             return {**base, "kind": "parse_failure",
                     "text": f"{agent.name} tried to accept a contract but: {reason}",
                     "payload": {"error": reason}}
+
+        # EM-228 — cooperation lever. teach_skill resolves a co-located target and
+        # returns a ready event dict (skill_taught on success, teach_failed
+        # otherwise — both via teach_skill_event); request_skill parks a pending
+        # request and returns a ready event dict (skill_requested / a fail event).
+        elif action == "teach_skill":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to teach but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.teach_skill_event(agent, target, args.get("skill", "")),
+                base, thought)
+
+        elif action == "request_skill":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to ask but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_request_skill(agent, target, args.get("skill", "")),
+                base, thought)
 
         # EM-240 — enforcer justice verbs (Task 10). investigate returns a
         # (ok, reason, count) tuple like steal; accuse returns a ready event dict
