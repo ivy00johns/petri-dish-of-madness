@@ -36,6 +36,7 @@ import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
 import { InspectorLayout } from './inspector/InspectorLayout';
 import { ChronicleView } from './components/chronicle/ChronicleView';
+import { DiaryView } from './components/diary/DiaryView';
 
 type WorldView = 'village' | 'map';
 type Sim = SimulationState & SimulationControls;
@@ -119,6 +120,14 @@ export default function App() {
           <Route
             path="/chronicle"
             element={<ChronicleView world={sim.world} history={sim.history} />}
+          />
+          {/* EM-215 — the Diary: a per-agent inner-life reading room (the
+              individual cousin to the Chronicle). Like /inspector + /chronicle
+              it does NOT mount LiveLayout/CozyWorld, so the WebGL context is
+              released on this route. */}
+          <Route
+            path="/diary"
+            element={<DiaryView world={sim.world} history={sim.history} />}
           />
           {/*
             "/inspector" renders the 2D annex. LiveLayout (and thus CozyWorld's

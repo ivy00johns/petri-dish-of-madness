@@ -26,10 +26,12 @@ interface HeaderProps {
   mockMode: boolean;
 }
 
-// EM-201 — the three top-level views.
+// EM-201 — the top-level views. EM-215 adds the Diary: the per-agent inner-life
+// reading room (the individual cousin to the town Chronicle).
 const NAV_TABS = [
   { to: '/', label: 'Live' },
   { to: '/chronicle', label: 'Chronicle' },
+  { to: '/diary', label: 'Diary' },
   { to: '/inspector', label: 'Inspector' },
 ] as const;
 
