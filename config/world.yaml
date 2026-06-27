@@ -110,6 +110,41 @@ world:
     feud_trust: -40              # rival|enemy → feud at trust <= this
     partner_trust_threshold: 40  # partner declarations / are_partners gate
 
+  # EM-240 — Crime & Justice tunables. Absent ⇒ engine defaults (pre-EM-240
+  # behavior, byte-identical). Notoriety accrues from THIRD-PARTY-witnessed
+  # crime and decays while lying low; crossing wanted_threshold flags an agent
+  # `wanted`. All values are first-pass defaults to tune against a live run, and
+  # MUST stay in sync with the CrimeParams mirror in
+  # backend/petridish/config/loader.py.
+  crime:
+    wanted_threshold: 40           # notoriety → `wanted`
+    detain_threshold: 60           # on-the-spot detain without a trial
+    notoriety_decay: 2             # per round, while not jailed
+    notoriety_per_extra_witness: 3 # added per witness beyond the first
+    rap_sheet_cap: 10              # keep only the most recent N entries
+    heist_max: 30                  # vs steal_max (8)
+    heist_min_target_credits: 15   # a heist needs a worthwhile mark
+    extort_max: 15
+    vandalize_blackout_ticks: 8    # building blackout from vandalism
+    vandalize_notoriety: 10
+    heist_notoriety: 18
+    extort_notoriety: 12
+    steal_notoriety: 6             # folded into existing steal
+    arson_notoriety: 22            # folded into existing arson
+    bribe_efficacy: 0.75           # fraction of payer notoriety wiped
+    bribe_notoriety: 14            # enforcer's notoriety gain if bribe witnessed
+    launder_cut: 0.3               # fraction of laundered credits lost
+    launder_notoriety_reduction: 8
+    investigate_notoriety: 10      # added per unwitnessed crime confirmed
+    conspiracy_notoriety: 6        # each conspirator on a sealed pact
+    conspiracy_trust_seed: 30      # mutual ally trust seeded by accept_contract
+    detain_sentence: 6             # ticks jailed by on-the-spot detain
+    trial_sentence: 20             # ticks jailed by conviction
+    trial_fine: 25                 # credits confiscated on conviction
+    acquittal_notoriety_relief: 15 # notoriety cleared on acquittal
+    accuser_acquittal_penalty: 8   # accuser trust hit from onlookers
+    released_notoriety_relief: 10  # notoriety cleared on release
+
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
   # the B1 consent mechanic) co-located at a home-kind place for a birth.
@@ -432,6 +467,9 @@ places:
   # civic — the records corner, north-west
   - { id: townhall,        name: City Hall,           x: 106, y: 106, kind: governance, district: civic,       description: "Propose and vote on rules." }
   - { id: archive,         name: The Records Office,  x: 303, y: 106, kind: governance, district: civic,       description: "Filing rows of city ledgers, old permits, and older grievances." }
+  # EM-240 — the town jail (kind: civic). Enforcers march detained / convicted
+  # lawbreakers here; a jailed agent may only talk and think until released.
+  - { id: jail,            name: The Lockup,          x: 106, y: 303, kind: civic,      district: civic,       description: "A spare stone cell where the town holds its lawbreakers." }
   # residential — lamplit blocks to the south-west
   - { id: home,            name: Hearth House,        x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
   - { id: rosehip_cottage, name: Rosehip Walk-up,     x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }

@@ -184,6 +184,16 @@ class AgentState:
     # worlds — and every pre-EM-223 snapshot — keep the exact prior dict shape
     # (the byte-identical guarantee). Canonical shape via normalize_plan().
     plan: dict | None = None
+    # EM-240 — Crime & Justice persona schema. ADDITIVE with non-None defaults;
+    # serialized ONLY when non-default (to_dict below), so a lawful citizen — and
+    # every pre-EM-240 snapshot — keeps the exact prior dict shape.
+    disposition: str = "lawful"   # lawful | opportunist | criminal — prompt bias only
+    role: str = "citizen"         # citizen | enforcer — enforcer unlocks justice verbs
+    # EM-240 — crime status substrate. ALL additive, serialized only when set.
+    notoriety: int = 0                       # 0..100; witnessed-crime heat, decays
+    crime_status: str | None = None          # None|wanted|detained|jailed|exiled
+    crime_status_until_tick: int = 0         # release tick for detained/jailed
+    rap_sheet: list[dict] = field(default_factory=list)  # capped crime record
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -230,6 +240,20 @@ class AgentState:
                 "made_tick": int(self.plan.get("made_tick", 0)),
                 "stale": bool(self.plan.get("stale", False)),
             }
+        # EM-240 — only when non-default, so lawful citizens keep the pre-EM-240 shape.
+        if self.disposition != "lawful":
+            d["disposition"] = self.disposition
+        if self.role != "citizen":
+            d["role"] = self.role
+        # EM-240 — crime status scalars: serialized only when non-default, so a
+        # clean agent (and every pre-EM-240 snapshot) keeps the exact prior shape.
+        if self.notoriety:
+            d["notoriety"] = self.notoriety
+        if self.crime_status is not None:
+            d["crime_status"] = self.crime_status
+            d["crime_status_until_tick"] = self.crime_status_until_tick
+        if self.rap_sheet:
+            d["rap_sheet"] = [dict(e) for e in self.rap_sheet]
         return d
 
 
@@ -785,6 +809,10 @@ class World:
         # so they ride the SAME action `_multi` chain (same turn_id) as the
         # action that mutated trust. NOT serialized: drained within the turn.
         self.pending_relationship_events: list[dict] = []
+        # EM-240 — open recruit offers, keyed by TARGET agent id → {recruiter_id,
+        # tick}. Posted by action_recruit; consumed on the target's
+        # accept_contract turn. NOT snapshotted (ephemeral, like whispers).
+        self.pending_crime_offers: dict[str, dict] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -1458,7 +1486,267 @@ class World:
             else:
                 rel.type = "rival"
             rel.since_tick = self.tick  # EM-113 — type changed here
+        # EM-240 — witnessed-crime notoriety bookkeeping (folded into existing steal).
+        self._register_crime(agent, "steal", target.id,
+                             int(self._crime_param("steal_notoriety", 6)))
         return True, "ok", amount
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 — offensive crime verbs (Task 6): heist, extort, vandalize. heist and
+    # extort mirror steal's co-location + trust-crater + rivalry-snap shape with a
+    # bigger score and heavier notoriety; vandalize damages a place's power (a
+    # short blackout) short of arson's structural destruction.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _snap_to_rival(self, target: AgentState, agent: AgentState) -> None:
+        """EM-240 — the victim's view of the perpetrator snaps to at least rival
+        (enemy when trust has already cratered). Mirrors the steal escalation:
+        an existing rival/enemy/feud is the deeper state and is never downgraded."""
+        rel = target.relationships.get(agent.id)
+        if rel is None or rel.type not in ("rival", "enemy", "feud"):
+            if rel is None:
+                rel = RelationshipState()
+                target.relationships[agent.id] = rel
+            rel.type = "enemy" if rel.trust < -20 else "rival"
+            rel.since_tick = self.tick  # EM-113 — type changed here
+
+    def action_heist(self, agent: AgentState, target: AgentState) -> tuple[bool, str, int]:
+        """EM-240 — a big-score theft: up to heist_max (≫ steal_max), gated on a
+        worthwhile mark. Same co-location + ban_stealing gate as steal; heavier
+        notoriety. Victim trust craters like steal."""
+        if self.has_active_rule("ban_stealing"):
+            return False, "ban_stealing rule is active", 0
+        if agent.location != target.location:
+            return False, "target not co-located", 0
+        if target.credits < int(self._crime_param("heist_min_target_credits", 15)):
+            return False, "target not worth the risk", 0
+        amount = min(target.credits, int(self._crime_param("heist_max", 30)))
+        target.credits -= amount
+        agent.credits += amount
+        self._update_trust(agent, target, -20)
+        self._update_trust(target, agent, -15)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "heist", target.id,
+                             int(self._crime_param("heist_notoriety", 18)))
+        return True, "ok", amount
+
+    def action_extort(self, agent: AgentState, target: AgentState) -> tuple[bool, str, int]:
+        """EM-240 — threaten a co-located agent for credits (up to extort_max).
+        Always snaps the victim's view to at least rival."""
+        if agent.location != target.location:
+            return False, "target not co-located", 0
+        amount = min(target.credits, int(self._crime_param("extort_max", 15)))
+        if amount <= 0:
+            return False, "target has nothing to give", 0
+        target.credits -= amount
+        agent.credits += amount
+        self._update_trust(target, agent, -18)
+        self._snap_to_rival(target, agent)
+        self._register_crime(agent, "extort", target.id,
+                             int(self._crime_param("extort_notoriety", 12)))
+        return True, "ok", amount
+
+    def action_vandalize(self, agent: AgentState, building_id: str) -> dict:
+        """EM-240 — damage a building short of arson: a short blackout at its place,
+        no health destruction. Witnesses lose trust (like arson)."""
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(agent.id, "vandalize", "building_not_found",
+                                    f"{agent.name} tried to vandalize an unknown structure.")
+        place = self.places.get(building.location)
+        ticks = int(self._crime_param("vandalize_blackout_ticks", 8))
+        if place is not None:
+            place.blackout_until_tick = max(place.blackout_until_tick, self.tick + ticks)
+        for witness in self.agents_at(building.location):
+            if witness.id != agent.id:
+                self._update_trust(witness, agent, -10)
+        self._register_crime(agent, "vandalize", None,
+                             int(self._crime_param("vandalize_notoriety", 10)))
+        return {
+            "kind": "crime_committed",
+            "actor_id": agent.id,
+            "target_id": building.id,
+            "text": f"{agent.name} vandalizes {building.name}!",
+            "payload": {"action": "vandalize", "building_id": building.id,
+                        "blackout_ticks": ticks},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 — economy & corruption verbs (Task 7): launder, bribe. launder spends
+    # a cut of credits to cool the actor's own notoriety (only when dirty). bribe
+    # pays a co-located enforcer to wipe most of the payer's notoriety — but a
+    # third-party witness dirties the ENFORCER (corruption is catchable). Both
+    # clear a stale `wanted` once notoriety falls back below threshold.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_launder(self, agent: AgentState, amount: int) -> tuple[bool, str, int]:
+        """EM-240 — spend a cut of credits to cool notoriety. Only when dirty."""
+        if agent.notoriety <= 0:
+            return False, "nothing to launder", 0
+        amount = max(0, min(agent.credits, int(amount or 0)))
+        if amount <= 0:
+            return False, "no credits to launder", 0
+        fee = int(amount * float(self._crime_param("launder_cut", 0.3)))
+        agent.credits -= fee
+        agent.notoriety = max(0, agent.notoriety -
+                              int(self._crime_param("launder_notoriety_reduction", 8)))
+        self._clear_wanted_if_cool(agent)
+        return True, "ok", fee
+
+    def action_bribe(self, agent: AgentState, enforcer: AgentState,
+                     amount: int) -> tuple[bool, str, int]:
+        """EM-240 — pay a co-located enforcer to wipe notoriety. If a third party
+        witnesses it, the ENFORCER gains notoriety (corruption is catchable)."""
+        if enforcer.role != "enforcer":
+            return False, "can only bribe an enforcer", 0
+        if agent.location != enforcer.location:
+            return False, "enforcer not co-located", 0
+        amount = max(0, min(agent.credits, int(amount or 0)))
+        if amount <= 0:
+            return False, "no credits to offer", 0
+        agent.credits -= amount
+        enforcer.credits += amount
+        eff = float(self._crime_param("bribe_efficacy", 0.75))
+        agent.notoriety = max(0, int(agent.notoriety * (1.0 - eff)))
+        self._clear_wanted_if_cool(agent)
+        witnesses = [a for a in self.agents_at(agent.location)
+                     if a.id not in (agent.id, enforcer.id)]
+        if witnesses:
+            self._register_crime(enforcer, "bribery", agent.id,
+                                 int(self._crime_param("bribe_notoriety", 14)))
+        return True, "ok", amount
+
+    def _clear_wanted_if_cool(self, agent: AgentState) -> None:
+        """Drop a `wanted` flag once notoriety falls back below threshold."""
+        if agent.crime_status == "wanted" and \
+                agent.notoriety < int(self._crime_param("wanted_threshold", 40)):
+            agent.crime_status = None
+
+    def action_recruit(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-240 — propose a criminal pact to a co-located agent. Posts a pending
+        offer the target may accept on its NEXT turn. No crime committed here."""
+        if agent.location != target.location:
+            return self._fail_event(agent.id, "recruit", "not co-located",
+                                    f"{agent.name} found no one here to recruit.")
+        if agent.id == target.id:
+            return self._fail_event(agent.id, "recruit", "self",
+                                    f"{agent.name} cannot recruit themselves.")
+        self.pending_crime_offers[target.id] = {
+            "recruiter_id": agent.id, "tick": self.tick,
+        }
+        return {
+            "kind": "recruited",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"{agent.name} quietly pitches {target.name} on a scheme.",
+            "payload": {"action": "recruit"},
+        }
+
+    def action_accept_contract(self, agent: AgentState) -> tuple[bool, str]:
+        """EM-240 — accept the open pact addressed to this agent: seal a warm
+        mutual bond (the ring) and mark both with a conspiracy notoriety bump.
+        The mutual ally edge (seeded to conspiracy_trust_seed) lets
+        recompute_factions cluster the conspirators — ally is NOT trust-gated,
+        partner is, which is why fresh conspirators use ally."""
+        offer = self.pending_crime_offers.pop(agent.id, None)
+        if not offer:
+            return False, "no open offer to accept"
+        recruiter = self.agents.get(offer.get("recruiter_id"))
+        if recruiter is None or not recruiter.alive:
+            return False, "the recruiter is gone"
+        seed = int(self._crime_param("conspiracy_trust_seed", 30))
+        for a, b in ((agent, recruiter), (recruiter, agent)):
+            rel = a.relationships.get(b.id)
+            if rel is None:
+                rel = RelationshipState()
+                a.relationships[b.id] = rel
+            rel.trust = max(rel.trust, seed)
+            if rel.type in ("neutral",):
+                rel.type = "ally"
+                rel.since_tick = self.tick
+        bump = int(self._crime_param("conspiracy_notoriety", 6))
+        for who in (agent, recruiter):
+            who.notoriety = max(0, min(100, who.notoriety + bump))
+            who.rap_sheet.append({"tick": self.tick, "crime": "conspiracy",
+                                  "victim_id": None, "witnessed": False})
+        return True, "ok"
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 (Task 10) — enforcer justice verbs. investigate confirms a suspect's
+    # unwitnessed crimes into notoriety (needs a third party to question); accuse
+    # is a public naming (narrative + a feed event); detain jails a wanted /
+    # high-notoriety suspect on the spot for detain_sentence ticks. The jail is a
+    # place with id 'jail' (else the first civic place, else nowhere).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _jail_place_id(self) -> str | None:
+        """EM-240 — the town jail: a place with id 'jail', else the first civic
+        place, else None (a town with no jail simply cannot detain)."""
+        if "jail" in self.places:
+            return "jail"
+        for p in self.places.values():
+            if p.kind == "civic":
+                return p.id
+        return None
+
+    def action_investigate(self, agent: AgentState, suspect: AgentState) -> tuple[bool, str, int]:
+        """EM-240 — an enforcer questions co-located witnesses to confirm a
+        suspect's unwitnessed crimes into notoriety. Needs a third party present."""
+        if agent.location != suspect.location:
+            return False, "suspect not co-located", 0
+        witnesses = [a for a in self.agents_at(agent.location)
+                     if a.id not in (agent.id, suspect.id)]
+        if not witnesses:
+            return False, "no witnesses here to question", 0
+        base = int(self._crime_param("investigate_notoriety", 10))
+        confirmed = 0
+        for entry in suspect.rap_sheet:
+            if not entry.get("witnessed"):
+                entry["witnessed"] = True
+                suspect.notoriety = max(0, min(100, suspect.notoriety + base))
+                confirmed += 1
+        if confirmed and suspect.crime_status is None and \
+                suspect.notoriety >= int(self._crime_param("wanted_threshold", 40)):
+            suspect.crime_status = "wanted"
+        return True, "ok", confirmed
+
+    def action_accuse(self, agent: AgentState, suspect: AgentState) -> dict:
+        """EM-240 — an enforcer publicly names a suspect. Narrative + a feed
+        event; the actual penalty comes via detain or a trial vote."""
+        if agent.location != suspect.location:
+            return self._fail_event(agent.id, "accuse", "not co-located",
+                                    f"{agent.name} found no one here to accuse.")
+        return {
+            "kind": "accusation",
+            "actor_id": agent.id,
+            "target_id": suspect.id,
+            "text": f"{agent.name} accuses {suspect.name} of crimes against the town.",
+            "payload": {"notoriety": suspect.notoriety},
+        }
+
+    def action_detain(self, agent: AgentState, suspect: AgentState):
+        """EM-240 — an enforcer jails a wanted / high-notoriety suspect on the
+        spot for detain_sentence ticks. (The spec's 'red-handed' fast lane is
+        subsumed: a witnessed crime registers notoriety, which is the grounds.)
+        Returns a dict on success, or a (False, reason, None) tuple on rejection."""
+        if agent.location != suspect.location:
+            return False, "suspect not co-located", None
+        threshold = int(self._crime_param("detain_threshold", 60))
+        if not (suspect.crime_status == "wanted" or suspect.notoriety >= threshold):
+            return False, "insufficient grounds to detain", None
+        jail = self._jail_place_id()
+        if jail is None:
+            return False, "this town has no jail", None
+        suspect.location = jail
+        suspect.crime_status = "detained"
+        suspect.crime_status_until_tick = self.tick + int(self._crime_param("detain_sentence", 6))
+        return {
+            "kind": "detained",
+            "actor_id": agent.id,
+            "target_id": suspect.id,
+            "text": f"{agent.name} detains {suspect.name} and marches them to jail.",
+            "payload": {"until_tick": suspect.crime_status_until_tick},
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # Wave H4 / EM-209 — pets & bonds. owner_id is the ONLY bond: adopting a
@@ -1955,8 +2243,14 @@ class World:
         # Wave I / EM-212: promote_image — the town VOTES a gallery image onto the
         # plaza banner. Carries the image_id on the payload (like demolish's target);
         # scoped per-image so two distinct images may have open votes at once.
+        # EM-240 (Task 11) — trial is a governance proposal effect: an enforcer
+        # escalates a suspect to a town-hall vote. It carries the defendant id on
+        # the payload (like demolish's target) and reuses the existing vote
+        # machinery (NO new tally code) — a passing vote convicts, a rejected one
+        # acquits (see _on_rule_activated / action_vote).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town", "demolish", "promote_image"}
+                         "ban_arson", "ban_extortion", "ban_vandalism",
+                         "name_town", "demolish", "promote_image", "trial"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -2000,6 +2294,30 @@ class World:
             if image_id == self.plaza_banner_ref:
                 return False, "that image already hangs over the plaza", None
             payload = {"image_id": image_id}
+        # EM-240 (Task 11) — trial carries the DEFENDANT id on the payload (like
+        # demolish's target). A trial of an unknown/dead defendant, or one already
+        # detained/jailed, is meaningless — reject it. The per-defendant duplicate
+        # guard lives in the OPEN-proposal loop below (mirrors demolish/promote_image).
+        if effect == "trial":
+            target = str(target or "").strip()
+            # Task 12a — agents see NAMES, not ids. Resolve the defendant by id
+            # FIRST; if that misses, resolve by display name (case-insensitive,
+            # must be ALIVE, prefer the LOWEST id on ties) so an enforcer who
+            # names the defendant can actually start a trial. The payload always
+            # carries the RESOLVED id (downstream conviction/acquittal look it up).
+            defendant = self.agents.get(target)
+            if defendant is None and target:
+                wanted = target.lower()
+                defendant = next(
+                    (a for a in sorted(self.living_agents(), key=lambda x: x.id)
+                     if str(a.name).strip().lower() == wanted),
+                    None,
+                )
+            if defendant is None or not defendant.alive:
+                return False, f"trial requires a living defendant (got {target!r})", None
+            if defendant.crime_status in ("detained", "jailed"):
+                return False, f"{defendant.name} is already in custody", None
+            payload = {"defendant_id": defendant.id, "charges": str(text)[:200]}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -2017,6 +2335,13 @@ class World:
                 if (rule.payload or {}).get("image_id") == payload.get("image_id"):
                     return False, f"a promote vote for {payload.get('image_id')!r} is already open", None
                 continue
+            # EM-240 (Task 11) — trial is scoped per DEFENDANT (two distinct
+            # defendants may have open trials at once); only a duplicate trial for
+            # the SAME defendant is blocked (mirrors demolish/promote_image).
+            if effect == "trial":
+                if (rule.payload or {}).get("defendant_id") == payload.get("defendant_id"):
+                    return False, f"{payload.get('defendant_id')!r} already has an open trial", None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -2024,10 +2349,11 @@ class World:
         # refreshes the existing rule instead of activating a duplicate.
         # EXCEPTION: name_town is a one-shot RENAME, and demolish is a one-shot
         # ACT (each targets a distinct building) — neither "renews"; each passing
-        # vote is fresh.
+        # vote is fresh. EM-240: trial is a one-shot ACT per defendant (same as
+        # demolish) — a conviction/acquittal is applied once, never "renewed".
         active = (
             self._active_rule(effect)
-            if effect not in ("name_town", "demolish", "promote_image") else None
+            if effect not in ("name_town", "demolish", "promote_image", "trial") else None
         )
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
@@ -2066,9 +2392,11 @@ class World:
                 # holds two simultaneously-active identical effects.
                 # name_town is a one-shot rename, not a stackable law — it never
                 # "renews"; a passing name supersedes whatever the town was called.
+                # EM-240: trial is a one-shot per-defendant ACT (like demolish) —
+                # it never "renews"; each passing guilty vote convicts afresh.
                 existing = (
                     self._active_rule(rule.effect)
-                    if rule.effect not in ("name_town", "promote_image") else None
+                    if rule.effect not in ("name_town", "promote_image", "trial") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -2077,6 +2405,13 @@ class World:
                 rule.status = "active"
                 self._on_rule_activated(rule)
                 return True, "ok", "active"
+            # EM-240 (Task 11) — a REJECTED trial is an ACQUITTAL: clear some of
+            # the defendant's notoriety and dock the accuser's standing with the
+            # onlookers/jurors who voted. Done before the status assignment so the
+            # rule's votes/payload/proposer are all still intact. Reuses the
+            # existing vote tally (new_status == "rejected") — NO new tally code.
+            if rule.effect == "trial" and new_status == "rejected" and not rule.applied:
+                self._on_trial_acquitted(rule)
             rule.status = new_status
             return True, "ok", new_status
         return True, "ok", None
@@ -2148,6 +2483,55 @@ class World:
                     },
                 })
             return
+        # EM-240 (Task 11) — trial CONVICTION: a passing guilty vote jails the
+        # defendant for trial_sentence, confiscates trial_fine, and pays restitution
+        # split evenly across the DISTINCT living victims on the defendant's rap
+        # sheet (remainder dropped). Parks trial_verdict(guilty) + jailed in the
+        # SAME outbox name_town/demolish use (drained by the loop). Reuses
+        # _jail_place_id (Task 10). A vanished defendant is a silent no-op.
+        if rule.effect == "trial":
+            rule.applied = True
+            defendant = self.agents.get((rule.payload or {}).get("defendant_id"))
+            if defendant is None:
+                return
+            sentence = int(self._crime_param("trial_sentence", 20))
+            fine = min(defendant.credits, int(self._crime_param("trial_fine", 25)))
+            defendant.credits -= fine
+            jail = self._jail_place_id()
+            if jail is not None:
+                defendant.location = jail
+            defendant.crime_status = "jailed"
+            defendant.crime_status_until_tick = self.tick + sentence
+            # Restitution: split the fine evenly across distinct living victims.
+            victim_ids: list[str] = []
+            for e in defendant.rap_sheet:
+                vid = e.get("victim_id")
+                v = self.agents.get(vid) if vid else None
+                if v is not None and v.alive and vid not in victim_ids:
+                    victim_ids.append(vid)
+            if victim_ids and fine > 0:
+                share = fine // len(victim_ids)
+                if share > 0:
+                    for vid in victim_ids:
+                        self.agents[vid].credits += share
+            self.pending_spawn_events.append({
+                "kind": "trial_verdict",
+                "actor_id": "system",
+                "actor_type": "system",
+                "target_id": defendant.id,
+                "text": f"⚖ By vote, {defendant.name} is found GUILTY and jailed.",
+                "payload": {"verdict": "guilty", "fine": fine,
+                            "sentence": sentence, "proposal_id": rule.id},
+            })
+            self.pending_spawn_events.append({
+                "kind": "jailed",
+                "actor_id": "system",
+                "actor_type": "system",
+                "target_id": defendant.id,
+                "text": f"{defendant.name} is led to jail for {sentence} ticks.",
+                "payload": {"until_tick": defendant.crime_status_until_tick},
+            })
+            return
         if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
@@ -2181,6 +2565,50 @@ class World:
                 "profile": agent.profile,
                 "location": agent.location,
             },
+        })
+
+    def _on_trial_acquitted(self, rule: RuleState) -> None:
+        """EM-240 (Task 11) — a REJECTED trial is an ACQUITTAL. Clear some of the
+        defendant's notoriety (acquittal_notoriety_relief) and clear a now-cool
+        `wanted` flag (Task 7's _clear_wanted_if_cool), then dock the accuser's
+        standing (accuser_acquittal_penalty trust) with the onlookers/jurors of the
+        proceeding. Parks a trial_verdict(acquitted) event. Idempotent via
+        rule.applied. The 'onlookers' = the people who VOTED on the trial (the
+        jurors who watched it) PLUS anyone physically co-located with the accuser —
+        a faithful read of 'co-located onlookers' that also covers jurors who voted
+        from elsewhere (voting is no longer location-gated, EM-199)."""
+        if rule.applied:
+            return
+        rule.applied = True
+        defendant = self.agents.get((rule.payload or {}).get("defendant_id"))
+        accuser = self.agents.get(rule.proposer_id)
+        if defendant is not None:
+            defendant.notoriety = max(
+                0, defendant.notoriety -
+                int(self._crime_param("acquittal_notoriety_relief", 15)))
+            self._clear_wanted_if_cool(defendant)
+        if accuser is not None:
+            pen = int(self._crime_param("accuser_acquittal_penalty", 8))
+            # Onlookers: trial voters (jurors who watched the proceeding) + anyone
+            # standing with the accuser. Dedup, and never dock the accuser or the
+            # defendant themselves.
+            onlooker_ids = set(rule.votes.keys())
+            onlooker_ids.update(a.id for a in self.agents_at(accuser.location))
+            onlooker_ids.discard(accuser.id)
+            if defendant is not None:
+                onlooker_ids.discard(defendant.id)
+            for oid in onlooker_ids:
+                onlooker = self.agents.get(oid)
+                if onlooker is not None and onlooker.alive:
+                    self._update_trust(onlooker, accuser, -pen)
+        self.pending_spawn_events.append({
+            "kind": "trial_verdict",
+            "actor_id": "system",
+            "actor_type": "system",
+            "target_id": defendant.id if defendant else None,
+            "text": (f"⚖ By vote, {defendant.name if defendant else 'the accused'} "
+                     "is ACQUITTED."),
+            "payload": {"verdict": "acquitted", "proposal_id": rule.id},
         })
 
     def drain_spawn_events(self) -> list[dict]:
@@ -2763,6 +3191,11 @@ class World:
             if witness.id == agent.id:
                 continue
             self._update_trust(witness, agent, -12)
+
+        # EM-240 — witnessed-crime notoriety bookkeeping. Arson has no single
+        # victim, so victim_id=None (every co-located non-actor is a witness).
+        self._register_crime(agent, "arson", None,
+                             int(self._crime_param("arson_notoriety", 22)))
 
         return {"_multi": [
             {
@@ -3521,6 +3954,14 @@ class World:
         (dataclass OR dict OR absent — EM-155 conventions, like _bld_param)."""
         return _block_get(getattr(self.params, "relationships", None), name, default)
 
+    def _crime_param(self, name: str, default: Any) -> Any:
+        """EM-240 — defensive accessor for the `world.crime` config block
+        (CrimeParams dataclass OR dict OR absent — EM-155 conventions, like
+        _rel_param/_bld_param). An absent block ⇒ every default ⇒ pre-EM-240
+        worlds run unchanged. `default` is only a fallback for a key missing from
+        the block, so keep these call-site defaults == CrimeParams defaults."""
+        return _block_get(getattr(self.params, "crime", None), name, default)
+
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
 
@@ -3631,6 +4072,71 @@ class World:
 
     def agents_at(self, place_id: str) -> list[AgentState]:
         return [a for a in self.living_agents() if a.location == place_id]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-240 — Crime & Justice bookkeeping. Witnessed crime accrues notoriety;
+    # a per-round advance decays it, clears stale `wanted`, and frees the jailed.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _register_crime(
+        self, actor: AgentState, crime: str, victim_id: str | None, notoriety_base: int
+    ) -> bool:
+        """EM-240 — shared crime bookkeeping. Witnesses = co-located living agents
+        OTHER than the actor and the direct victim. Bumps notoriety only when
+        witnessed; always records the rap sheet; flips `wanted` at threshold.
+        Does NOT touch trust — each action keeps its own witness-trust deltas."""
+        witnesses = [
+            a for a in self.agents_at(actor.location)
+            if a.id != actor.id and a.id != victim_id
+        ]
+        witnessed = len(witnesses) > 0
+        if witnessed:
+            per = int(self._crime_param("notoriety_per_extra_witness", 3))
+            gain = int(notoriety_base) + per * (len(witnesses) - 1)
+            actor.notoriety = max(0, min(100, actor.notoriety + gain))
+        actor.rap_sheet.append({
+            "tick": self.tick, "crime": crime,
+            "victim_id": victim_id, "witnessed": witnessed,
+        })
+        cap = int(self._crime_param("rap_sheet_cap", 10))
+        if len(actor.rap_sheet) > cap:
+            del actor.rap_sheet[: len(actor.rap_sheet) - cap]
+        threshold = int(self._crime_param("wanted_threshold", 40))
+        if actor.crime_status is None and actor.notoriety >= threshold:
+            actor.crime_status = "wanted"
+        return witnessed
+
+    def advance_crime(self) -> list[dict]:
+        """EM-240 — per-round crime status maintenance (called from the loop beside
+        advance_buildings). Decays notoriety while free, clears stale `wanted`, and
+        releases detained/jailed agents at expiry. Deterministic; no RNG/clock."""
+        events: list[dict] = []
+        decay = int(self._crime_param("notoriety_decay", 2))
+        threshold = int(self._crime_param("wanted_threshold", 40))
+        relief = int(self._crime_param("released_notoriety_relief", 10))
+        for agent in self.living_agents():
+            # Release at expiry: burn the release relief once. A just-released
+            # agent does NOT also decay this round (release relief IS the round's
+            # notoriety drop) — it decays normally on subsequent free rounds.
+            if agent.crime_status in ("detained", "jailed") and \
+                    self.tick >= agent.crime_status_until_tick:
+                agent.crime_status = None
+                agent.crime_status_until_tick = 0
+                agent.notoriety = max(0, agent.notoriety - relief)
+                events.append({
+                    "kind": "released",
+                    "actor_id": agent.id,
+                    "text": f"{agent.name} is released back into the town.",
+                    "payload": {"notoriety": agent.notoriety},
+                })
+                continue
+            # Decay only while free (jail is its own cool-off).
+            if agent.crime_status in (None, "wanted") and agent.notoriety > 0:
+                agent.notoriety = max(0, agent.notoriety - decay)
+            # Clear a `wanted` flag that has cooled below threshold.
+            if agent.crime_status == "wanted" and agent.notoriety < threshold:
+                agent.crime_status = None
+        return events
 
     # ──────────────────────────────────────────────────────────────────────────
     # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2)
@@ -4099,6 +4605,8 @@ class World:
         profile: str,
         location: str,
         cadence_tier: str = "protagonist",
+        disposition: str = "lawful",
+        role: str = "citizen",
     ) -> AgentState:
         name = self._unique_agent_name(name)
         agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
@@ -4115,6 +4623,9 @@ class World:
             cadence_tier=(
                 cadence_tier if cadence_tier in self.CADENCE_TIERS else "protagonist"
             ),
+            # EM-240 — additive persona schema; unknown/absent → lawful/citizen.
+            disposition=disposition if disposition in ("lawful", "opportunist", "criminal") else "lawful",
+            role=role if role in ("citizen", "enforcer") else "citizen",
         )
         self.agents[agent_id] = agent
         # Join the current round's rotation only when the tier is due this
@@ -4570,6 +5081,20 @@ class World:
                 # and restore None; a malformed stored plan coerces to None
                 # (normalize_plan is total). Byte-stable round-trip (EM-155).
                 plan=normalize_plan(d.get("plan")),
+                # EM-240 — additive: pre-EM-240 snapshots lack the keys and
+                # restore the lawful/citizen defaults (unknown values fail-safe).
+                disposition=(str(d.get("disposition")) if d.get("disposition")
+                             in ("lawful", "opportunist", "criminal") else "lawful"),
+                role=(str(d.get("role")) if d.get("role")
+                      in ("citizen", "enforcer") else "citizen"),
+                # EM-240 — crime status scalars: additive. Pre-EM-240 snapshots
+                # lack these keys and restore the clean defaults; notoriety is
+                # clamped 0..100 and an unknown crime_status fails safe to None.
+                notoriety=max(0, min(100, _int(d.get("notoriety")))),
+                crime_status=(str(d.get("crime_status")) if d.get("crime_status")
+                              in ("wanted", "detained", "jailed", "exiled") else None),
+                crime_status_until_tick=_int(d.get("crime_status_until_tick")),
+                rap_sheet=[dict(e) for e in (d.get("rap_sheet") or []) if isinstance(e, dict)],
             )
             a.relationships = {
                 str(aid): RelationshipState(

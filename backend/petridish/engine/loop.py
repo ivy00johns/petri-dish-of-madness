@@ -1566,6 +1566,19 @@ class TickLoop:
                     self._emit_event(evt)
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("building lifecycle advance failed: %s", exc)
+
+        # EM-240 — per-round crime status maintenance, beside advance_buildings:
+        # decay notoriety, clear stale `wanted`, release detained/jailed at expiry.
+        # Emit its events as standalone system events (same as the building ones).
+        advance_crime = getattr(world, "advance_crime", None)
+        if callable(advance_crime):
+            try:
+                for evt in advance_crime():
+                    evt.setdefault("turn_id", None)
+                    self._emit_event(evt)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("crime status advance failed: %s", exc)
+
         self._flush_spawn_events()
 
     def _flush_spawn_events(self) -> None:

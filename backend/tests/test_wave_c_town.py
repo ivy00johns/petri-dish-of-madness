@@ -43,7 +43,8 @@ import yaml
 REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
 DISTRICTS = {"core", "market", "residential", "civic", "farm"}
-KINDS = {"social", "work", "governance", "home", "wild"}
+# EM-240 added a `civic`-kind place (the jail) to the civic district.
+KINDS = {"social", "work", "governance", "home", "wild", "civic"}
 # The pre-Wave-C town; these ids must survive (old snapshots/agent locations).
 LEGACY_IDS_KINDS = {
     "plaza": "social", "market": "work", "townhall": "governance",
@@ -193,7 +194,7 @@ def test_town_shape_gates_and_legacy_ids(monkeypatch):
     places = _load_town(monkeypatch)
     by_id = {p.id: p for p in places}
 
-    assert len(places) == 15
+    assert len(places) == 16   # EM-240 added the jail (a civic-kind place)
     assert {p.district for p in places} == DISTRICTS
     assert {p.kind for p in places} <= KINDS
 
@@ -217,7 +218,9 @@ def test_town_shape_gates_and_legacy_ids(monkeypatch):
     assert all(p.kind == "home" for p in by_district["residential"])
     assert 3 <= len(by_district["residential"]) <= 4
     assert any(p.kind == "governance" for p in by_district["civic"])
-    assert len(by_district["civic"]) == 2
+    # EM-240 — civic now holds townhall + archive (governance) + the jail (civic).
+    assert len(by_district["civic"]) == 3
+    assert {p.kind for p in by_district["civic"]} == {"governance", "civic"}
     assert {p.kind for p in by_district["farm"]} <= {"wild", "work"}
 
 

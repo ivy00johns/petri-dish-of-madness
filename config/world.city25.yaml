@@ -319,6 +319,9 @@ places:
   # civic — the records corner, north-west
   - { id: townhall,        name: City Hall,           x: 106, y: 106, kind: governance, district: civic,       description: "Propose and vote on rules." }
   - { id: archive,         name: The Records Office,  x: 303, y: 106, kind: governance, district: civic,       description: "Filing rows of city ledgers, old permits, and older grievances." }
+  # EM-240 — the town jail (kind: civic). Enforcers march detained / convicted
+  # lawbreakers here; a jailed agent may only talk and think until released.
+  - { id: jail,            name: The Lockup,          x: 106, y: 303, kind: civic,      district: civic,       description: "A spare stone cell where the town holds its lawbreakers." }
   # residential — lamplit blocks to the south-west
   - { id: home,            name: Hearth House,        x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
   - { id: rosehip_cottage, name: Rosehip Walk-up,     x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }

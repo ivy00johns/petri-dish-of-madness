@@ -873,20 +873,27 @@ class SpawnBody(BaseModel):
     # (protagonist | supporting | background). Absent ⇒ protagonist (the
     # zero-behavior-change default). Unknown value -> 400.
     cadence_tier: str | None = Field(default=None, max_length=20)
+    # EM-240 — optional crime-schema overrides; a persona card fills these in,
+    # an explicit body wins. Unknown values fall back to lawful/citizen.
+    disposition: str | None = Field(default=None, max_length=20)
+    role: str | None = Field(default=None, max_length=20)
     # run-663 — A/B opt-in: spawn the SAME persona across multiple models as
     # labeled contestants. Each entry must be a known profile name. Only valid
     # in god mode; governance + ab_models is a 400.
     ab_models: list[str] | None = None
 
 
-def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str]:
-    """Effective (name, personality, profile) for a spawn (W11b EM-092).
+def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str, str, str]:
+    """Effective (name, personality, profile, disposition, role) for a spawn
+    (W11b EM-092; EM-240 added disposition/role).
 
     Explicit body fields always win; a `persona` card fills the gaps; what is
     still missing after that is a 400 (unknown persona is a 400 too). The
     pre-W11b default personality ('A generic agent.') is preserved when neither
-    the body nor a card supplies one."""
+    the body nor a card supplies one. EM-240 disposition/role fall back to the
+    lawful/citizen defaults when absent or unknown."""
     name, personality, profile = body.name, body.personality, body.profile
+    disposition, role = body.disposition, body.role
     if body.persona:
         wanted = body.persona.strip().lower()
         card = next(
@@ -898,11 +905,15 @@ def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str]:
         name = name or card["name"]
         personality = personality or card["personality"]
         profile = profile or card["suggested_profile"] or None
+        disposition = disposition or card.get("disposition")
+        role = role or card.get("role")
     if not name:
         raise HTTPException(400, "name is required (directly or via persona)")
     if not profile:
         raise HTTPException(400, "profile is required (directly or via persona)")
-    return name, (personality or "A generic agent."), profile
+    disposition = disposition if disposition in ("lawful", "opportunist", "criminal") else "lawful"
+    role = role if role in ("citizen", "enforcer") else "citizen"
+    return name, (personality or "A generic agent."), profile, disposition, role
 
 
 def _spawn_mode(body: SpawnBody) -> str:
@@ -1014,7 +1025,7 @@ async def spawn_agent(body: SpawnBody, response: Response):
 
     # W11b / EM-092 — persona prefill: explicit fields win, the card fills gaps,
     # unknown persona / still-missing name|profile -> 400.
-    name, personality, profile = _resolve_spawn_fields(body)
+    name, personality, profile, disposition, role = _resolve_spawn_fields(body)
     if _router.get_profile(profile) is None:
         raise HTTPException(400, f"Unknown profile: {profile}")
     # Wave D2 / EM-158 — optional cadence tier; absent ⇒ protagonist.
@@ -1070,6 +1081,8 @@ async def spawn_agent(body: SpawnBody, response: Response):
         profile=profile,
         location=body.location,
         cadence_tier=cadence_tier,  # Wave D2 / EM-158 — additive
+        disposition=disposition,    # EM-240 — additive persona schema
+        role=role,
     )
     _router.reassign(agent.id, profile)
     if _loop and _repo:

@@ -1,0 +1,125 @@
+# backend/tests/test_em240_schema.py
+from petridish.engine.world import World, AgentState, PlaceState
+from petridish.config.loader import WorldParams
+
+
+def _params() -> WorldParams:
+    return WorldParams(
+        tick_interval_seconds=0.5, turns_per_day=999, energy_decay_per_turn=0.0,
+        starting_energy=80.0, starting_credits=20, snapshot_interval_ticks=100,
+    )
+
+
+def _world() -> World:
+    places = [PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social")]
+    agents = [AgentState(id="ada", name="Ada", personality="", profile="mock",
+                         location="plaza", energy=80.0, credits=20)]
+    return World(params=_params(), places=places, agents=agents)
+
+
+def test_disposition_role_default_and_omitted_from_to_dict():
+    a = AgentState(id="x", name="X", personality="", profile="mock",
+                   location="plaza", energy=80.0, credits=20)
+    assert a.disposition == "lawful"
+    assert a.role == "citizen"
+    d = a.to_dict()
+    # Byte-stability: defaults must NOT appear in the serialized dict.
+    assert "disposition" not in d
+    assert "role" not in d
+
+
+def test_disposition_role_serialized_only_when_set():
+    a = AgentState(id="x", name="X", personality="", profile="mock",
+                   location="plaza", energy=80.0, credits=20,
+                   disposition="criminal", role="enforcer")
+    d = a.to_dict()
+    assert d["disposition"] == "criminal"
+    assert d["role"] == "enforcer"
+
+
+def test_spawn_agent_threads_disposition_and_role():
+    world = _world()
+    a = world.spawn_agent("Mona", "a fixer", "mock", "plaza",
+                          disposition="criminal", role="citizen")
+    assert a.disposition == "criminal"
+    assert a.role == "citizen"
+    # Round-trips through to_dict
+    assert a.to_dict()["disposition"] == "criminal"
+
+
+def test_load_personas_defaults_disposition_role(tmp_path, monkeypatch):
+    import petridish.config.loader as loader
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "personas.yaml").write_text(
+        "personas:\n"
+        "  - name: Crank\n"
+        "    archetype: Racketeer\n"
+        "    personality: shakes down stalls\n"
+        "    suggested_profile: groq-llama\n"
+        "    disposition: criminal\n"
+        "  - name: Dot\n"
+        "    archetype: Baker\n"
+        "    personality: bakes bread\n"
+    )
+    monkeypatch.setattr(loader, "_find_config_dir", lambda: cfg)
+    cards = {c["name"]: c for c in loader.load_personas()}
+    assert cards["Crank"]["disposition"] == "criminal"
+    assert cards["Crank"]["role"] == "citizen"          # defaulted
+    assert cards["Dot"]["disposition"] == "lawful"      # defaulted
+    assert cards["Dot"]["role"] == "citizen"
+
+
+def test_crime_scalars_default_and_omitted():
+    a = AgentState(id="x", name="X", personality="", profile="mock",
+                   location="plaza", energy=80.0, credits=20)
+    assert a.notoriety == 0
+    assert a.crime_status is None
+    assert a.crime_status_until_tick == 0
+    assert a.rap_sheet == []
+    d = a.to_dict()
+    for k in ("notoriety", "crime_status", "crime_status_until_tick", "rap_sheet"):
+        assert k not in d, f"{k} must be omitted at default for byte-stability"
+
+
+def test_crime_scalars_serialized_when_set():
+    a = AgentState(id="x", name="X", personality="", profile="mock",
+                   location="plaza", energy=80.0, credits=20)
+    a.notoriety = 42
+    a.crime_status = "wanted"
+    a.crime_status_until_tick = 99
+    a.rap_sheet = [{"tick": 3, "crime": "heist", "victim_id": "y", "witnessed": True}]
+    d = a.to_dict()
+    assert d["notoriety"] == 42
+    assert d["crime_status"] == "wanted"
+    assert d["crime_status_until_tick"] == 99
+    assert d["rap_sheet"][0]["crime"] == "heist"
+
+
+def test_crime_param_defaults_when_block_absent():
+    world = _world()  # WorldParams() has no `crime` block
+    assert world._crime_param("wanted_threshold", 40) == 40
+    assert world._crime_param("detain_sentence", 6) == 6
+
+
+def test_crime_param_reads_dict_block():
+    world = _world()
+    world.params.crime = {"wanted_threshold": 25}  # dict block, EM-155 convention
+    assert world._crime_param("wanted_threshold", 40) == 25
+    assert world._crime_param("detain_sentence", 6) == 6  # falls through to default
+
+
+def test_world_params_carries_crimeparams_dataclass():
+    # CONTRACT B — `crime` is a real CrimeParams dataclass field on WorldParams
+    # (wired exactly like RelationshipParams), NOT an auto-ingested dict. A
+    # default-constructed WorldParams therefore exposes the dataclass defaults.
+    from petridish.config.loader import CrimeParams
+
+    p = WorldParams()
+    assert isinstance(p.crime, CrimeParams)
+    assert p.crime.wanted_threshold == 40
+    world = _world()
+    # The accessor reads the dataclass attribute; its `default` arg is only a
+    # fallback for a key absent from the dataclass.
+    assert world._crime_param("wanted_threshold", 999) == 40
+    assert world._crime_param("trial_fine", 999) == 25
