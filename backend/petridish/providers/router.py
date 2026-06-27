@@ -33,7 +33,14 @@ _DEFAULT_CACHE_MAX = 512
 # that keeps cutting. The window flushes naturally (deque maxlen): a full
 # window of clean outcomes clears the flag with no extra bookkeeping.
 _LANE_WINDOW = 6                  # outcomes remembered per profile
-_LANE_TRUNCATION_TRIGGER = 2      # truncations in window that flag the lane
+# A SINGLE truncation flags the lane (was 2). During a free-tier 429 storm the
+# proxy collapses every lane onto the slow 120B reasoning survivors (nemotron /
+# gpt-oss), whose chain-of-thought truncates the FIRST attempt before any JSON
+# appears — there is nothing to salvage, so the turn burns a full retry. Boosting
+# after the first truncation (instead of letting one through as "noise") gives
+# attempt 1 of the NEXT turn room to finish thinking and emit the object, cutting
+# the retry rather than the call rate (north-star-safe: fewer WASTED calls).
+_LANE_TRUNCATION_TRIGGER = 1      # truncations in window that flag the lane
 _LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_FLOOR
 
 # ── Wave D3 / EM-177 — lane failover with recovery probes ─────────────────────

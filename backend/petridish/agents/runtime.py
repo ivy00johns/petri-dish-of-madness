@@ -4264,7 +4264,11 @@ class AgentRuntime:
             profile if call_profile == profile_name
             else self.router.get_profile(call_profile)
         )
-        max_tokens = call_prof.max_tokens if call_prof else 512
+        # 1024 (was 512): the no-profile fallback matches the ModelProfile default
+        # and config/profiles.yaml — a reasoning-model reroute truncates a 512 cap
+        # before emitting JSON. Only fires for a profile-less world (test harnesses);
+        # real runs read the lane's 1024 from the profile.
+        max_tokens = call_prof.max_tokens if call_prof else 1024
         temperature = call_prof.temperature if call_prof else 0.8
 
         # W11b — pending overheard lines are consumed by THIS turn (EM-081), the

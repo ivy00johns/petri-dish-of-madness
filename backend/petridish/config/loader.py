@@ -28,7 +28,7 @@ profiles:
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
     model_id: llama-3.3-70b-versatile
-    max_tokens: 512
+    max_tokens: 1024
     temperature: 0.8
     color: "#e74c3c"
   - name: gemini-flash
@@ -36,7 +36,7 @@ profiles:
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
     model_id: gemini-2.0-flash
-    max_tokens: 512
+    max_tokens: 1024
     temperature: 0.8
     color: "#3498db"
   - name: mock
@@ -364,7 +364,12 @@ class ModelProfile:
     name: str
     adapter: str
     model_id: str
-    max_tokens: int = 512
+    # 1024 (was 512): the proxy can reroute any lane onto a REASONING model whose
+    # chain-of-thought eats the budget before the JSON appears, so a 512 default
+    # truncates and forces a retry. The live config/profiles.yaml already pins
+    # 1024 per lane; this default keeps a profile that OMITS max_tokens on the same
+    # truncation-resistant floor (EM-135 still boosts to 4096 on a flagged lane).
+    max_tokens: int = 1024
     temperature: float = 0.8
     color: str = "#888888"
     base_url: str = ""
@@ -1658,7 +1663,7 @@ def _parse_profiles(raw: dict) -> list[ModelProfile]:
             name=p["name"],
             adapter=p["adapter"],
             model_id=p.get("model_id", ""),
-            max_tokens=int(p.get("max_tokens", 512)),
+            max_tokens=int(p.get("max_tokens", 1024)),
             temperature=float(p.get("temperature", 0.8)),
             color=p.get("color", "#888888"),
             base_url=p.get("base_url", ""),
