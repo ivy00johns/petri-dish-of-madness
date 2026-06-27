@@ -16,9 +16,11 @@ Invariants pinned here:
   - the restore is defensive (non-dict / garbage entries dropped),
   - re-snapshot of a restored world is byte-stable.
 
-The image-fetch outbox (pending_image_fetches) and the within-round boost
-budget (_boosts_this_round) stay deliberately NOT serialized (documented
-transient side-artifacts); this file pins that they never leak into the snapshot.
+The image-fetch outbox (pending_image_fetches) stays deliberately NOT serialized
+(a documented transient side-artifact); this file pins that it never leaks into
+the snapshot. (The within-round boost budget `_boosts_this_round` IS serialized
+snapshot-safe as of the EM-235 cap-bypass fix — its round-trip is pinned in
+test_em235_boost.py, not here.)
 """
 
 import copy
@@ -69,14 +71,15 @@ def test_no_outbox_state_round_trips_byte_identical():
         json.dumps(snap, sort_keys=True)
 
 
-def test_image_fetches_and_boost_budget_never_serialize():
+def test_image_fetches_never_serialize():
     w = _world()
-    # These transient side-artifacts must never reach the snapshot.
+    # This transient side-artifact (the PNG fetch queue) must never reach the
+    # snapshot. (The per-round boost budget _boosts_this_round, by contrast, IS
+    # serialized snapshot-safe — see test_em235_boost.py — to hold the
+    # world.boost.max_per_round cap across a mid-round fork/resume.)
     w.pending_image_fetches.append({"image_id": "x", "prompt": "p", "url": "u"})
-    w._boosts_this_round["dot"] = 3
     snap = w.to_snapshot()
     assert "pending_image_fetches" not in snap
-    assert "_boosts_this_round" not in snap
 
 
 # ── pending_spawn_events: parked -> snapshot -> restore preserves ──────────────

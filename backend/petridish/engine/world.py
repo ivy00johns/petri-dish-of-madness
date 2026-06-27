@@ -1118,13 +1118,16 @@ class World:
         # survives a fork/resume. One open pitch per agent (a later pitch overwrites
         # the prior — the freshest pitch on the wall wins).
         self.pending_pitches: dict[str, dict] = {}
-        # EM-235 — per-agent buys THIS round {agent_id: count}, the transient
-        # backing for the world.boost.max_per_round cap. Reset at each round
-        # boundary (_start_new_round) — it is a within-round budget, NOT durable
-        # state, so it is deliberately NOT serialized: a snapshot taken mid-round
-        # restores it empty (fail-safe — at worst an agent may buy its per-round
-        # quota again after a resume), while the DURABLE boosts already bought
-        # (AgentState.boosted_turns) ARE serialized and survive the round-trip.
+        # EM-235 — per-agent buys THIS round {agent_id: count}, the backing for the
+        # world.boost.max_per_round cap. Reset at each round boundary
+        # (_start_new_round) — a within-round budget. Snapshots fire per tick
+        # (routinely MID-round), so it IS serialized snapshot-safe (only-when-non-
+        # empty, restored defensively): a snapshot taken mid-round preserves the
+        # remaining budget, so an already-capped agent can't buy max_per_round MORE
+        # in the same round after a resume (cap bypass) and a fork/replay schedules
+        # the SAME boosted turns the continuous run had (EM-155 determinism). The
+        # DURABLE boosts already bought (AgentState.boosted_turns) are serialized
+        # separately and survive the round-trip too.
         self._boosts_this_round: dict[str, int] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
@@ -7086,14 +7089,30 @@ class World:
         # Serialized ONLY when non-empty (the cap_demotions / Wave-M outbox
         # pattern), JSON-cloned for a byte-stable round-trip, restored defensively
         # (non-dict/garbage entries dropped). pending_image_fetches (the PNG
-        # side-artifact outbox) and _boosts_this_round (a within-round budget)
-        # stay deliberately NOT serialized — both are documented transient
-        # side-state off the replay surface.
+        # side-artifact outbox) stays deliberately NOT serialized — a transient
+        # side-artifact queue off the replay surface.
         if self.pending_spawn_events:
             snap["pending_spawn_events"] = _json_safe_events(self.pending_spawn_events)
         if self.pending_relationship_events:
             snap["pending_relationship_events"] = _json_safe_events(
                 self.pending_relationship_events)
+        # EM-235 — the per-round boost-buy budget (the backing for the
+        # world.boost.max_per_round cap). Snapshots fire per tick — routinely
+        # MID-round — so a snapshot/restore that lost this counter would RESET the
+        # budget and let an already-capped agent buy max_per_round MORE this same
+        # round (cap bypass), AND a forked/resumed world would schedule EXTRA
+        # boosted turns the continuous run never had (EM-155 fork/replay
+        # determinism). Serialized ONLY when non-empty (the cap_demotions /
+        # only-when-non-default pattern), so a boost-free world — and every
+        # pre-EM-235 snapshot — keeps the exact prior key set and round-trips
+        # byte-identically; restored defensively (non-positive / garbage counts
+        # dropped). It still resets at the round boundary in _start_new_round —
+        # this only persists it ACROSS a mid-round snapshot.
+        if self._boosts_this_round:
+            snap["_boosts_this_round"] = {
+                str(aid): int(n)
+                for aid, n in self._boosts_this_round.items()
+            }
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -7604,4 +7623,20 @@ class World:
             state.get("pending_spawn_events"))
         world.pending_relationship_events = _json_safe_events(
             state.get("pending_relationship_events"))
+        # EM-235 — restore the per-round boost-buy budget (snapshot-safe). Additive:
+        # a pre-EM-235 snapshot (or any boost-free world) lacks the key and restores
+        # {}, so a fork/replay of an un-boosted world keeps the empty budget
+        # byte-identically. Defensive: keep only well-formed POSITIVE counts keyed by
+        # a still-living agent (a non-dict, an unknown id, or a non-positive / garbage
+        # count → dropped), so a tampered snapshot can never grant a phantom budget or
+        # crash the restore (fail-safe, like every other restore).
+        restored_boosts: dict[str, int] = {}
+        raw_boosts = state.get("_boosts_this_round")
+        if isinstance(raw_boosts, dict):
+            for aid, n in raw_boosts.items():
+                aid = str(aid)
+                count = _int(n)
+                if aid in world.agents and count > 0:
+                    restored_boosts[aid] = count
+        world._boosts_this_round = restored_boosts
         return world

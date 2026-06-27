@@ -283,6 +283,86 @@ def test_from_snapshot_garbage_boosted_turns_coerced():
     assert restored2.agents["a"].boosted_turns == 0
 
 
+# ── the per-round cap survives a mid-round snapshot (EM-235 / EM-155) ─────────
+
+def test_per_round_cap_survives_mid_round_snapshot_restore():
+    # Snapshots fire per tick — routinely MID-round. The per-round buy budget
+    # (_boosts_this_round, the backing for world.boost.max_per_round) must persist
+    # across that snapshot/restore: an agent already at the cap CANNOT buy more in
+    # the same round just because a fork/resume happened. Without serialization the
+    # restored world's budget resets empty and the agent bypasses the cap.
+    a = _agent(id="a", name="Ann", credits=500)
+    w = _world([a], _boost_params(cost=10, max_per_round=2))
+    assert w.action_buy_turn(a)["kind"] == "turn_boosted"
+    assert w.action_buy_turn(a)["kind"] == "turn_boosted"
+    assert w.action_buy_turn(a)["kind"] != "turn_boosted"   # cap hit this round
+    # Snapshot mid-round (the budget is full) and restore — still mid-round.
+    restored = World.from_snapshot(copy.deepcopy(w.to_snapshot()),
+                                   params=_boost_params(cost=10, max_per_round=2))
+    ra = restored.agents["a"]
+    # The cap is STILL in force across the restore — no extra buy this round.
+    assert restored.action_buy_turn(ra)["kind"] != "turn_boosted"
+    assert ra.boosted_turns == w.agents["a"].boosted_turns   # no phantom boost
+
+
+def test_boosts_this_round_round_trips_only_when_non_empty():
+    # Additive (EM-155): a world that has bought nothing this round omits the key
+    # and round-trips byte-identically; a world WITH a parked per-round buy budget
+    # emits it and the restore is byte-stable.
+    a = _agent(id="a", name="Ann", credits=500)
+    w = _world([a], _boost_params(cost=10, max_per_round=2))
+    snap_empty = w.to_snapshot()
+    assert "_boosts_this_round" not in json.dumps(snap_empty)
+    w.action_buy_turn(a)
+    snap1 = w.to_snapshot()
+    assert json.dumps(snap1).count('"_boosts_this_round"') >= 1
+    restored = World.from_snapshot(copy.deepcopy(snap1),
+                                   params=_boost_params(cost=10, max_per_round=2))
+    assert restored._boosts_this_round == {"a": 1}
+    snap2 = restored.to_snapshot()
+    assert json.dumps(snap2, sort_keys=True) == json.dumps(snap1, sort_keys=True)
+
+
+def test_fork_at_mid_round_yields_same_schedule_as_continuous_run():
+    # Fork-at-point equivalence (EM-155 replay determinism). A deterministic buy
+    # policy: each agent buys ONE turn on its first slot of the round. Run a world
+    # CONTINUOUSLY vs snapshot-it-mid-round + resume — both must schedule the SAME
+    # next_agent sequence. Before the fix the resumed world's reset budget lets the
+    # already-capped agent buy AGAIN, scheduling an EXTRA boosted turn the
+    # continuous run never had.
+    def _build():
+        a = _agent(id="a", name="Ann", credits=500)
+        b = _agent(id="b", name="Bea", credits=500)
+        return _world([a, b], _boost_params(cost=10, max_per_round=1))
+
+    def _step(world, bought):
+        # Deterministic policy: the FIRST time we see an agent this run, it buys
+        # one extra turn (then is at the per-round cap of 1).
+        agent = world.next_agent()
+        if agent is not None and agent.id not in bought:
+            world.action_buy_turn(agent)
+            bought.add(agent.id)
+        return agent.id if agent is not None else None
+
+    # Continuous reference run.
+    cont = _build()
+    cont_bought: set[str] = set()
+    cont_seq = [_step(cont, cont_bought) for _ in range(8)]
+
+    # Forked run: replay the first 3 steps, snapshot MID-round, resume from restore.
+    head = _build()
+    head_bought: set[str] = set()
+    fork_seq = [_step(head, head_bought) for _ in range(3)]
+    restored = World.from_snapshot(copy.deepcopy(head.to_snapshot()),
+                                   params=_boost_params(cost=10, max_per_round=1))
+    # The buy-bookkeeping carries forward with the world (the cap is per-round
+    # durable state across the fork, exactly like _boosts_this_round).
+    resume_bought = set(restored._boosts_this_round.keys())
+    fork_seq += [_step(restored, resume_bought) for _ in range(5)]
+
+    assert fork_seq == cont_seq
+
+
 # ── prompt menu: conditional (em161 golden) ───────────────────────────────────
 
 def test_buy_turn_line_absent_without_boost_config():
