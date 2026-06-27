@@ -3,11 +3,19 @@
 Contract (contracts/wave-i-atelier.md §1):
   - Protocol: `async def fetch_png(prompt: str) -> bytes | None` — PNG bytes or
     None on ANY failure (never raises into the loop).
-  - Default = Pollinations (zero-config, no key).
-  - Env opt-in = Cloudflare Workers AI (CF_ACCOUNT_ID + CF_API_TOKEN), falling
-    back to Pollinations on any failure.
+  - Primary = FreeLLMAPI image lane (FREELLMAPI_KEY) — the proxy's `/images/
+    generations` routes across its whole image-model pool; the image queues are
+    short relative to chat, so it rarely rate-limits.
+  - Backup = Gemini (GEMINI_API_KEY) — gemini-2.5-flash-image (PAID; an unbilled
+    key 429s and the chain falls through). Override via EM_IMAGEGEN_GEMINI_MODEL.
+  - Final fallback = Pollinations (keyless, zero-config) so art never fully stops.
+  - Cloudflare Workers AI (CF_ACCOUNT_ID + CF_API_TOKEN) stays an optional env lane.
   - Mock lane = EM_IMAGEGEN_MOCK: returns a fixed minimal valid PNG, no network.
-  - Selection precedence: EM_IMAGEGEN_MOCK > Cloudflare (if env present) > Pollinations.
+  - Selection precedence (build_provider):
+      EM_IMAGEGEN_MOCK
+        > chain[ FreeLLMAPI (if key) , Gemini (if key) , Cloudflare (if env) ,
+                 Pollinations (always, keyless) ]
+    Each chain member returns None on failure; ChainImageProvider tries the next.
 
 The provider does NOT decide paths or ids — the loop hands it a prompt and writes
 the bytes to the contract-derived path itself (replay-safety keystone: the PNG is
@@ -36,6 +44,13 @@ _CLOUDFLARE_URL = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}"
     "/ai/run/@cf/black-forest-labs/flux-1-schnell"
 )
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-image"
+# The FreeLLMAPI proxy's OpenAI-compatible image endpoint lives at {base}/images/
+# generations, where {base} already ends in /v1 (parity with the chat lanes).
+_FREELLMAPI_DEFAULT_BASE = "http://localhost:3001/v1"
 
 
 @runtime_checkable
@@ -45,6 +60,18 @@ class ImageProvider(Protocol):
 
     async def fetch_png(self, prompt: str) -> bytes | None:  # pragma: no cover - protocol
         ...
+
+
+async def _get_url_bytes(client, url: str) -> bytes | None:
+    """GET a url and return its bytes on 200, else None. Follows redirects
+    (Pollinations + some proxy image lanes 302 to a CDN). Never raises."""
+    try:
+        resp = await client.get(url, follow_redirects=True)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+    except Exception as exc:  # pragma: no cover - network defensive
+        log.debug("image url fetch failed: %s", exc)
+    return None
 
 
 class MockImageProvider:
@@ -76,15 +103,115 @@ class PollinationsProvider:
         return None
 
 
+class FreellmapiImageProvider:
+    """EM-247 — PRIMARY: the FreeLLMAPI proxy's image lane. POST {base}/images/
+    generations (OpenAI images shape) with the unified key; the proxy health-routes
+    across its whole image-model pool (small queues ⇒ rarely throttled). The model
+    is OPTIONAL — omitted ⇒ the proxy auto-picks; pin one via EM_IMAGEGEN_FREELLMAPI_MODEL.
+    The response `data[i]` carries EITHER `b64_json` (decode) OR `url` (fetch); we
+    handle both. Returns None on any failure (the chain owns fallback); never raises."""
+
+    def __init__(self, base_url: str, api_key: str, model: str | None = None) -> None:
+        self._base_url = (base_url or _FREELLMAPI_DEFAULT_BASE).rstrip("/")
+        self._api_key = api_key
+        self._model = (
+            model or os.environ.get("EM_IMAGEGEN_FREELLMAPI_MODEL") or ""
+        ).strip()
+
+    async def fetch_png(self, prompt: str) -> bytes | None:
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            return None
+        url = f"{self._base_url}/images/generations"
+        payload: dict = {"prompt": prompt}
+        if self._model:
+            payload["model"] = self._model
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    log.debug("freellmapi image http %s: %s",
+                              resp.status_code, resp.text[:200])
+                    return None
+                data = resp.json()
+                for item in (data.get("data") or []):
+                    b64 = item.get("b64_json")
+                    if b64:
+                        return base64.b64decode(b64)
+                    img_url = item.get("url")
+                    if img_url:
+                        png = await _get_url_bytes(client, img_url)
+                        if png is not None:
+                            return png
+        except Exception as exc:  # pragma: no cover - network defensive
+            log.debug("freellmapi image fetch failed: %s", exc)
+        return None
+
+
+class GeminiImageProvider:
+    """BACKUP (GEMINI_API_KEY) — POST to Gemini generateContent and decode the
+    inline base64 PNG from the first image part. Returns None on any failure (the
+    chain owns fallback); never raises.
+
+    Model defaults to gemini-2.5-flash-image (override via EM_IMAGEGEN_GEMINI_MODEL).
+    Note: that model is PAID — its free-tier request quota is 0, so an unbilled key
+    returns HTTP 429 and the call falls through to the next chain member."""
+
+    def __init__(self, api_key: str, model: str | None = None) -> None:
+        self._api_key = api_key
+        self._model = (
+            model
+            or os.environ.get("EM_IMAGEGEN_GEMINI_MODEL")
+            or _GEMINI_DEFAULT_MODEL
+        ).strip()
+
+    async def fetch_png(self, prompt: str) -> bytes | None:
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            return None
+        url = _GEMINI_URL.format(model=self._model)
+        # Key travels in the x-goog-api-key header, never the URL query string
+        # (parity with the text GeminiAdapter — query params leak into logs).
+        headers = {"x-goog-api-key": self._api_key}
+        # TEXT+IMAGE is the broadly-accepted modality combo; the response may
+        # interleave a text part, so we scan every part for the image below.
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        }
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                log.debug("gemini image http %s: %s", resp.status_code, resp.text[:200])
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            parts = (
+                (candidates[0].get("content") or {}).get("parts") or []
+                if candidates
+                else []
+            )
+            for part in parts:
+                inline = part.get("inlineData") or part.get("inline_data") or {}
+                if inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        except Exception as exc:  # pragma: no cover - network defensive
+            log.debug("gemini image fetch failed: %s", exc)
+        return None
+
+
 class CloudflareProvider:
-    """Env opt-in (CF_ACCOUNT_ID + CF_API_TOKEN) — POST to Workers AI flux-1-schnell.
-    Decodes the base64 image from the JSON response. Falls back to Pollinations on
-    ANY failure (never raises)."""
+    """Optional env lane (CF_ACCOUNT_ID + CF_API_TOKEN) — POST to Workers AI
+    flux-1-schnell, decoding the base64 image from the JSON response. Returns None
+    on any failure (the chain owns fallback); never raises."""
 
     def __init__(self, account_id: str, api_token: str) -> None:
         self._account_id = account_id
         self._api_token = api_token
-        self._fallback = PollinationsProvider()
 
     async def fetch_png(self, prompt: str) -> bytes | None:
         prompt = str(prompt or "").strip()
@@ -106,18 +233,62 @@ class CloudflareProvider:
                 if b64:
                     return base64.b64decode(b64)
         except Exception as exc:  # pragma: no cover - network defensive
-            log.debug("cloudflare fetch failed, falling back: %s", exc)
-        # On any failure, fall back to the no-key provider.
-        return await self._fallback.fetch_png(prompt)
+            log.debug("cloudflare fetch failed: %s", exc)
+        return None
+
+
+class ChainImageProvider:
+    """Tries each provider in order; returns the first non-None PNG. The composable
+    fallback that expresses FreeLLMAPI → Gemini → Pollinations. A member that
+    raises (it shouldn't) is caught and treated as a miss, so one bad lane never
+    breaks the chain."""
+
+    def __init__(self, providers: list[ImageProvider]) -> None:
+        self._providers = [p for p in providers if p is not None]
+
+    async def fetch_png(self, prompt: str) -> bytes | None:
+        for provider in self._providers:
+            try:
+                png = await provider.fetch_png(prompt)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("image provider %s raised: %s",
+                          type(provider).__name__, exc)
+                png = None
+            if png is not None:
+                return png
+        return None
 
 
 def build_provider() -> ImageProvider:
     """Factory honoring the selection precedence (§1):
-    EM_IMAGEGEN_MOCK > Cloudflare (if env present) > Pollinations."""
+    EM_IMAGEGEN_MOCK > chain[FreeLLMAPI?, Gemini?, Cloudflare?, Pollinations].
+
+    The chain is built from whichever keys/env are present; Pollinations is always
+    the keyless final member, so a no-key deployment is exactly the prior default.
+    A single-member chain returns that provider directly (no wrapper)."""
     if os.environ.get("EM_IMAGEGEN_MOCK"):
         return MockImageProvider()
+
+    chain: list[ImageProvider] = []
+
+    freellmapi_key = os.environ.get("FREELLMAPI_KEY")
+    if freellmapi_key:
+        base = (
+            os.environ.get("EM_IMAGEGEN_FREELLMAPI_URL")
+            or os.environ.get("FREELLMAPI_BASE_URL")
+            or _FREELLMAPI_DEFAULT_BASE
+        )
+        chain.append(FreellmapiImageProvider(base, freellmapi_key))
+
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        chain.append(GeminiImageProvider(gemini_key))
+
     account_id = os.environ.get("CF_ACCOUNT_ID")
     api_token = os.environ.get("CF_API_TOKEN")
     if account_id and api_token:
-        return CloudflareProvider(account_id, api_token)
-    return PollinationsProvider()
+        chain.append(CloudflareProvider(account_id, api_token))
+
+    chain.append(PollinationsProvider())  # keyless final fallback — always present
+
+    return chain[0] if len(chain) == 1 else ChainImageProvider(chain)
