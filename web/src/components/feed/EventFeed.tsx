@@ -284,9 +284,22 @@ function GrantAffordance({
           role="group"
           aria-label="Grant the petition — pick a miracle or intervention"
         >
-          <p className="m-0 font-mono text-[9px] text-lab-muted italic leading-snug break-words">
+          {/* EM-191 — the petitioner's own (injection-shaped, React-escaped,
+              280-capped) words read as a QUOTED nested block: a left-border
+              rule + italic + softer ink quarantines the agent's voice from the
+              god's own UI chrome (the "petition" label, the action buttons), so
+              the two channels never visually blend. The label below is the
+              god's voice naming the channel; the blockquote is the agent's. */}
+          <span className="block font-mono text-[8px] text-lab-dim uppercase tracking-wider not-italic">
+            petition
+          </span>
+          <blockquote
+            data-testid="grant-petition-quote"
+            className="m-0 pl-2 border-l-2 border-lab-border-bright font-mono text-[9px]
+                       text-lab-muted italic leading-snug break-words"
+          >
             “{quote || '(no petition text)'}”
-          </p>
+          </blockquote>
           <div className="flex flex-wrap gap-1">
             {GRANT_OPTIONS.map((opt) => {
               const needsTarget = !opt.world && !petitionerId;
