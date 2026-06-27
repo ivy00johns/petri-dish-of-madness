@@ -1118,6 +1118,20 @@ class World:
         # survives a fork/resume. One open pitch per agent (a later pitch overwrites
         # the prior — the freshest pitch on the wall wins).
         self.pending_pitches: dict[str, dict] = {}
+        # EM-232 — the last Victory-Arch cadence BOUNDARY the cycle has fired at (a
+        # multiple of every_n_ticks; 0 = never fired). run_victory_arch_cycle is
+        # invoked once per ROUND from _apply_round_start, but world.tick advances per
+        # TURN and a round spans a VARYING number of turns (EM-158 tiers + births/
+        # deaths). An exact `tick % every_n == 0` gate therefore SKIPS any cadence
+        # multiple that falls mid-round (the cycle fires irregularly / never). This
+        # tracker drives CATCH-UP: at each round boundary the cycle fires when tick
+        # has reached/passed the NEXT due multiple since the last fire, then advances
+        # to the highest crossed boundary (one judge per boundary — the queue is
+        # single-cycle). Serialized snapshot-safe (EM-155) ONLY when set (>0), so a
+        # never-fired / pre-EM-232 world round-trips byte-identically; restored
+        # defensively (absent/garbage → 0). Durable so a fork/resume never re-fires
+        # an already-judged boundary (no double award). No clock — pure tick math.
+        self._last_arch_tick: int = 0
         # EM-235 — per-agent buys THIS round {agent_id: count}, the backing for the
         # world.boost.max_per_round cap. Reset at each round boundary
         # (_start_new_round) — a within-round budget. Snapshots fire per tick
@@ -5618,25 +5632,51 @@ class World:
 
     def run_victory_arch_cycle(self) -> list[dict]:
         """EM-232 — the periodic pitch -> peer-judge -> award cycle, checked at the
-        round boundary. When the Victory Arch is ON (`every_n_ticks` > 0) AND this
-        tick is a cycle boundary (`tick > 0 and tick % every_n_ticks == 0`), rank
-        the PARKED pitches by the DETERMINISTIC contribution_score (descending),
-        TIE-BREAK by agent id (ascending) so same-seed runs are identical, and
-        award the top_n pitchers each `award` credits + a `reputation_bonus` renown
-        bump + an `influence_replenish` (the EM-229 hook). Emits one `arch_award`
-        event per winner; CLEARS the pitch queue regardless of how many won.
+        round boundary (invoked once per ROUND from _apply_round_start). When the
+        Victory Arch is ON (`every_n_ticks` > 0) AND the tick has reached/passed the
+        next DUE cadence boundary since the last fire, rank the PARKED pitches by the
+        DETERMINISTIC contribution_score (descending), TIE-BREAK by agent id
+        (ascending) so same-seed runs are identical, and award the top_n pitchers
+        each `award` credits + a `reputation_bonus` renown bump + an
+        `influence_replenish` (the EM-229 hook). Emits one `arch_award` event per
+        winner; CLEARS the pitch queue regardless of how many won.
 
-        OFF (the default cadence), an off-boundary tick, or an empty pitch queue is
-        a NO-OP that returns [] and clears nothing (pitches simply accumulate until
-        a boundary). Pure arithmetic + sorting — no random, no clock (EM-155)."""
+        CATCH-UP cadence (the fix for the round-vs-tick mismatch): world.tick
+        advances per TURN and a round spans a VARYING number of turns (EM-158 tiers +
+        births/deaths), so a round boundary rarely lands EXACTLY on a multiple of
+        `every_n_ticks`. Instead of the old exact `tick % every_n == 0` gate (which
+        silently skipped any cadence multiple falling mid-round — firing irregularly
+        / never), the cycle fires whenever `tick` has reached the next due multiple
+        after `_last_arch_tick`, then advances the tracker to the HIGHEST crossed
+        boundary. One judge per round boundary (the queue is single-cycle); a
+        boundary that has leapt past several multiples still judges once and skips
+        straight to the highest. Durable + snapshot-safe so a fork/resume never
+        re-fires an already-judged boundary (no double award).
+
+        OFF (the default cadence), a tick that has not yet reached the next due
+        boundary, or an empty pitch queue is a NO-OP that returns [] and clears
+        nothing (pitches simply accumulate until a boundary is crossed). Pure
+        arithmetic + sorting — no random, no clock (EM-155)."""
         if not self.victory_arch_enabled():
             return []
         try:
             cadence = int(self._arch_param("every_n_ticks", 0))
         except (TypeError, ValueError):  # pragma: no cover - defensive
             return []
-        if cadence <= 0 or self.tick <= 0 or (self.tick % cadence) != 0:
+        if cadence <= 0 or self.tick <= 0:
             return []
+        # The next DUE cadence boundary is the smallest multiple of `cadence` strictly
+        # greater than the last-fired boundary. The cycle is due iff the current tick
+        # has reached/passed it. (`_last_arch_tick` is always a multiple of cadence or
+        # 0, so `last + cadence` is the next multiple — pure tick math, no clock.)
+        last_fired = max(0, int(getattr(self, "_last_arch_tick", 0)))
+        next_due = last_fired + cadence
+        if self.tick < next_due:
+            return []
+        # Advance the tracker to the HIGHEST crossed boundary (<= tick) before any
+        # early return below, so a boundary with no pitches (or with all pitchers
+        # gone) still consumes the crossing and does not re-fire next round.
+        self._last_arch_tick = (self.tick // cadence) * cadence
         if not self.pending_pitches:
             return []
         try:
@@ -7041,6 +7081,12 @@ class World:
                 }
                 for pid, p in self.pending_pitches.items()
             }
+        # EM-232 — the catch-up cadence tracker (last fired arch boundary). Serialized
+        # ONLY when set (>0; the cap_demotions pattern), so a never-fired world — and
+        # every pre-EM-232 snapshot — keeps the exact prior key set (absent ⇒ 0 on
+        # restore). Durable so a fork/resume never re-fires an already-judged boundary.
+        if getattr(self, "_last_arch_tick", 0):
+            snap["last_arch_tick"] = int(self._last_arch_tick)
         # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
         # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
         # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
@@ -7594,6 +7640,12 @@ class World:
                     "tick": _int(p.get("tick")),
                 }
         world.pending_pitches = restored_pitches
+        # EM-232 — restore the catch-up cadence tracker (last fired arch boundary).
+        # Additive: a pre-EM-232 / never-fired snapshot lacks the key and restores 0,
+        # so a fork/replay keeps the exact prior schedule byte-identically. Defensive:
+        # garbage / negative → 0 (fail-safe). Durable so a resume never re-fires an
+        # already-judged boundary (no double award).
+        world._last_arch_tick = max(0, _int(state.get("last_arch_tick")))
         # EM-236 — restore the living constitution (additive: pre-EM-236 snapshots
         # lack the key and restore [], so a fork/replay of an un-amended world keeps
         # the empty constitution byte-identically). Defensive: keep only well-formed

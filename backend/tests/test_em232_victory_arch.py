@@ -129,12 +129,118 @@ def test_cycle_does_not_fire_off_cadence():
     w = _world([a], _arch_params(every_n_ticks=10, award=50))
     w.action_pitch_contribution(a, "did things")
     w.record_contribution(a, "project_built")
-    # tick 7 is not a multiple of 10 → no award, pitch stays parked.
+    # tick 7 is BEFORE the first cadence boundary (10) → no award yet, pitch
+    # stays parked (catch-up only fires once a due boundary has been reached).
     w.tick = 7
     events = w.run_victory_arch_cycle()
     assert events == []
     assert a.credits == 20
     assert "a" in w.pending_pitches
+
+
+# ── EM-232 regression: round-boundary cadence with CATCH-UP ───────────────────
+#
+# run_victory_arch_cycle is invoked ONLY from _apply_round_start (once per ROUND),
+# but world.tick advances per TURN and a round spans a VARYING number of turns
+# (EM-158 tiers + births/deaths). When NO round boundary lands exactly on a
+# multiple of every_n_ticks, the old `tick % every_n == 0` gate SKIPPED the cycle
+# entirely — the Victory Arch fired at irregular, far-too-rare intervals (or never).
+# The cycle must fire at (or right after) EACH crossed cadence boundary, once per
+# boundary, deterministically (no clock).
+
+def _round_boundary_cycle(w):
+    """Drive ONE round-start invocation of the arch cycle (the real call site),
+    re-parking a fresh pitch each round so an award is observable."""
+    return w.run_victory_arch_cycle()
+
+
+def test_cycle_catches_up_when_round_size_straddles_cadence():
+    # Round size 7, cadence 10: round boundaries land on ticks 7, 14, 21, 28, 35 —
+    # NONE is a multiple of 10. With the old exact-multiple gate the cycle would
+    # NEVER fire. With catch-up it must fire at the FIRST boundary that has reached
+    # or passed each due multiple (10 → boundary 14, 20 → boundary 21, 30 → 35),
+    # and stay a no-op on boundaries that crossed no new multiple.
+    a = _agent(id="a", name="Ann", credits=0)
+    w = _world([a], _arch_params(every_n_ticks=10, award=50, top_n=1))
+    w.record_contribution(a, "project_built")
+
+    fires = []  # ticks at which the cycle actually awarded
+    for boundary in (7, 14, 21, 28, 35):
+        w.tick = boundary
+        # Re-park a pitch each round (the live loop parks pitches during turns).
+        w.action_pitch_contribution(a, f"pitch at {boundary}")
+        events = w.run_victory_arch_cycle()
+        if any(e["kind"] == "arch_award" for e in events):
+            fires.append(boundary)
+
+    # Due cadence boundaries are 10, 20, 30. The cycle fires at the first round
+    # boundary AT/AFTER each: 14 (>=10), 21 (>=20), 35 (>=30). It must NOT fire at
+    # 7 (before the first multiple) nor at 28 (no new multiple crossed since 21).
+    assert fires == [14, 21, 35], fires
+    # Three awards of 50 credits landed (one per crossed cadence boundary), proving
+    # the configured cadence was honored — not silently skipped.
+    assert a.credits == 150
+
+
+def test_cycle_fires_at_most_once_per_round_boundary():
+    # A single round boundary that has leapt past MULTIPLE cadence multiples (e.g.
+    # ticks 0 → 35 with cadence 10 crosses 10, 20, 30) still judges the parked
+    # pitches ONCE (the queue is single-cycle) and advances the tracker to the
+    # highest crossed BOUNDARY MULTIPLE (30, not the tick 35), so a fresh boundary
+    # only re-fires once tick reaches the NEXT due multiple (40).
+    a = _agent(id="a", name="Ann", credits=0)
+    w = _world([a], _arch_params(every_n_ticks=10, award=50, top_n=1))
+    w.record_contribution(a, "project_built")
+    w.action_pitch_contribution(a, "big leap")
+    w.tick = 35
+    events = w.run_victory_arch_cycle()
+    assert sum(1 for e in events if e["kind"] == "arch_award") == 1
+    assert a.credits == 50
+    # The tracker advanced to the highest crossed multiple (30), so the next due is
+    # 40. A round boundary at tick 38 has NOT yet reached 40 → no-op, pitch parks.
+    w.action_pitch_contribution(a, "next")
+    w.tick = 38
+    assert w.run_victory_arch_cycle() == []
+    assert a.credits == 50
+    assert "a" in w.pending_pitches          # pitch accumulates until the boundary
+    # Once tick reaches/exceeds the next due multiple (40), the cycle fires again.
+    w.tick = 44
+    events = w.run_victory_arch_cycle()
+    assert sum(1 for e in events if e["kind"] == "arch_award") == 1
+    assert a.credits == 100
+
+
+def test_last_arch_tick_survives_snapshot_restore():
+    # The catch-up tracker is durable state: a fork/resume mid-run must NOT replay
+    # an already-fired cadence boundary (that would double-award). It serializes
+    # only-when-set (EM-155 byte-identical) and restores defensively.
+    a = _agent(id="a", name="Ann", credits=0)
+    w = _world([a], _arch_params(every_n_ticks=10, award=50, top_n=1))
+    w.record_contribution(a, "project_built")
+    w.action_pitch_contribution(a, "pitch")
+    w.tick = 14
+    w.run_victory_arch_cycle()          # fires boundary 10, tracker advances to 10
+    assert a.credits == 50
+    snap = w.to_snapshot()
+    restored = World.from_snapshot(copy.deepcopy(snap), params=_arch_params(
+        every_n_ticks=10, award=50, top_n=1))
+    # Re-park a pitch and re-drive the SAME round boundary on the restored world.
+    restored.action_pitch_contribution(restored.agents["a"], "again")
+    restored.tick = 14
+    events = restored.run_victory_arch_cycle()
+    # Boundary 10 already fired pre-snapshot → must NOT re-fire (no double award).
+    assert events == []
+    assert restored.agents["a"].credits == 50
+
+
+def test_no_arch_fire_leaves_snapshot_byte_identical():
+    # A world that has never fired a cycle must serialize WITHOUT the tracker key,
+    # so a pitch-free / pre-EM-232 snapshot round-trips byte-identically.
+    a = _agent(credits=20)
+    w = _world([a])
+    snap = w.to_snapshot()
+    assert "_last_arch_tick" not in snap
+    assert "last_arch_tick" not in json.dumps(snap)
 
 
 def test_cycle_fires_on_cadence_and_awards_top_pitcher():
