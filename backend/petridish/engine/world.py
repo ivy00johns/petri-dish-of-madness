@@ -25,6 +25,19 @@ def _block_get(block: Any, key: str, default: Any) -> Any:
     return getattr(block, key, default)
 
 
+def _clamp_need(value: Any, default: float = 100.0) -> float:
+    """EM-229 — coerce a restored need (knowledge/influence) to a float clamped
+    to 0..100. Absent (None) or malformed → the full default (fail-safe: a
+    pre-EM-229 snapshot restores full needs). Mirrors the crime notoriety clamp
+    on the restore path."""
+    if value is None:
+        return default
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _truncate(text: str, limit: int = 60) -> str:
     """Truncate feed text on a budget, with an ellipsis (EM-100 rule labels)."""
     text = str(text or "")
@@ -194,6 +207,17 @@ class AgentState:
     crime_status: str | None = None          # None|wanted|detained|jailed|exiled
     crime_status_until_tick: int = 0         # release tick for detained/jailed
     rap_sheet: list[dict] = field(default_factory=list)  # capped crime record
+    # EM-229 — three-needs psychology. Two decaying drives alongside `energy`
+    # (floats 0..100). ADDITIVE with default 100.0; serialized in to_dict ONLY
+    # when < 100 and restored defensively (absent/garbage → 100.0, clamped
+    # 0..100), so a full-needs agent — and every pre-EM-229 snapshot — keeps the
+    # exact prior dict shape (the EM-155 byte-identical guarantee). UNLIKE energy
+    # these NEVER kill (check_death reads only energy); a low need only biases
+    # behavior via a salience-gated prompt line. Knowledge is replenished by
+    # learning (teach/skill-gain, EM-227/228); influence by governance/social
+    # wins — see replenish_knowledge / replenish_influence.
+    knowledge: float = 100.0
+    influence: float = 100.0
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -254,6 +278,12 @@ class AgentState:
             d["crime_status_until_tick"] = self.crime_status_until_tick
         if self.rap_sheet:
             d["rap_sheet"] = [dict(e) for e in self.rap_sheet]
+        # EM-229 — needs serialized ONLY when below full, so a full-needs agent
+        # (and every pre-EM-229 snapshot) keeps the exact prior dict shape.
+        if self.knowledge < 100.0:
+            d["knowledge"] = round(self.knowledge, 2)
+        if self.influence < 100.0:
+            d["influence"] = round(self.influence, 2)
         return d
 
 
@@ -1376,6 +1406,36 @@ class World:
             except (TypeError, ValueError):  # pragma: no cover - defensive
                 pass
         agent.energy = max(0.0, agent.energy - decay)
+
+    def apply_needs_decay(self, agent: AgentState) -> None:
+        """EM-229 — decay the knowledge + influence needs one turn. Runs beside
+        apply_energy_decay on every turn (loop.py / run.py). Pure arithmetic,
+        floored at 0; UNLIKE energy these NEVER kill — check_death reads only
+        energy. The decay rates come from the optional `world.needs` block via the
+        defensive accessor (absent ⇒ dataclass defaults ⇒ no behavior change)."""
+        # Literal call-site defaults MUST match NeedsParams defaults (the
+        # _crime_param convention): an absent key falls back here, an absent
+        # block makes EVERY key fall back here ⇒ pre-EM-229 behavior.
+        k_decay = float(self._needs_param("knowledge_decay_per_turn", 0.5))
+        i_decay = float(self._needs_param("influence_decay_per_turn", 0.4))
+        agent.knowledge = max(0.0, agent.knowledge - k_decay)
+        agent.influence = max(0.0, agent.influence - i_decay)
+
+    def replenish_knowledge(self, agent: AgentState, amount: float) -> None:
+        """EM-229 — top up the knowledge need (clamped 0..100). Call-site hook for
+        learning: a successful skill-gain / being-taught (EM-227/228) replenishes
+        knowledge. Wave M2 wires the teach_skill / skill-level-up paths to this."""
+        if amount <= 0:
+            return
+        agent.knowledge = max(0.0, min(100.0, agent.knowledge + float(amount)))
+
+    def replenish_influence(self, agent: AgentState, amount: float) -> None:
+        """EM-229 — top up the influence need (clamped 0..100). Call-site hook for
+        governance/social wins: a passed rule, a won trial, a forged alliance
+        replenishes influence. Wave M2/M3 governance paths wire to this."""
+        if amount <= 0:
+            return
+        agent.influence = max(0.0, min(100.0, agent.influence + float(amount)))
 
     def check_death(self, agent: AgentState) -> bool:
         """Increment zero_energy counter; return True if agent should die."""
@@ -3962,6 +4022,14 @@ class World:
         the block, so keep these call-site defaults == CrimeParams defaults."""
         return _block_get(getattr(self.params, "crime", None), name, default)
 
+    def _needs_param(self, name: str, default: Any) -> Any:
+        """EM-229 — defensive accessor for the `world.needs` config block
+        (NeedsParams dataclass OR dict OR absent — EM-155 conventions, like
+        _crime_param). An absent block ⇒ every default ⇒ pre-EM-229 worlds run
+        unchanged. `default` is only a fallback for a key missing from the block,
+        so keep these call-site defaults == NeedsParams defaults."""
+        return _block_get(getattr(self.params, "needs", None), name, default)
+
     def _maybe_shift_relationship(self, from_agent: AgentState, to_agent: AgentState) -> None:
         """Reflex type transitions, evaluated after every trust clamp:
 
@@ -5095,6 +5163,12 @@ class World:
                               in ("wanted", "detained", "jailed", "exiled") else None),
                 crime_status_until_tick=_int(d.get("crime_status_until_tick")),
                 rap_sheet=[dict(e) for e in (d.get("rap_sheet") or []) if isinstance(e, dict)],
+                # EM-229 — needs: additive. Pre-EM-229 snapshots lack the keys
+                # and restore the full default (100.0); a present value is clamped
+                # 0..100 and a malformed value fails safe to 100.0. Byte-stable
+                # round-trip (EM-155): a full need is never re-emitted.
+                knowledge=_clamp_need(d.get("knowledge")),
+                influence=_clamp_need(d.get("influence")),
             )
             a.relationships = {
                 str(aid): RelationshipState(

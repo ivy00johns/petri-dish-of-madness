@@ -2136,6 +2136,26 @@ def _assemble_context(
             f"Recharge soon (cost {recharge_cost} credits — you have "
             f"{agent.credits}) or you will start dying."
         )
+    # ── EM-229 — three-needs psychology. The knowledge + influence drives ride
+    # alongside energy but NEVER kill; they surface a nudge ONLY when below the
+    # salience threshold (exactly like the energy starvation line above is
+    # conditional), so a full-needs agent's prompt is byte-identical to
+    # pre-EM-229 — the em161 protagonist golden is unaffected. getattr keeps
+    # callers safe if the engine seam is ever absent (default full ⇒ no line).
+    _know = getattr(agent, "knowledge", 100.0)
+    _infl = getattr(agent, "influence", 100.0)
+    _know_thresh = _world_block_get(params, "needs", "knowledge_salience_threshold", 40.0)
+    _infl_thresh = _world_block_get(params, "needs", "influence_salience_threshold", 40.0)
+    if _know < _know_thresh:
+        needs_lines.append(
+            f"Your KNOWLEDGE feels thin ({_know:.0f}/100) — you hunger to learn. "
+            f"Seek out who knows more, ask to be taught, gain a skill."
+        )
+    if _infl < _infl_thresh:
+        needs_lines.append(
+            f"Your INFLUENCE feels small ({_infl:.0f}/100) — you crave a say in "
+            f"things. Win people over, propose a rule, campaign, lead."
+        )
     needs_text = "\n".join(f"  {line}" for line in needs_lines)
 
     # ── W11b / EM-079 — active commitments (compact: text + age in ticks) ─────

@@ -101,6 +101,18 @@ world:
     friend_interactions: 5
     feud_trust: -40
     partner_trust_threshold: 40
+  # EM-229 — three-needs psychology: decaying `knowledge` + `influence` drives
+  # ride alongside `energy` on every agent. They decay every turn at these small
+  # non-zero rates but NEVER kill (only energy does) — a need below its salience
+  # threshold only adds a conditional prompt nudge (so a full-needs agent's
+  # prompt is byte-identical to pre-EM-229). Replenished by learning (knowledge)
+  # and governance/social wins (influence). MUST stay in sync with
+  # config/world.yaml. Absent ⇒ these exact defaults (no behavior change).
+  needs:
+    knowledge_decay_per_turn: 0.5
+    influence_decay_per_turn: 0.4
+    knowledge_salience_threshold: 40
+    influence_salience_threshold: 40
   # Wave E / EM-114 — lightweight children: once per round boundary, mutual
   # partners (are_partners) co-located at a home may have a child — a NEW
   # agent at background tier, only into vacancies under max_population AND
@@ -651,6 +663,41 @@ class CrimeParams:
 
 
 @dataclass
+class NeedsParams:
+    """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
+    — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
+
+    UNLIKE energy these NEVER kill; they only bias behavior via a conditional
+    prompt line that surfaces ONLY when a need drops below its salience threshold
+    (so a full-needs agent's prompt is byte-identical to pre-EM-229 — the em161
+    golden). The engine reads this block via the defensive `_needs_param`
+    accessor with IDENTICAL defaults, so a world.yaml WITHOUT a `needs` block
+    decays at exactly these rates (no KeyError, no crash).
+
+    EW drives map energy ~30h / influence ~24h / knowledge ~36h → scaled to our
+    tick cadence as SLOWER decay than energy (energy_decay_per_turn defaults 4):
+    small non-zero per-turn defaults so the needs drift over many turns. NO
+    `enabled` flag — the decay is always-on (additive, additive-default fields),
+    and the always-on PROMPT change is kept golden-safe by the salience gate.
+
+      knowledge_decay_per_turn     — knowledge lost each turn (curiosity drive)
+      influence_decay_per_turn     — influence lost each turn (politics drive)
+      knowledge_salience_threshold — below this, the prompt nudges toward
+                                     learning/teaching (curiosity)
+      influence_salience_threshold — below this, the prompt nudges toward
+                                     politics/campaigning/social wins
+
+    Replenishment (engine `replenish_knowledge` / `replenish_influence`): learning
+    (teach/skill-gain, EM-227/228) tops up knowledge; governance/social wins top
+    up influence. Wave M2 wires those call-sites; the hooks clamp to 100.
+    """
+    knowledge_decay_per_turn: float = 0.5
+    influence_decay_per_turn: float = 0.4
+    knowledge_salience_threshold: float = 40.0
+    influence_salience_threshold: float = 40.0
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -926,6 +973,11 @@ class WorldParams:
     # crime/justice verbs only fire on a deliberate agent turn, so a world.yaml
     # without the `crime` block restores pre-EM-240 snapshots byte-identical.
     crime: CrimeParams = field(default_factory=CrimeParams)
+    # EM-229 — three-needs psychology tunables. Additive with engine-matching
+    # defaults; the decay is always-on but the prompt surfacing is salience-gated
+    # so a world.yaml without the `needs` block keeps the em161 golden + restores
+    # pre-EM-229 snapshots byte-identical (needs default 100.0, omitted at 100).
+    needs: NeedsParams = field(default_factory=NeedsParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1484,6 +1536,34 @@ def _parse_crime(raw: dict | None) -> CrimeParams:
     )
 
 
+def _parse_needs(raw: dict | None) -> NeedsParams:
+    """Parse the optional `world.needs` block (EM-229).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_crime`; all fields are floats. Decay rates clamp to >= 0 (a negative
+    decay would REPLENISH a need each turn — never intended)."""
+    if not isinstance(raw, dict):
+        return NeedsParams()
+    d = NeedsParams()
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return NeedsParams(
+        knowledge_decay_per_turn=max(0.0, _float(
+            "knowledge_decay_per_turn", d.knowledge_decay_per_turn)),
+        influence_decay_per_turn=max(0.0, _float(
+            "influence_decay_per_turn", d.influence_decay_per_turn)),
+        knowledge_salience_threshold=_float(
+            "knowledge_salience_threshold", d.knowledge_salience_threshold),
+        influence_salience_threshold=_float(
+            "influence_salience_threshold", d.influence_salience_threshold),
+    )
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -1661,6 +1741,7 @@ def _parse_world(
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),
+        needs=_parse_needs(w.get("needs")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),

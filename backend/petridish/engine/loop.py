@@ -644,6 +644,9 @@ class TickLoop:
 
             # Energy decay
             world.apply_energy_decay(agent)
+            # EM-229 — knowledge + influence needs decay alongside energy (these
+            # never kill; a low need only biases the prompt via a salience gate).
+            world.apply_needs_decay(agent)
 
             # Run model turn (returns domain event(s) + a `_trace` structure)
             raw_result = await self._runtime.run_turn(agent)

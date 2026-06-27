@@ -145,6 +145,23 @@ world:
     accuser_acquittal_penalty: 8   # accuser trust hit from onlookers
     released_notoriety_relief: 10  # notoriety cleared on release
 
+  # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
+  # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
+  # every agent (floats 0..100, default 100). They decay every turn at these
+  # small non-zero rates but UNLIKE energy they NEVER kill: a need below its
+  # salience threshold only adds a conditional prompt nudge (toward learning /
+  # politics), so a full-needs agent's prompt stays byte-identical to pre-EM-229.
+  # EW drives (energy ~30h / influence ~24h / knowledge ~36h) scale to SLOWER
+  # decay than energy_decay_per_turn (4). Knowledge is replenished by learning
+  # (teach/skill-gain, EM-227/228); influence by governance/social wins. Absent
+  # ⇒ engine defaults (no behavior change). MUST stay in sync with the
+  # NeedsParams mirror in backend/petridish/config/loader.py.
+  needs:
+    knowledge_decay_per_turn: 0.5      # < energy_decay_per_turn (4); curiosity drift
+    influence_decay_per_turn: 0.4      # politics drift
+    knowledge_salience_threshold: 40   # below → prompt nudges toward learning
+    influence_salience_threshold: 40   # below → prompt nudges toward politics
+
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
   # the B1 consent mechanic) co-located at a home-kind place for a birth.

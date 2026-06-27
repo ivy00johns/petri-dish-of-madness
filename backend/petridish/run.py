@@ -104,6 +104,7 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             continue
 
         world.apply_energy_decay(agent)
+        world.apply_needs_decay(agent)  # EM-229 — knowledge + influence drift
         raw_result = await runtime.run_turn(agent)
 
         if "_multi" in raw_result:
