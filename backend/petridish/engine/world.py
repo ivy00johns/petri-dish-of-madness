@@ -939,6 +939,17 @@ class World:
         # so a request-free world round-trips byte-identically. One open request per
         # teacher (a later ask overwrites the prior — the freshest invitation wins).
         self.pending_skill_requests: dict[str, dict] = {}
+        # EM-230 — open trade offers, keyed by the OFFEREE's (target's) agent id →
+        # {from_id, give, get, tick}, where give/get are normalized term dicts
+        # {"credits": int>=0, "skill": str|None}. Posted by action_offer_trade (the
+        # two-turn negotiation OFFER); the target perceives "X offers you … for …"
+        # on its next prompt; consumed by action_accept_trade (the ATOMIC two-sided
+        # swap, only if BOTH sides can still pay) or dropped by action_decline_trade.
+        # Like pending_skill_requests this Wave-M outbox IS serialized snapshot-safe
+        # (EM-190): only when non-empty, restored defensively, so an offer-free world
+        # round-trips byte-identically. One open offer per offeree (a later offer
+        # overwrites the prior — the freshest deal on the table wins).
+        self.pending_trade_offers: dict[str, dict] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -2047,6 +2058,228 @@ class World:
             "target_id": target.id,
             "text": f"{asker.name} asks {target.name} to teach them {skill}.",
             "payload": {"action": "request_skill", "skill": skill},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-230 — real trade: offer_trade → accept_trade / decline_trade. A two-turn
+    # NEGOTIATED exchange (R4) beyond today's one-way give + steal. The offer parks
+    # a pending record keyed by the OFFEREE; accept performs the ATOMIC two-sided
+    # swap (credits both ways + any skill-teach via the EM-228 path) ONLY if BOTH
+    # sides can still pay; decline drops it. Reflex-tier (zero extra LLM calls). The
+    # pending dict is serialized snapshot-safe (EM-190). All deterministic — pure
+    # arithmetic + the EM-228 teach path; no random, no clock (EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_trade_terms(raw: Any) -> dict:
+        """EM-230 — coerce a give/get arg into the canonical term shape
+        {"credits": int>=0, "skill": str|None}. Tolerant of a model's loose JSON:
+        a non-dict, a negative/garbage credits, a blank skill all collapse to the
+        empty term {"credits": 0, "skill": None}. The substrate is credits + a
+        skill-teach (the only fungible economy primitives — agents hold no item
+        inventory); a `resource`/`item` key is intentionally NOT honored (there is
+        no resource state to move) so a trade never silently no-ops on a phantom arm.
+        """
+        credits = 0
+        skill = None
+        if isinstance(raw, dict):
+            try:
+                credits = max(0, int(raw.get("credits", 0) or 0))
+            except (TypeError, ValueError):
+                credits = 0
+            s = raw.get("skill")
+            if isinstance(s, str) and s.strip():
+                skill = s.strip()
+        return {"credits": credits, "skill": skill}
+
+    @staticmethod
+    def _trade_terms_empty(terms: dict) -> bool:
+        """EM-230 — True when a normalized term carries nothing (no credits, no
+        skill) — an empty side has nothing to swap."""
+        return not terms.get("credits") and not terms.get("skill")
+
+    def action_offer_trade(
+        self, offerer: AgentState, target: AgentState, give: Any, get: Any
+    ) -> dict:
+        """EM-230 — park a trade OFFER (R4 negotiation half). `give` is what the
+        offerer pledges to the target; `get` is what the offerer asks in return —
+        each a term dict that may carry {credits:int} and/or {skill:name}. Keyed by
+        the TARGET so they perceive "X offers you … in exchange for …" on their next
+        prompt. Co-located only; rejects an empty deal and a hollow credit pledge
+        the offerer can't currently back (a clear reason lets the model self-correct;
+        the accepter still re-checks at settle time, so a later loss is caught too).
+        Returns a ready-to-emit event dict. The pending dict is serialized
+        snapshot-safe (EM-190). A later offer to the same target overwrites the
+        prior (freshest deal wins)."""
+        if offerer.id == target.id:
+            return self._fail_event(offerer.id, "offer_trade", "self",
+                                    f"{offerer.name} cannot trade with themselves.")
+        if offerer.location != target.location:
+            return self._fail_event(offerer.id, "offer_trade", "not co-located",
+                                    f"{offerer.name} found no one here to trade with.")
+        give_t = self._normalize_trade_terms(give)
+        get_t = self._normalize_trade_terms(get)
+        if self._trade_terms_empty(give_t) and self._trade_terms_empty(get_t):
+            return self._fail_event(offerer.id, "offer_trade", "empty deal",
+                                    f"{offerer.name} offered nothing for nothing.")
+        # Don't let an offerer pledge credits they don't hold — a hollow offer would
+        # only fail later and clutter the target's prompt. (Skill arms are validated
+        # at settle time, since a level can change before acceptance.)
+        if give_t["credits"] > offerer.credits:
+            return self._fail_event(
+                offerer.id, "offer_trade", "cannot back the offer",
+                f"{offerer.name} cannot back an offer of {give_t['credits']} "
+                f"credits (holds {offerer.credits}).")
+        self.pending_trade_offers[target.id] = {
+            "from_id": offerer.id,
+            "give": give_t,
+            "get": get_t,
+            "tick": self.tick,
+        }
+        return {
+            "kind": "trade_offered",
+            "actor_id": offerer.id,
+            "target_id": target.id,
+            "text": (
+                f"{offerer.name} offers {target.name} a trade: "
+                f"{self._describe_terms(give_t)} for {self._describe_terms(get_t)}."
+            ),
+            "payload": {
+                "action": "offer_trade",
+                "give": dict(give_t),
+                "get": dict(get_t),
+            },
+        }
+
+    @staticmethod
+    def _describe_terms(terms: dict) -> str:
+        """EM-230 — a short human phrase for a term dict (for event text + the
+        perceived-offer prompt line)."""
+        parts = []
+        if terms.get("credits"):
+            parts.append(f"{int(terms['credits'])} credits")
+        if terms.get("skill"):
+            parts.append(f"a {terms['skill']} lesson")
+        return " + ".join(parts) if parts else "nothing"
+
+    def _can_teach(self, teacher: AgentState, student: AgentState, skill: str) -> bool:
+        """EM-230 — would a teach of `skill` from teacher→student actually transfer
+        a level right now? Mirrors action_teach_skill's gates (co-located + the
+        teacher STRICTLY outranks) WITHOUT mutating, so the atomic accept_trade
+        pre-check can reject a skill arm that would otherwise fail mid-swap (e.g.
+        the pair drifted apart after the offer was parked) — guaranteeing no partial
+        swap."""
+        return (teacher.location == student.location
+                and teacher.skill_level(skill) > student.skill_level(skill))
+
+    def action_accept_trade(self, accepter: AgentState) -> tuple[bool, str, dict | None]:
+        """EM-230 — ATOMICALLY settle the open offer addressed to `accepter`. The
+        offerer GIVES its `give` terms to the accepter and GETS the `get` terms from
+        the accepter (so from the accepter's seat: pay `get`, receive `give`). The
+        swap runs ONLY if BOTH sides can pay — every credit/skill arm is validated
+        FIRST; if any fails, NOTHING moves and the offer stays parked (the model can
+        retry once it can afford it). Returns (ok, reason, offer|None).
+
+        DETERMINISTIC: pure credit arithmetic + the EM-228 grant_skill_xp teach path
+        (no random, no clock). On success the offer is consumed."""
+        offer = self.pending_trade_offers.get(accepter.id)
+        if not offer:
+            return False, "no trade offer has been made to you", None
+        offerer = self.agents.get(offer.get("from_id"))
+        if offerer is None or not offerer.alive:
+            # The counterparty is gone — drop the stale offer.
+            self.pending_trade_offers.pop(accepter.id, None)
+            return False, "the offerer is gone", None
+        give = offer.get("give") or {}   # offerer → accepter
+        get = offer.get("get") or {}     # accepter → offerer
+        give_credits = int(give.get("credits", 0) or 0)
+        get_credits = int(get.get("credits", 0) or 0)
+        give_skill = give.get("skill")
+        get_skill = get.get("skill")
+        # ── Affordability pre-check (atomic gate — validate ALL before moving any) ──
+        if give_credits > offerer.credits:
+            return False, (
+                f"{offerer.name} can no longer afford {give_credits} credits "
+                f"(holds {offerer.credits})"), None
+        if get_credits > accepter.credits:
+            return False, (
+                f"you cannot afford {get_credits} credits (you hold "
+                f"{accepter.credits})"), None
+        if give_skill and not self._can_teach(offerer, accepter, give_skill):
+            return False, (
+                f"{offerer.name} cannot teach you {give_skill} now (not co-located "
+                f"or they do not outrank you)"), None
+        if get_skill and not self._can_teach(accepter, offerer, get_skill):
+            return False, (
+                f"you cannot teach {get_skill} now (not co-located or you do not "
+                f"outrank {offerer.name})"), None
+        # ── All arms validated → perform the swap (no further failure path) ──
+        if give_credits:
+            offerer.credits -= give_credits
+            accepter.credits += give_credits
+        if get_credits:
+            accepter.credits -= get_credits
+            offerer.credits += get_credits
+        if give_skill:
+            # offerer teaches the accepter (EM-228 bounded transfer + knowledge
+            # replenish + mutual trust + consumes any matching open skill request).
+            self.action_teach_skill(offerer, accepter, give_skill)
+        if get_skill:
+            self.action_teach_skill(accepter, offerer, get_skill)
+        # A settled trade warms both sides (cooperation, like give).
+        self._update_trust(offerer, accepter, +5)
+        self._update_trust(accepter, offerer, +5)
+        self.pending_trade_offers.pop(accepter.id, None)
+        return True, "ok", offer
+
+    def settle_trade_event(self, accepter: AgentState) -> dict:
+        """EM-230 — dispatch-facing wrapper: run action_accept_trade and return a
+        ready-to-emit event dict (a `trade_settled` event on success, a non-emitting
+        failure dict otherwise). Mirrors the action_* event shape."""
+        ok, reason, offer = self.action_accept_trade(accepter)
+        if ok and offer is not None:
+            offerer = self.agents.get(offer.get("from_id"))
+            offerer_name = offerer.name if offerer is not None else offer.get("from_id")
+            give = offer.get("give") or {}
+            get = offer.get("get") or {}
+            return {
+                "kind": "trade_settled",
+                "actor_id": accepter.id,
+                "target_id": offer.get("from_id"),
+                "text": (
+                    f"{accepter.name} and {offerer_name} settle a trade: "
+                    f"{self._describe_terms(give)} for {self._describe_terms(get)}."
+                ),
+                "payload": {
+                    "action": "accept_trade",
+                    "from_id": offer.get("from_id"),
+                    "give": dict(give),
+                    "get": dict(get),
+                },
+            }
+        return {
+            "kind": "trade_failed",
+            "actor_id": accepter.id,
+            "text": f"{accepter.name} could not settle the trade: {reason}",
+            "payload": {"action": "accept_trade", "error": reason},
+        }
+
+    def action_decline_trade(self, accepter: AgentState) -> dict:
+        """EM-230 — drop the open offer addressed to `accepter` (the polite no).
+        Returns a ready-to-emit `trade_declined` event, or a fail event when there
+        is nothing to decline."""
+        offer = self.pending_trade_offers.pop(accepter.id, None)
+        if not offer:
+            return self._fail_event(accepter.id, "decline_trade", "no offer",
+                                    f"{accepter.name} had no trade to decline.")
+        offerer = self.agents.get(offer.get("from_id"))
+        offerer_name = offerer.name if offerer is not None else offer.get("from_id")
+        return {
+            "kind": "trade_declined",
+            "actor_id": accepter.id,
+            "target_id": offer.get("from_id"),
+            "text": f"{accepter.name} declines {offerer_name}'s trade offer.",
+            "payload": {"action": "decline_trade"},
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -5526,6 +5759,23 @@ class World:
                 }
                 for tid, r in self.pending_skill_requests.items()
             }
+        # EM-230 — open trade offers {offeree_id: {from_id, give, get, tick}}.
+        # Serialized ONLY when non-empty (the cap_demotions pattern), so an
+        # offer-free world — and every pre-EM-230 snapshot — keeps the exact prior
+        # key set (absent ⇒ {} on restore). Like pending_skill_requests this
+        # Wave-M pending outbox IS snapshot-safe (EM-190): an offer parked between
+        # offer and accept survives a fork/resume instead of being silently dropped.
+        # give/get re-emit in their canonical term shape for a byte-stable round-trip.
+        if self.pending_trade_offers:
+            snap["pending_trade_offers"] = {
+                str(tid): {
+                    "from_id": str(o.get("from_id", "")),
+                    "give": self._normalize_trade_terms(o.get("give")),
+                    "get": self._normalize_trade_terms(o.get("get")),
+                    "tick": int(o.get("tick", 0)),
+                }
+                for tid, o in self.pending_trade_offers.items()
+            }
         # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
         # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
         # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
@@ -5914,4 +6164,28 @@ class World:
                     "tick": _int(r.get("tick")),
                 }
         world.pending_skill_requests = restored_requests
+        # EM-230 — restore open trade offers (snapshot-safe, EM-190). Defensive:
+        # keep only well-formed entries whose offeree AND offerer both still exist,
+        # are distinct, and that carry a non-empty deal (a non-dict entry, a missing
+        # agent, a self-offer, or an empty give+get → dropped). give/get are
+        # re-normalized so a garbage term collapses to its canonical empty form.
+        restored_offers: dict[str, dict] = {}
+        for tid, o in (state.get("pending_trade_offers") or {}).items():
+            if not isinstance(o, dict):
+                continue
+            offeree_id = str(tid)
+            from_id = str(o.get("from_id", ""))
+            give_t = World._normalize_trade_terms(o.get("give"))
+            get_t = World._normalize_trade_terms(o.get("get"))
+            if (offeree_id in world.agents and from_id in world.agents
+                    and from_id != offeree_id
+                    and not (World._trade_terms_empty(give_t)
+                             and World._trade_terms_empty(get_t))):
+                restored_offers[offeree_id] = {
+                    "from_id": from_id,
+                    "give": give_t,
+                    "get": get_t,
+                    "tick": _int(o.get("tick")),
+                }
+        world.pending_trade_offers = restored_offers
         return world

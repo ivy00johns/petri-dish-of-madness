@@ -138,6 +138,10 @@ ACTION_SCHEMA = {
                 # agent a skill you outrank them in; ASK a more-skilled co-located
                 # agent to teach you one (parks a pending request they perceive).
                 "teach_skill", "request_skill",
+                # EM-230 — real trade: offer a co-located agent a two-sided deal
+                # (credits and/or a skill-lesson each way); accept/decline the offer
+                # addressed to you (an ATOMIC swap that runs only if both can pay).
+                "offer_trade", "accept_trade", "decline_trade",
                 # Wave K / EM-218–220 — the builders'-city reflex tools: place /
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
@@ -191,6 +195,8 @@ ACTION_SCHEMA = {
                             "adopt", "feed_pet",
                             # EM-228 — teach / request skills (cooperation lever).
                             "teach_skill", "request_skill",
+                            # EM-230 — real trade: offer / accept / decline.
+                            "offer_trade", "accept_trade", "decline_trade",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
@@ -379,6 +385,15 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # (see _assemble_context). Zero extra LLM calls — they ride the existing turn.
     "teach_skill":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "request_skill":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-230 — real-trade reflex tools. offer_trade targets a co-located agent (the
+    # co-location gate lives in _validate_world, like teach_skill — a relationship
+    # rule, not a place rule). accept_trade / decline_trade take NO target (the open
+    # offer is keyed by the accepting agent's id, like accept_contract) and are
+    # gated on "an offer is addressed to you". All reflex — the swap rides the
+    # existing turn, zero extra LLM calls.
+    "offer_trade":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "accept_trade":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "decline_trade":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
     # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
     # co-location gate is prop-specific and enforced in _validate_world). demolish
@@ -1023,7 +1038,12 @@ _TARGETED_ACTIONS = frozenset(
      # EM-228 — teach_skill / request_skill both target a co-located agent name in
      # args["target"] (resolved to an id before dispatch, like steal). The `skill`
      # arg is a free string and needs no resolution.
-     "teach_skill", "request_skill"}
+     "teach_skill", "request_skill",
+     # EM-230 — offer_trade targets a co-located agent name in args["target"]
+     # (resolved to an id, like give). accept_trade / decline_trade take NO target
+     # (the offer is keyed by the accepting agent's id), so they are EXCLUDED here.
+     # The give/get term dicts are free args and need no resolution.
+     "offer_trade"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1414,6 +1434,23 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         skill = args.get("skill")
         if not isinstance(skill, str) or not skill.strip():
             return f"{action} requires a skill name (args.skill)"
+
+    elif action == "offer_trade":
+        # EM-230 — offer_trade targets a co-located agent (resolved like give). The
+        # world action re-checks co-location + self-target + that the deal is
+        # non-empty and the offerer can back any pledged credits, so this front gate
+        # only ensures a reachable target — a clear rejection lets the model
+        # self-correct. The give/get terms are validated in the world method.
+        target_error = _validate_target(args, agent, world, "offer_trade")
+        if target_error:
+            return target_error
+
+    elif action in ("accept_trade", "decline_trade"):
+        # EM-230 — accept_trade / decline_trade take no target; reject up front
+        # (clear message) unless an open offer is addressed to this agent. The
+        # world method re-checks affordability atomically at settle time.
+        if agent.id not in getattr(world, "pending_trade_offers", {}):
+            return "no trade offer has been made to you"
 
     elif action in ("investigate", "accuse", "detain"):
         # EM-240 (Task 10) — justice verbs are reserved for enforcers (a role
@@ -1905,6 +1942,19 @@ def _assemble_context(
         target_names = ", ".join(a.name for a in co_located)
         valid_actions.append(f"whisper (target, text) - private to one of: {target_names}")
         valid_actions.append(f"give (target, amount) - transfer credits to: {target_names}")
+        # EM-230 — real trade: a two-sided negotiated deal (beyond one-way give).
+        # Offered to any co-located agent (the deal can be credits and/or a skill
+        # lesson each way); the target perceives + accepts/declines on their turn.
+        # GATED on an active skills library — the headline value of offer_trade over
+        # plain give is the skill economy (skill-for-credit / skill-for-skill), and
+        # in a skill-less default world give/steal already cover credit moves. An
+        # empty library (every pre-Wave-M world, AND the em161 golden fixture) yields
+        # no offer_trade line ⇒ the em161 lawful-citizen golden is byte-identical.
+        if world.skill_library():
+            valid_actions.append(
+                "offer_trade (target, give, get) - propose a two-sided deal to: "
+                f"{target_names} — give/get are {{credits, skill}} dicts "
+                "(e.g. give {credits 10}, get {skill farming})")
         valid_actions.append(f"insult (target) - insult: {target_names}")
         valid_actions.append(f"attack (target) - attack: {target_names}")
         valid_actions.append(f"set_relationship (target, type) - ally|rival|neutral|friend|enemy")
@@ -2488,6 +2538,33 @@ def _assemble_context(
                 f"pass on your craft — or ignore it.\n"
             )
 
+    # ── EM-230 — perceived trade OFFER. When a co-located agent has offered THIS
+    # agent a two-sided deal (action_offer_trade parks it keyed by the offeree),
+    # surface "X offers you … for … — use accept_trade or decline_trade". EMPTY
+    # (⇒ byte-identical prompt) when no offer is addressed to this agent — so the
+    # em161 lawful-citizen golden is unaffected (a default world parks no offers).
+    # Only surfaced while the offerer is still co-located (the swap needs them here)
+    # — a moved-away offerer's stale offer simply isn't shown (the validator's
+    # affordability re-check still fires if the agent tries anyway). (getattr keeps
+    # callers safe if the seam is ever absent.)
+    trade_block = ""
+    _offers = getattr(world, "pending_trade_offers", None)
+    _offer = _offers.get(agent.id) if isinstance(_offers, dict) else None
+    if _offer:
+        _offerer = world.agents.get(_offer.get("from_id"))
+        if (_offerer is not None and _offerer.alive
+                and _offerer.location == agent.location):
+            _give = _offer.get("give") or {}   # what the OFFERER gives YOU
+            _get = _offer.get("get") or {}     # what YOU give the offerer
+            _give_txt = world._describe_terms(_give)
+            _get_txt = world._describe_terms(_get)
+            trade_block = (
+                f"\n=== ⇄ A TRADE OFFER ===\n"
+                f"  {_offerer.name} offers you {_give_txt} in exchange for "
+                f"{_get_txt}. Use accept_trade to settle it (an atomic swap — only "
+                f"if you can both pay) or decline_trade to refuse.\n"
+            )
+
     # ── EM-234 — universalization prompting (GovSim scaffold). The cheap
     # cooperation lift: before an agent acts on a SHARED resource it is nudged to
     # universalize the move — "what if EVERY agent did this?". ALWAYS-ON for every
@@ -2692,7 +2769,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{skills_block}{request_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{skills_block}{request_block}{trade_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -4834,6 +4911,30 @@ class AgentRuntime:
             return _emit_world_result(
                 self.world.action_request_skill(agent, target, args.get("skill", "")),
                 base, thought)
+
+        # EM-230 — real trade. offer_trade resolves a co-located target and parks an
+        # offer (ready event dict: trade_offered / a fail event). accept_trade settles
+        # the open offer addressed to this agent via the ATOMIC swap (trade_settled /
+        # trade_failed via settle_trade_event). decline_trade drops it (trade_declined
+        # / a fail event). accept/decline take NO target (keyed by this agent's id).
+        elif action == "offer_trade":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to offer a trade but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_offer_trade(
+                    agent, target, args.get("give"), args.get("get")),
+                base, thought)
+
+        elif action == "accept_trade":
+            return _emit_world_result(
+                self.world.settle_trade_event(agent), base, thought)
+
+        elif action == "decline_trade":
+            return _emit_world_result(
+                self.world.action_decline_trade(agent), base, thought)
 
         # EM-240 — enforcer justice verbs (Task 10). investigate returns a
         # (ok, reason, count) tuple like steal; accuse returns a ready event dict
