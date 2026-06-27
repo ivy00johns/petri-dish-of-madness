@@ -84,14 +84,14 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // Background
-    ctx.fillStyle = '#0a0a0b';
+    ctx.fillStyle = cssVar('--lab-bg');
     ctx.fillRect(0, 0, W, H);
     drawGrid(ctx, W, H);
 
     const world = worldRef.current;
     if (!world) {
       ctx.font = '12px "IBM Plex Mono", monospace';
-      ctx.fillStyle = '#3a3a50';
+      ctx.fillStyle = cssVar('--lab-dim');
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('AWAITING WORLD STATE…', W / 2, H / 2);
@@ -248,7 +248,7 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
     // Tick / day overlay.
     ctx.save();
     ctx.font = '10px "IBM Plex Mono", monospace';
-    ctx.fillStyle = '#3a3a50';
+    ctx.fillStyle = cssVar('--lab-dim');
     ctx.textAlign = 'right';
     ctx.textBaseline = 'bottom';
     ctx.fillText(`TICK ${world.tick}  DAY ${world.day}`, W - 8, H - 6);
@@ -469,7 +469,7 @@ function drawAgent(
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(ax, ay, r + 3, -Math.PI / 2 + energyAngle, 1.5 * Math.PI);
-  ctx.strokeStyle = '#252530';
+  ctx.strokeStyle = cssVar('--lab-border');
   ctx.lineWidth = 2.5;
   ctx.lineCap = 'butt';
   ctx.stroke();
@@ -495,10 +495,10 @@ function drawAgent(
     const px = ax + r - 1, py = ay + r - 1;
     ctx.beginPath();
     ctx.arc(px, py, Math.max(5, r * 0.4), 0, Math.PI * 2);
-    ctx.fillStyle = '#c8ff00';
+    ctx.fillStyle = cssVar('--lab-acid');
     ctx.fill();
     ctx.font = `bold ${Math.round(r * 0.42)}px "IBM Plex Mono", monospace`;
-    ctx.fillStyle = '#0a0a0b';
+    ctx.fillStyle = cssVar('--lab-bg');
     ctx.fillText(agent.credits > 99 ? '99+' : String(agent.credits), px, py + 0.5);
   }
 
