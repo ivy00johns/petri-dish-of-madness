@@ -210,6 +210,20 @@ world:
       farmer: {building: 1}
       healer: {art: 1}
 
+  # EM-231 — cooperation-gated tools (contracts/wave-m.md §3 Wave M2). EW's hard
+  # mechanic: a class of high-value action unlocks ONLY when both partners have
+  # AGREED to cooperate. A co-located pair forms a HANDSHAKE
+  # (offer_cooperation → accept_cooperation, the R4 two-turn pattern); the ONE
+  # gated action `co_build(building_id)` then requires that active handshake plus
+  # a co-located partner, advancing a building by co_build_bonus_step. Set ABOVE
+  # buildings.build_step (20) so a JOINT build genuinely outpaces solo work — the
+  # cooperation payoff. Purely additive (no enabled flag): a world that never
+  # forms a handshake has no cooperation state, so snapshots + the em161 golden
+  # are byte-identical. MUST stay in sync with the CooperationParams mirror in
+  # backend/petridish/config/loader.py.
+  cooperation:
+    co_build_bonus_step: 35     # progress one co_build adds (> build_step's 20 — the joint-build payoff)
+
   # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
   # Wave M1). When enabled, EVERY agent's turn context gets a single block that
   # asks them to reason about the commons by universalizing — "before acting on a

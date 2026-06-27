@@ -155,6 +155,14 @@ world:
       orator: {rhetoric: 2}
       farmer: {building: 1}
       healer: {art: 1}
+  # EM-231 — cooperation-gated tools. A co-located pair forms a HANDSHAKE
+  # (offer_cooperation → accept_cooperation); the gated `co_build` action then
+  # advances a building by co_build_bonus_step (set ABOVE buildings.build_step
+  # so a joint build outpaces solo work — the cooperation payoff). Purely
+  # additive: a world that never forms a handshake has no cooperation state
+  # (golden + snapshot byte-identical). MUST stay in sync with config/world.yaml.
+  cooperation:
+    co_build_bonus_step: 35
   # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
   # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
   # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
@@ -843,6 +851,34 @@ class SkillsParams:
 
 
 @dataclass
+class CooperationParams:
+    """EM-231 — Cooperation-gated tools (config `world.cooperation`). EW's hard
+    mechanic: a class of high-value action is unlocked ONLY when both partners
+    have AGREED to cooperate.
+
+    A co-located pair forms a HANDSHAKE — one agent `offer_cooperation(target)`,
+    the other `accept_cooperation` — creating a SYMMETRIC active link on the
+    World. The ONE cooperation-gated action `co_build(building_id)` then requires
+    an active handshake with a CO-LOCATED partner: it advances a building like
+    `build_step` but by `co_build_bonus_step` (the cooperation payoff over a solo
+    build_step). A solo agent attempting co_build is cleanly rejected.
+
+    The engine reads this block via the defensive `_coop_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `cooperation` block behaves at
+    exactly these values (no KeyError). NO `enabled` flag by design — the
+    handshake + the gated verb are PURELY ADDITIVE affordances: a world that
+    never forms a handshake has no cooperation state (golden + snapshot
+    byte-identical), and co_build is simply unavailable until a pair agrees.
+
+      co_build_bonus_step — progress a single co_build adds to a building (set
+                            ABOVE buildings.build_step — default 20 — so a joint
+                            build genuinely outpaces solo work; the cooperation
+                            payoff). Clamped to >= 1.
+    """
+    co_build_bonus_step: int = 35
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -1134,6 +1170,11 @@ class WorldParams:
     # populated `library` gates its listed high-value actions on a min skill
     # level; `archetypes` seeds a deterministic starting spread per persona.
     skills: SkillsParams = field(default_factory=SkillsParams)
+    # EM-231 — cooperation-gated tools. Additive: the handshake + the gated
+    # co_build verb are pure affordances with no `enabled` flag — a world that
+    # never forms a handshake has no cooperation state (golden + snapshot
+    # byte-identical), and co_build is simply unavailable until a pair agrees.
+    cooperation: CooperationParams = field(default_factory=CooperationParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1824,6 +1865,22 @@ def _parse_skills(raw: dict | None) -> SkillsParams:
     )
 
 
+def _parse_cooperation(raw: dict | None) -> CooperationParams:
+    """Parse the optional `world.cooperation` block (EM-231).
+    Absent/empty/malformed -> engine-matching defaults. Each key falls back to
+    its default individually (a malformed value never breaks the block). Mirrors
+    `_parse_memory`; the bonus step clamps to >= 1 (a non-positive joint build
+    would never advance — never intended)."""
+    if not isinstance(raw, dict):
+        return CooperationParams()
+    d = CooperationParams()
+    try:
+        bonus = max(1, int(raw.get("co_build_bonus_step", d.co_build_bonus_step)))
+    except (TypeError, ValueError):
+        bonus = d.co_build_bonus_step
+    return CooperationParams(co_build_bonus_step=bonus)
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -2004,6 +2061,7 @@ def _parse_world(
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),
+        cooperation=_parse_cooperation(w.get("cooperation")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),

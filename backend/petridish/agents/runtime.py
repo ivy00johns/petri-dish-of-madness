@@ -142,6 +142,11 @@ ACTION_SCHEMA = {
                 # (credits and/or a skill-lesson each way); accept/decline the offer
                 # addressed to you (an ATOMIC swap that runs only if both can pay).
                 "offer_trade", "accept_trade", "decline_trade",
+                # EM-231 — cooperation handshake + the ONE gated action: offer a
+                # co-located agent a partnership; accept the offer addressed to you
+                # (forms the active link); co_build a building with a co-located
+                # partner you've agreed to cooperate with (a bonus over solo build).
+                "offer_cooperation", "accept_cooperation", "co_build",
                 # Wave K / EM-218–220 — the builders'-city reflex tools: place /
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
@@ -197,6 +202,8 @@ ACTION_SCHEMA = {
                             "teach_skill", "request_skill",
                             # EM-230 — real trade: offer / accept / decline.
                             "offer_trade", "accept_trade", "decline_trade",
+                            # EM-231 — cooperation handshake + co_build.
+                            "offer_cooperation", "accept_cooperation", "co_build",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
@@ -394,6 +401,17 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "offer_trade":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "accept_trade":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "decline_trade":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-231 — cooperation handshake + the ONE gated action. offer_cooperation
+    # targets a co-located agent (the co-location gate lives in _validate_world,
+    # like teach_skill — a relationship rule). accept_cooperation takes NO target
+    # (the open offer is keyed by the accepting agent's id, like accept_contract).
+    # co_build gates to the building's OWN place ("@building", resolved per-turn,
+    # like build_step) PLUS a COOPERATION gate (an active handshake + a co-located
+    # partner) enforced in _validate_world. All reflex — they ride the existing
+    # turn, zero extra LLM calls.
+    "offer_cooperation":  {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
+    "accept_cooperation": {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
+    "co_build":           {"tier": "reflex", "location_gate": "@building",   "agreement_gate": None},
     # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
     # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
     # co-location gate is prop-specific and enforced in _validate_world). demolish
@@ -426,6 +444,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
 TIER_GATED_ACTIONS = frozenset({
     "propose_project", "build_step", "contribute_funds", "propose_rule",
 })
+# EM-231 NOTE: co_build is NOT tier-gated — like the other REFLEX building verbs
+# (repair / arson / take_offline) it stays open to every tier. Its real gate is
+# the COOPERATION handshake (an active link + a co-located partner), enforced in
+# _validate_world; the tier-pinning test (test_tier_gated_constant_shape) is left
+# byte-stable.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1043,7 +1066,12 @@ _TARGETED_ACTIONS = frozenset(
      # (resolved to an id, like give). accept_trade / decline_trade take NO target
      # (the offer is keyed by the accepting agent's id), so they are EXCLUDED here.
      # The give/get term dicts are free args and need no resolution.
-     "offer_trade"}
+     "offer_trade",
+     # EM-231 — offer_cooperation targets a co-located agent name in args["target"]
+     # (resolved to an id, like give). accept_cooperation takes NO target (the offer
+     # is keyed by the accepting agent's id) and co_build takes a building_id, not an
+     # agent — so both are EXCLUDED here.
+     "offer_cooperation"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1451,6 +1479,52 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # world method re-checks affordability atomically at settle time.
         if agent.id not in getattr(world, "pending_trade_offers", {}):
             return "no trade offer has been made to you"
+
+    elif action == "offer_cooperation":
+        # EM-231 — offer_cooperation targets a co-located agent (resolved like give).
+        # The world action re-checks co-location + self-target + an existing
+        # partnership, so this front gate only ensures a reachable target — a clear
+        # rejection lets the model self-correct.
+        target_error = _validate_target(args, agent, world, "offer_cooperation")
+        if target_error:
+            return target_error
+
+    elif action == "accept_cooperation":
+        # EM-231 — accept_cooperation takes no target; reject up front (clear
+        # message) unless a handshake offer is addressed to this agent. The world
+        # method re-checks the offerer is alive + co-located at settle time.
+        if agent.id not in getattr(world, "pending_cooperation_offers", {}):
+            return "no partnership offer has been made to you"
+
+    elif action == "co_build":
+        # EM-231 — THE cooperation-gated action (EW's hard mechanic). It unlocks
+        # ONLY when this agent has an ACTIVE handshake with a CO-LOCATED partner:
+        # a solo attempt gets a clear rejection so the model knows to offer/accept
+        # cooperation first. After the gate, the building checks mirror build_step.
+        partner_here = getattr(world, "cooperation_partner_here", None)
+        partner = partner_here(agent) if callable(partner_here) else None
+        if partner is None:
+            return ("co_build needs an agreed cooperation partner here — "
+                    "offer_cooperation to a co-located agent (and have them accept) "
+                    "first, then build together")
+        building_id = args.get("building_id")
+        building = _buildings(world).get(building_id)
+        if building is None:
+            return f"unknown building '{building_id}'"
+        status = _building_field(building, "status")
+        if status == "planned":
+            committed = _building_field(building, "funds_committed", 0)
+            required = _building_field(building, "funds_required", 0)
+            if committed < required:
+                return (
+                    f"building '{building_id}' is planned but not fully funded "
+                    f"({committed}/{required}) — contribute_funds first"
+                )
+        elif status != "under_construction":
+            return f"building '{building_id}' is {status}, not under_construction"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to co_build"
 
     elif action in ("investigate", "accuse", "detain"):
         # EM-240 (Task 10) — justice verbs are reserved for enforcers (a role
@@ -1955,6 +2029,25 @@ def _assemble_context(
                 "offer_trade (target, give, get) - propose a two-sided deal to: "
                 f"{target_names} — give/get are {{credits, skill}} dicts "
                 "(e.g. give {credits 10}, get {skill farming})")
+        # EM-231 — cooperation handshake invite: offer a co-located peer you are
+        # NOT already partnered with a partnership (unlocks the co_build joint
+        # action). GATED on an active skills library (the Wave-M2 cooperation
+        # economy ships together with skills/professions; the live config enables
+        # both). An empty library — every pre-Wave-M world AND the em161 golden
+        # fixture — yields no offer_cooperation line ⇒ the lawful-citizen golden is
+        # byte-identical. Offered only to peers not yet linked (a re-offer is a
+        # no-op), and only when a willing partner is actually present.
+        if world.skill_library():
+            _coop_targets = [
+                a for a in co_located
+                if not (hasattr(world, "are_cooperating")
+                        and world.are_cooperating(agent.id, a.id))
+            ]
+            if _coop_targets:
+                valid_actions.append(
+                    "offer_cooperation (target) - propose a partnership to: "
+                    + ", ".join(a.name for a in _coop_targets)
+                    + " — once they accept_cooperation you can co_build together")
         valid_actions.append(f"insult (target) - insult: {target_names}")
         valid_actions.append(f"attack (target) - attack: {target_names}")
         valid_actions.append(f"set_relationship (target, type) - ally|rival|neutral|friend|enemy")
@@ -2097,6 +2190,18 @@ def _assemble_context(
         )
         if (status == "under_construction" or funded_planned) and _gate_ok("build_step") and _tier_ok("build_step") and _skill_ok("build_step"):
             valid_actions.append(f"build_step (building_id={bid}) - add construction progress here")
+            # EM-231 — the cooperation-gated co_build: offered ONLY when this agent
+            # has an ACTIVE handshake with a co-located partner (cooperation_partner_here).
+            # A handshake-free world (every pre-EM-231 world AND the em161 golden) has
+            # no link ⇒ no co_build line ⇒ the lawful-citizen golden is byte-identical.
+            # The partner's NAME is surfaced so the invite is concrete (menu/resolution
+            # agree — the validator enforces the same gate).
+            _coop_partner = (world.cooperation_partner_here(agent)
+                             if hasattr(world, "cooperation_partner_here") else None)
+            if _coop_partner is not None:
+                valid_actions.append(
+                    f"co_build (building_id={bid}) - build TOGETHER with your partner "
+                    f"{_coop_partner.name} for a bonus over solo build_step")
         if status in ("damaged", "offline") and _gate_ok("repair"):
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
         if status != "destroyed" and _gate_ok("arson"):
@@ -2565,6 +2670,27 @@ def _assemble_context(
                 f"if you can both pay) or decline_trade to refuse.\n"
             )
 
+    # ── EM-231 — perceived cooperation HANDSHAKE offer. When a co-located agent has
+    # offered THIS agent a partnership (action_offer_cooperation parks it keyed by
+    # the offeree), surface "X wants to partner with you — use accept_cooperation".
+    # EMPTY (⇒ byte-identical prompt) when no offer is addressed to this agent — so
+    # the em161 lawful-citizen golden is unaffected (a default world parks no
+    # handshake offers). Only surfaced while the offerer is still co-located (the
+    # handshake needs them here). (getattr keeps callers safe if the seam is absent.)
+    cooperation_block = ""
+    _coop_offers = getattr(world, "pending_cooperation_offers", None)
+    _coop_offer = _coop_offers.get(agent.id) if isinstance(_coop_offers, dict) else None
+    if _coop_offer:
+        _coop_offerer = world.agents.get(_coop_offer.get("from_id"))
+        if (_coop_offerer is not None and _coop_offerer.alive
+                and _coop_offerer.location == agent.location):
+            cooperation_block = (
+                f"\n=== 🤝 A PARTNERSHIP OFFER ===\n"
+                f"  {_coop_offerer.name} wants to partner with you. Use "
+                f"accept_cooperation to agree — together you can co_build projects "
+                f"faster than building alone.\n"
+            )
+
     # ── EM-234 — universalization prompting (GovSim scaffold). The cheap
     # cooperation lift: before an agent acts on a SHARED resource it is nudged to
     # universalize the move — "what if EVERY agent did this?". ALWAYS-ON for every
@@ -2769,7 +2895,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{skills_block}{request_block}{trade_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -4935,6 +5061,30 @@ class AgentRuntime:
         elif action == "decline_trade":
             return _emit_world_result(
                 self.world.action_decline_trade(agent), base, thought)
+
+        # EM-231 — cooperation handshake + the ONE gated action. offer_cooperation
+        # resolves a co-located target and parks a handshake offer (ready event:
+        # cooperation_offered / a fail event). accept_cooperation forms the active
+        # link (cooperation_formed / a fail event); it takes NO target (keyed by
+        # this agent's id). co_build advances a building with a co-located partner
+        # this agent has agreed to cooperate with (co_built / a fail event).
+        elif action == "offer_cooperation":
+            target = self.world.agents.get(args.get("target"))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to offer a partnership but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_offer_cooperation(agent, target), base, thought)
+
+        elif action == "accept_cooperation":
+            return _emit_world_result(
+                self.world.action_accept_cooperation(agent), base, thought)
+
+        elif action == "co_build":
+            return _emit_world_result(
+                self.world.action_co_build(agent, args.get("building_id")),
+                base, thought)
 
         # EM-240 — enforcer justice verbs (Task 10). investigate returns a
         # (ok, reason, count) tuple like steal; accuse returns a ready event dict

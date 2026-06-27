@@ -950,6 +950,21 @@ class World:
         # round-trips byte-identically. One open offer per offeree (a later offer
         # overwrites the prior — the freshest deal on the table wins).
         self.pending_trade_offers: dict[str, dict] = {}
+        # EM-231 — cooperation handshakes. TWO additive, snapshot-safe Wave-M
+        # outboxes (EM-190): a world that never forms a handshake has NEITHER, so
+        # to_snapshot omits both keys and the round-trip is byte-identical.
+        #   pending_cooperation_offers: open handshake OFFERS keyed by the OFFEREE's
+        #     (target's) agent id → {from_id, tick}. Posted by action_offer_cooperation
+        #     (the R4 two-turn OFFER); the target perceives "X wants to partner with
+        #     you" on its next prompt; consumed by action_accept_cooperation (which
+        #     re-checks co-location at settle) or simply left to expire. One open
+        #     offer per offeree (a later offer overwrites — the freshest invite wins).
+        self.pending_cooperation_offers: dict[str, dict] = {}
+        #   cooperations: the ACTIVE handshakes — a SYMMETRIC link between a pair,
+        #     keyed by the sorted id-pair "lo|hi" → {a: lo, b: hi, tick}. are_cooperating
+        #     reads it order-independently. The ONE cooperation-gated action co_build
+        #     requires an active link with a CO-LOCATED partner (gated in _validate_world).
+        self.cooperations: dict[str, dict] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -2281,6 +2296,179 @@ class World:
             "text": f"{accepter.name} declines {offerer_name}'s trade offer.",
             "payload": {"action": "decline_trade"},
         }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-231 — cooperation-gated tools. EW's hard mechanic: a class of high-value
+    # action unlocks ONLY when both partners have AGREED to cooperate. A co-located
+    # pair forms a HANDSHAKE (offer_cooperation → accept_cooperation, the R4 two-turn
+    # pattern); the ONE gated action co_build requires that active handshake + a
+    # co-located partner, advancing a building by the cooperation bonus over a solo
+    # build_step. All deterministic — pure dict bookkeeping + the build_step path; no
+    # random, no clock (EM-155). Both the pending OFFER outbox and the ACTIVE link
+    # are serialized snapshot-safe (EM-190): a handshake-free world round-trips
+    # byte-identically (both keys absent).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _coop_key(a_id: str, b_id: str) -> str:
+        """EM-231 — the canonical key for a SYMMETRIC cooperation link: the two ids
+        sorted and joined, so are_cooperating(a, b) == are_cooperating(b, a) and a
+        pair has exactly ONE entry regardless of who offered."""
+        lo, hi = sorted((str(a_id), str(b_id)))
+        return f"{lo}|{hi}"
+
+    def are_cooperating(self, a_id: str, b_id: str) -> bool:
+        """EM-231 — True when an ACTIVE cooperation handshake links this pair
+        (order-independent). The single read used by the co_build gate, the prompt,
+        and the offer no-op guard."""
+        if a_id == b_id:
+            return False
+        return self._coop_key(a_id, b_id) in self.cooperations
+
+    def cooperation_partner_here(self, agent: AgentState) -> AgentState | None:
+        """EM-231 — a living, CO-LOCATED agent this agent has an active handshake
+        with, or None. This is the unlock condition for co_build: the gate requires
+        not just an active link but a partner standing HERE (deterministic: returns
+        the first such partner in sorted-id order so the choice is replay-stable)."""
+        for other in sorted(self.agents_at(agent.location), key=lambda a: a.id):
+            if (other.id != agent.id and other.alive
+                    and self.are_cooperating(agent.id, other.id)):
+                return other
+        return None
+
+    def action_offer_cooperation(self, offerer: AgentState, target: AgentState) -> dict:
+        """EM-231 — park a cooperation HANDSHAKE offer (R4 negotiation half). Keyed
+        by the TARGET so they perceive "X wants to partner with you" on their next
+        prompt. Co-located only; rejects a self-offer and a re-offer to an existing
+        partner (a clear reason lets the model self-correct). Returns a ready-to-emit
+        event dict. The pending dict is serialized snapshot-safe (EM-190). A later
+        offer to the same target overwrites the prior (freshest invite wins)."""
+        if offerer.id == target.id:
+            return self._fail_event(offerer.id, "offer_cooperation", "self",
+                                    f"{offerer.name} cannot partner with themselves.")
+        if offerer.location != target.location:
+            return self._fail_event(
+                offerer.id, "offer_cooperation", "not co-located",
+                f"{offerer.name} found no one here to partner with.")
+        if self.are_cooperating(offerer.id, target.id):
+            return self._fail_event(
+                offerer.id, "offer_cooperation", "already partnered",
+                f"{offerer.name} and {target.name} already cooperate.")
+        self.pending_cooperation_offers[target.id] = {
+            "from_id": offerer.id,
+            "tick": self.tick,
+        }
+        return {
+            "kind": "cooperation_offered",
+            "actor_id": offerer.id,
+            "target_id": target.id,
+            "text": f"{offerer.name} offers to partner with {target.name}.",
+            "payload": {"action": "offer_cooperation"},
+        }
+
+    def action_accept_cooperation(self, accepter: AgentState) -> dict:
+        """EM-231 — seal the open handshake offer addressed to `accepter` into an
+        ACTIVE symmetric cooperation link. Runs ONLY if the offerer still exists, is
+        alive, and is CO-LOCATED at settle time (a drifted pair cannot shake hands).
+        On success the offer is consumed, the link is recorded, and both sides warm
+        (cooperation, like a settled trade). Returns a ready-to-emit event dict.
+        DETERMINISTIC — pure dict bookkeeping + _update_trust; no random, no clock."""
+        offer = self.pending_cooperation_offers.get(accepter.id)
+        if not offer:
+            return self._fail_event(
+                accepter.id, "accept_cooperation", "no offer",
+                f"{accepter.name} had no partnership offer to accept.")
+        offerer = self.agents.get(offer.get("from_id"))
+        if offerer is None or not offerer.alive:
+            self.pending_cooperation_offers.pop(accepter.id, None)
+            return self._fail_event(
+                accepter.id, "accept_cooperation", "offerer gone",
+                f"{accepter.name}'s would-be partner is gone.")
+        if offerer.location != accepter.location:
+            # A drifted pair can't seal the handshake; leave the offer parked so it
+            # can be accepted if they reconvene (mirrors the trade co-location guard).
+            return self._fail_event(
+                accepter.id, "accept_cooperation", "not co-located",
+                f"{offerer.name} is no longer here to partner with {accepter.name}.")
+        self.pending_cooperation_offers.pop(accepter.id, None)
+        self.cooperations[self._coop_key(offerer.id, accepter.id)] = {
+            "a": min(offerer.id, accepter.id),
+            "b": max(offerer.id, accepter.id),
+            "tick": self.tick,
+        }
+        # A formed partnership warms both sides (cooperation, like a settled trade).
+        self._update_trust(offerer, accepter, +5)
+        self._update_trust(accepter, offerer, +5)
+        return {
+            "kind": "cooperation_formed",
+            "actor_id": accepter.id,
+            "target_id": offerer.id,
+            "text": (f"{accepter.name} and {offerer.name} agree to cooperate — "
+                     f"they can now co_build together."),
+            "payload": {"action": "accept_cooperation", "partner_id": offerer.id},
+        }
+
+    def action_co_build(self, agent: AgentState, building_id: str) -> dict:
+        """EM-231 — THE cooperation-gated action. Advances a building like build_step
+        but by the larger co_build_bonus_step — the payoff for a JOINT build — and
+        ONLY when `agent` has an ACTIVE handshake with a CO-LOCATED partner. Without
+        a partner here it is cleanly rejected (the gate is enforced in _validate_world
+        too; this re-check keeps the world method safe if called directly). Emits a
+        `co_built` event naming the partner; completion reuses the build_step path."""
+        partner = self.cooperation_partner_here(agent)
+        if partner is None:
+            return self._fail_event(
+                agent.id, "co_build", "no cooperation partner here",
+                f"{agent.name} needs an agreed cooperation partner here to co_build.")
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(
+                agent.id, "co_build", "building_not_found",
+                f"{agent.name} tried to co-build an unknown project.")
+        if building.status in ("operational", "destroyed", "abandoned"):
+            return self._fail_event(
+                agent.id, "co_build", f"cannot build a {building.status} structure",
+                f"{agent.name} cannot co-build {building.name} ({building.status}).")
+        if building.location != agent.location:
+            return self._fail_event(
+                agent.id, "co_build", "not here",
+                f"{agent.name} must be at {building.name}'s place to co-build it.")
+
+        events: list[dict] = []
+        # A first co_build on a fully-funded planned building begins construction,
+        # exactly like build_step (so the joint build is a real substitute for it).
+        if (building.status == "planned"
+                and building.funds_committed >= building.funds_required):
+            building.status = "under_construction"
+            events.append(self._structure_state_changed_event(
+                building, "planned", "under_construction",
+                "joint construction begun", agent.id))
+        if building.status != "under_construction":
+            return self._fail_event(
+                agent.id, "co_build", "project is not under construction",
+                f"{agent.name} cannot co-build {building.name} yet (not funded).")
+
+        step = int(self._coop_param("co_build_bonus_step", 35))
+        building.progress = min(100, building.progress + step)
+        building.last_progress_tick = self.tick
+        building.updated_tick = self.tick
+        events.append({
+            "kind": "co_built",
+            "actor_id": agent.id,
+            "target_id": building.id,
+            "text": (f"{agent.name} and {partner.name} build {building.name} together "
+                     f"({building.progress}% built)."),
+            "payload": {
+                "action": "co_build",
+                "building_id": building.id,
+                "partner_id": partner.id,
+                "progress": building.progress,
+                "step": step,
+            },
+        })
+        if building.progress >= 100:
+            events.extend(self._complete_construction(building, "completed", agent.id))
+        return {"_multi": events}
 
     # ──────────────────────────────────────────────────────────────────────────
     # EM-240 (Task 10) — enforcer justice verbs. investigate confirms a suspect's
@@ -4598,6 +4786,14 @@ class World:
         call-site defaults == SkillsParams defaults."""
         return _block_get(getattr(self.params, "skills", None), name, default)
 
+    def _coop_param(self, name: str, default: Any) -> Any:
+        """EM-231 — defensive accessor for the `world.cooperation` config block
+        (CooperationParams dataclass OR dict OR absent — EM-155 conventions, like
+        _skills_param). An absent block ⇒ every default ⇒ pre-EM-231 worlds run
+        unchanged. `default` is only a fallback for a key missing from the block,
+        so keep these call-site defaults == CooperationParams defaults."""
+        return _block_get(getattr(self.params, "cooperation", None), name, default)
+
     def skill_library(self) -> dict:
         """EM-227 — the configured skill library {skill: {gates, min_level}}, or
         {} when no `world.skills` block is set (the off state — gates nothing)."""
@@ -5776,6 +5972,33 @@ class World:
                 }
                 for tid, o in self.pending_trade_offers.items()
             }
+        # EM-231 — open cooperation handshake OFFERS {offeree_id: {from_id, tick}}.
+        # Serialized ONLY when non-empty (the cap_demotions pattern), so an
+        # offer-free world — and every pre-EM-231 snapshot — keeps the exact prior
+        # key set (absent ⇒ {} on restore). Snapshot-safe (EM-190): an offer parked
+        # between offer and accept survives a fork/resume instead of being dropped.
+        if self.pending_cooperation_offers:
+            snap["pending_cooperation_offers"] = {
+                str(tid): {
+                    "from_id": str(o.get("from_id", "")),
+                    "tick": int(o.get("tick", 0)),
+                }
+                for tid, o in self.pending_cooperation_offers.items()
+            }
+        # EM-231 — ACTIVE cooperation links, emitted in sorted-key order as a LIST
+        # of {a, b, tick} so the round-trip is byte-stable. Serialized ONLY when
+        # non-empty, so a handshake-free world — and every pre-EM-231 snapshot —
+        # keeps the exact prior key set (absent ⇒ {} on restore). Snapshot-safe
+        # (EM-190): an active partnership survives a fork/resume.
+        if self.cooperations:
+            snap["cooperations"] = [
+                {
+                    "a": str(self.cooperations[k].get("a", "")),
+                    "b": str(self.cooperations[k].get("b", "")),
+                    "tick": int(self.cooperations[k].get("tick", 0)),
+                }
+                for k in sorted(self.cooperations)
+            ]
         # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
         # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
         # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
@@ -6188,4 +6411,37 @@ class World:
                     "tick": _int(o.get("tick")),
                 }
         world.pending_trade_offers = restored_offers
+        # EM-231 — restore open cooperation OFFERS (snapshot-safe, EM-190).
+        # Defensive: keep only well-formed entries whose offeree AND offerer both
+        # still exist and are distinct (a non-dict entry, a missing agent, or a
+        # self-offer → dropped).
+        restored_coop_offers: dict[str, dict] = {}
+        for tid, o in (state.get("pending_cooperation_offers") or {}).items():
+            if not isinstance(o, dict):
+                continue
+            offeree_id = str(tid)
+            from_id = str(o.get("from_id", ""))
+            if (offeree_id in world.agents and from_id in world.agents
+                    and from_id != offeree_id):
+                restored_coop_offers[offeree_id] = {
+                    "from_id": from_id,
+                    "tick": _int(o.get("tick")),
+                }
+        world.pending_cooperation_offers = restored_coop_offers
+        # EM-231 — restore ACTIVE cooperation links (snapshot-safe, EM-190).
+        # Defensive: keep only links whose BOTH ends still exist and are distinct
+        # (a non-dict entry, a missing agent, or a self-link → dropped). Re-keyed
+        # through _coop_key so the stored shape is canonical regardless of input.
+        restored_coops: dict[str, dict] = {}
+        for entry in (state.get("cooperations") or []):
+            if not isinstance(entry, dict):
+                continue
+            a_id = str(entry.get("a", ""))
+            b_id = str(entry.get("b", ""))
+            if (a_id in world.agents and b_id in world.agents and a_id != b_id):
+                lo, hi = sorted((a_id, b_id))
+                restored_coops[World._coop_key(a_id, b_id)] = {
+                    "a": lo, "b": hi, "tick": _int(entry.get("tick")),
+                }
+        world.cooperations = restored_coops
         return world
