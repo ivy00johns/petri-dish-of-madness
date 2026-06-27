@@ -21,7 +21,7 @@ activity, never throttle).
 | Wave | Items | Gate | Status |
 |------|-------|------|--------|
 | M1 | EM-229, EM-233, EM-234 | full pytest | ✅ green — 1192 passed/1 skip |
-| M2 | EM-227, EM-228, EM-230, EM-231 | full pytest | pending |
+| M2 | EM-227, EM-228, EM-230, EM-231 | full pytest | ✅ green — 1326 passed/1 skip |
 | M3 | EM-232, EM-235, EM-236, EM-237 | full pytest | pending |
 | M4 | EM-224, EM-203/206, EM-189, EM-190, EM-186, EM-167, EM-126(stretch) | full pytest | pending |
 | F | EM-202, EM-215, EM-204, EM-195, EM-180, EM-191, EM-192, EM-193, EM-225 | typecheck+test+token-guard | pending |
@@ -43,3 +43,10 @@ activity, never throttle).
   snapshot byte-identical held. Also touched config/world.city25.yaml (needs block).
   M2 TODO: wire world.replenish_knowledge on skill-gain/teach, replenish_influence on
   governance/social wins.
+- **M2 (2026-06-27):** EM-227 skills keystone (library gates propose_project/build_step→building,
+  create_image→art, propose_rule→rhetoric; deterministic seed gradient + use-xp; knowledge
+  replenish wired) → 89e6556. EM-228 teach_skill/request_skill (transfer + pending request,
+  snapshot-safe) → 470bdf0. EM-230 offer_trade/accept/decline (atomic two-sided swap, pending
+  offer serialized) → d0200a7. EM-231 cooperation handshake + co_build gated action → 9a3120a.
+  Full suite 1326/1skip. New pending outboxes (pending_skill_requests/trade_offers/cooperation_
+  offers) all serialized only-when-non-empty (EM-190 pre-empted). em161 golden + EM-155 held.
