@@ -290,6 +290,18 @@ world:
   universalization:
     enabled: true               # EM-234 live run — inject the commons-reasoning scaffold into every turn (zero extra calls)
 
+  # EM-224 — PIANO coherence for multi-action turns. A deterministic, zero-LLM
+  # bottleneck that reconciles a turn's actions[] against its first speech act's
+  # intent (catches "Sure, friend!" then steal from the same agent). DEFAULT OFF
+  # so the prompt golden + snapshots stay byte-identical; flip enabled:true for a
+  # live run. MUST stay in sync with the CoherenceParams mirror in
+  # backend/petridish/config/loader.py.
+  #   strategy: annotate  → keep both, stamp the contradiction (hypocrisy legible)
+  #             drop       → suppress the contradicting act (the speech wins)
+  coherence:
+    enabled: false
+    strategy: annotate
+
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
   # the B1 consent mechanic) co-located at a home-kind place for a birth.

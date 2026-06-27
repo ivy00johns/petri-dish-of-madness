@@ -206,6 +206,16 @@ world:
   # config/world.yaml flips enabled:true). MUST stay in sync with config/world.yaml.
   universalization:
     enabled: false
+  # EM-224 — PIANO coherence for multi-action turns. When enabled, a
+  # deterministic zero-LLM bottleneck reconciles a turn's actions[] against the
+  # intent of its first speech act (catches "Sure, friend!" then steal). DEFAULT
+  # OFF here so this embedded mirror stays byte-identical to pre-EM-224 (no
+  # prompt block, no agent/world state). MUST stay in sync with config/world.yaml.
+  #   strategy: annotate  → keep both, stamp the contradiction (hypocrisy legible)
+  #             drop       → suppress the contradicting act (the speech wins)
+  coherence:
+    enabled: false
+    strategy: annotate
   # Wave E / EM-114 — lightweight children: once per round boundary, mutual
   # partners (are_partners) co-located at a home may have a child — a NEW
   # agent at background tier, only into vacancies under max_population AND
@@ -625,6 +635,37 @@ class UniversalizationParams:
       enabled — master toggle (default False = zero behavioral change).
     """
     enabled: bool = False
+
+
+@dataclass
+class CoherenceParams:
+    """EM-224 — PIANO coherence for multi-action turns (config `world.coherence`).
+
+    A deterministic, zero-LLM coherence bottleneck that runs AFTER the turn's
+    `actions[]` are flattened (EM-199 `_normalize_steps`) and BEFORE they apply:
+    it derives a single intent from the turn's first speech act, then reconciles
+    later hostile/helpful steps against it — catching "Sure, friend!" then steal
+    from the same agent. Takes ONLY PIANO's coherence idea (NOT its
+    parallelize-to-cut-latency motive — we want MORE calls). Zero extra LLM calls.
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-224. EM-224 adds NO
+    prompt block (so the em161 golden is unchanged either way) and NO
+    AgentState/World state (so EM-155 snapshots are unchanged) — it is a pure
+    per-turn structural pass. The engine reads via the defensive
+    `_coherence_enabled` accessor with the IDENTICAL default, so an absent block
+    behaves the same (config-absent = OFF). Flip `enabled: true` for live runs.
+
+      enabled  — master toggle (default False = zero behavioral change).
+      strategy — how a flagged contradiction is handled:
+                 'annotate' (default) keeps both steps but stamps the
+                 contradicting action's event with a coherence note (the
+                 hypocrisy becomes legible, the world still mutates);
+                 'drop' suppresses the contradicting step (the speech wins) and
+                 emits a coherence_note in its place. ('reorder' is reserved →
+                 falls back to 'annotate'.)
+    """
+    enabled: bool = False
+    strategy: str = "annotate"
 
 
 @dataclass
@@ -1364,6 +1405,13 @@ class WorldParams:
     # block into every turn (zero extra LLM calls — rides the existing turn).
     universalization: UniversalizationParams = field(
         default_factory=UniversalizationParams)
+    # EM-224 — PIANO coherence for multi-action turns. Additive with an
+    # engine-matching default; DEFAULT OFF, so a world.yaml without the
+    # `coherence` block is byte-identical to pre-EM-224 (prompt golden +
+    # snapshot key set — EM-224 carries NO prompt block and NO agent/world
+    # state). `enabled: true` runs the deterministic coherence bottleneck over
+    # each turn's resolved actions[] (zero extra LLM calls — rides the turn).
+    coherence: CoherenceParams = field(default_factory=CoherenceParams)
     # EM-123 — zoned districts that deepen as megaprojects complete. Additive
     # with engine-matching defaults (default ON); `enabled: false` keeps every
     # district at tier 1 (byte-identical pre-EM-123: no district_grew events,
@@ -1684,6 +1732,27 @@ def _parse_universalization(raw: dict | None) -> UniversalizationParams:
     d = UniversalizationParams()
     return UniversalizationParams(
         enabled=bool(raw.get("enabled", d.enabled)),
+    )
+
+
+_COHERENCE_STRATEGIES = ("annotate", "drop")
+
+
+def _parse_coherence(raw: dict | None) -> CoherenceParams:
+    """Parse the optional `world.coherence` block (EM-224).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-224 (prompt golden +
+    snapshot key set — EM-224 carries NO prompt block and NO agent/world state).
+    An unknown strategy falls back to the default ('annotate')."""
+    if not isinstance(raw, dict):
+        return CoherenceParams()
+    d = CoherenceParams()
+    strategy = raw.get("strategy", d.strategy)
+    if strategy not in _COHERENCE_STRATEGIES:
+        strategy = d.strategy
+    return CoherenceParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        strategy=strategy,
     )
 
 
@@ -2321,6 +2390,7 @@ def _parse_world(
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
         universalization=_parse_universalization(w.get("universalization")),
+        coherence=_parse_coherence(w.get("coherence")),
         miracles=_parse_miracles(w.get("miracles")),
         district_growth=_parse_district_growth(w.get("district_growth")),
     )

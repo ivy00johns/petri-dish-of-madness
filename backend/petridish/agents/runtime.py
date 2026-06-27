@@ -660,6 +660,153 @@ def _universalization_enabled(params: Any) -> bool:
     return bool(_world_block_get(params, "universalization", "enabled", False))
 
 
+def _coherence_enabled(params: Any) -> bool:
+    """EM-224 — config gate `world.coherence.enabled` (default False).
+    Disabled ⇒ the coherence bottleneck is a no-op: the turn's actions[] apply
+    exactly as pre-EM-224. EM-224 adds NO prompt block and NO agent/world state,
+    so the em161 golden and EM-155 snapshots are byte-identical either way."""
+    return bool(_world_block_get(params, "coherence", "enabled", False))
+
+
+def _coherence_strategy(params: Any) -> str:
+    """EM-224 — the configured contradiction-handling strategy
+    (`world.coherence.strategy`); 'annotate' (keep both, stamp) is the default,
+    'drop' suppresses the contradicting step. Unknown ⇒ 'annotate'."""
+    strat = _world_block_get(params, "coherence", "strategy", "annotate")
+    return strat if strat in ("annotate", "drop") else "annotate"
+
+
+# EM-224 — the verbs that HARM a target (the coherence bottleneck flags a
+# friendly speech act followed by one of these toward the SAME target). Pulled
+# from the offensive crime/harm surface (EM-240 + EM-237) plus the base
+# steal/attack/insult. A purely structural set — no state, no randomness.
+_HARM_VERBS = frozenset({
+    "steal", "attack", "insult", "intimidate", "deceive",
+    "extort", "vandalize", "heist",
+})
+
+# EM-224 — verbs that HELP a target (used for the mirror case: a hostile speech
+# act then a helpful act toward the same target is the inverse contradiction).
+_HELP_VERBS = frozenset({"give", "teach_skill", "feed_pet"})
+
+# EM-224 — deterministic stance lexicon for the first speech act. A turn's intent
+# toward a named target is `friendly` if its speech carries a cooperative cue and
+# no hostile cue, `hostile` if it carries a hostile cue, else `neutral`. Pure
+# substring matching on the lowercased text — no LLM, no randomness, no clock.
+_FRIENDLY_CUES = frozenset({
+    "help", "give", "gift", "for you", "take these", "take this", "welcome",
+    "friend", "thank", "trust", "share", "please", "happy to", "glad to",
+    "support", "here you go", "let me help", "i'll help", "i will help",
+})
+_HOSTILE_CUES = frozenset({
+    "hate", "kill", "destroy", "fool", "trick", "rob", "idiot", "enemy",
+    "ruin", "crush", "i'll take", "i will take", "give me everything",
+    "hand it over", "or else", "you'll regret", "threat",
+})
+
+
+def _coherence_target(args: dict, agent_names: dict) -> str | None:
+    """The agent-id target of a harm/help step, if present and known. Steps are
+    normalized BEFORE the coherence pass, so `args['target']` is already an id."""
+    tgt = args.get("target") if isinstance(args, dict) else None
+    if isinstance(tgt, str) and tgt in agent_names:
+        return tgt
+    return None
+
+
+def _speech_stance(text: str, target_name: str | None) -> str:
+    """EM-224 — classify a speech act's stance ('friendly'/'hostile'/'neutral').
+    Deterministic substring match on the lexicons. When a target name is given,
+    a neutral classification with no cue is still neutral (we only assert a
+    stance when a cue fires)."""
+    low = (text or "").lower()
+    has_friendly = any(cue in low for cue in _FRIENDLY_CUES)
+    has_hostile = any(cue in low for cue in _HOSTILE_CUES)
+    if has_hostile:
+        return "hostile"
+    if has_friendly:
+        return "friendly"
+    return "neutral"
+
+
+def _coherence_resolve(
+    steps: list[dict],
+    thought: str,
+    strategy: str,
+    agent_names: dict,
+) -> tuple[list[dict], list[dict]]:
+    """EM-224 — the PIANO coherence bottleneck (deterministic, zero-LLM).
+
+    Derive ONE intent from the turn's FIRST speech act (the single decision),
+    then reconcile every later harm/help step against it (the broadcast):
+
+    - friendly speech toward target T, then a HARM verb toward the same T → a
+      contradiction;
+    - hostile speech toward T, then a HELP verb toward the same T → the mirror
+      contradiction.
+
+    `strategy`:
+      'annotate' — leave the step in place but stamp it with a `_coherence`
+        marker (`{"intent": <stance>, "contradicted": True}`) that _apply_steps
+        surfaces onto the resulting event (text + payload.coherence); the world
+        still mutates, the hypocrisy is just legible.
+      'drop' — remove the contradicting step from the list and return a
+        synthetic `coherence_note` record so the caller can emit ONE note event
+        in its place.
+
+    Returns (resolved_steps, drop_notes). drop_notes is always empty for
+    'annotate'. Pure function: no random/clock/uuid, same input ⇒ same output."""
+    # The single decision: the FIRST speech act's stance toward its addressed
+    # target. v1 reads the target from the FIRST subsequent harm/help step (the
+    # speech rarely names an id; the action does). If no speech act and no
+    # harm/help step coexist, there is no intent to enforce → no-op.
+    first_speech = next(
+        (s for s in steps if s.get("action") in ("say", "whisper")), None
+    )
+    if first_speech is None:
+        return steps, []
+    speech_text = ""
+    sargs = first_speech.get("args")
+    if isinstance(sargs, dict):
+        speech_text = str(sargs.get("text") or "")
+
+    resolved: list[dict] = []
+    drop_notes: list[dict] = []
+    speech_idx = steps.index(first_speech)
+    for idx, step in enumerate(steps):
+        action = step.get("action")
+        # Only LATER steps (after the speech) are reconciled against the intent.
+        if idx <= speech_idx or action not in _HARM_VERBS and action not in _HELP_VERBS:
+            resolved.append(step)
+            continue
+        target = _coherence_target(step.get("args") or {}, agent_names)
+        if target is None:
+            resolved.append(step)
+            continue
+        stance = _speech_stance(speech_text, agent_names.get(target))
+        contradicted = (
+            (stance == "friendly" and action in _HARM_VERBS)
+            or (stance == "hostile" and action in _HELP_VERBS)
+        )
+        if not contradicted:
+            resolved.append(step)
+            continue
+        if strategy == "drop":
+            drop_notes.append({
+                "intent": stance,
+                "dropped_action": action,
+                "target_id": target,
+                "target_name": agent_names.get(target),
+            })
+            # the step is suppressed: NOT appended to resolved
+            continue
+        # 'annotate' (and the reserved 'reorder' fallback): keep, but stamp.
+        marked = dict(step)
+        marked["_coherence"] = {"intent": stance, "contradicted": True}
+        resolved.append(marked)
+    return resolved, drop_notes
+
+
 def _rule_label(text: str, limit: int = 60) -> str:
     """EM-100 — the human-readable rule label for feed text (quoted by callers,
     truncated to ~60 chars). Never the bare uuid."""
@@ -4254,10 +4401,49 @@ class AgentRuntime:
                 "%d (dropped %d)",
                 agent.name, len(steps) + dropped_steps, max_steps, dropped_steps,
             )
+        # EM-224 — PIANO coherence bottleneck (zero-LLM, deterministic). Runs
+        # AFTER the flatten and BEFORE apply: derive one intent from the turn's
+        # first speech act, reconcile later harm/help steps against it. Default
+        # OFF ⇒ no-op (byte-identical to pre-EM-224). 'annotate' stamps the
+        # contradicting step (_apply_steps surfaces it); 'drop' suppresses it and
+        # we emit ONE coherence_note in its place below.
+        coherence_drop_events: list[dict] = []
+        if _coherence_enabled(self.world.params):
+            # Normalize targets to ids FIRST (idempotent — _apply_steps re-runs
+            # it) so the coherence pass sees `target` as an agent id even when the
+            # model named the agent. Then derive intent + reconcile.
+            for s in steps:
+                _normalize_args(s, agent, self.world)
+            agent_names = {a.id: a.name for a in self.world.agents.values()}
+            steps, _drop_notes = _coherence_resolve(
+                steps, action_dict.get("thought", ""),
+                _coherence_strategy(self.world.params), agent_names,
+            )
+            for note in _drop_notes:
+                coherence_drop_events.append({
+                    "kind": "coherence_note",
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "text": (
+                        f"{agent.name}'s {note['dropped_action']} toward "
+                        f"{note['target_name']} was withheld — it belied their "
+                        f"{note['intent']} words this turn."
+                    ),
+                    "payload": {
+                        "coherence": {
+                            "intent": note["intent"],
+                            "dropped_action": note["dropped_action"],
+                            "target_id": note["target_id"],
+                        },
+                    },
+                })
         action_chain, step_results = self._apply_steps(
             agent, steps, profile_name, profile_color,
             action_dict.get("thought", ""),
         )
+        if coherence_drop_events:
+            action_chain.extend(coherence_drop_events)
         result_event = (
             {"_multi": action_chain} if len(action_chain) != 1 else action_chain[0]
         )
@@ -4843,6 +5029,15 @@ class AgentRuntime:
                 # exception path so a parked event never leaks onto the next
                 # agent's chain (dropped with the failed step, like _apply_action).
                 shifts = self.world.drain_relationship_events()
+            # EM-224 — surface a coherence annotation onto the primary event so
+            # a 'say-then-harm' contradiction is legible (the act still ran). The
+            # marker rides ONLY a real resolution (not a parse_failure); the
+            # world already mutated. Stamps text + payload.coherence.
+            marker = step.get("_coherence")
+            if marker and step_events:
+                primary = step_events[0]
+                if primary.get("kind") != "parse_failure":
+                    self._surface_coherence(primary, marker)
             chain.extend(step_events)
             if shifts and not raised:
                 tick = self.world.tick
@@ -4961,6 +5156,21 @@ class AgentRuntime:
         text = primary.get("text")
         if text:
             primary["text"] = f"{text}  💭 {thought}"
+
+    @staticmethod
+    def _surface_coherence(event: dict, marker: dict) -> None:
+        """EM-224 — stamp a contradicting action's event so the say-then-harm
+        dissonance is legible: append a ⚠/💢 coherence note to the feed text and
+        attach `payload.coherence`. ADDITIVE, only on a flagged event (the
+        'annotate' strategy keeps the act — the world still mutated). No-op on a
+        textless event."""
+        event.setdefault("payload", {})["coherence"] = {
+            "intent": marker.get("intent"),
+            "contradicted": True,
+        }
+        text = event.get("text")
+        if text:
+            event["text"] = f"{text}  💢 (belying their {marker.get('intent')} words)"
 
     def _apply_action_inner(
         self,
