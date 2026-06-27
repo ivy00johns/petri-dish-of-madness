@@ -20,7 +20,7 @@ activity, never throttle).
 ## Wave ledger
 | Wave | Items | Gate | Status |
 |------|-------|------|--------|
-| M1 | EM-229, EM-233, EM-234 | full pytest | pending |
+| M1 | EM-229, EM-233, EM-234 | full pytest | ✅ green — 1192 passed/1 skip |
 | M2 | EM-227, EM-228, EM-230, EM-231 | full pytest | pending |
 | M3 | EM-232, EM-235, EM-236, EM-237 | full pytest | pending |
 | M4 | EM-224, EM-203/206, EM-189, EM-190, EM-186, EM-167, EM-126(stretch) | full pytest | pending |
@@ -35,4 +35,11 @@ activity, never throttle).
 - EM-169/176 vehicles — in PR #44, art sign-off pending.
 
 ## Run notes
-(appended per wave)
+- **M1 (2026-06-26):** EM-229 three-needs (knowledge/influence decay, salience-gated
+  prompt line, replenish hooks for M2) → commit f272f17. EM-233 soul entries + memory
+  consolidation (deterministic digest at round boundary, `memory` event) → 7db913b.
+  EM-234 universalization (GovSim commons scaffold, gated `world.universalization.enabled`
+  default OFF → golden-safe) → 900e851. Full suite 1192/1skip. em161 golden + EM-155
+  snapshot byte-identical held. Also touched config/world.city25.yaml (needs block).
+  M2 TODO: wire world.replenish_knowledge on skill-gain/teach, replenish_influence on
+  governance/social wins.
