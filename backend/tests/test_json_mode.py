@@ -228,7 +228,7 @@ class _ReasoningRerouteRouter:
         return agent_profile
 
     def get_profile(self, name):
-        return None  # runtime falls back to max_tokens=512
+        return None  # runtime falls back to max_tokens=1024
 
     async def chat(self, profile_name, messages, *, max_tokens, temperature):
         self.calls.append(max_tokens)
@@ -259,7 +259,7 @@ async def test_run_turn_retries_length_truncation_with_boosted_budget():
 
     event = await runtime.run_turn(agent)
 
-    assert router.calls == [512, 2048]
+    assert router.calls == [1024, 4096]
     assert event["kind"] != "parse_failure"
 
 
@@ -349,7 +349,7 @@ class _StopTruncationRouter:
         return agent_profile
 
     def get_profile(self, name):
-        return None  # runtime falls back to max_tokens=512
+        return None  # runtime falls back to max_tokens=1024
 
     async def chat(self, profile_name, messages, *, max_tokens, temperature):
         self.calls.append(max_tokens)
@@ -385,7 +385,7 @@ async def test_run_turn_boosts_budget_on_stop_truncation_and_forgets_cache():
     event = await runtime.run_turn(agent)
 
     # The 'stop' lie must not suppress the boost — structure says truncated.
-    assert router.calls == [512, 2048]
+    assert router.calls == [1024, 4096]
     assert event["kind"] != "parse_failure"
     # The unparseable attempt-1 response was evicted from the decision cache.
     assert router.forgotten == ["test"]

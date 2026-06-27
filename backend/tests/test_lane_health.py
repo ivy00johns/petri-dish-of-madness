@@ -7,7 +7,9 @@ eats the budget; mistral-medium cuts mid-JSON while reporting 'stop' — runs
 FIRST attempt failing repeatedly once a lane is known-bad:
 
   (A) Router unit: note_parse_outcome window → first_attempt_max_tokens boosts
-      after ≥2 truncations, recovers on clean outcomes, and is flushed by
+      after ≥1 truncation (trigger lowered 2→1: a reasoning-reroute truncation
+      that emits no salvageable JSON costs a full retry, so don't let the first
+      one through as "noise"), recovers on clean outcomes, and is flushed by
       clear_cache(). lane_health() exposes the introspection snapshot.
   (B) End-to-end (agents): a runtime whose responses parse ONLY via truncation
       repair still reports truncated=True, and the NEXT turn's attempt-1
@@ -47,14 +49,34 @@ def _router() -> Router:
     return Router(profiles=[])
 
 
-def test_boost_engages_after_two_truncations_in_window():
+def test_boost_engages_after_one_truncation_in_window():
+    # EM-135 trigger 2→1: a SINGLE truncation now flags the lane (was "one is
+    # noise"). During a 429 storm the proxy collapses lanes onto reasoning models
+    # that truncate attempt 1 before any JSON appears — nothing to salvage, so the
+    # first truncation already costs a retry; boost the NEXT attempt immediately.
     r = _router()
     r.note_parse_outcome("lane", parsed=False, truncated=True)
-    assert r.first_attempt_max_tokens("lane", 512) == 512  # one is noise
-    r.note_parse_outcome("lane", parsed=True, truncated=True)  # repaired counts too
     # Same formula as the retry boost: max(base * 4, 2048).
     assert r.first_attempt_max_tokens("lane", 512) == 2048
     assert r.first_attempt_max_tokens("lane", 1024) == 4096
+    # A second (repaired) truncation keeps the lane flagged.
+    r.note_parse_outcome("lane", parsed=True, truncated=True)
+    assert r.first_attempt_max_tokens("lane", 512) == 2048
+
+
+def test_truncation_trigger_is_one_not_two():
+    # Regression for the EM-135 trigger lowering (2→1). Pin both the constant and
+    # the boundary it controls so the "one truncation is noise" behavior can't
+    # silently come back: zero truncations → not flagged; the FIRST → flagged.
+    from petridish.providers.router import _LANE_TRUNCATION_TRIGGER
+    assert _LANE_TRUNCATION_TRIGGER == 1
+
+    r = _router()
+    assert r.lane_health() == {}                      # nothing seen yet
+    assert r.first_attempt_max_tokens("lane", 1024) == 1024   # base, not boosted
+    r.note_parse_outcome("lane", parsed=False, truncated=True)
+    assert r.lane_health()["lane"]["boosted"] is True         # one truncation flags
+    assert r.first_attempt_max_tokens("lane", 1024) == 4096   # and boosts attempt 1
 
 
 def test_healthy_lane_base_unchanged():
@@ -160,7 +182,7 @@ class _LaneAwareRouter:
         return agent_profile
 
     def get_profile(self, name):
-        return None  # runtimes fall back to default budgets (agents 512, animals 256)
+        return None  # runtimes fall back to default budgets (agents 1024, animals 256)
 
     async def chat(self, profile_name, messages, *, max_tokens, temperature):
         self.calls.append(max_tokens)
@@ -224,16 +246,18 @@ async def test_agent_turns_record_repaired_truncations_and_bump_next_budget():
     for _ in range(2):
         event = await runtime.run_turn(agent)
         assert event["kind"] != "parse_failure"
-    assert router.calls == [512, 512]  # evidence first, boost after
+    # Base is now 1024 (the no-profile fallback). Trigger 2→1: turn 1 collects the
+    # first truncation, so turn 2 ALREADY starts boosted (max(1024*4, 2048)=4096).
+    assert router.calls == [1024, 4096]
     assert router.lane.lane_health()["test"]["window"] == [
         {"parsed": True, "truncated": True},
         {"parsed": True, "truncated": True},
     ]
 
-    # Third turn: the lane is known-bad → attempt 1 starts at the boosted cap.
+    # Third turn: the lane is still known-bad → attempt 1 stays at the boosted cap.
     router.response = _VALID_ACTION_JSON
     await runtime.run_turn(agent)
-    assert router.calls[2] == 2048
+    assert router.calls[2] == 4096
 
 
 @pytest.mark.asyncio
@@ -252,7 +276,7 @@ async def test_agent_lane_recovers_after_clean_turns():
     for _ in range(6):
         await runtime.run_turn(agent)
     await runtime.run_turn(agent)
-    assert router.calls[-1] == 512  # back to the base budget
+    assert router.calls[-1] == 1024  # back to the base budget
 
 
 @pytest.mark.asyncio
@@ -265,7 +289,7 @@ async def test_healthy_agent_lane_keeps_base_budget():
 
     for _ in range(3):
         await runtime.run_turn(agent)
-    assert router.calls == [512, 512, 512]
+    assert router.calls == [1024, 1024, 1024]
     window = router.lane.lane_health()["test"]["window"]
     assert all(o == {"parsed": True, "truncated": False} for o in window)
 
@@ -287,7 +311,9 @@ async def test_animal_decisions_record_outcomes_and_bump_next_budget():
         action_dict, _meta = await runtime._decide_via_llm(animal, world, "test")
         assert action_dict is not None  # repaired, not a dead turn
         assert action_dict["action"] == "nap"
-    assert router.calls == [256, 256]  # animal default budget, unboosted
+    # Animal base stays 256 (separate fallback, unchanged). Trigger 2→1: turn 1's
+    # truncation already flags the lane, so turn 2 boosts to max(256*4, 2048)=2048.
+    assert router.calls == [256, 2048]
 
     router.response = _VALID_ANIMAL_JSON
     await runtime._decide_via_llm(animal, world, "test")
@@ -308,7 +334,7 @@ async def test_agent_turn_works_against_router_without_lane_surface():
 
     event = await runtime.run_turn(agent)
     assert event["kind"] != "parse_failure"
-    assert router.calls == [512]  # base budget, no EM-135 methods consulted
+    assert router.calls == [1024]  # base budget, no EM-135 methods consulted
 
 
 @pytest.mark.asyncio
