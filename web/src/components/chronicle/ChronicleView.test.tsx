@@ -290,3 +290,95 @@ describe('ChaosPanel payload facts', () => {
     expect(screen.getAllByText('Aria').length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ============================================================
+// EM-225 — Chronicle Deep Dive (multi-pass)
+// ============================================================
+describe('Chronicle Deep Dive (EM-225)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('readChapters parses mode="deepdive" + dimensions and keeps it distinct from a same-window chapter', () => {
+    const history = [
+      ev({ kind: 'narrator_summary', text: 'Ordinary opener.', tick: 100, seq: 1,
+           payload: { from_tick: 0, to_tick: 100 } }),
+      ev({ kind: 'narrator_summary', text: 'The definitive deep-dive saga.', tick: 100, seq: 2,
+           payload: {
+             from_tick: 0, to_tick: 100, mode: 'deepdive',
+             dimensions: { governance: 'A UBI passed.', chat: 'Ada schemed.' },
+           } }),
+    ];
+    const chapters = readChapters(history);
+    // The same (fromTick,toTick) window now yields TWO chapters: ordinary + deep dive.
+    expect(chapters.map((c) => c.text)).toContain('Ordinary opener.');
+    const deep = chapters.find((c) => c.mode === 'deepdive');
+    expect(deep).toBeTruthy();
+    expect(deep!.text).toContain('definitive deep-dive');
+    expect(deep!.dimensions).toEqual({ governance: 'A UBI passed.', chat: 'Ada schemed.' });
+  });
+
+  it('renders the deep-dive badge + the per-dimension notes for a deep-dive chapter', () => {
+    const history = [
+      ev({
+        kind: 'narrator_summary',
+        text: 'A sweeping deep-dive chapter unfolded across the whole run.',
+        tick: 300,
+        payload: {
+          from_tick: 0,
+          to_tick: 300,
+          mode: 'deepdive',
+          chronicler_version: 2,
+          dimensions: {
+            governance: 'A UBI of 10 credits passed by a narrow vote.',
+            chat: 'Ada whispered of the dividend engine.',
+            growth: 'Bram starved; no one was born.',
+          },
+        },
+      }),
+    ];
+    render(<ChronicleView world={null} history={history} />);
+
+    expect(screen.getByTestId('deepdive-badge')).toBeTruthy();
+    const dims = screen.getByTestId('deepdive-dimensions');
+    expect(dims.textContent).toContain('A UBI of 10 credits passed');
+    expect(dims.textContent).toContain('dividend engine');
+    expect(dims.textContent).toContain('Bram starved');
+    // The synthesis prose still renders.
+    expect(screen.getByTestId('chapter-prose').textContent).toContain('sweeping deep-dive');
+  });
+
+  it('Deep Dive button POSTs /api/chronicle/deepdive with the picked model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'building', model: 'kimi', mode: 'deepdive' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const world = {
+      profiles: [{ name: 'kimi', adapter: 'x', model_id: 'x', color: 'x' }],
+    } as unknown as WorldState;
+
+    render(<ChronicleView world={world} history={[]} />);
+    await userEvent.selectOptions(screen.getByLabelText('Chronicle model'), 'kimi');
+    await userEvent.click(screen.getByRole('button', { name: /Deep Dive/i }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/chronicle/deepdive',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ model: 'kimi' });
+    expect(await screen.findByText(/Deep dive underway/i)).toBeTruthy();
+  });
+
+  it('Deep Dive button (no model) POSTs an empty body and surfaces already_running', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'already_running', mode: 'deepdive' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ChronicleView world={null} history={[]} />);
+    await userEvent.click(screen.getByRole('button', { name: /Deep Dive/i }));
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({});
+    expect(await screen.findByText(/deep dive is already underway/i)).toBeTruthy();
+  });
+});

@@ -23,6 +23,14 @@ export interface Chapter {
   /** Actual model the proxy served (may differ from profile when the profile
    *  routes to an alias or fallback). */
   routedVia?: string;
+  /** EM-225 — the chapter MODE. 'deepdive' marks a richer one-off saga built
+   *  from a multi-pass per-dimension review → synthesis (POST /api/chronicle/
+   *  deepdive); absent for ordinary single-pass chapters. */
+  mode?: 'deepdive';
+  /** EM-225 — per-dimension study notes the deep dive synthesised from
+   *  (governance / chat / growth), stamped server-side. Present only on a
+   *  deep-dive chapter. */
+  dimensions?: Record<string, string>;
 }
 
 export interface ChaosFacts {
@@ -170,6 +178,19 @@ export function readChapters(history: WorldEvent[]): Chapter[] {
         typeof e.payload?.['routed_via'] === 'string'
           ? (e.payload['routed_via'] as string)
           : undefined;
+      // EM-225 — a deep-dive chapter is marked mode="deepdive" and carries the
+      // per-dimension notes it was synthesised from.
+      const mode =
+        e.payload?.['mode'] === 'deepdive' ? ('deepdive' as const) : undefined;
+      const rawDims = e.payload?.['dimensions'];
+      const dimensions =
+        rawDims && typeof rawDims === 'object' && !Array.isArray(rawDims)
+          ? Object.fromEntries(
+              Object.entries(rawDims as Record<string, unknown>).filter(
+                (entry): entry is [string, string] => typeof entry[1] === 'string',
+              ),
+            )
+          : undefined;
       return {
         seq: typeof e.seq === 'number' ? e.seq : 0,
         text: (e.text || '').trim(),
@@ -179,17 +200,21 @@ export function readChapters(history: WorldEvent[]): Chapter[] {
         chaos,
         chroniclerVersion,
         routedVia,
+        mode,
+        dimensions,
       };
     });
 
-  // Dedupe by (fromTick, toTick) keeping the HIGHEST-seq version of each window.
-  // Order-INDEPENDENT (not array position): a re-narrated chapter is emitted
-  // later → higher seq → wins, even though the live runtime history arrives
-  // newest-first (useSimulation prepends + sorts seq desc). This is what makes
-  // the `rebuild` re-narrate actually replace the old chapter in the live UI.
+  // Dedupe by (mode, fromTick, toTick) keeping the HIGHEST-seq version of each
+  // window. Order-INDEPENDENT (not array position): a re-narrated chapter is
+  // emitted later → higher seq → wins, even though the live runtime history
+  // arrives newest-first (useSimulation prepends + sorts seq desc). This is what
+  // makes the `rebuild` re-narrate actually replace the old chapter in the live
+  // UI. EM-225 — the mode is part of the key so a whole-run DEEP DIVE coexists
+  // with an ordinary chapter that happens to share its tick window.
   const windowMap = new Map<string, typeof summaries[number]>();
   for (const s of summaries) {
-    const key = `${s.fromTick}:${s.toTick}`;
+    const key = `${s.mode ?? ''}:${s.fromTick}:${s.toTick}`;
     const existing = windowMap.get(key);
     if (!existing || s.seq >= existing.seq) windowMap.set(key, s);
   }
@@ -203,6 +228,8 @@ export function readChapters(history: WorldEvent[]): Chapter[] {
       chaos: s.chaos,
       chroniclerVersion: s.chroniclerVersion,
       routedVia: s.routedVia,
+      mode: s.mode,
+      dimensions: s.dimensions,
       title: chapterTitle(s.text),
     }))
     .sort((a, b) => a.toTick - b.toTick || a.fromTick - b.fromTick);

@@ -180,6 +180,10 @@ class TickLoop:
         # EM-201 — the on-demand backfill task (chronicle the EXISTING history as
         # chapters). One at a time; cancelled on reset like the narrator task.
         self._chronicle_backfill_task: asyncio.Task | None = None
+        # EM-225 — the on-demand DEEP-DIVE task (a richer one-off saga built from
+        # MULTI-PASS per-dimension review → synthesis). Distinct from the single-
+        # pass backfill; one at a time; cancelled on reset like the others.
+        self._chronicle_deepdive_task: asyncio.Task | None = None
 
         # Wave I / EM-210 — The Atelier: a bounded pool of best-effort PNG-fetch
         # tasks drained from world.pending_image_fetches each turn. The provider is
@@ -346,6 +350,20 @@ class TickLoop:
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("chronicle backfill raised during reset: %s", exc)
         self._chronicle_backfill_task = None
+        # EM-225 — drop any in-flight chronicle deep-dive (multi-pass review of the
+        # OLD run); like the backfill it must not bleed a saga into the fresh run.
+        if (
+            self._chronicle_deepdive_task is not None
+            and not self._chronicle_deepdive_task.done()
+        ):
+            self._chronicle_deepdive_task.cancel()
+            try:
+                await self._chronicle_deepdive_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("chronicle deep-dive raised during reset: %s", exc)
+        self._chronicle_deepdive_task = None
         # Wave I / EM-210 — cancel any in-flight image fetches (they write the OLD
         # run's side-artifacts; best-effort, so just cancel + await, swallowing).
         if self._image_fetch_tasks:
@@ -1569,6 +1587,226 @@ class TickLoop:
             "text": text[:2000],
             "payload": payload,
         })
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-225 — Chronicle DEEP DIVE: a richer ONE-OFF saga built from a MULTI-PASS
+    # per-dimension review (governance / chat / growth) → synthesis. Distinct
+    # from the single-pass backfill (POST /api/chronicle/build): each dimension
+    # gets its own focused pass, then a final pass weaves them into one chapter.
+    # OFF the agent critical path (a background task), the caller's model pick,
+    # a longer budget. Server-stamped like the backfill (chronicler_version +
+    # full-run chaos facts), and marked mode="deepdive" so the UI can tell it
+    # apart from an ordinary chapter.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # Per-dimension event-kind slices of _NARRATOR_DIGEST_KINDS. A dimension's
+    # pass only ever sees its own kinds, so its lens stays sharp; the union still
+    # lands inside the digest whitelist.
+    _DEEPDIVE_DIMENSIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+        (
+            "governance",
+            "the LAWS, votes, projects, treasuries and broken promises — how the "
+            "town tried to govern itself and where the rules bent or snapped",
+            (
+                "rule_proposed", "rule_passed", "rule_rejected", "town_named",
+                "project_proposed", "project_funded", "project_built",
+                "building_operational", "structure_state_changed",
+                "commitment_lapsed",
+            ),
+        ),
+        (
+            "chat",
+            "the VOICES — the memorable lines, the schemes whispered, the open "
+            "conflict and the inner reflections that reveal who these agents are",
+            ("agent_speech", "reflection", "conflict"),
+        ),
+        (
+            "growth",
+            "the SHAPE of the town over time — who was born or spawned, who "
+            "starved or died, the random shocks and how the population swelled "
+            "or thinned",
+            (
+                "agent_spawned", "animal_spawned", "agent_died", "animal_died",
+                "world_extinct", "agent_starving", "random_event",
+            ),
+        ),
+    )
+
+    async def _deepdive_pass(
+        self,
+        profile_name: str,
+        dimension: str,
+        focus: str,
+        digest: str,
+    ) -> str:
+        """EM-225 — ONE per-dimension review pass: a single LLM call that reads
+        the whole-run digest through ONE lens and returns a few tight analytical
+        notes (NOT prose). Returns '' on empty/failed/leaked output so the
+        synthesis can proceed on the dimensions that DID land. Never raises."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a study editor preparing notes for a town's grand "
+                    f"chronicle. Review ONLY this dimension — {dimension}: {focus}. "
+                    "From the digest, write 2–4 tight analytical notes (one short "
+                    "sentence each, no preamble, no markdown) naming the specific "
+                    "agents, laws, lines and turning points that matter for THIS "
+                    "dimension. If the digest is quiet on this dimension, say so "
+                    "in one line. Reply with ONLY the notes."
+                ),
+            },
+            {"role": "user", "content": digest},
+        ]
+        profile = self._router.get_profile(profile_name)
+        try:
+            text = await asyncio.wait_for(
+                self._router.chat(
+                    profile_name,
+                    messages,
+                    max_tokens=min(500, getattr(profile, "max_tokens", 500) or 500),
+                    temperature=0.7,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.CancelledError:
+            raise  # reset() cancels us
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("deep-dive %s pass failed: %s", dimension, exc)
+            return ""
+        text = self._clean_chapter(text or "")
+        if not text or self._looks_like_leaked_reasoning(text):
+            return ""
+        return text
+
+    async def _run_deepdive(self, profile_name: str) -> None:
+        """EM-225 — body of one deep-dive (background task): query the WHOLE run
+        once, run a focused review pass per dimension, then a SYNTHESIS pass that
+        weaves the per-dimension notes into one rich chapter. Emits a single
+        `narrator_summary` stamped mode="deepdive" + the dimension notes + the
+        server-computed chaos facts. A failed synthesis emits NOTHING (no retry);
+        never propagates (the loop never stalls)."""
+        try:
+            from_tick = 0
+            to_tick = int(self._world.tick)
+            rows = self._narrator_window_rows(from_tick, to_tick)
+            living = [a.name for a in self._world.living_agents()]
+            town = getattr(self._world, "town_name", "") or ""
+            facts = self._build_chronicle_facts(rows, from_tick, to_tick)
+            # PASS 1..N — one focused review per dimension (each over its own
+            # kind-slice of the rows we already have; no extra DB queries).
+            notes: dict[str, str] = {}
+            for dim, focus, kinds in self._DEEPDIVE_DIMENSIONS:
+                kindset = set(kinds)
+                dim_rows = [r for r in rows if (r.get("kind") or "") in kindset]
+                dim_digest = self._build_chronicle_digest(
+                    dim_rows, living, from_tick, to_tick, town
+                )
+                note = await self._deepdive_pass(
+                    profile_name, dim, focus, dim_digest
+                )
+                if note:
+                    notes[dim] = note
+            # SYNTHESIS — weave the dimension notes (+ a grounding digest) into one
+            # chapter. The digest keeps the prose anchored to real quotes/laws even
+            # if a dimension pass came back thin.
+            grounding = self._build_chronicle_digest(
+                rows, living, from_tick, to_tick, town
+            )
+            notes_block = (
+                "\n\n".join(
+                    f"NOTES — {dim.upper()}:\n{txt}" for dim, txt in notes.items()
+                )
+                or "(no dimension notes landed — work from the digest alone)"
+            )
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Chronicler of a tiny living town of AI agents "
+                        "— a wry, literary narrator. You have been given study "
+                        "notes on three dimensions of the WHOLE run (governance, "
+                        "the voices, and growth) plus a grounding digest. Write a "
+                        "single DEEP-DIVE chapter: three or four vivid paragraphs "
+                        "in past tense that weave the dimensions together into one "
+                        "saga — the laws and betrayals, the memorable lines, the "
+                        "births and deaths and shocks — naming names and quoting a "
+                        "real line verbatim when one lands. This is the definitive "
+                        "telling, so go deeper than a recap. Reply with ONLY the "
+                        "chapter prose — no title, no list, no markdown."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": notes_block + "\n\nGROUNDING DIGEST:\n" + grounding,
+                },
+            ]
+            profile = self._router.get_profile(profile_name)
+            text = await asyncio.wait_for(
+                self._router.chat(
+                    profile_name,
+                    messages,
+                    # The definitive chapter — a longer budget than a window recap.
+                    max_tokens=min(1200, getattr(profile, "max_tokens", 1200) or 1200),
+                    temperature=0.85,
+                ),
+                timeout=90.0,
+            )
+            text = self._clean_chapter(text or "")
+            finish_reason = (self._router.last_usage(profile_name) or {}).get("finish_reason")
+            if (
+                not text
+                or self._looks_truncated(text, finish_reason)
+                or self._looks_like_leaked_reasoning(text)
+            ):
+                log.debug(
+                    "deep-dive synthesis rejected (empty/truncated/leaked, finish=%s)",
+                    finish_reason)
+                return
+            payload = {
+                "from_tick": from_tick,
+                "to_tick": to_tick,
+                "profile": profile_name,
+                "chronicler_version": CHRONICLER_VERSION,
+                "chaos": facts,
+                # EM-225 — the deep-dive marker + the dimensions that fed it, so the
+                # UI can render this as a distinct, richer chapter (not a recap).
+                "mode": "deepdive",
+                "dimensions": notes,
+            }
+            routed_via = self._router.last_routed_via(profile_name)
+            if routed_via:
+                payload["routed_via"] = routed_via
+            self._emit_event({
+                "kind": "narrator_summary",
+                "actor_id": "narrator",
+                "actor_type": "system",
+                "profile": profile_name,
+                "turn_id": None,
+                "text": text[:4000],  # a deep-dive chapter — room for 3–4 paragraphs
+                "payload": payload,
+            })
+        except asyncio.CancelledError:
+            raise  # reset() cancels us; propagate so the await completes
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("chronicle deep-dive failed: %s", exc)
+
+    def start_chronicle_deepdive(self, profile_name: str) -> bool:
+        """EM-225 — kick off the multi-pass deep-dive as a background task (so the
+        API returns immediately and the chapter streams in as a narrator_summary).
+        Returns False when a deep-dive is already in flight, or when the model is
+        unknown/unconfigured (the caller's pick, never forced onto a paid lane)."""
+        if not profile_name or self._router.get_profile(profile_name) is None:
+            return False
+        if (
+            self._chronicle_deepdive_task is not None
+            and not self._chronicle_deepdive_task.done()
+        ):
+            return False
+        self._chronicle_deepdive_task = asyncio.create_task(
+            self._run_deepdive(profile_name)
+        )
+        return True
 
     def _advance_round_buildings(self) -> None:
         """W7 per-round hook. Runs once per round (guarded by world.round):
