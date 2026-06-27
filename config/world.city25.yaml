@@ -325,6 +325,14 @@ world:
     top_n: 1                     # how many top-ranked pitchers win per cycle
     reputation_bonus: 5          # renown points added to each winner (durable reputation signal)
     influence_replenish: 25      # influence (EM-229 need) topped up on each winner, clamped 0..100
+  # EM-235 — boost queue. MUST stay byte-equal to the world.yaml boost block (the
+  # city25 variant changes only the cast). Agents spend credits (buy_turn) for an
+  # EXTRA scheduled turn — buying airtime on the shared timeline (the north-star:
+  # MORE turns/LLM calls); the scheduler grants the extra slot, max_per_round caps
+  # how many one agent buys per round.
+  boost:
+    cost: 8                      # EM-235 live run — credits one buy_turn deducts (the price of an extra turn)
+    max_per_round: 2             # how many extra turns one agent may buy in a single round
   # EM-234 — universalization prompting (GovSim scaffold). MUST stay byte-equal to
   # the world.yaml universalization block (the city25 variant changes only the
   # cast). Injects the always-on "what if EVERY agent did this?" commons-reasoning

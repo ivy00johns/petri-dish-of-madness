@@ -244,6 +244,22 @@ world:
     reputation_bonus: 5         # renown points added to each winner (durable reputation signal)
     influence_replenish: 25     # influence (EM-229 need) topped up on each winner, clamped 0..100
 
+  # EM-235 — boost queue (contracts/wave-m.md §3 Wave M3). Agents spend credits
+  # (the reflex verb buy_turn) for EXTRA scheduled turns/airtime — EW's
+  # ComputeCredits, where agents literally purchase influence over the shared
+  # timeline (the north-star: MORE turns/LLM calls, never fewer). Each buy_turn
+  # deducts `cost` credits (rejected when the agent is too poor) and grants ONE
+  # extra scheduled turn this round; the scheduler honors a durable per-agent
+  # counter (boosted_turns, appended in sorted-id order for determinism) and
+  # `max_per_round` caps how many extra turns one agent may buy in a single round.
+  # DEFAULT-OFF in the dataclass (cost 0) keeps snapshots + the em161 golden
+  # byte-identical AND the scheduler untouched; this LIVE config turns it ON with a
+  # positive cost. MUST stay in sync with the BoostParams mirror in
+  # backend/petridish/config/loader.py.
+  boost:
+    cost: 8                     # EM-235 live run — credits one buy_turn deducts (the price of an extra turn)
+    max_per_round: 2            # how many extra turns one agent may buy in a single round
+
   # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
   # Wave M1). When enabled, EVERY agent's turn context gets a single block that
   # asks them to reason about the commons by universalizing — "before acting on a

@@ -150,6 +150,9 @@ ACTION_SCHEMA = {
                 # EM-232 — Victory Arch: pitch your contribution (parks a pitch the
                 # periodic peer-judge cycle ranks + awards). Reflex, no target.
                 "pitch_contribution",
+                # EM-235 — boost queue: spend credits for an EXTRA scheduled turn
+                # (buy influence over the shared timeline). Reflex, no target.
+                "buy_turn",
                 # Wave K / EM-218–220 — the builders'-city reflex tools: place /
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
@@ -209,6 +212,8 @@ ACTION_SCHEMA = {
                             "offer_cooperation", "accept_cooperation", "co_build",
                             # EM-232 — Victory Arch: pitch your contribution.
                             "pitch_contribution",
+                            # EM-235 — boost queue: buy an extra scheduled turn.
+                            "buy_turn",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
@@ -424,6 +429,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # em161 golden is byte-identical. action_pitch_contribution parks it keyed by
     # the pitcher; the periodic cycle judges + clears the queue.
     "pitch_contribution": {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
+    # EM-235 — boost queue reflex tool. No location_gate / agreement_gate: an agent
+    # may buy an extra turn from anywhere (the buy rides the existing turn, zero
+    # extra LLM calls; action_buy_turn charges credits + queues the extra slot).
+    # Offered in the menu only when the boost queue is configured ON AND the agent
+    # can afford it (see _assemble_context), so a default world's em161 golden is
+    # byte-identical.
+    "buy_turn":           {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
     # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
     # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
     # co-location gate is prop-specific and enforced in _validate_world). demolish
@@ -2142,6 +2154,21 @@ def _assemble_context(
             "pitch_contribution (text) - pitch your contribution to the Victory "
             "Arch; the periodic peer-judge cycle awards credits to the top "
             "contributors (funding, teaching, trading, building)")
+    # EM-235 — boost queue: offer buy_turn ONLY when the queue is configured ON (a
+    # positive cost) AND the agent can actually afford it (menu/resolution agree —
+    # no dangling line the validator would reject). The default-OFF world (the
+    # absent block, AND the em161 golden fixture) never shows this line ⇒ the
+    # lawful-citizen golden is byte-identical. getattr keeps callers safe if the
+    # seam is ever absent.
+    if getattr(world, "boost_enabled", None) and world.boost_enabled():
+        try:
+            _boost_cost = int(world._boost_param("cost", 0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            _boost_cost = 0
+        if _boost_cost > 0 and getattr(agent, "credits", 0) >= _boost_cost:
+            valid_actions.append(
+                f"buy_turn - spend {_boost_cost} credits to take an EXTRA turn this "
+                "round (buy more airtime on the shared timeline)")
     if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
@@ -5254,6 +5281,15 @@ class AgentRuntime:
                 self.world.action_pitch_contribution(
                     agent, args.get("text") or args.get("pitch") or ""),
                 base, thought)
+
+        # EM-235 — boost queue: buy_turn charges world.boost.cost credits + queues
+        # an EXTRA scheduled turn for this agent (a turn_boosted event / a fail
+        # event when OFF, too poor, or over the per-round cap). Reflex, no args —
+        # the buy rides this turn (zero extra LLM calls); the extra turn it grants
+        # is a real new scheduled slot honored by the world scheduler.
+        elif action == "buy_turn":
+            return _emit_world_result(
+                self.world.action_buy_turn(agent), base, thought)
 
         elif action == "move_to":
             place_id = args.get("place")

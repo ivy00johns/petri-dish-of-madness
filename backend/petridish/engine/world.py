@@ -330,6 +330,19 @@ class AgentState:
     #     defensively (absent/garbage → 0, clamped >= 0), so an unawarded agent —
     #     and every pre-EM-232 snapshot — keeps the exact prior dict shape.
     renown: int = 0
+    # EM-235 — boost queue: how many EXTRA scheduled turns this agent has bought
+    # but not yet consumed (EW's ComputeCredits — the agent literally purchases
+    # influence over the shared timeline). A DURABLE counter (not a transient
+    # outbox): buy_turn bumps it (after charging world.boost.cost credits, bounded
+    # by world.boost.max_per_round per round) and the scheduler decrements it as it
+    # grants each extra slot (sorted by id for determinism). ADDITIVE with default
+    # 0 → serialized in to_dict ONLY when > 0 and restored defensively (absent/
+    # garbage/negative → 0), so a boost-free agent — and every pre-EM-235 snapshot —
+    # keeps the exact prior dict shape (the EM-155 byte-identical guarantee + the
+    # em161 golden, since the default-OFF boost surfaces no prompt line and gates
+    # nothing). A parked boost survives a fork/resume (EM-190) because it is plain
+    # agent state, not a separate outbox dict.
+    boosted_turns: int = 0
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -424,6 +437,12 @@ class AgentState:
             d["contributions"] = dict(self.contributions)
         if self.renown:
             d["renown"] = self.renown
+        # EM-235 — parked boost count serialized ONLY when non-zero, so a boost-free
+        # agent (and every pre-EM-235 snapshot) keeps the exact prior dict shape (the
+        # em161 golden + the byte-identical guarantee). A parked boost survives a
+        # fork/resume (EM-190) — it is durable agent state, not a transient outbox.
+        if self.boosted_turns:
+            d["boosted_turns"] = self.boosted_turns
         return d
 
 
@@ -1028,6 +1047,14 @@ class World:
         # survives a fork/resume. One open pitch per agent (a later pitch overwrites
         # the prior — the freshest pitch on the wall wins).
         self.pending_pitches: dict[str, dict] = {}
+        # EM-235 — per-agent buys THIS round {agent_id: count}, the transient
+        # backing for the world.boost.max_per_round cap. Reset at each round
+        # boundary (_start_new_round) — it is a within-round budget, NOT durable
+        # state, so it is deliberately NOT serialized: a snapshot taken mid-round
+        # restores it empty (fail-safe — at worst an agent may buy its per-round
+        # quota again after a resume), while the DURABLE boosts already bought
+        # (AgentState.boosted_turns) ARE serialized and survive the round-trip.
+        self._boosts_this_round: dict[str, int] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -1322,6 +1349,11 @@ class World:
                 break
         self._turn_order = due
         self._turn_index = 0
+        # EM-235 — a fresh round resets the per-agent boost-buy budget (the
+        # world.boost.max_per_round cap is PER round). Durable boosts already
+        # bought (AgentState.boosted_turns) are untouched — only the within-round
+        # purchase counter clears.
+        self._boosts_this_round = {}
 
     def next_agent(self) -> AgentState | None:
         """Return the next agent whose turn it is, advancing the pointer.
@@ -1339,6 +1371,20 @@ class World:
         if self._turn_index >= len(self._turn_order):
             self._round_start = True
 
+        # EM-235 — boost queue: before the round rolls over, honor any parked extra
+        # turns. When THIS round's due rotation is exhausted (the round is about to
+        # roll) but a living agent still holds a bought boost, append the boosted
+        # slots (sorted by id for determinism) to THIS round's rotation and CANCEL
+        # the rollover — the agent acts an extra time before round R+1 begins (the
+        # north-star: MORE turns). Each appended slot consumes one unit of that
+        # agent's durable counter; the per-round buy budget (and so the cap) only
+        # resets when the round genuinely rolls. Done AFTER _rebuild_turn_order so a
+        # dead agent's boost is already pruned (no phantom turn) and the append
+        # lands strictly AFTER the due set, at/after the pointer — never disturbing
+        # the EM-172 mid-round-death pointer math or the EM-158 cadence tiers.
+        if self._round_start and self._append_boost_slots() > 0:
+            self._round_start = False
+
         if self._round_start:
             self._start_new_round()
             self._round_start = False
@@ -1353,6 +1399,106 @@ class World:
             self._round_start = True  # next call will start a new round
 
         return agent
+
+    def _append_boost_slots(self) -> int:
+        """EM-235 — append parked boosted turns to the CURRENT round's rotation.
+
+        For every LIVING agent holding a bought boost (`boosted_turns` > 0), append
+        ONE extra slot (its id) to `_turn_order`, in SORTED-id order so same-seed
+        runs schedule identically (no random/clock — EM-155). Each appended slot
+        consumes one unit of that agent's durable counter. Returns the number of
+        slots appended (0 ⇒ the round may roll over normally).
+
+        Called from next_agent only when the due rotation is already exhausted, so
+        the appended slots land strictly AFTER the due set, at/after the pointer —
+        never disturbing the EM-172 mid-round-death pointer math or the EM-158
+        cadence tiers. A dead agent's boost is never honored (it was pruned by
+        _rebuild_turn_order before this runs, and the living_agents filter here is a
+        second guard). One slot per agent per call, so multi-boosts drain over
+        successive calls (each materializes the next slot as the prior is consumed).
+
+        Only appends when a real round's rotation was already in progress (a
+        non-empty `_turn_order` with the pointer at its end). At init / a restore /
+        a post-rollover empty rotation it returns 0, so next_agent builds the normal
+        round FIRST and the boost is honored at THAT round's end — a boosted agent
+        never pre-empts the due set."""
+        if not self._turn_order or self._turn_index < len(self._turn_order):
+            return 0
+        appended = 0
+        for agent in self.living_agents():
+            if getattr(agent, "boosted_turns", 0) > 0:
+                self._turn_order.append(agent.id)
+                agent.boosted_turns -= 1
+                appended += 1
+        # Stable, replay-deterministic order: the slots just appended are re-sorted
+        # by id over the boosted tail so the grant order never depends on dict
+        # insertion order (living_agents follows self.agents insertion order).
+        if appended:
+            head = self._turn_order[:-appended]
+            tail = sorted(self._turn_order[-appended:])
+            self._turn_order = head + tail
+        return appended
+
+    def boost_enabled(self) -> bool:
+        """EM-235 — True when the boost queue is configured ON: a positive
+        `world.boost.cost`. The OFF state (default, and any world.yaml without the
+        block) rejects every buy_turn, gates the prompt line off, and leaves the
+        scheduler untouched, so a boost-free default world is golden + snapshot
+        byte-identical."""
+        try:
+            return int(self._boost_param("cost", 0)) > 0
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return False
+
+    def action_buy_turn(self, agent: AgentState) -> dict:
+        """EM-235 — the reflex BUY (R3): spend `world.boost.cost` credits to queue
+        ONE extra scheduled turn for this agent (EW's ComputeCredits — buying
+        influence over the shared timeline; the north-star: MORE turns/LLM calls).
+        Zero extra LLM calls at purchase — the buy rides the agent's existing turn;
+        the EXTRA turn it grants is a real new scheduled slot honored by next_agent.
+
+        Returns a ready-to-emit `turn_boosted` event dict, or a fail event when:
+          * the boost queue is OFF (cost <= 0 — config-absent no-op), or
+          * the agent can't afford the cost, or
+          * the agent already hit `world.boost.max_per_round` this round.
+        Deterministic — pure arithmetic + a per-round counter (no random/clock)."""
+        if not self.boost_enabled():
+            return self._fail_event(agent.id, "buy_turn", "boost disabled",
+                                    f"{agent.name} reached for an extra turn, but the boost queue is closed.")
+        try:
+            cost = int(self._boost_param("cost", 0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            cost = 0
+        try:
+            cap = max(1, int(self._boost_param("max_per_round", 2)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            cap = 2
+        if cost <= 0:  # pragma: no cover - boost_enabled already guards this
+            return self._fail_event(agent.id, "buy_turn", "boost disabled",
+                                    f"{agent.name} reached for an extra turn, but the boost queue is closed.")
+        bought = int(self._boosts_this_round.get(agent.id, 0))
+        if bought >= cap:
+            return self._fail_event(
+                agent.id, "buy_turn", "round cap reached",
+                f"{agent.name} has already bought {bought} extra turn(s) this round (cap {cap}).")
+        if agent.credits < cost:
+            return self._fail_event(
+                agent.id, "buy_turn", "insufficient credits",
+                f"{agent.name} can't afford an extra turn ({cost} credits, has {agent.credits}).")
+        agent.credits -= cost
+        agent.boosted_turns += 1
+        self._boosts_this_round[agent.id] = bought + 1
+        return {
+            "kind": "turn_boosted",
+            "actor_id": agent.id,
+            "text": f"{agent.name} buys an extra turn ({cost} credits).",
+            "payload": {
+                "action": "buy_turn",
+                "cost": cost,
+                "boosted_turns": agent.boosted_turns,
+                "credits": agent.credits,
+            },
+        }
 
     def _apply_round_start(self) -> None:
         """Apply per-round effects (UBI etc.)."""
@@ -4889,6 +5035,15 @@ class World:
         call-site defaults == VictoryArchParams defaults."""
         return _block_get(getattr(self.params, "victory_arch", None), name, default)
 
+    def _boost_param(self, name: str, default: Any) -> Any:
+        """EM-235 — defensive accessor for the `world.boost` config block
+        (BoostParams dataclass OR dict OR absent — EM-155 conventions, like
+        _arch_param). An absent block ⇒ every default ⇒ cost 0 ⇒ every buy_turn is
+        rejected and the scheduler is untouched (pre-EM-235 byte-identical + the
+        em161 golden). `default` is only a fallback for a key missing from the
+        block, so keep these call-site defaults == BoostParams defaults."""
+        return _block_get(getattr(self.params, "boost", None), name, default)
+
     def victory_arch_enabled(self) -> bool:
         """EM-232 — True when the Victory Arch is configured ON: a positive cycle
         cadence (`every_n_ticks` > 0). The OFF state (default, and any world.yaml
@@ -6400,6 +6555,12 @@ class World:
                 # / zero renown is never re-emitted, so the agent's dict is unchanged.
                 contributions=_coerce_contributions(d.get("contributions")),
                 renown=max(0, _int(d.get("renown"))),
+                # EM-235 — parked boost count: additive. Pre-EM-235 snapshots lack
+                # the key and restore 0; a present value is clamped >= 0 and a
+                # malformed/negative value fails safe to 0 (never a "negative
+                # boost"). Byte-stable round-trip (EM-155): a zero count is never
+                # re-emitted, so a boost-free agent's dict is unchanged.
+                boosted_turns=max(0, _int(d.get("boosted_turns"))),
             )
             a.relationships = {
                 str(aid): RelationshipState(

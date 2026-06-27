@@ -179,6 +179,17 @@ world:
     top_n: 1
     reputation_bonus: 5
     influence_replenish: 25
+  # EM-235 — boost queue. Agents spend credits (buy_turn) for EXTRA scheduled
+  # turns/airtime (EW's ComputeCredits) — they buy influence over the shared
+  # timeline (the north-star: MORE turns/LLM calls). cost credits are deducted per
+  # buy (rejected if too poor); the scheduler grants the agent an extra slot,
+  # bounded by max_per_round per round. DEFAULT-OFF here (cost 0 = every buy
+  # rejected, no buy_turn line, scheduler untouched) so this embedded mirror stays
+  # byte-identical to pre-EM-235 — the live config/world.yaml sets a positive cost.
+  # MUST stay in sync with config/world.yaml.
+  boost:
+    cost: 0
+    max_per_round: 2
   # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
   # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
   # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
@@ -935,6 +946,37 @@ class VictoryArchParams:
 
 
 @dataclass
+class BoostParams:
+    """EM-235 — Boost queue (config `world.boost`). Agents spend credits to buy
+    EXTRA scheduled turns/airtime (EW's ComputeCredits) — they literally purchase
+    influence over the shared timeline (the north-star: MORE turns/LLM calls).
+
+    A reflex verb `buy_turn` deducts `cost` credits (rejected when the agent is too
+    poor) and bumps a durable per-agent counter `boosted_turns`. The scheduler
+    honors the counter: when a round's due rotation is exhausted, every agent with
+    a parked boost gets ONE extra slot (sorted by id for determinism), the counter
+    decrementing as that slot is consumed — BEFORE the round rolls over. A per-agent
+    per-round cap (`max_per_round`) bounds how many extra turns one agent buys in a
+    single round.
+
+    The engine reads this block via the defensive `_boost_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `boost` block is a complete
+    NO-OP: `cost` defaults to 0, every buy is rejected (no credits move, no boost
+    granted), no `buy_turn` line is offered, and the scheduler is untouched
+    (byte-identical pre-EM-235 + the em161 golden). The DEFAULT-OFF (cost 0) IS the
+    off state by design — no separate `enabled` flag (the EM-232 cadence-0
+    convention). The live config sets a positive cost to turn it on.
+
+      cost           — credits a single `buy_turn` deducts (the price of one extra
+                       turn). <= 0 ⇒ OFF (every buy rejected, no prompt line).
+      max_per_round  — how many extra turns ONE agent may buy in a single round
+                       (>= 1; the per-round cap resets at each round boundary).
+    """
+    cost: int = 0
+    max_per_round: int = 2
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -1237,6 +1279,11 @@ class WorldParams:
     # pre-EM-232 + the em161 golden. A positive cadence turns the pitch->judge->
     # award cycle on (the live config sets one).
     victory_arch: VictoryArchParams = field(default_factory=VictoryArchParams)
+    # EM-235 — boost queue. Additive with a DEFAULT-OFF cost (0), so a world.yaml
+    # without the `boost` block rejects every buy_turn and never offers the line —
+    # byte-identical pre-EM-235 + the em161 golden + an untouched scheduler. A
+    # positive cost turns the buy-an-extra-turn economy on (the live config sets one).
+    boost: BoostParams = field(default_factory=BoostParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1977,6 +2024,33 @@ def _parse_victory_arch(raw: dict | None) -> VictoryArchParams:
     )
 
 
+def _parse_boost(raw: dict | None) -> BoostParams:
+    """Parse the optional `world.boost` block (EM-235).
+    Absent/empty/malformed -> engine-matching defaults (cost 0 ⇒ OFF, a complete
+    no-op). Each key falls back to its default individually (a malformed value
+    never breaks the block). Mirrors `_parse_victory_arch`; cost clamps to >= 0
+    and max_per_round to >= 1 (a non-positive cap would forbid every buy — never
+    intended), so a tampered value can never crash a buy or the scheduler."""
+    if not isinstance(raw, dict):
+        return BoostParams()
+    d = BoostParams()
+
+    def _int_nonneg(key, fallback):
+        try:
+            return max(0, int(raw.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    try:
+        max_per_round = max(1, int(raw.get("max_per_round", d.max_per_round)))
+    except (TypeError, ValueError):
+        max_per_round = d.max_per_round
+    return BoostParams(
+        cost=_int_nonneg("cost", d.cost),
+        max_per_round=max_per_round,
+    )
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -2159,6 +2233,7 @@ def _parse_world(
         skills=_parse_skills(w.get("skills")),
         cooperation=_parse_cooperation(w.get("cooperation")),
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
+        boost=_parse_boost(w.get("boost")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
