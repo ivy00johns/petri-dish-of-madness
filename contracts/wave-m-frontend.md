@@ -6,8 +6,18 @@
 > Vitest. **Branch `build/wave-m-cooperation-economy`. Never merge/push to main.**
 
 ## §1 — Invariants (DO NOT BREAK)
-- `cd web && npm run typecheck` (tsc -b) clean; `npm test` (vitest run) green;
-  `npm run lint` clean. Add tests for new components/logic.
+- **NODE VERSION — REQUIRED.** This shell's `npm`/`node`/`npx` are broken nvm
+  placeholder functions, and node v25 has a broken jsdom localStorage (55 spurious
+  test fails). **Prefix EVERY frontend shell command with this exact block:**
+  ```
+  unset -f node npm npx nvm 2>/dev/null; export PATH="/Users/johns/.nvm/versions/node/v22.22.3/bin:$PATH"
+  ```
+  Then `npx tsc -b` (typecheck), `npm test` (vitest run), `npm run lint` work. The
+  GREEN baseline on v22.22.3 is **963 tests passed (80 files), tsc clean**. Your
+  number must be ≥ 963 + your new tests, zero failures. (`npm run build` also does
+  `tsc -b`; `npm run typecheck` does NOT exist — use `npx tsc -b`.)
+- typecheck (tsc -b) clean; `npm test` (vitest run) green; `npm run lint` clean.
+  Add tests for new components/logic.
 - WorldState/event types stay **additive** (optional fields) — pre-wave snapshots
   must still type-check (model on `types/index.ts` existing optional fields).
 - **3D WebGL palette is EXEMPT from the design-token system** — colors in

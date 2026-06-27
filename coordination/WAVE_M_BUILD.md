@@ -28,6 +28,19 @@ activity, never throttle).
 | F | EM-202, EM-215, EM-204, EM-195, EM-180, EM-191, EM-192, EM-193, EM-225 | typecheck+test+token-guard | pending |
 | Verify | adversarial review + QA gate + ledger + results + PR | qa-report.json | pending |
 
+- **M4a (2026-06-27):** EM-224 PIANO coherence (post-resolution contradiction pass, gated
+  world.coherence default OFF, design doc) → 33028be. EM-203/206 governance renewal cooldown
+  + settled-naming → bb7d50a. EM-189 deterministic seeded child ids → 8751c97. EM-190 fork-safe
+  outbox serialization → 990811d. Suite 1462/1skip.
+- **M4b (2026-06-27):** EM-186 headless run.py D3 wiring parity with app.py → 2e12dde. EM-167
+  Ollama overflow lane (mock-verified; live-verify pending a running Ollama, world.overflow_lane
+  default OFF) → 232f4e4. EM-126 generational depth — life stages/aging/inheritance, gated
+  world.generations → d9e7a7f. Suite 1530/1skip. **ALL BACKEND WAVES COMPLETE** (18 feat commits,
+  +10.4k lines, em161 golden + EM-155 held throughout).
+- **Frontend env (2026-06-27):** the shell's npm/node are broken nvm placeholder funcs; node v25
+  has a broken jsdom localStorage (55 spurious fails). Frontend MUST use node **v22.22.3** — baseline
+  there is GREEN (tsc clean, 963 tests). Incantation in contracts/wave-m-frontend.md §1.
+
 ## Deferred (with reasons)
 - Multi-city EM-109/110/116/117/121 + parallel-worlds 112/119/128 — user: deepen
   first city before founding a second.
