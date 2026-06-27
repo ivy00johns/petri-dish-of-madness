@@ -45,7 +45,7 @@ import {
   type BuildingStyle,
   type VariantKey,
 } from './worldSpace';
-import { GOLDEN_HOUR, toonGradientMap, toonMaterial } from './toon';
+import { GOLDEN_HOUR, LABEL_INK, LABEL_OUTLINE, toonGradientMap, toonMaterial } from './toon';
 import { Model } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
 import type { ModelSpec } from './assets/models';
@@ -56,7 +56,7 @@ import {
   structureModelTint,
 } from './structureModel';
 import { MiniMarker } from './Building';
-import { useProximity, PLACE_LABEL_DIST } from './useProximity';
+import { useProximity, structureLabelFade, PLACE_LABEL_DIST } from './useProximity';
 
 interface StructureProps {
   building: Building;
@@ -98,19 +98,54 @@ const STATUS_TINT: Record<string, string> = {
 /** Max chars for the subtitle readout before it's clamped to one tidy line. */
 const SUB_MAX = 34;
 
+/** Troika <Text> surface we mutate per-frame (uniform-only — no glyph re-sync). */
+type TextFade = { fillOpacity: number; outlineOpacity: number };
+
 function StructureLabel({
   building,
   style,
   y,
   fund = false,
+  fadePoint,
 }: {
   building: Building;
   style: BuildingStyle;
   y: number;
   /** EM-180: a fund reads as a treasury, so its subtitle shows funding, not a tag. */
   fund?: boolean;
+  /**
+   * EM-192(c): the label's ground point + the distance under which it stays
+   * fully solid. When set, the label FADES (plate + both Text layers) over the
+   * fade band past `dist` instead of hard-cutting to the marker. Omitted (or
+   * null) when the label is up for a hover/focus reason — those stay solid.
+   */
+  fadePoint?: { x: number; z: number; dist: number } | null;
 }) {
-  const tint = STATUS_TINT[building.status] ?? '#fff3e0';
+  const tint = STATUS_TINT[building.status] ?? LABEL_INK;
+
+  // Per-frame opacity drive (mirrors Building.tsx LandmarkLabel): two cheap
+  // imperative mutations, no setState. Refs are no-ops until mounted, so the
+  // headless render path is unaffected.
+  const plateRef = useRef<THREE.MeshBasicMaterial>(null);
+  const titleRef = useRef<TextFade | null>(null);
+  const subRef = useRef<TextFade | null>(null);
+  useFrame(({ camera }) => {
+    if (!fadePoint) return;
+    const dx = camera.position.x - fadePoint.x;
+    const dy = camera.position.y;
+    const dz = camera.position.z - fadePoint.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const fade = structureLabelFade(d, fadePoint.dist);
+    if (plateRef.current) plateRef.current.opacity = 0.72 * fade;
+    if (titleRef.current) {
+      titleRef.current.fillOpacity = fade;
+      titleRef.current.outlineOpacity = fade;
+    }
+    if (subRef.current) {
+      subRef.current.fillOpacity = fade;
+      subRef.current.outlineOpacity = fade;
+    }
+  });
   const rawSub = fund
     ? building.funds_required > 0
       ? `Treasury · ${building.funds_committed}/${building.funds_required} ¢`
@@ -142,29 +177,31 @@ function StructureLabel({
     <Billboard position={[0, y, 0]}>
       <mesh position={[0, 0, -0.02]}>
         <planeGeometry args={[w, 1.15]} />
-        <meshBasicMaterial color="#3a2f25" transparent opacity={0.72} />
+        <meshBasicMaterial ref={plateRef} color="#3a2f25" transparent opacity={0.72} />
       </mesh>
       <Text
+        ref={titleRef as never}
         position={[0, 0.22, 0]}
         fontSize={0.46}
-        color="#fff3e0"
+        color={LABEL_INK}
         anchorX="center"
         anchorY="middle"
         outlineWidth={0.014}
-        outlineColor="#241b14"
+        outlineColor={LABEL_OUTLINE}
         whiteSpace="nowrap"
         maxWidth={w}
       >
         {building.name}
       </Text>
       <Text
+        ref={subRef as never}
         position={[0, -0.28, 0]}
         fontSize={0.3}
         color={tint}
         anchorX="center"
         anchorY="middle"
         outlineWidth={0.01}
-        outlineColor="#241b14"
+        outlineColor={LABEL_OUTLINE}
         whiteSpace="nowrap"
         maxWidth={w}
       >
@@ -1333,7 +1370,9 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
   // EM-102: full label only when near / hovered / the camera-focus target
   // (EM-095 zoom-to-place reveals it). Far away → a small status-tinted marker.
   const near = useProximity(useCallback(() => ({ x, z }), [x, z]), PLACE_LABEL_DIST);
-  const showFull = near || hovered || focusedId === building.id;
+  // EM-192(c): hover / focus pin the label SOLID; only the proximity case fades.
+  const labelForcedSolid = hovered || focusedId === building.id;
+  const showFull = near || labelForcedSolid;
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
     if (!onPick) return;
@@ -1428,7 +1467,13 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
       </group>
 
       {showFull ? (
-        <StructureLabel building={building} style={style} y={labelY} fund={fund} />
+        <StructureLabel
+          building={building}
+          style={style}
+          y={labelY}
+          fund={fund}
+          fadePoint={labelForcedSolid ? null : { x, z, dist: PLACE_LABEL_DIST }}
+        />
       ) : (
         <MiniMarker y={labelY} color={STATUS_TINT[building.status] ?? style.accent} />
       )}

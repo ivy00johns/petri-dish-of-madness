@@ -309,7 +309,7 @@ export function ChronicleView({ world, history }: ChronicleViewProps) {
   const activeEntryRef = useRef<HTMLButtonElement | null>(null);
 
   const profiles = world?.profiles ?? [];
-  const townName = (world as { town_name?: string } | null)?.town_name?.trim() || '';
+  const townName = world?.town_name?.trim() || '';
 
   const N = chapters.length;
   // Clamp idx: if selected is null → last; if chapters just grew and selected is OOB → last

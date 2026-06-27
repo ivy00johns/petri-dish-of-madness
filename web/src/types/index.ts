@@ -296,6 +296,11 @@ export interface WorldState {
   // diverged from the tier-1 baseline (a fresh world omits it); when absent the
   // 3D city re-derives tier-1 neighborhoods from `places` and renders identically.
   neighborhoods?: Neighborhood[];
+  // EM-188/192 (additive): the town's runtime-mutable name (agents vote to rename
+  // it via a `town_named` event). Optional/null so mock mode and pre-naming
+  // snapshots stay valid; the CityNameChip / ChronicleView render it only when a
+  // non-empty string is present. Typed here so reads stop using a defensive cast.
+  town_name?: string | null;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
