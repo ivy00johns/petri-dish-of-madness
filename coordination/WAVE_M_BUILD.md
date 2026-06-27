@@ -25,7 +25,9 @@ activity, never throttle).
 | M3 | EM-232, EM-235, EM-236, EM-237 | full pytest | ✅ green — 1413 passed/1 skip |
 | M4a | EM-224, EM-203/206, EM-189, EM-190 | full pytest | ✅ green — 1462 passed/1 skip |
 | M4b | EM-186, EM-167, EM-126(stretch) | full pytest | ✅ green — 1530 passed/1 skip |
-| F | EM-202, EM-215, EM-204, EM-195, EM-180, EM-191, EM-192, EM-193, EM-225 | typecheck+test+token-guard | pending |
+| F1 | EM-191, EM-202, EM-180, EM-192 | tsc+vitest (node v22) | ✅ green — 994 passed, tsc clean |
+| F2 | EM-195, EM-204, EM-215, EM-225 | tsc+vitest+pytest | pending |
+| F3 | EM-193 (token burndown, solo) | tsc+vitest+design-token-guard | pending |
 | Verify | adversarial review + QA gate + ledger + results + PR | qa-report.json | pending |
 
 - **M4a (2026-06-27):** EM-224 PIANO coherence (post-resolution contradiction pass, gated
@@ -40,6 +42,13 @@ activity, never throttle).
 - **Frontend env (2026-06-27):** the shell's npm/node are broken nvm placeholder funcs; node v25
   has a broken jsdom localStorage (55 spurious fails). Frontend MUST use node **v22.22.3** — baseline
   there is GREEN (tsc clean, 963 tests). Incantation in contracts/wave-m-frontend.md §1.
+
+- **F1 (2026-06-27):** EM-191 GRANT petition quote quarantined in its own blockquote → 7acfec8.
+  EM-202 A/B persona spawn UI + feed/roster ab_group grouping → 018d09c. EM-180 funds-as-marker —
+  **found already implemented on origin/main (bdfa130, 2026-06-11); ledger was STALE** — F1 added
+  the missing test coverage → d4f8397. EM-192 town_name type + toon LABEL inks + label fade →
+  d50d1d7. Gate: tsc clean + 994 vitest passed (node v22.22.3). LEDGER NOTE: re-check each "open"
+  item's real state at reconcile — main drifted ahead of the ledger for EM-180.
 
 ## Deferred (with reasons)
 - Multi-city EM-109/110/116/117/121 + parallel-worlds 112/119/128 — user: deepen
