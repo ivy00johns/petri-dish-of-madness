@@ -130,7 +130,7 @@ done rows move to a new `docs/COMPLETED-WORK.md` archive; the open ledger stays 
 | # | Item | State |
 |---|------|-------|
 | 1–2 | Per-wave validation + contract conformance | ✅ every wave gated |
-| 3 | UI renders | ◑ vitest render tests pass; browser render-sanity recommended pre-merge |
+| 3 | UI renders | ✅ render-sanity PASS — stack up (uvicorn :8000 + vite :5173, hermetic DB copy), walked Live/Diary/Inspector-tabs/Chronicle in a real browser: all mount with real chrome + graceful empty-states (no dead shells), **0 console errors** (1 benign WS-reconnect-on-nav warning). Diary tab wired in nav; inspector Forensics/Society/Chaos/Runs tabs switch; Chronicle "🔬 Deep Dive" present; roster shows renown |
 | 4 | Reality gate (real value path) | ◑ deterministic + mock-smoke proven; **live-LLM run is the handoff** (not a scaffold — the product already runs live; this is feature expansion) |
 | 5–6 | E2E + integration fixes re-validated | ✅ 300-tick smoke clean; verify findings fixed + re-gated |
 | 7 | Acceptance criteria / every numbered item | ✅ 28 shipped, 13 deferred-with-reason |

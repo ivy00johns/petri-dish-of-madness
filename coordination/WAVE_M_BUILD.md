@@ -73,6 +73,14 @@ activity, never throttle).
   ACCEPTED-as-is (rationale, not bugs): EM-227 partial-xp ledger fork-drift (levels persist;
   documented), EM-232 lifetime-vs-recent contribution ledger (deliberate — the inequality story).
 
+- **Render-sanity (2026-06-27):** brought up the stack (uvicorn :8000 + vite :5173 on a
+  hermetic copy of the run DB; live data/run.sqlite untouched), Playwright-walked Live / Diary /
+  Inspector-tabs / Chronicle. ALL new surfaces render with real chrome + graceful empty-states
+  (DiaryView "0 diarists" filter; inspector Forensics/Society/Chaos/Runs tablist switches;
+  Chronicle "🔬 Deep Dive" button + the EM-167 `ollama` profile in the model picker; roster
+  REP/renown). **0 console errors** (1 benign WS-reconnect-on-navigation warning, EM-074
+  backoff). Stack torn down; tree clean. **PASS.**
+
 ## Deferred (with reasons)
 - Multi-city EM-109/110/116/117/121 + parallel-worlds 112/119/128 — user: deepen
   first city before founding a second.
