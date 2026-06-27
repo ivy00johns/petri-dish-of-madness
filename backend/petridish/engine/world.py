@@ -1111,6 +1111,19 @@ class World:
         # frontend renders a procedural fallback). Serialized in to_snapshot() only
         # when non-empty so pre-Wave-I snapshots restore byte-identically.
         self.plaza_banner_ref: str = ""
+        # EM-236 — the LIVING CONSTITUTION: an amendable, ARTICLED foundational
+        # document layered over the flat rule list. A list of articles, each
+        # {id, text, ratified_tick}; grown ONLY through governance (an
+        # amend_constitution proposal that ratifies on a 70% supermajority, like
+        # demolish — see action_propose_rule / _evaluate_rule / _on_rule_activated).
+        # Article ids derive from ratified_tick + an ordinal (deterministic, no
+        # uuid/clock — replay-safe, EM-155). Serialized in to_snapshot() ONLY when
+        # non-empty (the factions/active_miracles only-when-non-empty pattern), so
+        # an un-amended world — and every pre-EM-236 snapshot — round-trips
+        # byte-identically; restored defensively in from_snapshot. Surfaced in the
+        # prompt ONLY when non-empty (conditional block ⇒ em161 golden byte-identical
+        # for a default empty-constitution world).
+        self.constitution: list[dict] = []
         # EM-137 (god console) — one-shot god whispers awaiting delivery, keyed
         # by agent id. post_whisper_as_god queues lines here; the runtime pops
         # the target's queue into its NEXT prompt exactly once. EM-145: queued
@@ -3256,6 +3269,7 @@ class World:
         self, agent: AgentState, effect: str, text: str,
         name: str | None = None, target: str | None = None,
         image_id: str | None = None,
+        op: str | None = None, article_id: str | None = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -3274,9 +3288,14 @@ class World:
         # the payload (like demolish's target) and reuses the existing vote
         # machinery (NO new tally code) — a passing vote convicts, a rejected one
         # acquits (see _on_rule_activated / action_vote).
+        # EM-236 — amend_constitution is a governance effect (R5, modelled on
+        # demolish/trial): it carries {op, article_id?, text} on its payload and
+        # ratifies on a 70% supermajority (like demolish — see _evaluate_rule). The
+        # passing vote add/edit/removes an article in _on_rule_activated.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
-                         "name_town", "demolish", "promote_image", "trial"}
+                         "name_town", "demolish", "promote_image", "trial",
+                         "amend_constitution"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -3344,6 +3363,27 @@ class World:
             if defendant.crime_status in ("detained", "jailed"):
                 return False, f"{defendant.name} is already in custody", None
             payload = {"defendant_id": defendant.id, "charges": str(text)[:200]}
+        # EM-236 — amend_constitution carries {op, article_id?, text} on its payload
+        # (op ∈ add|edit|remove). Validate it like demolish's target: a malformed op,
+        # a missing text on add/edit, or an edit/remove of an unknown article is
+        # meaningless — reject it BEFORE a vote opens. The per-(op,article) duplicate
+        # guard lives in the OPEN-proposal loop below (mirrors demolish/trial).
+        if effect == "amend_constitution":
+            op = str(op or "").strip().lower()
+            if op not in ("add", "edit", "remove"):
+                return False, (f"amend_constitution requires op add|edit|remove "
+                               f"(got {op!r})"), None
+            text = str(text or "").strip()
+            article_id = str(article_id or "").strip()
+            if op in ("add", "edit") and not text:
+                return False, f"amend_constitution {op} requires article text", None
+            if op in ("edit", "remove"):
+                if self._find_article(article_id) is None:
+                    return False, (f"amend_constitution {op} requires a real "
+                                   f"article_id (got {article_id!r})"), None
+            payload = {"op": op, "text": text[:300]}
+            if article_id:
+                payload["article_id"] = article_id
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -3368,6 +3408,21 @@ class World:
                 if (rule.payload or {}).get("defendant_id") == payload.get("defendant_id"):
                     return False, f"{payload.get('defendant_id')!r} already has an open trial", None
                 continue
+            # EM-236 — amend_constitution is scoped per (op, article_id): two
+            # distinct ADD proposals may have open votes at once (each adds a NEW
+            # article, so they never collide), but a duplicate EDIT/REMOVE of the
+            # SAME article is blocked (mirrors demolish-per-target). An add (no
+            # article_id) never duplicates another add.
+            if effect == "amend_constitution":
+                op_here = payload.get("op")
+                if op_here == "add":
+                    continue
+                if ((rule.payload or {}).get("op") == op_here
+                        and (rule.payload or {}).get("article_id")
+                        == payload.get("article_id")):
+                    return False, (f"a {op_here} vote for article "
+                                   f"{payload.get('article_id')!r} is already open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -3377,9 +3432,13 @@ class World:
         # ACT (each targets a distinct building) — neither "renews"; each passing
         # vote is fresh. EM-240: trial is a one-shot ACT per defendant (same as
         # demolish) — a conviction/acquittal is applied once, never "renewed".
+        # EM-236: amend_constitution is a one-shot ACT (each amendment applies once,
+        # like demolish/trial) — it never "renews"; each passing vote mutates the
+        # constitution afresh, so it joins the no-renewal exclusion list.
         active = (
             self._active_rule(effect)
-            if effect not in ("name_town", "demolish", "promote_image", "trial") else None
+            if effect not in ("name_town", "demolish", "promote_image", "trial",
+                              "amend_constitution") else None
         )
         rule = RuleState(
             id=f"r_{str(uuid.uuid4())[:8]}",  # run-663: prefixed so a rule id is never all-numeric (votable-as-int)
@@ -3422,7 +3481,8 @@ class World:
                 # it never "renews"; each passing guilty vote convicts afresh.
                 existing = (
                     self._active_rule(rule.effect)
-                    if rule.effect not in ("name_town", "promote_image", "trial") else None
+                    if rule.effect not in ("name_town", "promote_image", "trial",
+                                           "amend_constitution") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -3556,6 +3616,62 @@ class World:
                 "target_id": defendant.id,
                 "text": f"{defendant.name} is led to jail for {sentence} ticks.",
                 "payload": {"until_tick": defendant.crime_status_until_tick},
+            })
+            return
+        # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
+        # article in the living constitution. The op + payload were validated at
+        # propose time (action_propose_rule), so here we apply it idempotently
+        # (rule.applied) and park a `constitution_amended` event in the SAME outbox
+        # name_town/demolish use (drained + emitted by the loop's _flush_spawn_events).
+        # The proposer's influence need (EM-229) is replenished — a governance win.
+        if rule.effect == "amend_constitution":
+            rule.applied = True
+            spec = rule.payload or {}
+            op = str(spec.get("op", ""))
+            text = str(spec.get("text", "")).strip()
+            article_id = str(spec.get("article_id", "")).strip()
+            applied_id: str | None = None
+            if op == "add" and text:
+                applied_id = self._next_article_id()
+                self.constitution.append({
+                    "id": applied_id,
+                    "text": text[:300],
+                    "ratified_tick": self.tick,
+                })
+            elif op == "edit":
+                art = self._find_article(article_id)
+                if art is not None and text:
+                    art["text"] = text[:300]
+                    art["ratified_tick"] = self.tick
+                    applied_id = art["id"]
+            elif op == "remove":
+                art = self._find_article(article_id)
+                if art is not None:
+                    self.constitution = [
+                        a for a in self.constitution if a.get("id") != article_id]
+                    applied_id = article_id
+            # Replenish the proposer's influence on a successful amendment (a
+            # governance win; the EM-229 hook). A vanished proposer is a no-op.
+            proposer = self.agents.get(rule.proposer_id)
+            if proposer is not None and applied_id is not None:
+                try:
+                    reward = float(self._constitution_param("influence_replenish", 15.0))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    reward = 15.0
+                self.replenish_influence(proposer, reward)
+            self.pending_spawn_events.append({
+                "kind": "constitution_amended",
+                "actor_id": "system",
+                "actor_type": "system",
+                "text": (f"📜 By vote, the constitution is amended "
+                         f"({op}{f': {text[:80]}' if text else ''})."),
+                "payload": {
+                    "op": op,
+                    "article_id": applied_id,
+                    "text": text[:300],
+                    "proposal_id": rule.id,
+                    "proposer_id": rule.proposer_id,
+                },
             })
             return
         if rule.effect != "admit_agent":
@@ -3696,8 +3812,21 @@ class World:
         # than the simple strict majority ordinary rules pass on (the user's locked
         # decision + design spec + contract wave-k.md §3). Ordinary effects keep
         # their existing bar.
-        if rule.effect == "demolish":
-            yes_needed = math.ceil(0.7 * living_count)
+        # EM-236 — amend_constitution edits the town's FOUNDATIONAL document, a
+        # weightier act than an ordinary law, so it shares the demolish-grade
+        # supermajority bar (the fraction is `world.constitution.ratify_threshold`,
+        # default 0.7 == the demolish bar; demolish itself stays a fixed 0.7).
+        if rule.effect in ("demolish", "amend_constitution"):
+            if rule.effect == "amend_constitution":
+                try:
+                    frac = float(self._constitution_param("ratify_threshold", 0.7))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    frac = 0.7
+                if not (0.0 < frac <= 1.0):  # pragma: no cover - defensive
+                    frac = 0.7
+            else:
+                frac = 0.7
+            yes_needed = math.ceil(frac * living_count)
             if yes_votes >= yes_needed:
                 return "active"
             # The vote fails once a yes-supermajority is mathematically out of reach
@@ -5043,6 +5172,41 @@ class World:
         em161 golden). `default` is only a fallback for a key missing from the
         block, so keep these call-site defaults == BoostParams defaults."""
         return _block_get(getattr(self.params, "boost", None), name, default)
+
+    def _constitution_param(self, name: str, default: Any) -> Any:
+        """EM-236 — defensive accessor for the `world.constitution` config block
+        (ConstitutionParams dataclass OR dict OR absent — EM-155 conventions, like
+        _boost_param). An absent block ⇒ every default ⇒ the demolish-grade 0.7
+        ratify bar + a 15.0 influence reward, with the constitution simply empty
+        until an amendment ratifies (pre-EM-236 byte-identical + the em161 golden).
+        `default` is only a fallback for a key missing from the block, so keep these
+        call-site defaults == ConstitutionParams defaults."""
+        return _block_get(getattr(self.params, "constitution", None), name, default)
+
+    def _find_article(self, article_id: str) -> dict | None:
+        """EM-236 — return the constitution article with this id, or None. Pure
+        lookup over the durable list (no clock/random)."""
+        if not article_id:
+            return None
+        return next(
+            (a for a in self.constitution if a.get("id") == str(article_id)), None)
+
+    def _next_article_id(self) -> str:
+        """EM-236 — a DETERMINISTIC article id: `art-<ratified_tick>-<ordinal>`,
+        where the ordinal is the count of articles already ratified at THIS tick
+        (so two amendments ratified on the same tick get distinct ids). No uuid, no
+        clock read — derived purely from world.tick + the current article list, so
+        the same amendment sequence yields identical ids on replay/fork (EM-155).
+        Defensive against a (hand-crafted) collision: bump the ordinal until free."""
+        prefix = f"art-{self.tick}-"
+        ordinal = sum(
+            1 for a in self.constitution
+            if str(a.get("id", "")).startswith(prefix))
+        candidate = f"{prefix}{ordinal}"
+        while self._find_article(candidate) is not None:
+            ordinal += 1
+            candidate = f"{prefix}{ordinal}"
+        return candidate
 
     def victory_arch_enabled(self) -> bool:
         """EM-232 — True when the Victory Arch is configured ON: a positive cycle
@@ -6411,6 +6575,21 @@ class World:
                 self.neighborhoods[nid].to_dict()
                 for nid in sorted(self.neighborhoods)
             ]
+        # EM-236 — the living constitution: a list of articles {id, text,
+        # ratified_tick}, emitted in their durable order. Serialized ONLY when
+        # non-empty (the factions/active_miracles only-when-non-empty pattern), so
+        # an un-amended world — and every pre-EM-236 snapshot — keeps the exact prior
+        # key set (absent ⇒ [] on restore). A ratified amendment survives a
+        # fork/replay byte-identically (article ids are deterministic, EM-155).
+        if self.constitution:
+            snap["constitution"] = [
+                {
+                    "id": str(a.get("id", "")),
+                    "text": str(a.get("text", "")),
+                    "ratified_tick": int(a.get("ratified_tick", 0)),
+                }
+                for a in self.constitution
+            ]
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -6866,4 +7045,22 @@ class World:
                     "tick": _int(p.get("tick")),
                 }
         world.pending_pitches = restored_pitches
+        # EM-236 — restore the living constitution (additive: pre-EM-236 snapshots
+        # lack the key and restore [], so a fork/replay of an un-amended world keeps
+        # the empty constitution byte-identically). Defensive: keep only well-formed
+        # articles with a non-empty id AND non-blank text (a non-dict entry, a
+        # missing id, or blank text → dropped), preserving the durable order.
+        restored_constitution: list[dict] = []
+        for a in (state.get("constitution") or []):
+            if not isinstance(a, dict):
+                continue
+            art_id = str(a.get("id", "")).strip()
+            art_text = str(a.get("text", "")).strip()
+            if art_id and art_text:
+                restored_constitution.append({
+                    "id": art_id,
+                    "text": art_text[:300],
+                    "ratified_tick": _int(a.get("ratified_tick")),
+                })
+        world.constitution = restored_constitution
         return world

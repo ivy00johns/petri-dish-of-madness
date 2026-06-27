@@ -190,6 +190,15 @@ world:
   boost:
     cost: 0
     max_per_round: 2
+  # EM-236 — living constitution. Agents amend an ARTICLED foundational document
+  # via propose_rule(effect=amend_constitution, op=add|edit|remove); it ratifies
+  # on a 70% supermajority (the demolish bar) and replenishes the proposer's
+  # influence need. The constitution is empty until an amendment ratifies, so this
+  # block only TUNES the bar + reward — an un-amended world is byte-identical to
+  # pre-EM-236. MUST stay in sync with config/world.yaml.
+  constitution:
+    ratify_threshold: 0.7
+    influence_replenish: 15
   # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
   # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
   # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
@@ -977,6 +986,35 @@ class BoostParams:
 
 
 @dataclass
+class ConstitutionParams:
+    """EM-236 — Living constitution (config `world.constitution`). An amendable,
+    ARTICLED foundational document layered over today's flat rule list.
+
+    Articles are added/edited/removed ONLY through governance: an agent proposes a
+    `propose_rule(effect="amend_constitution", op=..., text=..., article_id?=...)`
+    and it RATIFIES on a 70% SUPERMAJORITY — the same bar as `demolish`. A ratified
+    amendment mutates `World.constitution` and replenishes the proposer's influence
+    need (EM-229). The constitution is surfaced in the prompt ONLY when non-empty.
+
+    The engine reads this block via the defensive `_constitution_param` accessor
+    with IDENTICAL defaults, so a world.yaml WITHOUT a `constitution` block behaves
+    exactly like these values — i.e. byte-identical to pre-EM-236. NO `enabled`
+    flag: the constitution is empty until an amendment is RATIFIED (a deliberate
+    governance act), so an un-amended world (and every pre-EM-236 snapshot) stays
+    byte-identical without one — the constitution simply never grows.
+
+      ratify_threshold    — the YES-vote supermajority fraction an amendment needs
+                            to ratify (0.7 == 70%, the `demolish` bar). Clamped to
+                            (0, 1]; the engine accessor falls back to 0.7.
+      influence_replenish — influence (EM-229 need) topped up on the PROPOSER when
+                            an amendment ratifies (a governance win), clamped
+                            0..100 by replenish_influence (>= 0).
+    """
+    ratify_threshold: float = 0.7
+    influence_replenish: float = 15.0
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -1284,6 +1322,12 @@ class WorldParams:
     # byte-identical pre-EM-235 + the em161 golden + an untouched scheduler. A
     # positive cost turns the buy-an-extra-turn economy on (the live config sets one).
     boost: BoostParams = field(default_factory=BoostParams)
+    # EM-236 — living constitution. Additive with engine-matching defaults; the
+    # constitution is empty until an amendment RATIFIES (a governance act), so a
+    # world.yaml without the `constitution` block — and every pre-EM-236 snapshot —
+    # is byte-identical (no `enabled` flag: the document simply never grows). The
+    # block only tunes the ratify supermajority + the proposer's influence reward.
+    constitution: ConstitutionParams = field(default_factory=ConstitutionParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -2051,6 +2095,29 @@ def _parse_boost(raw: dict | None) -> BoostParams:
     )
 
 
+def _parse_constitution(raw: dict | None) -> ConstitutionParams:
+    """Parse the optional `world.constitution` block (EM-236).
+    Absent/empty/malformed -> engine-matching defaults (the un-amended world is a
+    complete no-op). Each key falls back to its default individually (a malformed
+    value never breaks the block). ratify_threshold clamps to (0, 1] (a value <= 0
+    would ratify on the first vote; > 1 would be impossible to pass — never
+    intended), influence_replenish clamps to >= 0."""
+    if not isinstance(raw, dict):
+        return ConstitutionParams()
+    d = ConstitutionParams()
+    try:
+        thr = float(raw.get("ratify_threshold", d.ratify_threshold))
+        if not (0.0 < thr <= 1.0):
+            thr = d.ratify_threshold
+    except (TypeError, ValueError):
+        thr = d.ratify_threshold
+    try:
+        infl = max(0.0, float(raw.get("influence_replenish", d.influence_replenish)))
+    except (TypeError, ValueError):
+        infl = d.influence_replenish
+    return ConstitutionParams(ratify_threshold=thr, influence_replenish=infl)
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -2234,6 +2301,7 @@ def _parse_world(
         cooperation=_parse_cooperation(w.get("cooperation")),
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
         boost=_parse_boost(w.get("boost")),
+        constitution=_parse_constitution(w.get("constitution")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),

@@ -260,6 +260,20 @@ world:
     cost: 8                     # EM-235 live run — credits one buy_turn deducts (the price of an extra turn)
     max_per_round: 2            # how many extra turns one agent may buy in a single round
 
+  # EM-236 — living constitution (contracts/wave-m.md §3 Wave M3). An amendable,
+  # ARTICLED foundational document layered over the flat rule list. Agents grow it
+  # ONLY through governance: propose_rule(effect=amend_constitution, op=add|edit|
+  # remove, text, article_id?) ratifies on a `ratify_threshold` supermajority (0.7
+  # == the demolish bar), mutates World.constitution, emits constitution_amended,
+  # and tops up the proposer's influence need (EM-229) by `influence_replenish`.
+  # The constitution is empty until an amendment ratifies (no `enabled` flag), so
+  # this block only tunes the bar + reward — an un-amended world stays byte-
+  # identical to pre-EM-236. MUST stay in sync with the ConstitutionParams mirror
+  # in backend/petridish/config/loader.py.
+  constitution:
+    ratify_threshold: 0.7       # YES-vote supermajority fraction an amendment needs to ratify (0.7 = 70%, the demolish bar)
+    influence_replenish: 15     # influence (EM-229 need) topped up on the PROPOSER when an amendment ratifies, clamped 0..100
+
   # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
   # Wave M1). When enabled, EVERY agent's turn context gets a single block that
   # asks them to reason about the commons by universalizing — "before acting on a

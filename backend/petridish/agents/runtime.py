@@ -2209,6 +2209,20 @@ def _assemble_context(
                 propose_line += "|trial"
                 propose_tail += (f"; trial needs target=<the defendant's name or id> "
                                  f"to put them on trial by vote (e.g. {_defendant.name})")
+        # EM-236 — amend_constitution is offered to EVERY proposer (no role gate):
+        # add|edit|remove a foundational article by 70% supermajority. The tail
+        # names a concrete article_id for edit/remove ONLY when the constitution has
+        # one (so the menu never offers an edit with no target); add always works.
+        propose_line += "|amend_constitution"
+        propose_tail += ("; amend_constitution needs op=add|edit|remove plus "
+                         "text=<the article> (add/edit)")
+        _articles_now = getattr(world, "constitution", None) or []
+        if _articles_now:
+            _an_article = str(_articles_now[0].get("id", ""))
+            propose_tail += (f" and article_id=<an article's id, e.g. {_an_article}> "
+                             f"(edit/remove) — ratified on a 70% supermajority")
+        else:
+            propose_tail += " — ratified on a 70% supermajority"
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -2833,6 +2847,28 @@ def _assemble_context(
     _town = (getattr(world, "town_name", "") or "").strip()
     town_line = f"\nTown: {_town}" if _town else ""
 
+    # ── EM-236 — the LIVING CONSTITUTION rides every prompt ONCE it has articles.
+    # The articled foundational document (grown by amend_constitution governance) is
+    # surfaced as a conditional block: an EMPTY constitution prints NOTHING, so the
+    # lawful-citizen em161 golden is byte-identical for a default (un-amended) world.
+    # Background tier gets the SAME compact list (it is short — one line per article).
+    # Zero extra LLM calls — it rides this turn. getattr keeps callers safe if the
+    # engine seam is ever absent.
+    constitution_block = ""
+    _articles = getattr(world, "constitution", None) or []
+    if _articles:
+        _article_lines = "\n".join(
+            f"  • {str(a.get('text', '')).strip()}"
+            for a in _articles if str(a.get("text", "")).strip()
+        )
+        if _article_lines:
+            constitution_block = f"""
+=== 📜 THE CONSTITUTION ({len(_articles)} article{"s" if len(_articles) != 1 else ""}) ===
+{_article_lines}
+  These are the town's ratified foundational articles. Amend them only by vote
+  (propose_rule effect=amend_constitution) — a 70% supermajority is required.
+"""
+
     # ── Wave D2 / EM-162 + Wave D3 / EM-171 — cache-key normalization
     # (BACKGROUND only): every displayed energy buckets to 10s, and the tick
     # line is DROPPED entirely. EM-162's day-floored tick still missed the
@@ -2962,7 +2998,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
 {project_text}
-
+{constitution_block}
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
 
@@ -5315,8 +5351,14 @@ class AgentRuntime:
             target = args.get("target") or args.get("building_id")
             # Wave I / EM-212 — promote_image carries the gallery image id.
             image_id = args.get("image_id")
+            # EM-236 — amend_constitution carries op (add|edit|remove) + an optional
+            # article_id (for edit/remove). article_id also arrives via the generic
+            # `target` arg (the model may reuse it), so accept either.
+            op = args.get("op")
+            article_id = args.get("article_id") or (
+                args.get("target") if effect == "amend_constitution" else None)
             ok, reason, rule = self.world.action_propose_rule(
-                agent, effect, text, name, target, image_id)
+                agent, effect, text, name, target, image_id, op, article_id)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)
