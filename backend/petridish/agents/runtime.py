@@ -1368,6 +1368,24 @@ _HOISTABLE_COGNITION = (
 )
 
 
+def _coerce_actions_keyword(action_dict: dict) -> None:
+    """EM-249 — a free model told to 'return "actions" — an ordered list' (the
+    EM-199 multi-action prompt) routinely echoes the keyword as the VERB, emitting
+    {"action": "actions", "actions": [...]}. That dies on the ACTION_SCHEMA enum
+    ('actions' is not an action) even though a perfectly good actions[] sits right
+    beside it — a recurring groq-llama idle fallback (run-1117). When `action` is
+    literally "actions" AND a non-empty actions[] is present, drop the spurious
+    `action` key so the multi-action path takes over (schema anyOf [action|actions];
+    _normalize_steps prefers actions). With no usable actions[] to fall back on we
+    leave it for the normal retry. Mutates in place; never raises; a no-op for every
+    well-formed response (so the em161 golden parse path is untouched)."""
+    if action_dict.get("action") != "actions":
+        return
+    actions = action_dict.get("actions")
+    if isinstance(actions, list) and actions:
+        action_dict.pop("action", None)
+
+
 def _hoist_step_cognition(action_dict: dict) -> None:
     """Free models told to return an `actions` sequence routinely put
     turn-level cognition (thought / mood / perceived_summary / memories_used /
@@ -2501,7 +2519,22 @@ def _assemble_context(
             "start a new building/collective project. kind is free-text but pick "
             f"from this menu when you can: {_build_menu}. "
             "place? = a place id to build there (else here)")
-    if open_projects and _tier_ok("contribute_funds"):
+    # EM-248 — only a PLANNED, still-UNDERFUNDED project can actually take funds.
+    # A fully-funded planned building (committed >= required) or any
+    # under_construction one needs build_step, NOT money — offering contribute_funds
+    # when the only open projects are those just burns the turn on an "already fully
+    # funded — needs build_step" rejection (run-1117: 7 such idle fallbacks). Gate on
+    # the fundable subset so the invitation disappears when nothing is fundable
+    # (menu/resolution agree, EM-108). The line TEXT is unchanged (em161 golden: the
+    # fixture's b1 is planned-underfunded, so the line still prints byte-identically);
+    # only the gate condition narrows.
+    fundable_projects = [
+        b for b in open_projects
+        if _building_field(b, "status") == "planned"
+        and _building_field(b, "funds_committed", 0)
+        < _building_field(b, "funds_required", 0)
+    ]
+    if fundable_projects and _tier_ok("contribute_funds"):
         valid_actions.append("contribute_funds (building_id, amount) - fund an active project below to push it toward construction")
     for b in here_buildings:
         bid = _building_field(b, "id")
@@ -4948,6 +4981,11 @@ class AgentRuntime:
             self._forget_response(profile_name, messages)
             return None, _no_json_error(text, finish_reason), meta
 
+        # EM-249 — recover the "action": "actions" keyword-echo confusion (a model
+        # that put the real steps in actions[] but also named the verb "actions")
+        # BEFORE anything reads the shape, so the multi-action path takes over
+        # instead of dying on the schema enum.
+        _coerce_actions_keyword(action_dict)
         # EM-199 — lift turn-level cognition the model scattered into actions[0]
         # up to the top level (before sanitize/validate), so a 💭 thought / trace
         # nested in a step still counts. The step keeps its copy (items tolerate
