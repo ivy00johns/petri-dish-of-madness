@@ -163,6 +163,22 @@ world:
   # (golden + snapshot byte-identical). MUST stay in sync with config/world.yaml.
   cooperation:
     co_build_bonus_step: 35
+  # EM-232 — peer-judged credit economy / Victory Arch. A periodic
+  # pitch -> peer-judge -> award cycle: agents pitch_contribution(text) to park a
+  # pitch; every `every_n_ticks` ticks the parked pitches are ranked by a
+  # DETERMINISTIC contribution score (buildings funded, skills taught, trades
+  # settled, projects built; tie-broken by id — no random), and the top_n pitchers
+  # each win `award` credits + a renown bump + an influence replenish (EM-229). An
+  # `arch_award` event fires per winner; the queue clears. DEFAULT-OFF here
+  # (every_n_ticks 0 = no cycle, no pitch line) so this embedded mirror stays
+  # byte-identical to pre-EM-232 — the live config/world.yaml sets a positive
+  # cadence. MUST stay in sync with config/world.yaml.
+  victory_arch:
+    every_n_ticks: 0
+    award: 50
+    top_n: 1
+    reputation_bonus: 5
+    influence_replenish: 25
   # EM-234 — universalization prompting (GovSim scaffold). When enabled, every
   # agent's turn gets a "before acting on the commons, ask: what if EVERY agent
   # did this?" block (zero extra LLM calls — rides the turn). DEFAULT OFF here so
@@ -879,6 +895,46 @@ class CooperationParams:
 
 
 @dataclass
+class VictoryArchParams:
+    """EM-232 — Peer-judged credit economy / Victory Arch (config
+    `world.victory_arch`). A periodic pitch -> peer-judge -> award cycle (EW's
+    ~2-day Victory Arch cadence).
+
+    Agents `pitch_contribution(text)` (a reflex verb) to park a pitch. At a cycle
+    boundary — `every_n_ticks` ticks — the parked pitches are ranked by a
+    DETERMINISTIC contribution score (each pitcher's durable `contributions`
+    ledger: buildings funded, skills taught, trades settled, projects built; NO
+    random, tie-broken by agent id). The top_n pitchers each get `award` credits +
+    a `reputation_bonus` renown bump + an `influence_replenish` (the EM-229 hook).
+    An `arch_award` event fires per winner; the pitch queue clears each cycle.
+    Adds reputation-through-contribution + the inequality story (a Gini/AWI read).
+
+    The engine reads this block via the defensive `_arch_param` accessor with
+    IDENTICAL defaults, so a world.yaml WITHOUT a `victory_arch` block is a
+    complete NO-OP: `every_n_ticks` defaults to 0, the cycle gate is never true,
+    no pitch line is offered, and pitches simply accumulate without an award
+    (byte-identical pre-EM-232 + the em161 golden). The DEFAULT-OFF (every_n_ticks
+    0) IS the off state by design — no separate `enabled` flag (the EM-227 empty-
+    library convention). The live config sets a positive cadence to turn it on.
+
+      every_n_ticks      — the cycle cadence: a cycle fires when
+                           `tick > 0 and tick % every_n_ticks == 0`. <= 0 ⇒ OFF
+                           (no cycle ever, pitches accumulate, no prompt line).
+      award              — credits granted to each winning pitcher (the prize).
+      top_n              — how many top-ranked pitchers win each cycle (>= 1).
+      reputation_bonus   — renown points added to each winner (the durable
+                           reputation-through-contribution signal; clamped >= 0).
+      influence_replenish — influence (EM-229 need) topped up on each winner,
+                           clamped 0..100 by replenish_influence (>= 0).
+    """
+    every_n_ticks: int = 0
+    award: int = 50
+    top_n: int = 1
+    reputation_bonus: int = 5
+    influence_replenish: float = 25.0
+
+
+@dataclass
 class ChildrenParams:
     """Wave E / EM-114 — lightweight children (config `world.children`).
     Once per round boundary the world checks every mutual-partner pair
@@ -1175,6 +1231,12 @@ class WorldParams:
     # never forms a handshake has no cooperation state (golden + snapshot
     # byte-identical), and co_build is simply unavailable until a pair agrees.
     cooperation: CooperationParams = field(default_factory=CooperationParams)
+    # EM-232 — peer-judged credit economy / Victory Arch. Additive with a DEFAULT-
+    # OFF cadence (every_n_ticks 0), so a world.yaml without the `victory_arch`
+    # block never fires a cycle and never offers the pitch line — byte-identical
+    # pre-EM-232 + the em161 golden. A positive cadence turns the pitch->judge->
+    # award cycle on (the live config sets one).
+    victory_arch: VictoryArchParams = field(default_factory=VictoryArchParams)
     # Wave E / EM-114 — lightweight children. Additive with engine-matching
     # defaults (default ON); births require a mutual-partner pair, so a world
     # without partners (every pre-E world) behaves byte-identically.
@@ -1881,6 +1943,40 @@ def _parse_cooperation(raw: dict | None) -> CooperationParams:
     return CooperationParams(co_build_bonus_step=bonus)
 
 
+def _parse_victory_arch(raw: dict | None) -> VictoryArchParams:
+    """Parse the optional `world.victory_arch` block (EM-232).
+    Absent/empty/malformed -> engine-matching defaults (every_n_ticks 0 ⇒ OFF, a
+    complete no-op). Each key falls back to its default individually (a malformed
+    value never breaks the block). Mirrors `_parse_cooperation`; cadence/award/
+    bonus clamp to >= 0 and top_n to >= 1 (a non-positive top_n would award
+    nobody — never intended), so a tampered value can never crash a cycle."""
+    if not isinstance(raw, dict):
+        return VictoryArchParams()
+    d = VictoryArchParams()
+
+    def _int_nonneg(key, fallback):
+        try:
+            return max(0, int(raw.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    try:
+        top_n = max(1, int(raw.get("top_n", d.top_n)))
+    except (TypeError, ValueError):
+        top_n = d.top_n
+    try:
+        influence = max(0.0, float(raw.get("influence_replenish", d.influence_replenish)))
+    except (TypeError, ValueError):
+        influence = d.influence_replenish
+    return VictoryArchParams(
+        every_n_ticks=_int_nonneg("every_n_ticks", d.every_n_ticks),
+        award=_int_nonneg("award", d.award),
+        top_n=top_n,
+        reputation_bonus=_int_nonneg("reputation_bonus", d.reputation_bonus),
+        influence_replenish=influence,
+    )
+
+
 def _parse_children(raw: dict | None) -> ChildrenParams:
     """Parse the optional `world.children` block (Wave E / EM-114).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -2062,6 +2158,7 @@ def _parse_world(
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),
         cooperation=_parse_cooperation(w.get("cooperation")),
+        victory_arch=_parse_victory_arch(w.get("victory_arch")),
         children=_parse_children(w.get("children")),
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),

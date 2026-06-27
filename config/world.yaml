@@ -224,6 +224,26 @@ world:
   cooperation:
     co_build_bonus_step: 35     # progress one co_build adds (> build_step's 20 — the joint-build payoff)
 
+  # EM-232 — peer-judged credit economy / Victory Arch (contracts/wave-m.md §3
+  # Wave M3). A periodic pitch -> peer-judge -> award cycle (EW's ~2-day Victory
+  # Arch cadence). Agents pitch_contribution(text) to park a pitch; every
+  # every_n_ticks ticks the parked pitches are ranked by a DETERMINISTIC
+  # contribution score (each pitcher's durable ledger: buildings funded, skills
+  # taught, trades settled, projects built — tie-broken by agent id, NO random),
+  # and the top_n win `award` credits + a renown bump + an influence replenish
+  # (the EM-229 hook). An `arch_award` event fires per winner; the queue clears.
+  # Adds reputation-through-contribution + the inequality story (a Gini/AWI read).
+  # DEFAULT-OFF in the dataclass (every_n_ticks 0) keeps snapshots + the em161
+  # golden byte-identical; this LIVE config turns it ON with a positive cadence.
+  # MUST stay in sync with the VictoryArchParams mirror in
+  # backend/petridish/config/loader.py.
+  victory_arch:
+    every_n_ticks: 120          # EM-232 live run — fire the pitch->judge->award cycle every 120 ticks
+    award: 50                   # credits each winning pitcher receives
+    top_n: 1                    # how many top-ranked pitchers win per cycle
+    reputation_bonus: 5         # renown points added to each winner (durable reputation signal)
+    influence_replenish: 25     # influence (EM-229 need) topped up on each winner, clamped 0..100
+
   # EM-234 — universalization prompting (GovSim scaffold; contracts/wave-m.md §3
   # Wave M1). When enabled, EVERY agent's turn context gets a single block that
   # asks them to reason about the commons by universalizing — "before acting on a

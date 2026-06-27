@@ -315,6 +315,16 @@ world:
       orator: {rhetoric: 2}
       farmer: {building: 1}
       healer: {art: 1}
+  # EM-232 — peer-judged credit economy / Victory Arch. MUST stay byte-equal to the
+  # world.yaml victory_arch block (the city25 variant changes only the cast). The
+  # periodic pitch -> peer-judge -> award cycle: top contributors (funding, teaching,
+  # trading, building) win credits + renown + an influence top-up every cadence.
+  victory_arch:
+    every_n_ticks: 120           # EM-232 live run — fire the pitch->judge->award cycle every 120 ticks
+    award: 50                    # credits each winning pitcher receives
+    top_n: 1                     # how many top-ranked pitchers win per cycle
+    reputation_bonus: 5          # renown points added to each winner (durable reputation signal)
+    influence_replenish: 25      # influence (EM-229 need) topped up on each winner, clamped 0..100
   # EM-234 — universalization prompting (GovSim scaffold). MUST stay byte-equal to
   # the world.yaml universalization block (the city25 variant changes only the
   # cast). Injects the always-on "what if EVERY agent did this?" commons-reasoning

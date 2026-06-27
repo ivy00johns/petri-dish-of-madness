@@ -147,6 +147,9 @@ ACTION_SCHEMA = {
                 # (forms the active link); co_build a building with a co-located
                 # partner you've agreed to cooperate with (a bonus over solo build).
                 "offer_cooperation", "accept_cooperation", "co_build",
+                # EM-232 — Victory Arch: pitch your contribution (parks a pitch the
+                # periodic peer-judge cycle ranks + awards). Reflex, no target.
+                "pitch_contribution",
                 # Wave K / EM-218–220 — the builders'-city reflex tools: place /
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
@@ -204,6 +207,8 @@ ACTION_SCHEMA = {
                             "offer_trade", "accept_trade", "decline_trade",
                             # EM-231 — cooperation handshake + co_build.
                             "offer_cooperation", "accept_cooperation", "co_build",
+                            # EM-232 — Victory Arch: pitch your contribution.
+                            "pitch_contribution",
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
@@ -412,6 +417,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "offer_cooperation":  {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
     "accept_cooperation": {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
     "co_build":           {"tier": "reflex", "location_gate": "@building",   "agreement_gate": None},
+    # EM-232 — Victory Arch pitch reflex tool. No location_gate / agreement_gate:
+    # an agent may pitch their contribution from anywhere (the pitch text rides the
+    # existing turn, zero extra LLM calls). Offered in the menu only when the
+    # Victory Arch is configured ON (see _assemble_context), so a default world's
+    # em161 golden is byte-identical. action_pitch_contribution parks it keyed by
+    # the pitcher; the periodic cycle judges + clears the queue.
+    "pitch_contribution": {"tier": "reflex", "location_gate": None,          "agreement_gate": None},
     # Wave K / EM-218–220 — builders'-city reflex tools. place_prop / remove_prop
     # are offered ANYWHERE (place_prop takes a target place arg; remove_prop's
     # co-location gate is prop-specific and enforced in _validate_world). demolish
@@ -2120,6 +2132,16 @@ def _assemble_context(
         valid_actions.append(f"investigate (target) - question witnesses about: {tnames}")
         valid_actions.append(f"accuse (target) - publicly accuse: {tnames}")
         valid_actions.append(f"detain (target) - jail a wanted suspect: {tnames}")
+    # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
+    # (a positive cadence). The default-OFF world (the absent block, AND the em161
+    # golden fixture) never shows this line ⇒ the lawful-citizen golden is
+    # byte-identical. Ungated otherwise — an agent may pitch from anywhere. getattr
+    # keeps callers safe if the seam is ever absent.
+    if getattr(world, "victory_arch_enabled", None) and world.victory_arch_enabled():
+        valid_actions.append(
+            "pitch_contribution (text) - pitch your contribution to the Victory "
+            "Arch; the periodic peer-judge cycle awards credits to the top "
+            "contributors (funding, teaching, trading, building)")
     if _gate_ok("work"):
         valid_actions.append("work - earn credits (you are at a work place)")
     else:
@@ -5221,6 +5243,17 @@ class AgentRuntime:
             return {**base, "kind": "memory",
                     "text": f"{agent.name} remembers: \"{args.get('fact', '')}\"",
                     "payload": {"action": "remember", "fact": args.get("fact"), "thought": thought}}
+
+        # EM-232 — Victory Arch: pitch_contribution parks this agent's pitch keyed
+        # by their id (a contribution_pitched event / a fail event on blank text);
+        # the periodic peer-judge cycle ranks + awards. Reflex, no target — the
+        # pitch text rides this turn (zero extra LLM calls). The text arg is read
+        # from `text` (or a `pitch` alias) so a model's loose JSON still lands.
+        elif action == "pitch_contribution":
+            return _emit_world_result(
+                self.world.action_pitch_contribution(
+                    agent, args.get("text") or args.get("pitch") or ""),
+                base, thought)
 
         elif action == "move_to":
             place_id = args.get("place")

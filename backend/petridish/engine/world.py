@@ -86,6 +86,28 @@ def _coerce_skills(value: Any) -> dict:
     return out
 
 
+def _coerce_contributions(value: Any) -> dict:
+    """EM-232 — coerce a restored contribution ledger into {str: int>0}. Absent
+    (None) or malformed (non-dict, non-str keys, non-int/non-positive counts) →
+    {} / dropped entries (fail-safe: a tampered or pre-EM-232 snapshot restores a
+    contributionless agent). Pure/total: never raises, no clock, no RNG. A 0-count
+    entry is DROPPED so the ledger round-trips byte-stably (EM-155): the canonical
+    form holds only positive counts, matching to_dict's only-when-non-empty emit."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    for kind, count in value.items():
+        if not isinstance(kind, str):
+            continue
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[kind] = n
+    return out
+
+
 def _truncate(text: str, limit: int = 60) -> str:
     """Truncate feed text on a budget, with an ellipsis (EM-100 rule labels)."""
     text = str(text or "")
@@ -285,6 +307,29 @@ class AgentState:
     # teaching) and a starting spread via World.seed_skills (deterministic). The
     # canonical form holds only POSITIVE levels (see _coerce_skills).
     skills: dict[str, int] = field(default_factory=dict)
+    # EM-232 — peer-judged credit economy / Victory Arch. TWO additive fields feed
+    # the pitch->judge->award cycle:
+    #   contributions — a DURABLE per-agent ledger {kind → count} of the four
+    #     pro-social acts the arch judges by (skill_taught / trade_settled /
+    #     project_funded / project_built), bumped at each act's success site via
+    #     World.record_contribution. The deterministic contribution score
+    #     (World.contribution_score) is a weighted sum of this ledger — pure
+    #     arithmetic, no random/clock (EM-155). ADDITIVE with default {} →
+    #     serialized in to_dict ONLY when non-empty and restored defensively
+    #     (absent/garbage → {}, non-str keys + non-positive counts dropped), so a
+    #     contributionless agent — and every pre-EM-232 snapshot — keeps the exact
+    #     prior dict shape (the byte-identical guarantee + the em161 golden, since
+    #     an empty ledger surfaces no prompt block and the default cadence never
+    #     fires a cycle).
+    contributions: dict[str, int] = field(default_factory=dict)
+    #   renown — a DURABLE reputation-through-contribution counter bumped when this
+    #     agent WINS a Victory Arch cycle (the inequality story: repeat winners
+    #     pull ahead). UNLIKE the EM-120 DERIVED `reputation` (mean incoming trust,
+    #     zero storage), renown is an earned, persisted score. ADDITIVE with
+    #     default 0 → serialized in to_dict ONLY when non-zero and restored
+    #     defensively (absent/garbage → 0, clamped >= 0), so an unawarded agent —
+    #     and every pre-EM-232 snapshot — keeps the exact prior dict shape.
+    renown: int = 0
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -370,6 +415,15 @@ class AgentState:
         # round-trip is byte-stable.
         if self.skills:
             d["skills"] = dict(self.skills)
+        # EM-232 — contribution ledger + renown serialized ONLY when non-default, so
+        # a contributionless / unawarded agent (and every pre-EM-232 snapshot) keeps
+        # the exact prior dict shape (the em161 golden + the byte-identical
+        # guarantee). The ledger already holds only positive counts (record_contribution
+        # enforces it) so the round-trip is byte-stable.
+        if self.contributions:
+            d["contributions"] = dict(self.contributions)
+        if self.renown:
+            d["renown"] = self.renown
         return d
 
 
@@ -965,6 +1019,15 @@ class World:
         #     reads it order-independently. The ONE cooperation-gated action co_build
         #     requires an active link with a CO-LOCATED partner (gated in _validate_world).
         self.cooperations: dict[str, dict] = {}
+        # EM-232 — open Victory-Arch pitches, keyed by the PITCHER's agent id →
+        # {text, tick}. Posted by action_pitch_contribution (a reflex verb); ranked
+        # + drained by run_victory_arch_cycle at a cycle boundary. Like the M2
+        # outboxes this Wave-M pending state IS serialized snapshot-safe (EM-190):
+        # only when non-empty, restored defensively, so a pitch-free world
+        # round-trips byte-identically and a pitch parked between pitch and cycle
+        # survives a fork/resume. One open pitch per agent (a later pitch overwrites
+        # the prior — the freshest pitch on the wall wins).
+        self.pending_pitches: dict[str, dict] = {}
         # Wave E / EM-114 — the birth casting pool. The world has no view of
         # the persona library or the router's profile roster (both are
         # config-side), so the TickLoop seeds them at construction via
@@ -1319,6 +1382,16 @@ class World:
         # existing _flush_spawn_events, like births/factions). Deterministic +
         # clock/RNG-free; a small cast under the ceiling is a no-op (golden-safe).
         self.consolidate_memories()
+        # EM-232 — the Victory-Arch cycle, checked at the round boundary AFTER
+        # consolidation. When the arch is ON and this tick is a cycle boundary, the
+        # parked pitches are judged + the top_n awarded; the `arch_award` events
+        # park in the SAME pending_spawn_events outbox (drained + emitted by the
+        # tick loop's _flush_spawn_events, like births/factions/consolidation). OFF
+        # (the default cadence) / an off-boundary tick / no pitches ⇒ a no-op that
+        # parks nothing (golden-safe). Deterministic — no random/clock.
+        arch_events = self.run_victory_arch_cycle()
+        if arch_events:
+            self.pending_spawn_events.extend(arch_events)
 
     def _active_rule(self, effect: str) -> RuleState | None:
         for rule in self.rules.values():
@@ -2023,6 +2096,8 @@ class World:
         ok, reason, gained = self.action_teach_skill(teacher, student, skill)
         if ok:
             new_level = student.skill_level(skill)
+            # EM-232 — a successful lesson is a judged contribution (the teacher's).
+            self.record_contribution(teacher, "skill_taught")
             return {
                 "kind": "skill_taught",
                 "actor_id": teacher.id,
@@ -2253,6 +2328,12 @@ class World:
         failure dict otherwise). Mirrors the action_* event shape."""
         ok, reason, offer = self.action_accept_trade(accepter)
         if ok and offer is not None:
+            # EM-232 — a settled trade is a judged contribution for BOTH parties
+            # (a mutual exchange — each side made the deal happen).
+            self.record_contribution(accepter, "trade_settled")
+            _offerer = self.agents.get(offer.get("from_id"))
+            if _offerer is not None:
+                self.record_contribution(_offerer, "trade_settled")
             offerer = self.agents.get(offer.get("from_id"))
             offerer_name = offerer.name if offerer is not None else offer.get("from_id")
             give = offer.get("give") or {}
@@ -3709,6 +3790,9 @@ class World:
         if agent.id not in building.contributors:
             building.contributors.append(agent.id)
         building.updated_tick = self.tick
+        # EM-232 — funding a public project is a judged contribution (buildings
+        # funded). Recorded per successful contribution (each credit infusion).
+        self.record_contribution(agent, "project_funded")
 
         clamp_note = (
             f" (offered {amount}; clamped at the remaining gap)"
@@ -3823,6 +3907,8 @@ class World:
         events.append(built_evt)
 
         if building.progress >= 100:
+            # EM-232 — finishing a project is a judged contribution (projects built).
+            self.record_contribution(agent, "project_built")
             events.extend(self._complete_construction(building, "completed", agent.id))
         return {"_multi": events}
 
@@ -4793,6 +4879,145 @@ class World:
         unchanged. `default` is only a fallback for a key missing from the block,
         so keep these call-site defaults == CooperationParams defaults."""
         return _block_get(getattr(self.params, "cooperation", None), name, default)
+
+    def _arch_param(self, name: str, default: Any) -> Any:
+        """EM-232 — defensive accessor for the `world.victory_arch` config block
+        (VictoryArchParams dataclass OR dict OR absent — EM-155 conventions, like
+        _coop_param). An absent block ⇒ every default ⇒ every_n_ticks 0 ⇒ the
+        cycle never fires (pre-EM-232 byte-identical + the em161 golden). `default`
+        is only a fallback for a key missing from the block, so keep these
+        call-site defaults == VictoryArchParams defaults."""
+        return _block_get(getattr(self.params, "victory_arch", None), name, default)
+
+    def victory_arch_enabled(self) -> bool:
+        """EM-232 — True when the Victory Arch is configured ON: a positive cycle
+        cadence (`every_n_ticks` > 0). The OFF state (default, and any world.yaml
+        without the block) gates the pitch_contribution prompt line off and makes
+        run_victory_arch_cycle a no-op, so a pitch-free default world is golden +
+        snapshot byte-identical."""
+        try:
+            return int(self._arch_param("every_n_ticks", 0)) > 0
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return False
+
+    # EM-232 — the weight each judged contribution kind carries in the
+    # deterministic score. Equal weights in v1 (each pro-social act counts once);
+    # the per-kind table lets a future config tune emphasis without touching the
+    # ranking. Pure data — no random, no clock.
+    _CONTRIBUTION_WEIGHTS: dict[str, int] = {
+        "skill_taught": 1,
+        "trade_settled": 1,
+        "project_funded": 1,
+        "project_built": 1,
+    }
+
+    def record_contribution(self, agent: AgentState, kind: str) -> None:
+        """EM-232 — bump an agent's DURABLE contribution ledger by one for `kind`
+        (one of the judged pro-social acts: skill_taught / trade_settled /
+        project_funded / project_built). Called at each act's success site. The
+        ledger holds only positive counts (the canonical, byte-stable form). Pure
+        bookkeeping — no random, no clock (EM-155). An unknown kind still records
+        (forward-compatible) but only WEIGHTED kinds count toward the score."""
+        if not isinstance(kind, str) or not kind.strip():
+            return
+        kind = kind.strip()
+        agent.contributions[kind] = int(agent.contributions.get(kind, 0)) + 1
+
+    def contribution_score(self, agent: AgentState) -> int:
+        """EM-232 — the DETERMINISTIC peer-judge score: the weighted sum of an
+        agent's contribution ledger over the judged kinds. Pure arithmetic over
+        durable state — no random, no clock — so same-seed runs rank identically
+        (EM-155). An agent with an empty ledger scores 0."""
+        total = 0
+        for kind, count in agent.contributions.items():
+            total += self._CONTRIBUTION_WEIGHTS.get(kind, 0) * int(count)
+        return total
+
+    def action_pitch_contribution(self, agent: AgentState, text: str) -> dict:
+        """EM-232 — the reflex PITCH (R3): park this agent's case for the Victory
+        Arch keyed by the pitcher id, to be judged at the next cycle boundary.
+        Zero extra LLM calls — the pitch text rides the agent's existing turn.
+        Returns a ready-to-emit `contribution_pitched` event dict (or a fail event
+        on blank text). The pending dict is serialized snapshot-safe (EM-190). One
+        open pitch per agent — a later pitch overwrites the prior."""
+        if not isinstance(text, str) or not text.strip():
+            return self._fail_event(agent.id, "pitch_contribution", "no text",
+                                    f"{agent.name} stepped up to pitch but said nothing.")
+        text = text.strip()
+        self.pending_pitches[agent.id] = {"text": text, "tick": self.tick}
+        return {
+            "kind": "contribution_pitched",
+            "actor_id": agent.id,
+            "text": f"{agent.name} pitches their contribution to the Victory Arch.",
+            "payload": {"action": "pitch_contribution", "pitch": text},
+        }
+
+    def run_victory_arch_cycle(self) -> list[dict]:
+        """EM-232 — the periodic pitch -> peer-judge -> award cycle, checked at the
+        round boundary. When the Victory Arch is ON (`every_n_ticks` > 0) AND this
+        tick is a cycle boundary (`tick > 0 and tick % every_n_ticks == 0`), rank
+        the PARKED pitches by the DETERMINISTIC contribution_score (descending),
+        TIE-BREAK by agent id (ascending) so same-seed runs are identical, and
+        award the top_n pitchers each `award` credits + a `reputation_bonus` renown
+        bump + an `influence_replenish` (the EM-229 hook). Emits one `arch_award`
+        event per winner; CLEARS the pitch queue regardless of how many won.
+
+        OFF (the default cadence), an off-boundary tick, or an empty pitch queue is
+        a NO-OP that returns [] and clears nothing (pitches simply accumulate until
+        a boundary). Pure arithmetic + sorting — no random, no clock (EM-155)."""
+        if not self.victory_arch_enabled():
+            return []
+        try:
+            cadence = int(self._arch_param("every_n_ticks", 0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return []
+        if cadence <= 0 or self.tick <= 0 or (self.tick % cadence) != 0:
+            return []
+        if not self.pending_pitches:
+            return []
+        try:
+            award = max(0, int(self._arch_param("award", 50)))
+            top_n = max(1, int(self._arch_param("top_n", 1)))
+            rep_bonus = max(0, int(self._arch_param("reputation_bonus", 5)))
+            influence = max(0.0, float(self._arch_param("influence_replenish", 25.0)))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            award, top_n, rep_bonus, influence = 50, 1, 5, 25.0
+        # Rank the pitchers: highest contribution_score first, ties broken by agent
+        # id (ascending) — a stable, replay-deterministic order (no random/clock).
+        # Only pitchers that still exist as living agents are eligible (a pitcher
+        # who died/left between pitch and cycle is skipped, fail-safe).
+        candidates = [
+            (self.contribution_score(self.agents[pid]), pid)
+            for pid in self.pending_pitches
+            if pid in self.agents and self.agents[pid].alive
+        ]
+        ranked = sorted(candidates, key=lambda sp: (-sp[0], sp[1]))
+        events: list[dict] = []
+        for score, pid in ranked[:top_n]:
+            agent = self.agents[pid]
+            agent.credits += award
+            agent.renown += rep_bonus
+            self.replenish_influence(agent, influence)
+            pitch = self.pending_pitches.get(pid) or {}
+            events.append({
+                "kind": "arch_award",
+                "actor_id": agent.id,
+                "text": (
+                    f"The Victory Arch honors {agent.name} for their contribution "
+                    f"(+{award} credits)."
+                ),
+                "payload": {
+                    "action": "arch_award",
+                    "award": award,
+                    "score": int(score),
+                    "renown": agent.renown,
+                    "pitch": str(pitch.get("text", "")),
+                },
+            })
+        # The queue clears every cycle (pitches are single-cycle; next cycle judges
+        # a fresh round of pitches).
+        self.pending_pitches = {}
+        return events
 
     def skill_library(self) -> dict:
         """EM-227 — the configured skill library {skill: {gates, min_level}}, or
@@ -5999,6 +6224,19 @@ class World:
                 }
                 for k in sorted(self.cooperations)
             ]
+        # EM-232 — open Victory-Arch pitches {pitcher_id: {text, tick}}. Serialized
+        # ONLY when non-empty (the cap_demotions pattern), so a pitch-free world —
+        # and every pre-EM-232 snapshot — keeps the exact prior key set (absent ⇒
+        # {} on restore). Snapshot-safe (EM-190): a pitch parked between pitch and
+        # cycle survives a fork/resume instead of being silently dropped.
+        if self.pending_pitches:
+            snap["pending_pitches"] = {
+                str(pid): {
+                    "text": str(p.get("text", "")),
+                    "tick": int(p.get("tick", 0)),
+                }
+                for pid, p in self.pending_pitches.items()
+            }
         # Wave I / EM-210+213 — the gallery + the voted plaza banner. Serialized
         # ONLY when present (the cap_demotions pattern), so a Wave-I-free world —
         # and every pre-Wave-I snapshot — keeps the exact prior key set (absent ⇒
@@ -6155,6 +6393,13 @@ class World:
                 # stable round-trip (EM-155): an empty skills map is never
                 # re-emitted, so a skill-less agent's dict is unchanged.
                 skills=_coerce_skills(d.get("skills")),
+                # EM-232 — contribution ledger + renown: additive. Pre-EM-232
+                # snapshots lack the keys and restore {} / 0; a present ledger is
+                # coerced to {str: int>0} (garbage dropped, fail-safe) and renown
+                # is clamped >= 0. Byte-stable round-trip (EM-155): an empty ledger
+                # / zero renown is never re-emitted, so the agent's dict is unchanged.
+                contributions=_coerce_contributions(d.get("contributions")),
+                renown=max(0, _int(d.get("renown"))),
             )
             a.relationships = {
                 str(aid): RelationshipState(
@@ -6444,4 +6689,20 @@ class World:
                     "a": lo, "b": hi, "tick": _int(entry.get("tick")),
                 }
         world.cooperations = restored_coops
+        # EM-232 — restore open Victory-Arch pitches (snapshot-safe, EM-190).
+        # Defensive: keep only well-formed entries whose pitcher still exists and
+        # that carry non-blank text (a non-dict entry, a missing agent, or a blank
+        # pitch → dropped).
+        restored_pitches: dict[str, dict] = {}
+        for pid, p in (state.get("pending_pitches") or {}).items():
+            if not isinstance(p, dict):
+                continue
+            pitcher_id = str(pid)
+            text = str(p.get("text", "")).strip()
+            if pitcher_id in world.agents and text:
+                restored_pitches[pitcher_id] = {
+                    "text": text,
+                    "tick": _int(p.get("tick")),
+                }
+        world.pending_pitches = restored_pitches
         return world
