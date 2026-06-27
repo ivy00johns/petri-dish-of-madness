@@ -101,7 +101,9 @@ def _build_world(cfg: WorldConfig) -> tuple[World, Router, AgentRuntime, SQLiteR
     places = [
         PlaceState(id=p.id, name=p.name, x=p.x, y=p.y,
                    kind=p.kind, description=p.description,
-                   district=p.district)  # Wave C / EM-147 — optional, additive
+                   district=p.district,  # Wave C / EM-147 — optional, additive
+                   neighborhood_id=p.neighborhood_id,  # EM-123 — optional
+                   zone_kind=p.zone_kind)              # EM-123 — optional
         for p in cfg.places
     ]
     agents = [

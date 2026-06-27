@@ -58,7 +58,7 @@
  * Math.atan2(dx, dz), so +X ⇒ π/2, −Z ⇒ π, −X ⇒ −π/2.
  */
 
-import type { Place } from '../../types';
+import type { Place, Neighborhood } from '../../types';
 import { placeToWorld, hashUnit, slotLayout } from './worldSpace';
 
 // ── Frozen vocabulary (Wave D1 contract — the registry imports this) ────────
@@ -153,6 +153,12 @@ export interface CityBlockLots { cx: number; cz: number; lots: CityInstance[] }
 export interface CityWorld {
   places: Place[];
   city_seed?: number | null;
+  // EM-123 (additive): zoned-district maturity. When present, a block whose
+  // nearest place belongs to a tier>1 neighborhood gets deterministic EXTRA
+  // street life (park trees + curb props) — a strict superset of the tier-1
+  // plan, never filler buildings (EM-174). Absent ⇒ every district is tier 1
+  // and the plan is byte-identical to pre-EM-123.
+  neighborhoods?: Neighborhood[] | null;
 }
 
 export interface CityPlan {
@@ -321,9 +327,46 @@ const KIND_ZONE: Readonly<Record<string, CityZone>> = {
   wild: 'park',
 };
 
+/** EM-123: a place's explicit canonical zone_kind → the frontend block zone.
+ *  Lets an author re-zone one place inside a mixed district; absent ⇒ the
+ *  district mapping below stands (byte-identical to pre-EM-123). */
+const ZONE_KIND_CITYZONE: Readonly<Record<string, CityZone>> = {
+  residential: 'residential',
+  market: 'commercial',
+  civic: 'civic',
+  industrial: 'commercial',
+  farm: 'park',
+};
+
 function zoneForPlace(p: Place): CityZone {
+  if (p.zone_kind && ZONE_KIND_CITYZONE[p.zone_kind] !== undefined) return ZONE_KIND_CITYZONE[p.zone_kind];
   if (p.district && DISTRICT_ZONE[p.district] !== undefined) return DISTRICT_ZONE[p.district];
   return KIND_ZONE[p.kind] ?? 'residential';
+}
+
+// ── EM-123: district maturity → deterministic extra street life ──────────────
+
+/** Extra park trees per tier above 1 (a matured district reads denser/greener;
+ *  strictly additive — the first N trees keep their tier-1 positions). */
+const TIER_EXTRA_PARK_TREES = 1;
+/** Curb-prop chance bump per tier above 1 (more lamps/bins/benches as a
+ *  district fills in). Added to PROP_SIDE_CHANCE, clamped below 1 so the
+ *  seeded threshold stays a strict superset of the tier-1 props. */
+const TIER_PROP_CHANCE_STEP = 0.08;
+const TIER_PROP_CHANCE_MAX = 0.95;
+
+/** A place's neighborhood id (`neighborhood_id ?? district`), or '' when the
+ *  place is un-districted (procgen). Mirrors the backend grouping key. */
+function neighborhoodIdOf(p: Place): string {
+  return String(p.neighborhood_id ?? p.district ?? '');
+}
+
+/** The maturity tier of a place's neighborhood (1 when un-districted, the
+ *  feature is off, or the tier hasn't diverged from the baseline). */
+function tierForPlace(p: Place | null, tierById: Map<string, number>): number {
+  if (!p) return 1;
+  const nid = neighborhoodIdOf(p);
+  return (nid && tierById.get(nid)) || 1;
 }
 
 const CAR_KEYS: readonly CityPieceKey[] = ['car_a', 'car_b', 'car_c'];
@@ -563,16 +606,24 @@ function emitCurbLife(
   bx: number,
   bz: number,
   pieces: Record<CityPieceKey, CityInstance[]>,
+  tier = 1,
 ): void {
   const wx = bx * BLOCK_PITCH;
   const wz = bz * BLOCK_PITCH;
+  // EM-123: a matured district fills its sidewalks in. The bump is ADDED to the
+  // tier-1 chance, so the seeded `h(...) < chance` set stays a strict superset
+  // (tier 1 ⇒ chance == PROP_SIDE_CHANCE ⇒ byte-identical to pre-EM-123).
+  const propChance = Math.min(
+    TIER_PROP_CHANCE_MAX,
+    PROP_SIDE_CHANCE + Math.max(0, tier - 1) * TIER_PROP_CHANCE_STEP,
+  );
   for (let s = 0; s < 4; s++) {
     const side = SIDES[s];
     const tx = -side.dz;
     const tz = side.dx;
 
     // Sidewalk props at block corners along the road edge.
-    if (h(seed, `prop-${s}`, bx, bz) < PROP_SIDE_CHANCE) {
+    if (h(seed, `prop-${s}`, bx, bz) < propChance) {
       const r = h(seed, `prop-kind-${s}`, bx, bz);
       const key: CityPieceKey = r < 0.4 ? 'lamp' : r < 0.6 ? 'bin' : r < 0.8 ? 'hydrant' : 'bench';
       const cornerSign = h(seed, `prop-corner-${s}`, bx, bz) < 0.5 ? -1 : 1;
@@ -622,6 +673,14 @@ export function computeCityPlan(world: CityWorld): CityPlan {
   const seed = world.city_seed ?? DEFAULT_CITY_SEED;
   const pieces = emptyPieces();
 
+  // EM-123: neighborhood id → maturity tier (absent/baseline ⇒ tier 1 ⇒ the
+  // plan is byte-identical to pre-EM-123). Sorted insert is irrelevant (a Map
+  // lookup), but ids are unique so order never affects the result.
+  const tierById = new Map<string, number>();
+  for (const n of world.neighborhoods ?? []) {
+    if (n && n.id) tierById.set(String(n.id), Math.max(1, Math.floor(n.tier ?? 1)));
+  }
+
   emitRoads(pieces);
 
   const landmarks = computeLandmarks(places);
@@ -657,16 +716,22 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     bz: number;
     zone: CityZone;
     landmark: Place | null;
+    tier: number;   // EM-123: maturity of the block's governing neighborhood
   }
   const infos: BlockInfo[] = [];
   for (let bz = -B_MAX; bz <= B_MAX; bz++) {
     for (let bx = -B_MAX; bx <= B_MAX; bx++) {
       const claimed = landmarkAt.get(`${bx},${bz}`) ?? null;
       if (claimed) {
-        infos.push({ bx, bz, zone: 'landmark', landmark: claimed });
+        infos.push({ bx, bz, zone: 'landmark', landmark: claimed, tier: tierForPlace(claimed, tierById) });
       } else {
         const near = nearestPlace(bx * BLOCK_PITCH, bz * BLOCK_PITCH);
-        infos.push({ bx, bz, zone: near ? zoneForPlace(near) : 'residential', landmark: null });
+        infos.push({
+          bx, bz,
+          zone: near ? zoneForPlace(near) : 'residential',
+          landmark: null,
+          tier: tierForPlace(near, tierById),
+        });
       }
     }
   }
@@ -703,12 +768,14 @@ export function computeCityPlan(world: CityWorld): CityPlan {
       if (b.landmark && (b.landmark.district === 'farm' || (!b.landmark.district && b.landmark.kind === 'wild'))) {
         const trees =
           LANDMARK_PARK_TREES_MIN +
-          Math.floor(h(seed, 'landmark-park-trees', b.bx, b.bz) * LANDMARK_PARK_TREES_SPAN);
+          Math.floor(h(seed, 'landmark-park-trees', b.bx, b.bz) * LANDMARK_PARK_TREES_SPAN) +
+          Math.max(0, b.tier - 1) * TIER_EXTRA_PARK_TREES;  // EM-123: matured ⇒ greener
         emitParkTrees(seed, b.bx, b.bz, trees, true, pieces);
       }
     } else if (b.zone === 'park') {
       const trees =
-        PARK_TREES_MIN + Math.floor(h(seed, 'park-trees', b.bx, b.bz) * PARK_TREES_SPAN);
+        PARK_TREES_MIN + Math.floor(h(seed, 'park-trees', b.bx, b.bz) * PARK_TREES_SPAN) +
+        Math.max(0, b.tier - 1) * TIER_EXTRA_PARK_TREES;  // EM-123: matured ⇒ greener
       emitParkTrees(seed, b.bx, b.bz, trees, false, pieces);
       emitParkBenches(seed, b.bx, b.bz, pieces);
     } else {
@@ -720,8 +787,9 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     }
 
     // Curb life dresses every block's road edges (landmark blocks included —
-    // sidewalk props on their road edges are explicitly fine).
-    emitCurbLife(seed, b.bx, b.bz, pieces);
+    // sidewalk props on their road edges are explicitly fine). EM-123: a
+    // matured district fills its sidewalks in (strict superset of tier-1).
+    emitCurbLife(seed, b.bx, b.bz, pieces, b.tier);
   }
 
   // EM-174: ALL platted lots render as pavement pads from day 0 — the

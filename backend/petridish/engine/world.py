@@ -254,6 +254,19 @@ class PlaceState:
     # output are byte-identical. The frontend groups places by district for
     # zone tinting + lane adjacency; absent → coordinate clustering fallback.
     district: str | None = None
+    # EM-123 — optional neighborhood override. A place belongs to the
+    # neighborhood `neighborhood_id or district`; this field only EXISTS so an
+    # author can split/merge a district into named neighborhoods without
+    # renaming the district. ADDITIVE: default None ⇒ the place's district IS
+    # its neighborhood, so the hand-authored town and every pre-EM-123 snapshot
+    # are byte-identical.
+    neighborhood_id: str | None = None
+    # EM-123 — optional per-place zoning override (residential|market|civic|
+    # industrial|farm). ADDITIVE: default None ⇒ zone is derived from the
+    # district (then place.kind) at neighborhood-build time, reproducing the
+    # frontend's existing district→zone mapping exactly. Only set this to
+    # override a single place inside a mixed district.
+    zone_kind: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -269,7 +282,80 @@ class PlaceState:
             d["capacity"] = self.capacity
         if self.district is not None:
             d["district"] = self.district
+        # EM-123 — overrides serialized only when set (the district pattern), so
+        # an un-overridden place keeps the exact pre-EM-123 dict shape.
+        if self.neighborhood_id is not None:
+            d["neighborhood_id"] = self.neighborhood_id
+        if self.zone_kind is not None:
+            d["zone_kind"] = self.zone_kind
         return d
+
+
+# EM-123 — canonical zone kinds (the maturity unit's zoning category). The
+# frontend mirrors these in cityLayout.ts; keep the two in sync.
+_ZONE_KINDS = ("residential", "market", "civic", "industrial", "farm")
+# District name → canonical zone_kind. Mirrors the frontend DISTRICT_ZONE map
+# (core→civic, market→commercial≈market, civic→civic, residential→residential,
+# farm→park≈farm) so a district-derived zone reproduces today's rendering.
+_DISTRICT_ZONE_KIND = {
+    "core": "civic",
+    "market": "market",
+    "civic": "civic",
+    "residential": "residential",
+    "farm": "farm",
+    "industrial": "industrial",
+}
+# place.kind → zone_kind fallback (when a place has neither zone_kind nor a
+# recognized district). Mirrors the frontend KIND_ZONE legacy fallback.
+_KIND_ZONE_KIND = {
+    "work": "market",
+    "home": "residential",
+    "social": "civic",
+    "governance": "civic",
+    "wild": "farm",
+}
+
+
+def zone_kind_for_place(place: "PlaceState") -> str:
+    """The canonical zone_kind of a single place: an explicit per-place
+    override wins, then the district mapping, then the place.kind fallback,
+    finally 'civic'. Pure + deterministic (the frontend mirrors this)."""
+    if place.zone_kind in _ZONE_KINDS:
+        return place.zone_kind  # type: ignore[return-value]
+    if place.district and place.district in _DISTRICT_ZONE_KIND:
+        return _DISTRICT_ZONE_KIND[place.district]
+    return _KIND_ZONE_KIND.get(place.kind, "civic")
+
+
+def _neighborhood_display_name(nid: str) -> str:
+    """Human-readable neighborhood name from its id (e.g. 'residential' →
+    'Residential'). Underscores/hyphens become spaces, title-cased."""
+    return nid.replace("_", " ").replace("-", " ").strip().title() or nid
+
+
+@dataclass
+class Neighborhood:
+    """EM-123 — a zoned district that DEEPENS as the town invests in it. The
+    grouping unit (id == `place.neighborhood_id or place.district`) carries the
+    zoning category and a maturity `tier` that grows when a megaproject (a
+    collective building) completes inside it. `tier` is the SINGLE source of
+    truth (deliberately not duplicated onto every place): the frontend reads it
+    via the place's neighborhood id. tier starts at 1 (a founded district =
+    today's baseline density) so a fresh world renders byte-identically."""
+    id: str
+    name: str
+    zone_kind: str          # one of _ZONE_KINDS
+    tier: int = 1           # maturity; 1 = founded baseline, grows on megaprojects
+    progress: int = 0       # completed megaprojects toward the next tier
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "zone_kind": self.zone_kind,
+            "tier": self.tier,
+            "progress": self.progress,
+        }
 
 
 @dataclass
@@ -806,6 +892,14 @@ class World:
         # housing. Disabled (default) leaves the hand-authored town untouched.
         self.apply_procgen()
 
+        # EM-123 — zoned neighborhoods derived from the (now-final) places. Each
+        # distinct `place.neighborhood_id or district` becomes a Neighborhood at
+        # tier 1 (founded baseline); a megaproject completing inside one matures
+        # it (_grow_district). Un-districted towns (procgen) yield {} and the
+        # feature is inert. Serialized in to_snapshot() ONLY once a tier diverges
+        # from the derivable baseline, so a fresh world stays byte-identical.
+        self.neighborhoods: dict[str, Neighborhood] = self._derive_neighborhoods()
+
     def apply_procgen(self) -> None:
         """Apply the seeded procgen town layout when world.procgen.enabled
         (EM-098). No-op (hand-authored town byte-identical) when the block is
@@ -824,6 +918,92 @@ class World:
         for an in self.animals.values():
             if an.location not in self.places:
                 an.location = fallback
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-123 — zoned neighborhoods (districts that deepen as megaprojects land)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _derive_neighborhoods(self) -> dict[str, "Neighborhood"]:
+        """Group the current places into Neighborhoods at tier 1. Pure +
+        deterministic: places are visited in sorted-id order and the result is
+        keyed/inserted in sorted neighborhood-id order, so a replay/fork that
+        re-runs this on the same places yields the byte-identical baseline. The
+        neighborhood's zone_kind is the majority of its members' zone_kinds,
+        tie-broken by the canonical _ZONE_KINDS order (stable, never RNG)."""
+        groups: dict[str, list[PlaceState]] = {}
+        for p in sorted(self.places.values(), key=lambda pl: pl.id):
+            nid = p.neighborhood_id or p.district
+            if not nid:
+                continue  # un-districted place (procgen) → no neighborhood
+            groups.setdefault(str(nid), []).append(p)
+        result: dict[str, Neighborhood] = {}
+        for nid in sorted(groups):
+            counts: dict[str, int] = {}
+            for p in groups[nid]:
+                zk = zone_kind_for_place(p)
+                counts[zk] = counts.get(zk, 0) + 1
+            # max count, tie-break by canonical order (index in _ZONE_KINDS)
+            zone = max(
+                counts,
+                key=lambda zk: (counts[zk], -_ZONE_KINDS.index(zk)
+                                if zk in _ZONE_KINDS else -99),
+            )
+            result[nid] = Neighborhood(
+                id=nid, name=_neighborhood_display_name(nid), zone_kind=zone)
+        return result
+
+    def neighborhood_of(self, place_id: str) -> "Neighborhood | None":
+        """The Neighborhood a place belongs to (None when un-districted)."""
+        p = self.places.get(place_id)
+        if p is None:
+            return None
+        nid = p.neighborhood_id or p.district
+        return self.neighborhoods.get(str(nid)) if nid else None
+
+    def _grow_district(self, building: "Building") -> list[dict]:
+        """EM-123 — a completed megaproject matures its district. ADDITIVE +
+        GUARDED: when `world.district_growth.enabled` is off, the building's
+        place is un-districted, or the tier is already maxed, this returns []
+        and the completion is byte-identical to pre-EM-123. Otherwise it bumps
+        the neighborhood's progress; on reaching `completions_per_tier` it raises
+        the tier (capped at `max_tier`) and emits ONE `district_grew` event.
+        Sub-threshold completions only advance progress silently (no event), so
+        the feed stays quiet until a district actually levels up. EM-174-safe:
+        growth is a tier/zoning state change, NEVER a generated filler building.
+        Deterministic: pure counter arithmetic, no clock/RNG, so replay/fork
+        reproduce the identical tier timeline."""
+        cfg = getattr(self.params, "district_growth", None)
+        if not bool(_block_get(cfg, "enabled", True)):
+            return []
+        nb = self.neighborhood_of(building.location)
+        if nb is None:
+            return []
+        try:
+            per_tier = max(1, int(_block_get(cfg, "completions_per_tier", 2)))
+            max_tier = max(1, int(_block_get(cfg, "max_tier", 4)))
+        except (TypeError, ValueError):
+            per_tier, max_tier = 2, 4
+        if nb.tier >= max_tier:
+            return []
+        nb.progress += 1
+        if nb.progress < per_tier:
+            return []
+        nb.progress = 0
+        nb.tier += 1
+        return [{
+            "kind": "district_grew",
+            "actor_id": None,
+            "target_id": building.id,
+            "text": f"The {nb.name} district matures to tier {nb.tier} "
+                    f"({nb.zone_kind}), spurred on by {building.name}.",
+            "payload": {
+                "neighborhood_id": nb.id,
+                "zone_kind": nb.zone_kind,
+                "tier": nb.tier,
+                "building_id": building.id,
+                "reason": "megaproject_completed",
+            },
+        }]
 
     # ──────────────────────────────────────────────────────────────────────────
     # Scheduler
@@ -2457,6 +2637,11 @@ class World:
         # a re-completion of the same building id yields the identical menagerie.
         if building.kind == "zoo":
             events.extend(self._stock_zoo(building, actor_id))
+        # EM-123 — a completed megaproject deepens its zoned district (tier++ on
+        # crossing the completions threshold). ADDITIVE + GUARDED: returns []
+        # (byte-identical completion) when growth is disabled, the place is
+        # un-districted, or the tier is maxed. EM-174-safe — no filler building.
+        events.extend(self._grow_district(building))
         return events
 
     def _stock_zoo(self, building: Building, actor_id: str | None) -> list[dict]:
@@ -4274,6 +4459,16 @@ class World:
             snap["gallery"] = [dict(g) for g in self.gallery]
         if self.plaza_banner_ref:
             snap["plaza_banner_ref"] = self.plaza_banner_ref
+        # EM-123 — zoned-neighborhood maturity. Serialized ONLY when a tier has
+        # diverged from the derivable baseline (tier 1 / progress 0), so a fresh
+        # world — and every pre-EM-123 snapshot — keeps the exact prior key set
+        # (the cap_demotions pattern). When absent, from_snapshot + the frontend
+        # both re-derive the baseline from the places, rendering identically.
+        if any(nb.tier > 1 or nb.progress for nb in self.neighborhoods.values()):
+            snap["neighborhoods"] = [
+                self.neighborhoods[nid].to_dict()
+                for nid in sorted(self.neighborhoods)
+            ]
         return snap
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -4328,6 +4523,10 @@ class World:
                 # Wave C / EM-147 — optional district; pre-Wave-C snapshots
                 # lack the key and restore as None (back-compat by contract).
                 district=(str(d["district"]) if d.get("district") is not None else None),
+                # EM-123 — optional neighborhood/zone overrides; absent ⇒ None
+                # (the place's district is its neighborhood, zone is derived).
+                neighborhood_id=(str(d["neighborhood_id"]) if d.get("neighborhood_id") is not None else None),
+                zone_kind=(str(d["zone_kind"]) if d.get("zone_kind") is not None else None),
             )
             for d in (place_dicts or [])
             if isinstance(d, dict) and d.get("id")
@@ -4557,6 +4756,28 @@ class World:
             if isinstance(g, dict) and g.get("image_id")
         ]
         world.plaza_banner_ref = str(state.get("plaza_banner_ref", "") or "")
+        # EM-123 — restore zoned-neighborhood maturity. The baseline (tier 1)
+        # neighborhoods are already derived from the restored places by __init__;
+        # here we OVERLAY the serialized tier/progress. Absent in pre-EM-123
+        # snapshots ⇒ the derived baseline stands, so a fork/replay re-renders
+        # tier 1 identically. A serialized id with no matching place (the place
+        # set changed) is re-created from its dict so its maturity is not lost.
+        for d in (state.get("neighborhoods") or []):
+            if not isinstance(d, dict) or not d.get("id"):
+                continue
+            nid = str(d["id"])
+            nb = world.neighborhoods.get(nid)
+            if nb is not None:
+                nb.tier = max(1, _int(d.get("tier"), 1))
+                nb.progress = max(0, _int(d.get("progress")))
+            elif d.get("zone_kind"):
+                world.neighborhoods[nid] = Neighborhood(
+                    id=nid,
+                    name=str(d.get("name") or _neighborhood_display_name(nid)),
+                    zone_kind=str(d["zone_kind"]),
+                    tier=max(1, _int(d.get("tier"), 1)),
+                    progress=max(0, _int(d.get("progress"))),
+                )
         # EM-145 — restore queued god whispers (only for agents that exist).
         world.pending_whispers = {
             str(aid): [str(t) for t in (lines or []) if str(t).strip()]

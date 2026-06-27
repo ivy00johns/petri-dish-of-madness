@@ -94,6 +94,8 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   faction_dissolved:    '⚑',
   god_miracle:          '🌧',
   miracle_expired:      '☀',
+  // EM-123 — a zoned district matured a tier (megaproject completed).
+  district_grew:        '🏙',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
   // category so these don't flood the live feed.
   perceived:        '◌',
@@ -348,7 +350,7 @@ export const CATEGORIES: FeedCategory[] = [
   // Wave E: god miracles live with the other world-scale levers (random_event
   // is the closest sibling — god_intervention itself is uncategorized ON
   // PURPOSE, but miracles are filterable world events, not feedback receipts).
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked', 'world_paused'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked', 'world_paused', 'district_grew'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },

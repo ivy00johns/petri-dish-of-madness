@@ -33,7 +33,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Building, Place } from '../../types';
+import type { Building, Place, Neighborhood } from '../../types';
 import { placeToWorld, slotLayout, SLOT_BASE_RADIUS } from './worldSpace';
 import {
   TILE,
@@ -892,5 +892,77 @@ describe('degenerate worlds', () => {
   it('snaps out-of-grid positions to the grid edge (clamped, never off-world)', () => {
     const far = snapToBlockCenter(500, -500);
     expect(far).toEqual({ x: 2 * BLOCK_PITCH, z: -2 * BLOCK_PITCH });
+  });
+});
+
+// ── EM-123: zoned districts deepen as megaprojects complete ──────────────────
+// (reuses the file-level countInstances helper defined above.)
+
+/** All five hand-town districts at tier 1 (the derivable baseline). */
+const NB_BASELINE: Neighborhood[] = [
+  { id: 'core', name: 'Core', zone_kind: 'civic', tier: 1, progress: 0 },
+  { id: 'market', name: 'Market', zone_kind: 'market', tier: 1, progress: 0 },
+  { id: 'civic', name: 'Civic', zone_kind: 'civic', tier: 1, progress: 0 },
+  { id: 'residential', name: 'Residential', zone_kind: 'residential', tier: 1, progress: 0 },
+  { id: 'farm', name: 'Farm', zone_kind: 'farm', tier: 1, progress: 0 },
+];
+
+const withTier = (id: string, tier: number): Neighborhood[] =>
+  NB_BASELINE.map((n) => (n.id === id ? { ...n, tier } : n));
+
+describe('EM-123 — district maturity drives extra street life', () => {
+  it('tier-1 (or absent) neighborhoods ⇒ byte-identical to the pre-EM-123 plan', () => {
+    const base = JSON.stringify(computeCityPlan({ places: TOWN, city_seed: 1337 }));
+    // Explicit all-tier-1 neighborhoods change nothing.
+    expect(JSON.stringify(computeCityPlan({ places: TOWN, city_seed: 1337, neighborhoods: NB_BASELINE }))).toBe(base);
+    // null/undefined neighborhoods change nothing.
+    expect(JSON.stringify(computeCityPlan({ places: TOWN, city_seed: 1337, neighborhoods: null }))).toBe(base);
+  });
+
+  it('a matured district emits MORE instances (a strict superset of tier 1)', () => {
+    const base = countInstances(computeCityPlan({ places: TOWN, city_seed: 1337 }));
+    const grownFarm = countInstances(
+      computeCityPlan({ places: TOWN, city_seed: 1337, neighborhoods: withTier('farm', 4) }));
+    const grownMarket = countInstances(
+      computeCityPlan({ places: TOWN, city_seed: 1337, neighborhoods: withTier('market', 4) }));
+    // Farm gains park trees; market gains curb props — both above baseline.
+    expect(grownFarm).toBeGreaterThan(base);
+    expect(grownMarket).toBeGreaterThan(base);
+  });
+
+  it('growth is monotonic in tier (each step adds, never removes)', () => {
+    const at = (t: number) =>
+      countInstances(computeCityPlan({ places: TOWN, city_seed: 1337, neighborhoods: withTier('farm', t) }));
+    expect(at(2)).toBeGreaterThan(at(1));
+    expect(at(3)).toBeGreaterThanOrEqual(at(2));
+    expect(at(4)).toBeGreaterThanOrEqual(at(3));
+  });
+
+  it('is deterministic + insensitive to neighborhood array ordering', () => {
+    const nb = withTier('farm', 3);
+    const a = computeCityPlan({ places: TOWN, city_seed: 7, neighborhoods: nb });
+    const b = computeCityPlan({ places: TOWN, city_seed: 7, neighborhoods: [...nb].reverse() });
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it('only the matured district changes — others stay at the baseline plan', () => {
+    // Counting the farm park-tree pieces in isolation: a market-only bump must
+    // not touch them, proving growth is district-scoped.
+    const base = computeCityPlan({ places: TOWN, city_seed: 1337 });
+    const marketGrown = computeCityPlan({ places: TOWN, city_seed: 1337, neighborhoods: withTier('market', 4) });
+    expect(marketGrown.pieces.tree_city.length).toBe(base.pieces.tree_city.length);
+    // …but its curb props grew.
+    const curb = (p: CityPlan) => p.pieces.lamp.length + p.pieces.bin.length + p.pieces.hydrant.length + p.pieces.bench.length;
+    expect(curb(marketGrown)).toBeGreaterThan(curb(base));
+  });
+
+  it('a per-place zone_kind override re-zones that block (residential → commercial)', () => {
+    const rezoned: Place[] = TOWN.map((p) =>
+      p.id === 'home' ? { ...p, zone_kind: 'industrial' } : p);
+    const base = computeCityPlan({ places: TOWN, city_seed: 1337 });
+    const over = computeCityPlan({ places: rezoned, city_seed: 1337 });
+    // The plan changes (the home landmark block keeps zone 'landmark', but
+    // generated blocks nearest to it adopt commercial instead of residential).
+    expect(JSON.stringify(over)).not.toBe(JSON.stringify(base));
   });
 });

@@ -312,11 +312,25 @@ describe('citySignature (plan memo key)', () => {
     expect(citySignature(moved, null)).not.toBe(citySignature(TOWN, null));
   });
 
-  it('is keyed on (places, city_seed) ONLY — buildings/day never churn the memo (EM-174)', () => {
-    // The EM-155 determinism contract: same places + same seed ⇒ the same
-    // memoized plan, no matter what the rest of the snapshot is doing.
-    expect(citySignature.length).toBe(2);
+  it('is keyed on (places, city_seed, neighborhoods) ONLY — buildings/day never churn the memo (EM-174)', () => {
+    // The EM-155 determinism contract: same places + seed (+ neighborhood
+    // tiers, EM-123) ⇒ the same memoized plan, no matter what the rest of the
+    // snapshot is doing. The arity guard catches a quietly-added input.
+    expect(citySignature.length).toBe(3);
     expect(citySignature(TOWN, 1337)).toBe(citySignature(TOWN.map((p) => ({ ...p })), 1337));
+  });
+
+  it('EM-123: a district tier change churns the memo; tier-1/absent does not', () => {
+    const baseline = [
+      { id: 'farm', name: 'Farm', zone_kind: 'farm', tier: 1, progress: 0 },
+    ];
+    const grown = [
+      { id: 'farm', name: 'Farm', zone_kind: 'farm', tier: 3, progress: 0 },
+    ];
+    // tier-1 (or absent) neighborhoods leave the signature unchanged…
+    expect(citySignature(TOWN, 1337, baseline)).toBe(citySignature(TOWN, 1337));
+    // …a grown tier changes it (so the plan rebuilds with extra street life).
+    expect(citySignature(TOWN, 1337, grown)).not.toBe(citySignature(TOWN, 1337));
   });
 });
 

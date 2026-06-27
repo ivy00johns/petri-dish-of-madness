@@ -455,6 +455,7 @@ export function CozyWorld({
   const { plan: cityPlan } = useCityPlan({
     places: places ?? [],
     city_seed: world?.city_seed,
+    neighborhoods: world?.neighborhoods,  // EM-123: matured districts densify
   });
   const buildingSpots = useMemo(() => {
     const list = buildings ?? [];

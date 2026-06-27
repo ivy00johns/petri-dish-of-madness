@@ -255,6 +255,13 @@ class PlaceConfig:
     # configs parse unchanged. Kinds stay the existing five
     # (social/work/governance/home/wild) — district only groups them.
     district: str | None = None
+    # EM-123 — optional neighborhood/zone overrides (both default None ⇒
+    # neighborhood == district, zone derived from district/kind). Authors only
+    # set these to split a district into named neighborhoods or to override one
+    # place's zoning inside a mixed district. ADDITIVE: pre-EM-123 configs parse
+    # unchanged.
+    neighborhood_id: str | None = None
+    zone_kind: str | None = None
 
 
 @dataclass
@@ -553,6 +560,30 @@ class CapGovernorParams:
                 cap_pressure events, no new snapshot keys).
     """
     enabled: bool = False
+
+
+@dataclass
+class DistrictGrowthParams:
+    """EM-123 — zoned districts that DEEPEN as megaprojects complete (config
+    `world.district_growth`). A completed collective building advances its
+    district's growth progress; every `completions_per_tier` completions raise
+    the district one `tier` (capped at `max_tier`), emitting a `district_grew`
+    event. The frontend reads the tier (via the place's neighborhood) and adds
+    deterministic street life — NEVER filler buildings (EM-174). The engine
+    reads the block via its defensive _block_get accessor with IDENTICAL
+    defaults, so an absent block behaves exactly like these values.
+
+      enabled              — master toggle (default ON). `false` ⇒ completions
+                             never grow a district: byte-identical pre-EM-123
+                             behavior (all districts stay tier 1, no new events,
+                             no new snapshot keys).
+      completions_per_tier — megaprojects that must finish in a district to
+                             raise it one tier (default 2). Clamped >= 1.
+      max_tier             — the maturity ceiling (default 4). Clamped >= 1.
+    """
+    enabled: bool = True
+    completions_per_tier: int = 2
+    max_tier: int = 4
 
 
 @dataclass
@@ -868,6 +899,12 @@ class WorldParams:
     # `planning` block is byte-identical to pre-EM-223 (prompt golden +
     # snapshot key set). `enabled: true` activates the plan layer.
     planning: PlanningParams = field(default_factory=PlanningParams)
+    # EM-123 — zoned districts that deepen as megaprojects complete. Additive
+    # with engine-matching defaults (default ON); `enabled: false` keeps every
+    # district at tier 1 (byte-identical pre-EM-123: no district_grew events,
+    # no new snapshot keys). Inert for un-districted (procgen) towns.
+    district_growth: DistrictGrowthParams = field(
+        default_factory=DistrictGrowthParams)
 
 
 @dataclass
@@ -1294,6 +1331,30 @@ def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
     return CapGovernorParams(enabled=bool(raw.get("enabled", d.enabled)))
 
 
+def _parse_district_growth(raw: dict | None) -> "DistrictGrowthParams":
+    """Parse the optional `world.district_growth` block (EM-123). Absent/empty/
+    malformed -> engine-matching defaults (growth ON). completions_per_tier and
+    max_tier clamp to >= 1 (a 0 would either max a district on the first build
+    or never let it grow). The engine reads the block via its defensive
+    _block_get accessor with IDENTICAL defaults, so an absent block behaves
+    exactly like these values."""
+    if not isinstance(raw, dict):
+        return DistrictGrowthParams()
+    d = DistrictGrowthParams()
+
+    def _pos_int(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return DistrictGrowthParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        completions_per_tier=_pos_int("completions_per_tier", d.completions_per_tier),
+        max_tier=_pos_int("max_tier", d.max_tier),
+    )
+
+
 def _parse_relationships(raw: dict | None) -> RelationshipParams:
     """Parse the optional `world.relationships` block (Wave E / EM-113).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back
@@ -1497,6 +1558,7 @@ def _parse_world(
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
         miracles=_parse_miracles(w.get("miracles")),
+        district_growth=_parse_district_growth(w.get("district_growth")),
     )
 
     places = [
@@ -1509,6 +1571,9 @@ def _parse_world(
             description=p.get("description", ""),
             # Wave C / EM-147 — optional district tag; absent → None.
             district=(str(p["district"]) if p.get("district") is not None else None),
+            # EM-123 — optional neighborhood/zone overrides; absent → None.
+            neighborhood_id=(str(p["neighborhood_id"]) if p.get("neighborhood_id") is not None else None),
+            zone_kind=(str(p["zone_kind"]) if p.get("zone_kind") is not None else None),
         )
         for p in raw.get("places", [])
     ]

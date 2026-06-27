@@ -15,6 +15,26 @@ export interface Place {
   // (core/market/civic/residential/farm). Optional/null so pre-Wave-C
   // snapshots stay valid; townLayout falls back to coordinate clustering.
   district?: string | null;
+  // EM-123 (additive): optional neighborhood/zone overrides. A place belongs to
+  // the neighborhood `neighborhood_id ?? district`; `zone_kind` overrides the
+  // derived zoning for one place inside a mixed district. Both optional/null so
+  // pre-EM-123 snapshots stay valid — zone is derived from district then kind.
+  neighborhood_id?: string | null;
+  zone_kind?: string | null;
+}
+
+// EM-123: a zoned district that DEEPENS as megaprojects complete. The backend
+// derives one per distinct `neighborhood_id ?? district` at tier 1; a completed
+// collective building raises the tier (capped). The 3D city reads the tier (via
+// the place's neighborhood) and adds deterministic street life — never filler
+// buildings (EM-174). Serialized only once a tier diverges from the tier-1
+// baseline, so a fresh world omits the key and the frontend re-derives it.
+export interface Neighborhood {
+  id: string;
+  name: string;
+  zone_kind: string;   // residential | market | civic | industrial | farm
+  tier: number;        // 1 = founded baseline, grows on megaprojects
+  progress: number;    // completed megaprojects toward the next tier
 }
 
 // Wave E (EM-113, contracts/wave-e.md shared vocabulary): the relationship
@@ -272,6 +292,10 @@ export interface WorldState {
   // `plaza_banner_ref` → its gallery url (procedural fallback when absent).
   gallery?: GalleryImage[];
   plaza_banner_ref?: string;
+  // EM-123 (additive): zoned-district maturity. Present ONLY once a tier has
+  // diverged from the tier-1 baseline (a fresh world omits it); when absent the
+  // 3D city re-derives tier-1 neighborhoods from `places` and renders identically.
+  neighborhoods?: Neighborhood[];
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -358,6 +382,11 @@ export type EventKind =
   | 'faction_dissolved'
   | 'god_miracle'
   | 'miracle_expired'
+  // EM-123 — a zoned district matured a tier when a megaproject completed.
+  // actor_type:"system" (actor_id null), payload {neighborhood_id, zone_kind,
+  // tier, building_id, reason:"megaproject_completed"}. Only emitted when
+  // world.district_growth.enabled — absent histories are normal.
+  | 'district_grew'
   // W11a (EM-094, event-log.md v1.2.0 note 1) — the optional LLM narrator's
   // periodic recap: actor_type:"system", actor_id:"narrator", text = the 2–3
   // sentence recap, payload {from_tick, to_tick, profile, routed_via?}. Only

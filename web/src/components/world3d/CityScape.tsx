@@ -48,7 +48,7 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { Place } from '../../types';
+import type { Place, Neighborhood } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
@@ -281,12 +281,23 @@ export function extractInstanceParts(scene: THREE.Object3D): CityPart[] {
 export function citySignature(
   places: readonly Place[] | null | undefined,
   citySeed: number | null | undefined,
+  neighborhoods?: readonly Neighborhood[] | null,
 ): string {
   const head = citySeed ?? 'default';
   const body = (places ?? [])
-    .map((p) => `${p.id}:${p.x}:${p.y}:${p.kind}:${p.district ?? ''}`)
+    .map((p) => `${p.id}:${p.x}:${p.y}:${p.kind}:${p.district ?? ''}:${p.neighborhood_id ?? ''}:${p.zone_kind ?? ''}`)
     .join(',');
-  return `${head}|${body}`;
+  // EM-123: district maturity shapes extra street life — fold each grown
+  // district's id:tier in (sorted, so polling order never churns the memo) so
+  // the plan rebuilds when a district levels up. ONLY tier>1 contributes (tier 1
+  // adds nothing to the plan), so an all-tier-1 or absent set ⇒ '' ⇒ the plan is
+  // byte-identical to pre-EM-123 and the memo never churns on a fresh world.
+  const tiers = (neighborhoods ?? [])
+    .filter((n) => (n.tier ?? 1) > 1)
+    .map((n) => `${n.id}:${n.tier}`)
+    .sort()
+    .join(',');
+  return `${head}|${body}|${tiers}`;
 }
 
 /**
@@ -297,8 +308,11 @@ export function citySignature(
 export function useCityPlan(
   world: CityWorld,
 ): { plan: CityPlan; center: { x: number; z: number } } {
-  const { places = [], city_seed: citySeed } = world;
-  const sig = useMemo(() => citySignature(places, citySeed), [places, citySeed]);
+  const { places = [], city_seed: citySeed, neighborhoods } = world;
+  const sig = useMemo(
+    () => citySignature(places, citySeed, neighborhoods),
+    [places, citySeed, neighborhoods],
+  );
   const ref = useRef<{
     sig: string;
     plan: CityPlan;
@@ -307,7 +321,7 @@ export function useCityPlan(
   if (!ref.current || ref.current.sig !== sig) {
     ref.current = {
       sig,
-      plan: computeCityPlan({ places, city_seed: citySeed }),
+      plan: computeCityPlan({ places, city_seed: citySeed, neighborhoods }),
       center: GRID_CENTER,
     };
   }

@@ -30,12 +30,18 @@ the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minu
 
 **Open P1:** none. EM-151 (inspector blank on ~40k-event runs) shipped in Wave F.
 
-**In flight (2026-06-24, PRs open):** a wide-ranging asset-library expansion toward the
-EW-grade dense city — building-pool variety (#41, generic 6→17 by reusing already-vendored
-build-type GLBs), **+14 new CC0 buildings** (#42, towers/church/windmill/townhouses) and
-**+12 new CC0 props** (#43, street-furniture + greenery pools), plus **ambient moving
-traffic + parked cars** (#44, EM-169/176). All CC0-enforced + recorded in `ASSET_LICENSES.md`;
-the poly.pizza vendoring runbook is `docs/em216-kit-acquisition-plan.md`.
+**Recently merged (2026-06-24):** a wide-ranging asset-library expansion toward the
+EW-grade dense city — building-pool variety + **26 new CC0 GLBs** (buildings #42 + props #43,
+consolidated #43), **ambient moving traffic + parked cars** (#44, EM-169/176), golden-hour
+**dust motes** (#46, EM-127 partial), and **auto-pause on a sustained provider outage** (#47,
+EM-226). All CC0-enforced + recorded in `ASSET_LICENSES.md`; the poly.pizza vendoring runbook
+is `docs/em216-kit-acquisition-plan.md`.
+
+**In flight (2026-06-24):** **deepening the first city** before founding a second (the
+EM-115/122/123 depth track) — **EM-123 zoned districts that mature as megaprojects complete**
+(`Neighborhood` tier model; a completed collective building levels its district up, and the
+3-D city answers with deterministic extra street life — never filler buildings, EM-174-safe;
+byte-identical until a district actually grows). Branch `feat/district-growth`.
 
 ## Which doc is which (ownership map)
 
