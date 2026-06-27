@@ -60,6 +60,19 @@ activity, never throttle).
   (fine for a squash-merged feature branch; user can re-sign on merge). Backend commits (M1–M4)
   remain signed.
 
+- **Adversarial verify (2026-06-27):** 7 parallel refutation lanes over the riskiest logic
+  found **2 critical + 4 high + 3 medium + 5 low** that the green test suites MISSED (tests
+  shared the authors' blind spots). Headlines: EM-227 skill-seeding hashed the uuid4 boot id
+  (non-deterministic, breaks EM-155) AND ~33% of boots seeded zero rhetoric holders → town
+  could never legislate (hard lockout); EM-235 boost per-round cap not snapshotted (cap bypass
+  + fork non-determinism); EM-224 coherence matched speech cues target-blind (false-positive
+  contradictions); EM-232 victory-arch cadence only sampled at irregular round boundaries
+  (fires too rarely); EM-126 newborns started "adult" + aged their birth round. Fix wave
+  (regression-first) dispatched. Integration smoke run (300 ticks, mock) had passed clean —
+  these are logic/determinism/fork bugs the deterministic happy-path suite couldn't see.
+  ACCEPTED-as-is (rationale, not bugs): EM-227 partial-xp ledger fork-drift (levels persist;
+  documented), EM-232 lifetime-vs-recent contribution ledger (deliberate — the inequality story).
+
 ## Deferred (with reasons)
 - Multi-city EM-109/110/116/117/121 + parallel-worlds 112/119/128 — user: deepen
   first city before founding a second.
