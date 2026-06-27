@@ -5925,18 +5925,61 @@ class World:
                 return events  # world cooldown: at most ONE birth per round
         return []
 
+    def _births_at_tick(self, tick: int) -> int:
+        """Per-tick birth ordinal source: how many children were already born
+        at `tick` (the family-tie since_tick stamped at birth, the same seam
+        _latest_pair_child_tick reads). Two births at the SAME tick (two pairs,
+        two check_births calls) get ordinals 0, 1, … so their seeded ids never
+        collide. Derived state — no clock, no counter, survives snapshots."""
+        seen: set[str] = set()
+        for child in self.agents.values():
+            if not child.parents:
+                continue
+            rel = (child.relationships.get(child.parents[0])
+                   or (child.relationships.get(child.parents[1])
+                       if len(child.parents) > 1 else None))
+            if rel is not None and rel.since_tick == tick:
+                seen.add(child.id)
+        return len(seen)
+
+    def _child_id(self, parents: list[str], tick: int, ordinal: int,
+                  name: str) -> str:
+        """Wave M4 / EM-189 — a SEEDED, replay/fork-stable child agent id
+        (NEVER uuid4). Mirrors _image_id / _prop_id: a sha256 of
+        (sorted parents, birth tick, per-tick ordinal, city_seed) via the
+        animal layer's _seed_int. Format-compatible with the historical
+        `agent_<name>_<hash>` shape (a hex suffix), so id consumers that split
+        on '_' or match the prefix keep working. `ordinal` disambiguates two
+        children born at the SAME tick; `tick` keeps ids unique across the run's
+        full history (a later child of the same pair can never alias an
+        earlier one). Fully replay-safe — tick/parents/ordinal are deterministic
+        in replay + fork."""
+        from ..animals.runtime import _seed_int
+        slug = name.lower().replace(" ", "_") or "child"
+        seed = _seed_int(
+            "child", self.city_seed, *sorted(parents), tick, ordinal)
+        return f"agent_{slug}_{format(seed % (16 ** 10), '010x')}"
+
     def _spawn_child(
         self, p1: AgentState, p2: AgentState, personas: list[dict], cost: int
     ) -> list[dict]:
         """Create the child for a qualified pair (check_births gates). Returns
         the ready-to-emit [child_spawned, agent_spawned] event dicts."""
         name, card_personality = self._pick_child_persona(personas)
+        # EM-189 — derive the child id from a SEEDED birth hash (sorted parents
+        # + birth tick + per-tick ordinal + city_seed) so same-seed runs mint
+        # IDENTICAL births that A/B diffs can align. Passed into spawn_agent
+        # (which otherwise uuid4s for free/operator spawns).
+        child_id = self._child_id(
+            sorted((p1.id, p2.id)), self.tick, self._births_at_tick(self.tick),
+            name)
         child = self.spawn_agent(
             name=name,
             personality=self._child_personality(card_personality, p1, p2),
             profile=self._pick_child_profile(),
             location=p1.location,           # the birth home
             cadence_tier="background",      # free-scale law
+            agent_id=child_id,
         )
         child.energy = 70.0
         child.credits = 0
@@ -6225,9 +6268,14 @@ class World:
         cadence_tier: str = "protagonist",
         disposition: str = "lawful",
         role: str = "citizen",
+        agent_id: str | None = None,
     ) -> AgentState:
         name = self._unique_agent_name(name)
-        agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
+        # EM-189 — a caller may pass a pre-derived, SEEDED id (the child-spawn
+        # path does, for replay/fork-stable births). Absent ⇒ the historical
+        # uuid4-suffixed id for free/operator spawns (no determinism contract).
+        if agent_id is None:
+            agent_id = f"agent_{name.lower().replace(' ', '_')}_{str(uuid.uuid4())[:6]}"
         agent = AgentState(
             id=agent_id,
             name=name,
