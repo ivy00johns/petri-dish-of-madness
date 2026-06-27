@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { Agent } from '../../types';
+import type { Agent, Place } from '../../types';
 import {
   BUILDING_STYLES,
   SKIN_PALETTES,
@@ -15,6 +15,7 @@ import {
   healthTint,
   humanizeKind,
   operationalVariant,
+  resolveCivicCenterId,
   resolveLivingOwner,
   skinPalette,
   slotLayout,
@@ -706,5 +707,49 @@ describe('resolveLivingOwner (Wave H4 EM-209 — pet bond agreement)', () => {
     // A dead owner must NOT silently fall through to some other alive agent.
     expect(resolveLivingOwner(roster, 'agent-dead')).not.toBe(bystander);
     expect(resolveLivingOwner([], 'agent-owner')).toBeUndefined();
+  });
+});
+
+// ── EM-183: resolveCivicCenterId (3D orbit home ↔ backend civic_center_id) ────
+
+function place(id: string, kind: Place['kind'], extra: Partial<Place> = {}): Place {
+  return { id, name: id, x: 500, y: 500, kind, description: '', ...extra };
+}
+
+describe('resolveCivicCenterId (EM-183 — town center vote)', () => {
+  const townhall = place('townhall', 'governance');
+  const plaza = place('plaza', 'social');
+  const market = place('market', 'work');
+  const town: Place[] = [townhall, plaza, market];
+
+  it('returns the VOTED center when it names a real place', () => {
+    expect(resolveCivicCenterId(town, 'market')).toBe('market');
+    expect(resolveCivicCenterId(town, 'townhall')).toBe('townhall');
+  });
+
+  it('falls back to the plaza when no center is voted (default)', () => {
+    expect(resolveCivicCenterId(town, '')).toBe('plaza');
+    expect(resolveCivicCenterId(town, null)).toBe('plaza');
+    expect(resolveCivicCenterId(town, undefined)).toBe('plaza');
+  });
+
+  it('ignores a dangling voted id (falls through to the plaza chain)', () => {
+    // Matches the backend tolerance of a town_center_id whose place vanished.
+    expect(resolveCivicCenterId(town, 'ghost-place')).toBe('plaza');
+  });
+
+  it('falls back to the first SOCIAL place when there is no plaza', () => {
+    const noPlaza: Place[] = [townhall, place('green', 'social'), market];
+    expect(resolveCivicCenterId(noPlaza, null)).toBe('green');
+  });
+
+  it('falls back to the first place when there is no plaza or social place', () => {
+    const noSocial: Place[] = [townhall, market];
+    expect(resolveCivicCenterId(noSocial, null)).toBe('townhall');
+  });
+
+  it('returns null for an empty world', () => {
+    expect(resolveCivicCenterId([], null)).toBeNull();
+    expect(resolveCivicCenterId([], 'market')).toBeNull();
   });
 });

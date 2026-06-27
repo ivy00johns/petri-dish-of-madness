@@ -370,3 +370,26 @@ Backend 1560 tests / frontend 1033 tests. See `docs/build-results/BUILD_RESULTS_
 | EM-235 | P3 | W23 | backend | research-v1 (EW gap) | **Boost queue** — let agents spend credits for extra turns / airtime (EW's ComputeCredits boost queue). A pure emergence lever: agents literally buy influence over the shared timeline. We have multi-action turns (EM-199) but no credit-bought turn priority. | done | wave-M 2026-06-27 |
 | EM-236 | P3 | W23 | backend+frontend | research-v1 (EW gap) | **Living constitution artifact** — an amendable articled foundational document (EW's 5-article constitution) agents revise, vs today's flat list of ad-hoc rules. Adds the constitutional-growth signal (AWI M9). Builds on the existing 70%-threshold propose/vote/enact (EM-015) + governance location gate (EM-108). | done | wave-M 2026-06-27 |
 | EM-237 | P3 | W23 | backend | research-v1 (EW gap) | **Harm-surface finishers** — add `intimidate` (threaten without contact) + `deceive` (lying as a first-class act) as distinct tools, the reputation-gaming / dark-emergence axis EW exposed (arson/punch/intimidate/steal/deceive). Our `attack`/`insult`/`steal`/`arson` already cover physical harm; these two complete the set. (EW had **no weapons-as-objects** — violence is tool calls, so none are needed.) **Scope reduced post-EM-240:** the reflex-tier crime-verb dispatch now exists (`heist`/`extort`/`vandalize`/`bribe`/`launder`/`recruit` via `_apply_action_inner` + `ACTION_SCHEMA`), so these two slot into that path — a small add, not new infrastructure. | done | wave-M 2026-06-27 |
+
+## EM-183 — Town-center vote (shipped 2026-06-27)
+
+Standalone backlog item (branch `feat/town-center-vote`): the "they grow the city as
+they see fit" end-goal — agents vote to re-anchor the town's civic heart. TDD, full
+backend + frontend suites green (backend 1582 / frontend 1039), em161 golden + EM-155
+snapshots byte-identical, integration smoke all-invariants-PASS. Drive-by: closed the
+EM-236 `amend_constitution` runtime-gate gap (FINDING-1 bug class — the effect was
+un-proposable through the agent gate, reachable only by bypassing it in tests).
+
+`relocate_center` is a governance effect (R5, modelled on `demolish`): carries the
+target place id, ratifies on a 70% supermajority, sets `World.town_center_id`, parks a
+`center_relocated` event, and replenishes the proposer's influence. Additive +
+serialized only-when-set (restored defensively) ⇒ an un-relocated world round-trips
+byte-identically. `World.civic_center_id()` resolves the voted heart (voted →
+plaza → first social → first place); the 3-D world mirrors that chain
+(`resolveCivicCenterId`) and glides the orbit home to the chosen heart when the vote
+lands. The 2-D minimap stays plaza-anchored (3-D is the redesign focus). See
+`docs/build-results/BUILD_RESULTS_EM183.md`.
+
+| ID | Pri | Wave | Area | Source | Summary | Status | Owner |
+|----|-----|------|------|--------|---------|--------|-------|
+| EM-183 | P3 | W17 | backend+frontend | user 2026-06-11 | Vote to move/expand the town center: a `relocate_center` governance proposal re-anchors the civic center on the agents' chosen place when ratified (~70% supermajority, like demolish), and the 3-D city re-centers its orbit on the chosen heart. Additive `World.town_center_id` (snapshot only-when-set, EM-155 byte-identical), `civic_center_id()` fallback chain mirrored frontend-side. Builds on shipped governance texture (EM-079/087/100/103). Drive-by: fixed the EM-236 amend_constitution runtime-gate gap. | done | 2026-06-27 |

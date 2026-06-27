@@ -41,7 +41,7 @@ import { PlazaBanner } from './PlazaBanner';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
-import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, resolveLivingOwner, WORLD_REACH } from './worldSpace';
+import { placeToWorld, ringOffset, buildingSpot, latestRoutedVia, resolveLivingOwner, resolveCivicCenterId, WORLD_REACH } from './worldSpace';
 import { GOLDEN_HOUR } from './toon';
 import { preloadHeroModels } from './assets/Model';
 import { allCityModelSpecs } from './assets/cityModels';
@@ -185,11 +185,18 @@ function prefersReducedMotion(): boolean {
 function CameraDirector({
   focus,
   resetNonce,
+  homeTarget = DEFAULT_TARGET,
+  recenterNonce = 0,
   resolveFocus,
   onFocusBreak,
 }: {
   focus: FocusTarget | null;
   resetNonce: number;
+  // EM-183 — the orbit "home": where reset-view eases to and the city re-centers
+  // when the town votes its heart. Defaults to DEFAULT_TARGET (the plaza/origin),
+  // so an un-relocated world frames exactly as before.
+  homeTarget?: THREE.Vector3;
+  recenterNonce?: number;
   resolveFocus: (f: FocusTarget) => FocusPoint | null;
   onFocusBreak?: () => void;
 }) {
@@ -198,6 +205,15 @@ function CameraDirector({
   const focusRef = useRef<FocusTarget | null>(focus);
   // EM-082: the idle auto-rotate is a motion nicety — off under reduced motion.
   const reducedMotionRef = useRef(prefersReducedMotion());
+  // EM-183 — track the live home target (and its framing-preserving camera) in a
+  // ref so the useFrame reset/recenter ease always reads the current center.
+  const homeTargetRef = useRef<THREE.Vector3>(homeTarget);
+  homeTargetRef.current = homeTarget;
+  const homeCameraRef = useRef<THREE.Vector3>(DEFAULT_CAMERA);
+  // Preserve the default framing (camera offset from target) about the new home.
+  homeCameraRef.current = homeTarget
+    .clone()
+    .add(DEFAULT_CAMERA.clone().sub(DEFAULT_TARGET));
 
   // Focus changes select the programmed mode.
   useEffect(() => {
@@ -220,6 +236,19 @@ function CameraDirector({
     }
     modeRef.current = 'reset';
   }, [resetNonce]);
+
+  // EM-183 — the town re-centers: when the voted civic heart changes, glide the
+  // orbit home to it (the SAME interruptible 'reset' ease — any user input wins).
+  // Skip the mount-time value so a world that loads already-relocated just frames
+  // there without an animation.
+  const firstRecenterRef = useRef(true);
+  useEffect(() => {
+    if (firstRecenterRef.current) {
+      firstRecenterRef.current = false;
+      return;
+    }
+    modeRef.current = 'reset';
+  }, [recenterNonce]);
 
   // User input ('start' fires only for pointer/touch/wheel interaction)
   // breaks any programmed motion.
@@ -286,14 +315,18 @@ function CameraDirector({
         }
       }
     } else if (mode === 'reset') {
-      controls.target.lerp(DEFAULT_TARGET, k);
-      cam.position.lerp(DEFAULT_CAMERA, k);
+      // EM-183 — ease to the orbit HOME (the voted civic center, or the
+      // plaza/origin default), preserving the default framing about it.
+      const homeT = homeTargetRef.current;
+      const homeC = homeCameraRef.current;
+      controls.target.lerp(homeT, k);
+      cam.position.lerp(homeC, k);
       if (
-        controls.target.distanceTo(DEFAULT_TARGET) < ARRIVE_EPS &&
-        cam.position.distanceTo(DEFAULT_CAMERA) < ARRIVE_EPS * 2
+        controls.target.distanceTo(homeT) < ARRIVE_EPS &&
+        cam.position.distanceTo(homeC) < ARRIVE_EPS * 2
       ) {
-        controls.target.copy(DEFAULT_TARGET);
-        cam.position.copy(DEFAULT_CAMERA);
+        controls.target.copy(homeT);
+        cam.position.copy(homeC);
         modeRef.current = 'free';
       }
     }
@@ -320,7 +353,7 @@ function CameraDirector({
       maxDistance={130}
       minPolarAngle={0.25}
       maxPolarAngle={Math.PI / 2.3}
-      target={[DEFAULT_TARGET.x, DEFAULT_TARGET.y, DEFAULT_TARGET.z]}
+      target={[homeTarget.x, homeTarget.y, homeTarget.z]}
     />
   );
 }
@@ -444,6 +477,35 @@ export function CozyWorld({
     (places ?? []).forEach((p) => m.set(p.id, placeToWorld(p)));
     return m;
   }, [places]);
+
+  // EM-183 — the voted civic center: the place the town chose as its heart
+  // (world.town_center_id), resolved with the SAME fallback chain the backend's
+  // civic_center_id() uses (the voted place if it exists → 'plaza' → first social
+  // → first place). An unset/absent center resolves to the plaza, which sits at
+  // the layout origin, so an un-relocated world frames exactly as before.
+  const centerPlaceId = useMemo(
+    () => resolveCivicCenterId(places ?? [], world?.town_center_id),
+    [places, world?.town_center_id],
+  );
+
+  // The orbit HOME point: the center place's world position (y from the default
+  // target). Falls back to DEFAULT_TARGET when there is no place at all.
+  const homeTarget = useMemo(() => {
+    const c = centerPlaceId ? placeCenters.get(centerPlaceId) : null;
+    if (!c) return DEFAULT_TARGET;
+    return new THREE.Vector3(c.x, DEFAULT_TARGET.y, c.z);
+  }, [centerPlaceId, placeCenters]);
+
+  // Bump a nonce whenever the chosen center changes (after mount) so the camera
+  // glides home to the new heart — "the city re-centers on the agents' choice".
+  const [recenterNonce, setRecenterNonce] = useState(0);
+  const prevCenterRef = useRef<string | null>(centerPlaceId);
+  useEffect(() => {
+    if (prevCenterRef.current !== centerPlaceId) {
+      prevCenterRef.current = centerPlaceId;
+      setRecenterNonce((n) => n + 1);
+    }
+  }, [centerPlaceId]);
 
   // EM-174: real W7 buildings claim REAL lots — street-front lots inside
   // their place's landmark block first (stable id order → lot index), then
@@ -594,6 +656,8 @@ export function CozyWorld({
         <CameraDirector
           focus={focus}
           resetNonce={resetNonce}
+          homeTarget={homeTarget}
+          recenterNonce={recenterNonce}
           resolveFocus={resolveFocus}
           onFocusBreak={onFocusBreak}
         />

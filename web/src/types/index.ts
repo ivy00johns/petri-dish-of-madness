@@ -301,6 +301,11 @@ export interface WorldState {
   // snapshots stay valid; the CityNameChip / ChronicleView render it only when a
   // non-empty string is present. Typed here so reads stop using a defensive cast.
   town_name?: string | null;
+  // EM-183 (additive): the place id the town VOTED to be its civic heart (a
+  // `relocate_center` proposal ratified at 70%). Empty/absent ⇒ the conventional
+  // center (the "plaza", at the layout origin), so a town that never relocates is
+  // unchanged. The 3D world re-anchors its orbit home target on this place.
+  town_center_id?: string | null;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds

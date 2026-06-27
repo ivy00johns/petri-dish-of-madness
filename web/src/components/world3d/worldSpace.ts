@@ -702,3 +702,30 @@ export function resolveLivingOwner(
   if (!ownerId) return undefined;
   return agents.find((a) => a.id === ownerId && a.alive);
 }
+
+/**
+ * EM-183 — resolve the town's CIVIC CENTER place id (the heart the 3D orbit
+ * re-anchors on). Mirrors the backend `World.civic_center_id()` fallback chain
+ * EXACTLY so the camera home and the engine agree on the same place:
+ *
+ *   the VOTED center (`town_center_id`, when it names a real place)
+ *     → the 'plaza' (the conventional anchor at the layout origin)
+ *     → the first social place
+ *     → the first place of any kind
+ *     → null (an empty world)
+ *
+ * A `town_center_id` that points at a vanished place is ignored (it falls through
+ * to the plaza chain), matching the backend's tolerance of a dangling id. Pure +
+ * deterministic — no clock/RNG — so a replay re-centers identically.
+ */
+export function resolveCivicCenterId(
+  places: readonly Place[],
+  votedId: string | null | undefined,
+): string | null {
+  if (votedId && places.some((p) => p.id === votedId)) return votedId;
+  const plaza = places.find((p) => p.id === 'plaza');
+  if (plaza) return plaza.id;
+  const social = places.find((p) => p.kind === 'social');
+  if (social) return social.id;
+  return places[0]?.id ?? null;
+}
