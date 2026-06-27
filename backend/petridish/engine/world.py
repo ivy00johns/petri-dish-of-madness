@@ -388,6 +388,15 @@ class AgentState:
     # generations is off.
     life_stage: str = "adult"
     age_ticks: int = 0
+    # EM-126 — set True by World.apply_inheritance once this (deceased) agent's
+    # estate has been settled, so a second call on the same corpse (a defensive
+    # double-invoke, or a resume/fork that re-walks the death path) is a no-op
+    # instead of emitting a spurious credits=0 `inherited` event. ADDITIVE with
+    # default False → serialized in to_dict ONLY when True and restored defensively
+    # (absent/garbage → False), so a living/never-inherited agent — and every
+    # pre-EM-126 snapshot — keeps the exact prior dict shape (EM-155 byte-identical
+    # + em161 golden; gates nothing in the prompt, surfaces no line).
+    inheritance_settled: bool = False
     beliefs: list[str] = field(default_factory=list)
     relationships: dict[str, RelationshipState] = field(default_factory=dict)
 
@@ -497,6 +506,10 @@ class AgentState:
             d["life_stage"] = self.life_stage
         if self.age_ticks:
             d["age_ticks"] = self.age_ticks
+        # EM-126 — the inheritance-settled flag rides along ONLY when set (a
+        # settled corpse), so a living agent keeps the exact prior dict shape.
+        if self.inheritance_settled:
+            d["inheritance_settled"] = True
         return d
 
 
@@ -1608,6 +1621,12 @@ class World:
         if ubi_rule:
             for agent in self.living_agents():
                 agent.credits += self.params.ubi_amount
+        # EM-126 — snapshot the roster BEFORE the birth check so the aging sweep
+        # below ages only agents that already existed this round; a child born in
+        # check_births is excluded (it ages from 0 NEXT round, not the round it is
+        # born — the invariant this method's tail documents). Cheap id-set copy;
+        # generations OFF makes the sweep a no-op regardless.
+        pre_birth_ids = set(self.agents)
         # Wave E / EM-114 — the once-per-round birth check (contract: "hook
         # beside the existing per-round effects"). At most ONE birth per
         # round; events park in pending_spawn_events and are drained by the
@@ -1646,8 +1665,9 @@ class World:
         # tick loop's _flush_spawn_events, like births/factions/consolidation/arch).
         # Gated behind world.generations.enabled: OFF (the default) ⇒ a no-op that
         # parks nothing and ages no one (golden-safe + EM-114 children untouched).
-        # Deterministic — no random/clock.
-        aged_events = self.age_agents()
+        # Deterministic — no random/clock. Only the pre-birth roster ages — a
+        # child born above is held out so it ages from 0 next round (not its own).
+        aged_events = self.age_agents(pre_birth_ids)
         if aged_events:
             self.pending_spawn_events.extend(aged_events)
 
@@ -3835,10 +3855,19 @@ class World:
                     self.constitution = [
                         a for a in self.constitution if a.get("id") != article_id]
                     applied_id = article_id
+            # EM-236 — a CONTENDING no-op (the article this edit/remove targets
+            # vanished before this amendment ratified — e.g. a separate `remove`
+            # for the same article ratified first; ops differ so the propose-time
+            # per-(op,article) guard let both open) leaves applied_id None. Guard
+            # the side effects on it just as demolish/promote_image guard a
+            # vanished target: no influence replenish, and NO phantom
+            # `constitution_amended` event (nothing actually changed).
+            if applied_id is None:
+                return
             # Replenish the proposer's influence on a successful amendment (a
             # governance win; the EM-229 hook). A vanished proposer is a no-op.
             proposer = self.agents.get(rule.proposer_id)
-            if proposer is not None and applied_id is not None:
+            if proposer is not None:
                 try:
                     reward = float(self._constitution_param("influence_replenish", 15.0))
                 except (TypeError, ValueError):  # pragma: no cover - defensive
@@ -5410,13 +5439,20 @@ class World:
             return "elder"
         return "adult"
 
-    def age_agents(self) -> list[dict]:
+    def age_agents(self, only_ids: set[str] | None = None) -> list[dict]:
         """EM-126 — the once-per-round aging sweep (hooked in _apply_round_start
         AFTER births so a newborn ages from 0 next round, not the round it is
         born). For every LIVING agent: bump age_ticks by one round, then derive
         the life stage from the new age. A stage PROMOTION (child→adult→elder)
         parks an `aged` event in deterministic sorted-id order (replay-stable);
         an unchanged stage emits nothing. PURE — no random, no clock (EM-155).
+
+        `only_ids` restricts the sweep to a roster snapshot — _apply_round_start
+        passes the agents present BEFORE this round's birth check so a just-born
+        child is NOT aged the very round it appears (it would otherwise go
+        0→1 and park a spurious backwards `aged` event, contradicting the
+        round-boundary invariant). Absent ⇒ every agent ages (the test/standalone
+        path). An id no longer in self.agents is skipped defensively.
 
         Gated behind world.generations.enabled: OFF (the default / absent block) ⇒
         a no-op that touches nothing and parks nothing, so every agent stays at
@@ -5425,10 +5461,11 @@ class World:
         in tests)."""
         if not self._generations_enabled():
             return []
+        ids = sorted(self.agents) if only_ids is None else sorted(only_ids)
         events: list[dict] = []
-        for aid in sorted(self.agents):
-            agent = self.agents[aid]
-            if not agent.alive:
+        for aid in ids:
+            agent = self.agents.get(aid)
+            if agent is None or not agent.alive:
                 continue
             prior = agent.life_stage
             agent.age_ticks = max(0, int(agent.age_ticks)) + 1
@@ -5498,8 +5535,15 @@ class World:
         Gated behind world.generations.enabled: OFF (the default / absent block) ⇒
         a no-op that returns None and moves nothing — so a default world's death
         path is byte-identical to pre-EM-126 (credits simply vanish with the agent,
-        as the EM-114 mechanic has always done). No living heir ⇒ also a no-op."""
+        as the EM-114 mechanic has always done). No living heir ⇒ also a no-op.
+
+        IDEMPOTENT: a settled corpse is marked (`inheritance_settled`), so a second
+        call on the SAME deceased (a defensive double-invoke, or a resume/fork that
+        re-walks the death path) returns None instead of re-moving an empty estate
+        and emitting a spurious credits=0 `inherited` event."""
         if not self._generations_enabled():
+            return None
+        if agent.inheritance_settled:
             return None
         heirs = self._heirs_for(agent)
         if not heirs:
@@ -5524,6 +5568,9 @@ class World:
                     since_tick=rel.since_tick,
                 )
                 copied_relationships += 1
+        # Mark the corpse settled so a re-walk of the death path (defensive
+        # double-invoke / resume / fork) does not re-emit a spurious `inherited`.
+        agent.inheritance_settled = True
         return {
             "kind": "inherited",
             "actor_id": heir_id,
@@ -6350,6 +6397,16 @@ class World:
         child.energy = 70.0
         child.credits = 0
         child.parents = sorted((p1.id, p2.id))
+        # EM-126 — with the generational layer ON, a BORN agent enters at the
+        # `child` stage so the child→adult→elder cadence runs in the right order
+        # (spawn_agent leaves life_stage at the AgentState `adult` default, which
+        # would otherwise make every newborn start an adult). age_ticks stays 0 —
+        # life_stage_for(0) is `child` under the default thresholds, so the two
+        # stay consistent. Gated behind generations: with it OFF (the default) the
+        # field is untouched (adult), keeping EM-114 births + snapshots byte-
+        # identical. A newborn is NOT aged its birth round (see age_agents).
+        if self._generations_enabled():
+            child.life_stage = "child"
         # Both parents pay — a credits sink, not a transfer.
         p1.credits -= cost
         p2.credits -= cost
@@ -7318,6 +7375,11 @@ class World:
                 life_stage=(str(d.get("life_stage")) if d.get("life_stage")
                             in ("child", "adult", "elder") else "adult"),
                 age_ticks=max(0, _int(d.get("age_ticks"))),
+                # EM-126 — the inheritance-settled flag: additive. Absent/garbage
+                # → False (a living/never-inherited agent), so a settled corpse
+                # that was already serialized restores as already-settled (no
+                # re-inherit on resume/fork) and everything else is unchanged.
+                inheritance_settled=bool(d.get("inheritance_settled", False)),
             )
             a.relationships = {
                 str(aid): RelationshipState(

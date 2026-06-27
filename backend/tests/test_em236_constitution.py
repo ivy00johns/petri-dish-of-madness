@@ -283,6 +283,63 @@ def test_duplicate_edit_for_same_article_is_blocked():
     assert r2 is None
 
 
+# ── regression (adversarial verify): a contending no-op emits NO event ───────
+
+def test_contending_amendment_noop_emits_no_constitution_amended_event():
+    # BUG (EM-236): _on_rule_activated parked a `constitution_amended` event
+    # UNCONDITIONALLY, even when the amendment was a no-op (its target article
+    # vanished before it ratified). An `edit` and a `remove` for the SAME article
+    # have different ops, so the per-(op,article) propose-time guard lets BOTH
+    # open. Ratify the remove first → article gone; then ratify the edit → it
+    # finds nothing (applied_id None) yet still emitted a phantom event.
+    agents = [_agent(id=f"a{i}", name=f"A{i}") for i in range(10)]
+    w = _world(agents)
+    voters = [f"a{i}" for i in range(7)]
+    art_id = _seed_article(w, voters, text="Article I.")
+    w.drain_spawn_events()                               # clear the seed's event
+
+    # Open an EDIT and a REMOVE for the same article (different ops → both allowed).
+    ok_e, _re, rule_edit = w.action_propose_rule(
+        agents[0], "amend_constitution", "Article I: revised.",
+        op="edit", article_id=art_id)
+    ok_r, _rr, rule_remove = w.action_propose_rule(
+        agents[1], "amend_constitution", "", op="remove", article_id=art_id)
+    assert ok_e and ok_r
+
+    # Ratify the REMOVE first — the article is deleted + a real event fires.
+    _ratify(w, rule_remove, voters)
+    assert w.constitution == []
+    evs = w.drain_spawn_events()
+    assert sum(e["kind"] == "constitution_amended" for e in evs) == 1
+
+    # Now ratify the EDIT — its target article is gone, so it is a no-op and must
+    # emit NO constitution_amended event (the phantom this fix removes).
+    _ratify(w, rule_edit, voters)
+    evs = w.drain_spawn_events()
+    assert [e for e in evs if e["kind"] == "constitution_amended"] == []
+    assert w.constitution == []                          # still nothing
+
+
+def test_contending_amendment_noop_does_not_replenish_influence():
+    # The no-op guard also skips the EM-229 influence replenish — only a real
+    # amendment is a governance win.
+    agents = [_agent(id=f"a{i}", name=f"A{i}", influence=10.0) for i in range(10)]
+    w = _world(agents, _params())
+    w.params.constitution = ConstitutionParams(influence_replenish=20.0)
+    voters = [f"a{i}" for i in range(7)]
+    art_id = _seed_article(w, voters, text="Article I.")
+    ok_e, _re, rule_edit = w.action_propose_rule(
+        agents[2], "amend_constitution", "Article I: revised.",
+        op="edit", article_id=art_id)
+    ok_r, _rr, rule_remove = w.action_propose_rule(
+        agents[1], "amend_constitution", "", op="remove", article_id=art_id)
+    assert ok_e and ok_r
+    before = w.agents["a2"].influence
+    _ratify(w, rule_remove, voters)                      # article gone
+    _ratify(w, rule_edit, voters)                        # no-op edit
+    assert w.agents["a2"].influence == before            # NOT replenished
+
+
 # ── determinism: article ids are seeded (no uuid / clock) ────────────────────
 
 def test_article_ids_are_deterministic_across_runs():

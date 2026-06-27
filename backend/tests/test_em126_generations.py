@@ -42,6 +42,7 @@ from petridish.engine.world import World, AgentState, PlaceState, RelationshipSt
 from petridish.config.loader import (
     WorldParams,
     GenerationsParams,
+    ChildrenParams,
     _parse_generations,
     load_config,
     EMBEDDED_WORLD_YAML,
@@ -447,6 +448,116 @@ def test_death_then_inherit_sequence_matches_loop_order():
     assert evt["payload"]["heir_id"] == "c"
     assert child.credits == 33
     assert parent.credits == 0
+
+
+# ── regression (adversarial verify): newborn lifecycle + inherit idempotency ──
+
+def _birth_world(gen_params):
+    """Two mutual partners co-located at a HOME place, every birth gate met, so
+    one check_births call mints a child (mirrors test_wave_e_children setup)."""
+    places = [
+        PlaceState(id="hearth", name="Hearth", x=0, y=0, kind="home", capacity=10),
+    ]
+    ada = AgentState(id="agent_ada", name="Ada", personality="", profile="mock",
+                     location="hearth", energy=80.0, credits=50)
+    bram = AgentState(id="agent_bram", name="Bram", personality="", profile="mock",
+                      location="hearth", energy=80.0, credits=50)
+    w = World(params=gen_params, places=places, agents=[ada, bram])
+    for x, y in (("agent_ada", "agent_bram"), ("agent_bram", "agent_ada")):
+        w.agents[x].relationships[y] = RelationshipState(
+            type="partner", trust=50, interactions=10)
+    # Birth-friendly chance so the seeded gate always fires (deterministic).
+    w.params.children = ChildrenParams(birth_chance=1.0)
+    return w
+
+
+def test_newborn_enters_as_child_stage_when_generations_on():
+    # BUG (EM-126): _spawn_child mints the child via spawn_agent, which leaves
+    # life_stage at the AgentState "adult" default — so with generations ON every
+    # BORN agent started as an ADULT, inverting the child→adult→elder cadence.
+    w = _birth_world(_gen_params(child_until=6, elder_after=60))
+    w.tick = 10
+    events = w.check_births([{"name": "Mox", "personality": "curious"}])
+    child_id = events[0]["payload"]["child_id"]
+    child = w.agents[child_id]
+    assert child.life_stage == "child"          # was "adult" pre-fix
+    # life_stage stays consistent with the threshold math at age 0.
+    assert w.life_stage_for(child.age_ticks) == "child"
+
+
+def test_newborn_keeps_adult_default_when_generations_off():
+    # Guard the fix's gate: with generations OFF the EM-114 birth path is
+    # byte-identical — the child keeps the adult / age-0 defaults (nothing ages).
+    w = _birth_world(_gen_params(enabled=False))
+    events = w.check_births([{"name": "Mox", "personality": "curious"}])
+    child = w.agents[events[0]["payload"]["child_id"]]
+    assert child.life_stage == "adult"
+    assert child.age_ticks == 0
+
+
+def test_newborn_is_not_aged_its_birth_round_no_spurious_aged_event():
+    # BUG (EM-126): _apply_round_start runs check_births THEN age_agents in the
+    # SAME call, and age_agents iterated EVERY agent including the just-inserted
+    # newborn — so its age_ticks went 0→1 in the birth round and (with the child
+    # stage) it could park a backwards `aged` event, contradicting the in-code
+    # invariant "ages from 0 NEXT round, not the round it is born".
+    w = _birth_world(_gen_params(child_until=1, elder_after=60))
+    w.set_birth_casting([{"name": "Mox", "personality": "curious"}], [])
+    w.tick = 10
+    w._apply_round_start()                       # one round: birth THEN aging
+    born = [e for e in w.pending_spawn_events if e.get("kind") == "child_spawned"]
+    assert born, "expected a birth this round"
+    child = w.agents[born[0]["payload"]["child_id"]]
+    # The newborn did NOT age its birth round.
+    assert child.age_ticks == 0
+    assert child.life_stage == "child"
+    # No spurious `aged` event for the newborn (its age never moved this round).
+    aged_for_child = [
+        e for e in w.pending_spawn_events
+        if e.get("kind") == "aged" and e["payload"].get("agent_id") == child.id
+    ]
+    assert aged_for_child == []
+    # A pre-existing agent DID age this round (the sweep still runs for them).
+    assert w.agents["agent_ada"].age_ticks == 1
+
+
+def test_double_apply_inheritance_emits_exactly_one_inherited_event():
+    # BUG (EM-126): apply_inheritance had no already-inherited guard, so a second
+    # call on the same corpse re-walked the (now empty) estate and emitted a
+    # spurious credits=0 `inherited` event.
+    parent = _agent(id="p", name="Pat", credits=40)
+    child = _agent(id="c", name="Cal", credits=5, parents=["p"])
+    w = _world([parent, child], _gen_params())
+    parent.alive = False
+    first = w.apply_inheritance(parent)
+    assert first is not None and first["payload"]["credits"] == 40
+    assert child.credits == 45
+    # The corpse is now settled; a second call is a no-op (no phantom event).
+    second = w.apply_inheritance(parent)
+    assert second is None
+    assert child.credits == 45                   # nothing moved twice
+    assert parent.inheritance_settled is True
+
+
+def test_inheritance_settled_round_trips_only_when_set():
+    # EM-155: the settled flag is additive — absent on a living agent (byte-
+    # identical), present on a settled corpse so a resume/fork won't re-inherit.
+    living = _agent(id="live", credits=10)
+    w_living = _world([living], _gen_params())
+    assert "inheritance_settled" not in json.dumps(w_living.to_snapshot())
+
+    parent = _agent(id="p", credits=20)
+    heir = _agent(id="h", credits=0, parents=["p"])
+    w = _world([parent, heir], _gen_params())
+    parent.alive = False
+    w.apply_inheritance(parent)
+    snap = w.to_snapshot()
+    assert '"inheritance_settled"' in json.dumps(snap)
+    restored = World.from_snapshot(copy.deepcopy(snap), params=_gen_params())
+    rp = restored.agents["p"]
+    assert rp.inheritance_settled is True
+    # The restored corpse will not re-inherit.
+    assert restored.apply_inheritance(rp) is None
 
 
 # ── config parse: defaults / clamps / sync ────────────────────────────────────
