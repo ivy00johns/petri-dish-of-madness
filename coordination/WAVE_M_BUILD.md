@@ -24,7 +24,7 @@ activity, never throttle).
 | M2 | EM-227, EM-228, EM-230, EM-231 | full pytest | ✅ green — 1326 passed/1 skip |
 | M3 | EM-232, EM-235, EM-236, EM-237 | full pytest | ✅ green — 1413 passed/1 skip |
 | M4a | EM-224, EM-203/206, EM-189, EM-190 | full pytest | ✅ green — 1462 passed/1 skip |
-| M4b | EM-186, EM-167, EM-126(stretch) | full pytest | pending |
+| M4b | EM-186, EM-167, EM-126(stretch) | full pytest | ✅ green — 1530 passed/1 skip |
 | F | EM-202, EM-215, EM-204, EM-195, EM-180, EM-191, EM-192, EM-193, EM-225 | typecheck+test+token-guard | pending |
 | Verify | adversarial review + QA gate + ledger + results + PR | qa-report.json | pending |
 
