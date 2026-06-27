@@ -44,7 +44,8 @@ def _make_params(**over) -> WorldParams:
     return WorldParams(**base)
 
 
-def _make_world_runtime(script: list, *, start: str = "market", params=None):
+def _make_world_runtime(script: list, *, start: str = "market", params=None,
+                        names=("Ada", "Bram")):
     params = params or _make_params()
     places = [
         PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social"),
@@ -55,7 +56,7 @@ def _make_world_runtime(script: list, *, start: str = "market", params=None):
         AgentState(id=f"agent_{n.lower()}", name=n, personality="Test agent.",
                    profile="mock", location=start,
                    energy=params.starting_energy, credits=params.starting_credits)
-        for n in ("Ada", "Bram")
+        for n in names
     ]
     world = World(params=params, places=places, agents=agents)
     profiles = [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#2ecc71")]
@@ -266,3 +267,108 @@ def test_coherence_resolve_no_speech_act_is_noop():
                                     {"agent_bram": "Bram"})
     assert out == steps
     assert notes == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EM-224 regression — target-blind matching (the stance must be directed at the
+# SAME target as the harm/help step). A friendly remark ABOUT Cara must not
+# contradict a steal FROM Bram; a self-targeted harm after friendly speech must
+# not be flagged either.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_speech_stance_about_other_target_is_neutral_for_named_target():
+    """The stance toward a target is asserted ONLY when the speech references
+    that target. 'I'll help you, Cara!' is friendly toward Cara — but NEUTRAL
+    toward Bram, who the speech never addressed (the 'you' is claimed by the
+    named addressee Cara)."""
+    from petridish.agents.runtime import _speech_stance
+    # Toward Cara (named, second-person bound to her): friendly.
+    assert _speech_stance("I'll help you, Cara!", "Cara", ("Bram",)) == "friendly"
+    # Toward Bram: the line names Cara, so the 'you' is hers, not Bram's.
+    assert _speech_stance("I'll help you, Cara!", "Bram", ("Cara",)) == "neutral"
+
+
+def test_coherence_resolve_friendly_about_X_then_harm_to_Y_not_flagged():
+    """REGRESSION (target-blind): a friendly say naming Cara, then a steal FROM
+    Bram (a DIFFERENT target) must NOT be flagged — the friendly stance was
+    never directed at Bram."""
+    from petridish.agents.runtime import _coherence_resolve
+    steps = [
+        {"action": "say", "args": {"text": "I'll help you, Cara!"}},
+        {"action": "steal", "args": {"target": "agent_bram"}},
+    ]
+    names = {"agent_bram": "Bram", "agent_cara": "Cara"}
+    out, notes = _coherence_resolve([dict(s) for s in steps], "", "annotate", names)
+    assert notes == []
+    assert all("_coherence" not in s for s in out), (
+        "friendly-about-Cara must not contradict harm-to-Bram"
+    )
+
+
+def test_coherence_resolve_friendly_about_X_then_harm_to_X_IS_flagged():
+    """The true contradiction is preserved: friendly say naming Bram, then a
+    steal FROM Bram (the SAME target) IS flagged."""
+    from petridish.agents.runtime import _coherence_resolve
+    steps = [
+        {"action": "say", "args": {"text": "I'll help you, Bram!"}},
+        {"action": "steal", "args": {"target": "agent_bram"}},
+    ]
+    names = {"agent_bram": "Bram", "agent_cara": "Cara"}
+    out, notes = _coherence_resolve([dict(s) for s in steps], "", "annotate", names)
+    flagged = [s for s in out if s.get("_coherence", {}).get("contradicted")]
+    assert flagged, "friendly-about-Bram + steal-from-Bram is a true contradiction"
+    assert flagged[0]["_coherence"]["intent"] == "friendly"
+
+
+def test_coherence_resolve_self_harm_after_friendly_speech_not_flagged():
+    """A SELF-targeted harm after friendly speech is not a contradiction (the
+    actor cannot be hypocritical toward themselves here)."""
+    from petridish.agents.runtime import _coherence_resolve
+    steps = [
+        {"action": "say", "args": {"text": "I'll help you, friend!"}},
+        {"action": "steal", "args": {"target": "agent_ada"}},
+    ]
+    names = {"agent_ada": "Ada", "agent_bram": "Bram"}
+    out, notes = _coherence_resolve(
+        [dict(s) for s in steps], "", "annotate", names, actor_id="agent_ada",
+    )
+    assert notes == []
+    assert all("_coherence" not in s for s in out), (
+        "self-targeted harm after friendly speech must not be flagged"
+    )
+
+
+async def test_friendly_say_to_X_then_harm_to_Y_not_flagged_full_path():
+    """Full parse→normalize→coherence→apply path: a friendly say naming Cara,
+    then a steal FROM Bram must NOT be flagged when coherence is enabled."""
+    script = [{"actions": [
+        {"action": "say", "args": {"text": "I'll help you, Cara — take these, friend!"}},
+        {"action": "steal", "args": {"target": "agent_bram"}},
+    ]}]
+    runtime, world, ada, bram = _make_world_runtime(
+        script, start="market", names=("Ada", "Bram", "Cara"),
+        params=_make_params(coherence=CoherenceParams(enabled=True, strategy="annotate")),
+    )
+    result = await runtime.run_turn(ada)
+    evts = _domain_events(result)
+    assert all(not e.get("payload", {}).get("coherence", {}).get("contradicted")
+               for e in evts)
+    assert "coherence_note" not in [e["kind"] for e in evts]
+
+
+async def test_friendly_say_to_X_then_harm_to_X_is_flagged_full_path():
+    """Full path: friendly say naming Bram, then a steal FROM Bram IS flagged —
+    the true contradiction survives the target-aware fix."""
+    script = [{"actions": [
+        {"action": "say", "args": {"text": "I'll help you, Bram — take these, friend!"}},
+        {"action": "steal", "args": {"target": "agent_bram"}},
+    ]}]
+    runtime, world, ada, bram = _make_world_runtime(
+        script, start="market", names=("Ada", "Bram", "Cara"),
+        params=_make_params(coherence=CoherenceParams(enabled=True, strategy="annotate")),
+    )
+    result = await runtime.run_turn(ada)
+    evts = _domain_events(result)
+    flagged = [e for e in evts if e.get("payload", {}).get("coherence", {}).get("contradicted")]
+    assert flagged, "friendly-to-Bram + steal-from-Bram is a true contradiction"
+    assert flagged[0]["payload"]["coherence"]["intent"] == "friendly"

@@ -714,11 +714,48 @@ def _coherence_target(args: dict, agent_names: dict) -> str | None:
     return None
 
 
-def _speech_stance(text: str, target_name: str | None) -> str:
-    """EM-224 — classify a speech act's stance ('friendly'/'hostile'/'neutral').
-    Deterministic substring match on the lexicons. When a target name is given,
-    a neutral classification with no cue is still neutral (we only assert a
-    stance when a cue fires)."""
+def _name_in_text(low: str, name: str | None) -> bool:
+    """Whether an agent name (full, or its first token) appears in lowercased
+    text. e.g. 'Bram the Bold' matches on 'bram'."""
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    if name in low:
+        return True
+    parts = name.split()
+    return bool(parts) and parts[0] in low
+
+
+def _speech_addresses(text: str, target_name: str | None,
+                      other_names: tuple[str, ...] = ()) -> bool:
+    """EM-224 — does the speech act actually address `target_name`? A stance is
+    DIRECTED at a target, so a friendly/hostile remark only bears on a harm/help
+    step toward that SAME target. True when the target's name appears in the
+    text, OR the speech is a direct second-person address ('you'/'your') that is
+    not claimed by a DIFFERENT named agent. Naming another agent ('…you, Cara!')
+    binds the second person to that named addressee, so a 'you' alone no longer
+    counts as addressing this target. Pure substring match — no LLM/clock/random."""
+    low = (text or "").lower()
+    if _name_in_text(low, target_name):
+        return True
+    if "you" in low or "your" in low:
+        # second-person address — but only this target's, not one explicitly
+        # redirected to a different named agent in the same line.
+        names_another = any(_name_in_text(low, n) for n in other_names)
+        return not names_another
+    return False
+
+
+def _speech_stance(text: str, target_name: str | None,
+                   other_names: tuple[str, ...] = ()) -> str:
+    """EM-224 — classify a speech act's stance ('friendly'/'hostile'/'neutral')
+    TOWARD `target_name`. Deterministic substring match on the lexicons, but the
+    stance is asserted ONLY when the speech actually addresses the target (its
+    name or an unredirected second-person 'you'). A friendly/hostile remark about
+    a DIFFERENT agent leaves this target's stance 'neutral', so it cannot
+    contradict an action toward this target (EM-224 target-blind regression)."""
+    if not _speech_addresses(text, target_name, other_names):
+        return "neutral"
     low = (text or "").lower()
     has_friendly = any(cue in low for cue in _FRIENDLY_CUES)
     has_hostile = any(cue in low for cue in _HOSTILE_CUES)
@@ -734,6 +771,7 @@ def _coherence_resolve(
     thought: str,
     strategy: str,
     agent_names: dict,
+    actor_id: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """EM-224 — the PIANO coherence bottleneck (deterministic, zero-LLM).
 
@@ -783,7 +821,18 @@ def _coherence_resolve(
         if target is None:
             resolved.append(step)
             continue
-        stance = _speech_stance(speech_text, agent_names.get(target))
+        # A self-targeted harm/help after friendly speech is not hypocrisy toward
+        # another agent → never a contradiction (EM-224 self-harm regression).
+        if actor_id is not None and target == actor_id:
+            resolved.append(step)
+            continue
+        # The stance must be directed at THIS target: a second-person 'you' is
+        # claimed by any OTHER agent the speech names, so it cannot bind here.
+        target_name = agent_names.get(target)
+        other_names = tuple(
+            n for aid, n in agent_names.items() if aid != target and n
+        )
+        stance = _speech_stance(speech_text, target_name, other_names)
         contradicted = (
             (stance == "friendly" and action in _HARM_VERBS)
             or (stance == "hostile" and action in _HELP_VERBS)
@@ -4453,6 +4502,7 @@ class AgentRuntime:
             steps, _drop_notes = _coherence_resolve(
                 steps, action_dict.get("thought", ""),
                 _coherence_strategy(self.world.params), agent_names,
+                actor_id=agent.id,
             )
             for note in _drop_notes:
                 coherence_drop_events.append({
