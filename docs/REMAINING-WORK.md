@@ -49,6 +49,15 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 > parity, EM-182 agent-chosen placement. Backend 922 / frontend 803 tests. **EM-216 acquisition DONE (2026-06-19); ongoing variety expansion in PRs #41–43**
 > — the new-kit acquisition (Nature Kit etc.) is the one HITL follow-on; systems consume them with
 > zero further code. **EM-201 (Chronicle) ✅** the headline shipped; multi-pass deep-dive deferred → EM-225.
+> **Wave M (Cooperation Economy) filed 2026-06-24** via `plan-intake` from a gap analysis of
+> `docs/research/deep-research-v1.md` (the original Emergence-World deep research) vs shipped
+> capabilities — **EM-227–238**, opening **W23**. The parts of EW's emergence engine we have
+> zero/partial implementation for, ranked by leverage: the **cooperation economy** (skills →
+> teach/trade → specialization → peer-judged reward; EM-227–232) and EW's **multi-drive
+> psychology** (knowledge + influence needs, EM-229) — the mechanisms that made identical
+> agents diverge into a society. Tier 3 is governance/harm texture (boost queue, living
+> constitution, intimidate/deceive, police). Already-tracked EW gaps not re-filed: voice/TTS
+> (EM-214), weather/day-night (EM-127).
 
 ## Format & conventions
 
@@ -390,7 +399,20 @@ list. The strategic roadmap (waves + exit criteria) lives in `BUILD-PLAN.md`.
 
 | EM-226 | P0 | — | providers | run storm 2026-06-20 | **Auto-backup circuit breaker (storm fast-fail).** Live run hit a total rate-limit storm — `[auto] 429: "All models exhausted"` for every agent, ~50% failure rate (5625/5702). Root cause = NOT bad routing: the proxy's own `auto` health-router (the EM-205 universal backup) had no un-throttled upstream left (Cloudflare hit its HARD daily 10k-neuron cap; ollama/zhipu/llm7/google per-minute limits), and recent call-rate step-ups (EM-222 per-turn query-embed + Wave I art voting, same single proxy key) outran the 14-tier pool's refill rate. The amplifier in OUR code: EM-205 re-issued the backup EVERY failing turn → 2 doomed POSTs/turn (home + auto), pinning the windows. **Fix:** `Router._auto_backup_call` now trips a breaker on ANY `auto` failure and FAST-FAILS subsequent backups (home error → EM-173 idle fallback, NO 2nd POST). Recovery is **counter-based, no clock reads** (like EM-177): every Nth skipped backup (`_AUTO_BREAKER_PROBE_EVERY=8`) PROBES `auto` once; a probe success closes it. ~87% fewer doomed POSTs during a sustained storm; agents never go quiet. In-memory state cleared by `clear_cache()` on world reset; `auto_backup_health()` accessor + OPEN/CLOSED transition logs. Tests: `backend/tests/test_auto_breaker.py` (8). The single proxy key is by-design (FreeLLMAPI aggregates 14 free tiers behind one endpoint); real headroom = enable more tiers/accounts in the proxy dashboard, not code. | done | 2026-06-20 |
 
-_Next free ID: EM-227._
+| EM-227 | P1 | W23 | backend | research-v1 (EW gap) | **Skills & emergent professions** — a skill library: agents hold distinct named skills; gate some high-value actions behind a skill an agent *lacks*, so interdependence forces Project-Sid-style self-specialization (identical agents diverge into farmers/artists/etc.). Today every agent can do every action equally, so cooperation has no functional driver. Closes the dangling assumption in **EM-110** (city migration already re-points a `skills` payload that has no system behind it). The research's single biggest gap + "your differentiator." Source: `docs/research/deep-research-v1.md` §2,4. | open | — |
+| EM-228 | P1 | W23 | backend | research-v1 (EW gap) | **`teach_skill` / skill-sharing** — co-located skill transfer (`teach_skill(agent, skill)` / `request_skill`) as *the* explicit cooperation lever (research: "your single best explicit cooperation mechanic"; Voyager skill library shared between agents). Pairs the gorgeous skill-transfer animation payoff. Deps EM-227. | open | — |
+| EM-229 | P1 | W23 | backend | research-v1 (EW gap) | **Three-needs psychology** — add decaying `knowledge` + `influence` needs alongside `energy` (EW's 30h / 24h / 36h drives). Today only energy decays, so agents trend toward bare survival + governance and never chase status or learning; two-thirds of EW's motivational engine is absent. Knowledge-need drives curiosity/teaching; influence-need drives politics/campaigning. | open | — |
+| EM-230 | P1 | W23 | backend | research-v1 (EW gap) | **Real trade / barter** — two-sided `offer_trade(give ⇄ get)` negotiated exchange (credits / skill / resource), beyond today's one-way `give` (a gift) + `steal`. Turns the charity-or-theft binary into an economy; with EM-227 enables skill-for-skill and skill-for-credit deals. Deps EM-227. | open | — |
+| EM-231 | P2 | W23 | backend | research-v1 (EW gap) | **Cooperation-gated tools** — high-value actions unlock *only* when both partners have agreed to cooperate (EW's hard mechanic: "collaborative tools only available when partners have agreed"). Makes cooperation a designed affordance, not a hoped-for accident; we trust-gate births (EM-114) but gate no general tool behind mutual consent. Deps EM-230. | open | — |
+| EM-232 | P2 | W23 | backend | research-v1 (EW gap) | **Peer-judged credit economy (Victory Arch)** — a periodic pitch → peer-judge → award cycle (EW's ~2-day Victory Arch). Today credits are minted only via work/forage; this adds reputation-through-contribution and the inequality story (feeds a Gini / AWI-M8 read of whether credits circulate or concentrate). | open | — |
+| EM-233 | P2 | W23 | backend | research-v1 (EW gap) | **Memory consolidation ("sleep") + soul entries** — episodic→semantic batch summarization at a token ceiling (EW's 500-batch / 100k→50k REM-style consolidation), scaled down; plus **soul entries** = a tiny never-summarized table of immutable identity anchors injected into every prompt. EM-222 added relevance retrieval but no consolidation; today's `beliefs` (FIFO-cap-20 via `remember`) is a weak soul-entry stand-in. Curbs long-run prompt bloat + identity drift. | open | — |
+| EM-234 | P2 | W23 | backend | research-v1 (EW gap) | **Universalization prompting** — inject the GovSim moral-reasoning scaffold ("before acting on the commons, ask: what happens if *every* agent did this?") into the turn prompt. Measurably lifts cooperation in weaker models (GovSim's proven lever); cheapest ROI here — one prompt block, no new systems. | open | — |
+| EM-235 | P3 | W23 | backend | research-v1 (EW gap) | **Boost queue** — let agents spend credits for extra turns / airtime (EW's ComputeCredits boost queue). A pure emergence lever: agents literally buy influence over the shared timeline. We have multi-action turns (EM-199) but no credit-bought turn priority. | open | — |
+| EM-236 | P3 | W23 | backend+frontend | research-v1 (EW gap) | **Living constitution artifact** — an amendable articled foundational document (EW's 5-article constitution) agents revise, vs today's flat list of ad-hoc rules. Adds the constitutional-growth signal (AWI M9). Builds on the existing 70%-threshold propose/vote/enact (EM-015) + governance location gate (EM-108). | open | — |
+| EM-237 | P3 | W23 | backend | research-v1 (EW gap) | **Harm-surface finishers** — add `intimidate` (threaten without contact) + `deceive` (lying as a first-class act) as distinct tools, the reputation-gaming / dark-emergence axis EW exposed (arson/punch/intimidate/steal/deceive). Our `attack`/`insult`/`steal`/`arson` already cover physical harm; these two complete the set. (EW had **no weapons-as-objects** — violence is tool calls, so none are needed.) | open | — |
+| EM-238 | P3 | W23 | backend | research-v1 (EW gap) | **Police / justice institution** — a complaint-filing + soft-enforcement venue (EW's Police Station): agent-driven consequences for crime (`crime_kinds` already tracked) beyond the `ban_arson`/`ban_stealing`/`crime_penalty` laws. Keeps EW's "self-governance *without* hard enforcement" research question intact. | open | — |
+
+_Next free ID: EM-239._
 
 ## Notes
 
@@ -460,3 +482,16 @@ _Next free ID: EM-227._
   flatten into NPCs-on-rails. EM-156 resolves the full-pivot question → old-town historic
   district. Existing entries re-pointed instead of duplicated: **EM-127** re-waved W14→W17
   (day/night rides D3), **EM-123** feeds the EM-153 generator.
+- **EM-227–238 (Wave M — Cooperation Economy)** entered 2026-06-24 via `plan-intake` from a
+  gap analysis of `docs/research/deep-research-v1.md` (the *original* Emergence-World deep
+  research) against shipped capabilities. They open **W23**. The framing: we've built a strong
+  observation/world-dressing layer + survival/governance loops, but EW's **cooperation economy**
+  (skills → teach/trade → specialization → peer-judged reward; **EM-227–232**) and its
+  **multi-drive psychology** (knowledge + influence needs; **EM-229**) are almost entirely
+  absent — and those are the mechanisms that made identical agents diverge into a society.
+  Ranked Tier 1 (P1, EM-227–230) → Tier 3 (P3, EM-235–238). **Sequencing:** EM-227 (skills) is
+  the keystone — EM-228 (teach), EM-230 (trade), EM-231 (co-op-gated tools) all dep on it; do it
+  first. **Weapons note (user Q):** EW had *no weapons-as-objects* — violence is tool calls, and
+  our `attack`/`insult`/`steal`/`arson` already match that surface, so nothing weapon-shaped was
+  filed; **EM-237** only adds the two missing harm *verbs* (intimidate/deceive). Already-tracked
+  EW gaps deliberately **not** re-filed: voice/TTS (**EM-214**), weather/day-night (**EM-127**).
