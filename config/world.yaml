@@ -537,7 +537,7 @@ world:
   # (reflex-first, zero critical-path LLM calls; the PNG is an external
   # side-artifact off the replay surface). More art = more chronicle texture.
   image_gen:
-    enabled: false         # OFF 2026-06-21 — HF inference credits depleted (402); create_image is dropped from the menu + rejected (zero image-API calls). Re-enable when credits return.
+    enabled: true          # ON 2026-06-27 — re-enabled on the FreeLLMAPI image lane (EM-247). Chain: FreeLLMAPI /images/generations (primary, small queues) → Gemini gemini-2.5-flash-image (backup, needs GEMINI_API_KEY) → Pollinations (keyless final fallback). The old HF-credit 402 path is gone.
     max_concurrent: 2      # in-flight PNG fetches; the loop skips a fetch above this (skip-under-load)
     max_gallery: 30        # newest images retained in world.gallery (pop-oldest on append)
 
