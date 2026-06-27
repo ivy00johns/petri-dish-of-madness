@@ -1212,6 +1212,15 @@ class World:
         # frontend renders a procedural fallback). Serialized in to_snapshot() only
         # when non-empty so pre-Wave-I snapshots restore byte-identically.
         self.plaza_banner_ref: str = ""
+        # EM-183 — the CIVIC CENTER: the place id the town VOTED to be its heart
+        # (a `relocate_center` proposal that ratifies on a 70% supermajority, like
+        # demolish — see action_propose_rule / _evaluate_rule / _on_rule_activated).
+        # Empty = the conventional center (the "plaza", at the layout origin) — so a
+        # town that never relocates is byte-identical to today. The frontend reads
+        # this to re-anchor the 3-D orbit on the agents' chosen heart. Serialized in
+        # to_snapshot() ONLY when non-empty (the plaza_banner_ref only-when-set
+        # pattern); restored defensively in from_snapshot ⇒ EM-155 round-trips.
+        self.town_center_id: str = ""
         # EM-236 — the LIVING CONSTITUTION: an amendable, ARTICLED foundational
         # document layered over the flat rule list. A list of articles, each
         # {id, text, ratified_tick}; grown ONLY through governance (an
@@ -2909,6 +2918,22 @@ class World:
                 return p.id
         return None
 
+    def civic_center_id(self) -> str:
+        """EM-183 — the effective civic center: the place the town VOTED its heart
+        (town_center_id) if that place still exists, else the conventional default —
+        the 'plaza', falling back to the first social place, then the first place,
+        then "" (an empty world). Pure + deterministic; the frontend mirrors this
+        fallback chain (noticeSpot) so the 3-D orbit re-anchors on the same place."""
+        voted = self.town_center_id
+        if voted and voted in self.places:
+            return voted
+        if "plaza" in self.places:
+            return "plaza"
+        for p in self.places.values():
+            if p.kind == "social":
+                return p.id
+        return next(iter(self.places), "")
+
     def action_investigate(self, agent: AgentState, suspect: AgentState) -> tuple[bool, str, int]:
         """EM-240 — an enforcer questions co-located witnesses to confirm a
         suspect's unwitnessed crimes into notoriety. Needs a third party present."""
@@ -3473,10 +3498,15 @@ class World:
         # demolish/trial): it carries {op, article_id?, text} on its payload and
         # ratifies on a 70% supermajority (like demolish — see _evaluate_rule). The
         # passing vote add/edit/removes an article in _on_rule_activated.
+        # EM-183 — relocate_center is a governance effect (R5, modelled on demolish):
+        # it carries the TARGET place id (the proposed new civic heart) on the
+        # payload and ratifies on a 70% supermajority (like demolish — see
+        # _evaluate_rule). The passing vote re-anchors the town center in
+        # _on_rule_activated; the 3-D world re-orbits on the agents' chosen heart.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
                          "name_town", "demolish", "promote_image", "trial",
-                         "amend_constitution"}
+                         "amend_constitution", "relocate_center"}
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -3571,6 +3601,24 @@ class World:
             payload = {"op": op, "text": text[:300]}
             if article_id:
                 payload["article_id"] = article_id
+        # EM-183 — relocate_center carries the TARGET place id (the proposed new
+        # civic heart) on the payload, like demolish's target. Validate it BEFORE a
+        # vote opens: the target must be a REAL place, and re-anchoring to the place
+        # that is ALREADY the center is a no-op (reject it so the SAME relocation
+        # can't re-pass forever — the run-663 name_town-spam guard). The per-target
+        # duplicate guard lives in the OPEN-proposal loop below (mirrors demolish).
+        if effect == "relocate_center":
+            target = str(target or "").strip()
+            if target not in self.places:
+                return False, (f"relocate_center requires a real place id "
+                               f"(got {target!r})"), None
+            if target == self.civic_center_id():
+                place = self.places.get(target)
+                here = place.name if place is not None else target
+                return False, (f"the civic center is already at {here} (settled) — "
+                               f"propose a DIFFERENT place or legislate something "
+                               f"else"), None
+            payload = {"target": target}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -3583,6 +3631,13 @@ class World:
             if effect == "demolish":
                 if (rule.payload or {}).get("target") == payload.get("target"):
                     return False, f"a demolish vote for {payload.get('target')!r} is already open", None
+                continue
+            # EM-183 — relocate_center is scoped per TARGET (two distinct "new
+            # heart" proposals may have open votes at once); only a duplicate vote
+            # for the SAME target is blocked (mirrors demolish/promote_image).
+            if effect == "relocate_center":
+                if (rule.payload or {}).get("target") == payload.get("target"):
+                    return False, f"a relocate vote for {payload.get('target')!r} is already open", None
                 continue
             if effect == "promote_image":
                 if (rule.payload or {}).get("image_id") == payload.get("image_id"):
@@ -3625,7 +3680,7 @@ class World:
         active = (
             self._active_rule(effect)
             if effect not in ("name_town", "demolish", "promote_image", "trial",
-                              "amend_constitution") else None
+                              "amend_constitution", "relocate_center") else None
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
         # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
@@ -3687,7 +3742,8 @@ class World:
                 existing = (
                     self._active_rule(rule.effect)
                     if rule.effect not in ("name_town", "promote_image", "trial",
-                                           "amend_constitution") else None
+                                           "amend_constitution",
+                                           "relocate_center") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -3888,6 +3944,38 @@ class World:
                 },
             })
             return
+        # EM-183 — relocate_center: a passing vote re-anchors the town's civic
+        # heart on the agents' chosen place. Sets town_center_id and parks a
+        # `center_relocated` event in the SAME outbox name_town/demolish use (drained
+        # + emitted by the loop's _flush_spawn_events); the frontend re-orbits the
+        # 3-D world there. A vanished target is a silent no-op (the vote still
+        # applied). The proposer's influence need (EM-229) is replenished — a
+        # governance win, like a ratified amendment.
+        if rule.effect == "relocate_center":
+            rule.applied = True
+            target = (rule.payload or {}).get("target")
+            place = self.places.get(target)
+            if place is None:
+                return
+            self.town_center_id = str(target)
+            proposer = self.agents.get(rule.proposer_id)
+            if proposer is not None:
+                self.replenish_influence(proposer, 15.0)
+            town_label = self.town_name or "the town"
+            self.pending_spawn_events.append({
+                "kind": "center_relocated",
+                "actor_id": "system",
+                "actor_type": "system",
+                "text": (f"🏛 By vote, the heart of {town_label} moves to "
+                         f"{place.name}."),
+                "payload": {
+                    "place_id": str(target),
+                    "place_name": place.name,
+                    "proposal_id": rule.id,
+                    "proposer_id": rule.proposer_id,
+                },
+            })
+            return
         if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
@@ -4030,7 +4118,10 @@ class World:
         # weightier act than an ordinary law, so it shares the demolish-grade
         # supermajority bar (the fraction is `world.constitution.ratify_threshold`,
         # default 0.7 == the demolish bar; demolish itself stays a fixed 0.7).
-        if rule.effect in ("demolish", "amend_constitution"):
+        # EM-183 — relocate_center re-anchors the town's civic heart, a weightier,
+        # one-shot civic act than an ordinary law, so it shares the demolish-grade
+        # 0.7 supermajority bar (the fixed `else` branch below — no config block).
+        if rule.effect in ("demolish", "amend_constitution", "relocate_center"):
             if rule.effect == "amend_constitution":
                 try:
                     frac = float(self._constitution_param("ratify_threshold", 0.7))
@@ -7153,6 +7244,13 @@ class World:
             snap["gallery"] = [dict(g) for g in self.gallery]
         if self.plaza_banner_ref:
             snap["plaza_banner_ref"] = self.plaza_banner_ref
+        # EM-183 — the VOTED civic center. Serialized ONLY when set (the
+        # plaza_banner_ref only-when-non-empty pattern), so a town that never
+        # relocates — and every pre-EM-183 snapshot — keeps the exact prior key set
+        # (absent ⇒ "" on restore ⇒ the conventional plaza center). A relocation
+        # survives a fork/replay byte-identically (it is a plain place id).
+        if self.town_center_id:
+            snap["town_center_id"] = self.town_center_id
         # EM-123 — zoned-neighborhood maturity. Serialized ONLY when a tier has
         # diverged from the derivable baseline (tier 1 / progress 0), so a fresh
         # world — and every pre-EM-123 snapshot — keeps the exact prior key set
@@ -7566,6 +7664,12 @@ class World:
             if isinstance(g, dict) and g.get("image_id")
         ]
         world.plaza_banner_ref = str(state.get("plaza_banner_ref", "") or "")
+        # EM-183 — restore the VOTED civic center (absent ⇒ "" ⇒ the conventional
+        # plaza center, so pre-EM-183 snapshots restore byte-identically). A
+        # serialized id with no matching place is tolerated and re-emitted verbatim
+        # (round-trip stays byte-identical); civic_center_id() resolves the dangling
+        # id back to the plaza chain at READ time, so nothing breaks.
+        world.town_center_id = str(state.get("town_center_id", "") or "")
         # EM-123 — restore zoned-neighborhood maturity. The baseline (tier 1)
         # neighborhoods are already derived from the restored places by __init__;
         # here we OVERLAY the serialized tier/progress. Absent in pre-EM-123

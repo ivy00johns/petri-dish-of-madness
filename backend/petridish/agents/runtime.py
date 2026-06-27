@@ -1820,10 +1820,26 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # EM-240 (Task 11): trial — an enforcer escalates a suspect to a town-hall
         # vote (convict/acquit). Role-gated to enforcers (menu and resolution agree);
         # carries the defendant id on args.target (mirrors demolish's target arg).
+        # EM-236: amend_constitution — add|edit|remove a foundational article by 70%
+        # vote. EM-183: relocate_center — re-anchor the civic heart on a chosen place
+        # by 70% vote (carries the place id on args.target, like demolish). BOTH MUST
+        # be in this set (FINDING 1, above): the gate is the agent's ONLY path, so an
+        # effect missing here is silently un-proposable even though world.action_-
+        # propose_rule accepts it (amend_constitution shipped EM-236 without this and
+        # was reachable only by bypassing the gate in tests).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
-                         "ban_arson", "name_town", "demolish", "promote_image", "trial"}
+                         "ban_arson", "name_town", "demolish", "promote_image",
+                         "trial", "amend_constitution", "relocate_center"}
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
+        # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
+        # agree rule, EM-108): mirror demolish's existence check so the gate rejects
+        # the same proposals world.action_propose_rule would, with the same guidance.
+        if effect == "relocate_center":
+            target = str(args.get("target") or "").strip()
+            if target not in getattr(world, "places", {}):
+                return ("relocate_center requires args.target = the id of a real "
+                        "place to make the new town center")
         if effect == "trial":
             if getattr(agent, "role", "citizen") != "enforcer":
                 return "trial is reserved for enforcers (role) — you keep no badge"
@@ -2453,6 +2469,21 @@ def _assemble_context(
                              f"(edit/remove) — ratified on a 70% supermajority")
         else:
             propose_tail += " — ratified on a 70% supermajority"
+        # EM-183 — relocate_center re-anchors the town's civic heart on a chosen
+        # place by 70% supermajority. Offered to EVERY proposer, but ONLY when there
+        # is a non-center place to move to (so the menu never names the place that
+        # is already the center, which the validator would reject as a no-op). Names
+        # a concrete candidate so the model is offered a target that will resolve.
+        _center_now = (world.civic_center_id() if hasattr(world, "civic_center_id")
+                       else "plaza")
+        _relocate_to = next(
+            (pid for pid in (getattr(world, "places", {}) or {}) if pid != _center_now),
+            None)
+        if _relocate_to:
+            propose_line += "|relocate_center"
+            propose_tail += (f"; relocate_center needs target=<a place's id, e.g. "
+                             f"{_relocate_to}> to make it the new town center by "
+                             f"70% vote")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
