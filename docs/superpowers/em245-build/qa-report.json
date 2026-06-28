@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "ticket": "EM-245 (S3b) — master-plan city morph (final city-layout slice)",
+  "status": "pass",
+  "summary": "EM-245 ships. Backend suite 1704 passed / 0 failed (independent re-run, 47s). All four core contracts verified: adopt_master_plan ratifies only at 0.7 supermajority through the shared governance gate; activation sets self.master_plan; unknown kind + one-active-plan guards enforced in BOTH world and runtime and they agree; a failed vote starts no morph; renewal-excluded in both lists; the EM-244 mirror (demolish_road/set_car_policy/demolish) is intact (30 EM-244 tests green). Morph safety holds on the live vote path: never-edgeless (adds-before-removes), exact bounded convergence (<=4 ops/tick), determinism + mid-morph snapshot round-trip byte-identical, and EM-155 no-op-when-inactive is airtight (default-world snapshot byte-identical, loop hook a pure no-op when master_plan is None). Scope clean: only 7 backend files + the plan doc in the commit range; the working-tree M flags on imagegen/provider.py + config/world*.yaml are pre-existing, outside the range. No CRITICAL blockers, no lens=blocker.",
+  "scores": {
+    "contract_conformance": {
+      "score": 4,
+      "notes": "Every core EM-245 contract clause verified in code + tests (0.7 supermajority via ceil(0.7*living); governance gate at world.py:3617; activation at world.py:4197; unknown-kind + one-active guards at world.py:3785-3793 and runtime.py:1965-1971, agreeing; renewal exclusion at world.py:3857 and 3928; EM-244 mirror intact). Docked one point: the stated 'corrupt master_plan -> None' snapshot-hardening invariant is only PARTIALLY met — from_snapshot (world.py:7763) is type-only (non-dict/empty-dict -> None, confirmed) but admits any NON-EMPTY shape-malformed dict, so the intent is not fully enforced."
+    },
+    "correctness": {
+      "score": 4,
+      "notes": "Core logic correct; full propose->ratify->morph-to-completion is deterministic across two worlds and survives a mid-morph snapshot/resume byte-identically. Two real-but-contained defects: (1) the radial preset target is DISCONNECTED into 2 components (verified 17 nodes/24 edges/2 components vs 1 for pentagon/ring/grid) — the inner ring (radI, with_center=False) gets ring edges but no spokes, contradicting its docstring; impact is nil today (place-based movement) and visual-gated on EM-247. (2) A shape-corrupt master_plan in a snapshot can wedge the morph in a per-tick KeyError or silently drive/complete an unintended grid morph — but loop.py:639-644 wraps the step in try/except so it never crashes the run."
+    },
+    "security": {
+      "score": 4,
+      "notes": "No network-facing surface. The only attack vector is a crafted/corrupted snapshot artifact (trusted/internal) reaching the type-only restore guard at world.py:7763 -> degenerate target (e.g. params sides:0 -> edgeless removal path; missing kind/seed -> KeyError). All outcomes are CONTAINED by the loop's try/except (no crash, no traceback escape) and the vote path itself hardcodes params={} so it cannot reach degenerate targets. Recommend (non-blocking) validating kind in MASTER_PLAN_KINDS + seed presence at restore to fully meet the corrupt->None intent."
+    },
+    "coverage": {
+      "score": 4,
+      "notes": "22 new tests (15 in test_master_plan.py incl. supermajority pass/fail, full-morph byte-identical replay, mid-morph snapshot resume, never-edgeless, determinism; 7 in test_citygraph.py). EM-246 completion tests are legitimate (geometric kinds now route to master_plan; unknown-kind grid fallback PRESERVED, just re-pointed pentagon->hexagon). Gaps: no test for a shape-malformed snapshot master_plan, and no connectivity assertion on the radial preset (existing radial tests only assert nonempty+deterministic)."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "git diff --stat 93a1a9e..HEAD = exactly the 7 backend files (citygraph.py, world.py, loop.py, agents/runtime.py + 3 test files) plus the plan doc. No web/, no unrelated drift. Working-tree M flags on imagegen/provider.py + config/world*.yaml confirmed empty across the commit range (pre-existing uncommitted edits, unrelated to EM-245)."
+    }
+  },
+  "test_results": {
+    "command": ".venv/bin/python -m pytest backend/tests/ -q",
+    "passed": 1704,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "warnings": 1,
+    "warning_detail": "pre-existing StarletteDeprecationWarning (httpx/testclient), unrelated to EM-245",
+    "duration_seconds": 47.12,
+    "independent_rerun": true
+  },
+  "blockers": [],
+  "issues": [
+    {
+      "severity": "MEDIUM",
+      "id": "snapshot-hardening-type-only",
+      "location": "backend/petridish/engine/world.py:7763 (from_snapshot) vs :1350 (step_master_plan_morph)",
+      "description": "Snapshot restore guard is type-only (non-dict/empty-dict -> None, verified) and admits any NON-EMPTY shape-malformed master_plan dict. step_master_plan_morph then hard-subscripts plan['kind'] and int(plan['seed']) while the only filter (if not plan) catches falsy. Confirmed corrupt outcomes from a crafted snapshot: {'kind':'pentagon'} -> per-tick KeyError 'seed' (swallowed by loop try/except -> morph silently wedged); {'kind':'hexagon',...} -> falls back to classic_grid -> silently drives/completes an unintended grid morph. from_snapshot never crashes and loop.py:639-644 contains the fallout, but the stated 'corrupt -> None' invariant is not fully met. Fix (non-blocking): validate kind in MASTER_PLAN_KINDS + seed presence (-> None) in the restore ModelBoundary.",
+      "blocking": false,
+      "verified": true
+    },
+    {
+      "severity": "LOW",
+      "id": "radial-preset-disconnected",
+      "location": "backend/petridish/engine/citygraph.py:408-411 (master_plan radial branch, inner _ring_plan with_center=False)",
+      "description": "The radial preset target is topologically DISCONNECTED into 2 components (verified 17 nodes / 24 edges / 2 components). The inner ring (radI) gets ring edges but no spokes to the center/outer wheel, contradicting its docstring ('two concentric rings + spokes to a roundabout center'). No functional impact today (backend movement is place-based, not road-graph traversal) and the visual is gated on EM-247, so not a blocker; will surface as a stranded inner ring once ROAD_MESH renders. Fix: add inner-ring spokes (radI -> center or -> radO) + a connectivity assertion.",
+      "blocking": false,
+      "verified": true
+    },
+    {
+      "severity": "LOW",
+      "id": "no-op-self-shape-guard-absent",
+      "location": "backend/petridish/engine/world.py:3785-3793 (adopt_master_plan propose validation)",
+      "description": "No no-op guard: an agent can adopt the city's current shape (e.g. grid on an already-grid city); on ratification step_master_plan_morph sees an empty diff and immediately emits master_plan_complete + clears, zero roads changed. LOW because each cycle needs a fresh 0.7 supermajority and it is CONSISTENT with the EM-244 mirror (set_car_policy also lacks a no-op guard). Worth a guard only if the run-663 no-op-re-pass spam pattern resurfaces.",
+      "blocking": false,
+      "verified": true
+    },
+    {
+      "severity": "LOW",
+      "id": "cross-host-ulp-determinism",
+      "location": "backend/petridish/engine/citygraph.py:392-415 (master_plan/_ring_plan math.cos/math.sin)",
+      "description": "master_plan node coords use math.cos/math.sin (the only non-exact-arithmetic source in citygraph). Same-host replay/fork is fully deterministic (all tests pass). Cross-HOST only: a mid-morph snapshot forked to a different host recomputes coords for not-yet-added nodes, which could differ in the last ULP, making to_dict() non-byte-identical across hosts. Mitigated: diff_graphs matches by id (not coords) and already-placed nodes ride the serialized floats. Low probability; noted because determinism is the contract.",
+      "blocking": false,
+      "verified": true
+    }
+  ],
+  "non_defects_recorded": [
+    "EM-247 geometric visual (ROAD_MESH render of pentagon/radial/ring) is a separate ticket awaiting sign-off — NOT a defect.",
+    "Frontend building-lot relocation (assignBuildingLots) deferral — NOT a defect.",
+    "adopt_master_plan absent from the proactive propose_rule effect menu (runtime.py:2519) — a discoverability gap that FAITHFULLY MIRRORS EM-244 (demolish_road/set_car_policy are likewise absent); recorded NON-defect.",
+    "diff_graphs add_nodes/remove_node_ids unused by the morph step (nodes derived from edge endpoints) — dead but harmless.",
+    "Convergence decided on edges only — safe for all current generators (every target node is an edge endpoint); a latent constraint only on hypothetical future edgeless-node generators."
+  ],
+  "lens_verdicts": [
+    {"lens": "Determinism + EM-155 no-op-when-inactive + snapshot-restore hardening", "verdict": "issues"},
+    {"lens": "Governance correctness + EM-244 mirror intact", "verdict": "clean"},
+    {"lens": "Morph safety + convergence", "verdict": "issues"},
+    {"lens": "Scope + regression + EM-246 completion", "verdict": "issues"}
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "No CRITICAL blocker, no lens=blocker, contract_conformance=4 (>=3), security=4 (>=3). Three of four lenses returned 'issues' but every finding is MEDIUM/LOW/INFO and non-blocking: the highest-severity item (type-only snapshot hardening) does not crash from_snapshot and is contained by the loop's try/except, and is not reachable via the vote path. The radial-disconnection and no-op-self-shape items are LOW and visual-gated / mirror-consistent. Backend suite 1704 passed / 0 failed on independent re-run. Recommend filing the MEDIUM snapshot-hardening fix and the LOW radial-connectivity fix as follow-ups (the latter before EM-247 visual sign-off)."
+  }
+}
