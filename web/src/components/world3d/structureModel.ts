@@ -23,7 +23,7 @@
  * and buildingStyle — this layer guards independently, belt and braces).
  */
 
-import { MODEL_REGISTRY, MODEL_POOLS, PLACE_MODELS, type ModelSpec } from './assets/models';
+import { MODEL_REGISTRY, MODEL_POOLS, PLACE_MODELS, PLACE_POOLS, type ModelSpec } from './assets/models';
 import { hashUnit, operationalVariant, type VariantKey } from './worldSpace';
 
 export interface StructureModelResolution {
@@ -76,9 +76,20 @@ export function isFundBuilding(building: { name: string; kind: string }): boolea
 
 /**
  * Resolve a place-anchor GLB by place kind (Building.tsx). Unknown kinds (or
- * registry nulls — wild stays procedural by design) return null.
+ * registry nulls — none today) return null. EM-248: when the kind has a
+ * PLACE_POOLS pool AND an `id` is supplied, the GLB is picked deterministically
+ * from the id (so repeated homes/workplaces aren't clones), stable across
+ * frame/reload/fork (EM-155). Without an id (or pool), the single PLACE_MODELS
+ * spec stands, which is pool slot 0 by construction.
  */
-export function resolvePlaceModel(kind: string): ModelSpec | null {
+export function resolvePlaceModel(kind: string, id?: string): ModelSpec | null {
+  const pool = Object.prototype.hasOwnProperty.call(PLACE_POOLS, kind)
+    ? PLACE_POOLS[kind as keyof typeof PLACE_POOLS]
+    : undefined;
+  if (pool && pool.length > 0 && id) {
+    const idx = Math.floor(hashUnit(id) * pool.length) % pool.length;
+    return pool[idx];
+  }
   const spec = Object.prototype.hasOwnProperty.call(PLACE_MODELS, kind)
     ? PLACE_MODELS[kind as keyof typeof PLACE_MODELS]
     : null;

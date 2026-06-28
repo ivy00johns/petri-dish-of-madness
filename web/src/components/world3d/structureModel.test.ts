@@ -18,7 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VariantKey } from './worldSpace';
 import type { PlaceKind } from '../../types';
-import { MODEL_REGISTRY, MODEL_POOLS, PLACE_MODELS } from './assets/models';
+import { MODEL_REGISTRY, MODEL_POOLS, PLACE_MODELS, PLACE_POOLS } from './assets/models';
 import { effectiveTint } from './assets/Model';
 import {
   OFFLINE_MODEL_TINT,
@@ -131,6 +131,18 @@ describe('resolveStructureModel', () => {
   });
 });
 
+describe('resolveStructureModel covers every recurring building key (EM-248)', () => {
+  it.each(['farm', 'workshop', 'library', 'clocktower'] as const)(
+    '%s distributes across its pool by id', (kind) => {
+      const pool = MODEL_POOLS[kind]!;
+      const picks = Array.from({ length: 24 }, (_, i) =>
+        resolveStructureModel(kind, `b_${kind}_${i}`).spec!.url);
+      for (const u of picks) expect(pool.map((s) => s.url)).toContain(u);
+      expect(new Set(picks).size, kind).toBeGreaterThan(1);
+    },
+  );
+});
+
 describe('resolvePlaceModel', () => {
   it.each(ALL_PLACE_KINDS.map((k) => [k] as const))(
     'place kind %s resolves to its registry spec-or-null',
@@ -156,6 +168,29 @@ describe('resolvePlaceModel', () => {
   it('unknown kinds return null', () => {
     expect(resolvePlaceModel('volcano')).toBeNull();
     expect(resolvePlaceModel('')).toBeNull();
+  });
+});
+
+describe('resolvePlaceModel (EM-248 place-anchor variety)', () => {
+  it('without an id returns the single PLACE_MODELS default (pool slot 0)', () => {
+    for (const kind of Object.keys(PLACE_POOLS)) {
+      expect(resolvePlaceModel(kind)).toBe(PLACE_MODELS[kind as keyof typeof PLACE_MODELS]);
+    }
+  });
+
+  it('with an id picks a stable, distributed pool member', () => {
+    for (const [kind, pool] of Object.entries(PLACE_POOLS)) {
+      if (!pool) continue;
+      const ids = Array.from({ length: 24 }, (_, i) => `place_${kind}_${i}`);
+      const picks = ids.map((id) => resolvePlaceModel(kind, id));
+      for (const p of picks) expect(pool, kind).toContain(p);
+      expect(resolvePlaceModel(kind, ids[0])).toBe(resolvePlaceModel(kind, ids[0])); // deterministic
+      expect(new Set(picks.map((s) => s!.url)).size, kind).toBeGreaterThan(1); // distributes
+    }
+  });
+
+  it('unknown kinds still return null (procedural fallback intact)', () => {
+    expect(resolvePlaceModel('not-a-place', 'x')).toBeNull();
   });
 });
 

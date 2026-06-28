@@ -207,6 +207,42 @@ export const PROP_POOLS: Partial<Record<PropKind, ModelSpec[]>> = {
     { url: `${POLY_PROPS}/planter-houseplant.glb`, scale: 0.574, yOffset: -0.001 }, // Quaternius houseplant
     { url: `${POLY_PROPS}/planter-fern.glb`, scale: 0.083, yOffset: 0.021 },        // Quaternius fern
   ],
+  // EM-248 (S5b) — variety pools for the seven props that were still single-model
+  // (slot 0 stays the PROP_MODELS default; measured longest dim in comments).
+  fence: [
+    PROP_MODELS.fence, // Kenney picket fence (slot 0)
+    { url: `${POLY_PROPS}/fence-stone.glb`, scale: 0.83, yOffset: 0.006 }, // Quaternius stone wall: 1.56 long → ~1.3u
+    { url: `${POLY_PROPS}/fence-iron.glb`, scale: 0.31, yOffset: 0 },      // Quaternius metal fence: 3.55 long → ~1.1u, 0.89u tall
+  ],
+  bin: [
+    PROP_MODELS.bin, // Kenney trashcan (slot 0)
+    { url: `${POLY_PROPS}/bin-dumpster.glb`, scale: 0.49, yOffset: 0.02 }, // Quaternius dumpster: 2.44 long → ~1.2u, ~1.0u tall
+    { url: `${POLY_PROPS}/bin-recycle.glb`, scale: 2.0, yOffset: 0 },      // CreativeTrio trash bin: 0.30 tall → ~0.6u
+  ],
+  hydrant: [
+    PROP_MODELS.hydrant, // KayKit fire hydrant (slot 0)
+    { url: `${POLY_PROPS}/hydrant-q.glb`, scale: 0.78, yOffset: 0 },  // Quaternius fire hydrant: 0.77 tall → ~0.6u
+    { url: `${POLY_PROPS}/hydrant-kl.glb`, scale: 2.4, yOffset: 0 },  // Kay Lousberg fire hydrant: 0.225 tall → ~0.54u
+  ],
+  fountain: [
+    PROP_MODELS.fountain, // Kenney round plaza fountain (slot 0)
+    { url: `${POLY_PROPS}/fountain-isa.glb`, scale: 0.8, yOffset: 0 }, // Isa Lousberg fountain: 4.0 raw → ~3.2u plaza piece
+  ],
+  sign: [
+    PROP_MODELS.sign, // Kenney signpost single (slot 0)
+    { url: `${POLY_PROPS}/sign-arrow.glb`, scale: 0.5, yOffset: 0 },     // Quaternius arrow sign: 2.05 tall → ~1.0u directional
+    { url: `${POLY_PROPS}/sign-town.glb`, scale: 0.25, yOffset: 0.006 }, // Quaternius town sign: 5.99 wide → ~1.5u board
+  ],
+  crate: [
+    PROP_MODELS.crate, // Quaternius cube crate (slot 0)
+    { url: `${POLY_PROPS}/crate-pallet.glb`, scale: 0.59, yOffset: 0.004 }, // Quaternius pallet: 1.70 long → ~1.0u
+    { url: `${POLY_PROPS}/crate-stack.glb`, scale: 0.82, yOffset: 0 },      // Quaternius cardboard boxes: 0.98 long → ~0.8u stack
+  ],
+  barrel: [
+    PROP_MODELS.barrel, // Kenney barrel (slot 0)
+    { url: `${POLY_PROPS}/barrel-wood.glb`, scale: 0.63, yOffset: -0.004 }, // Quaternius barrel: 1.35 tall → ~0.85u
+    { url: `${POLY_PROPS}/barrel-open.glb`, scale: 1.9, yOffset: 0 },       // Kenney barrel open: 0.34 tall → ~0.65u
+  ],
 };
 
 /**

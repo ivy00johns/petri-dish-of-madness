@@ -183,3 +183,22 @@ describe('ASSET_LICENSES.md (prop reuse recorded)', () => {
     expect(doc).toMatch(/PROP_MODELS/);
   });
 });
+
+// ── Payload guard (EM-248) ───────────────────────────────────────────────────
+// models.test.ts caps building specs (allModelSpecs); props are a SEPARATE
+// registry, so the per-file 4 MB sanity cap must be asserted here too — else the
+// poly-props/ dir this wave expanded is protected by nothing. Same rationale:
+// GLBs are lazy-loaded (not first-paint weight), so the cap targets the real
+// failure mode (a file vendored without dedup/prune, or mis-compressed), not count.
+describe('prop payload guard (EM-248)', () => {
+  it('no single vendored prop GLB exceeds the 4 MB per-file sanity cap', () => {
+    for (const spec of allPropModelSpecs()) {
+      const disk = resolve(PUBLIC_DIR, spec.url.replace(/^\//, ''));
+      const bytes = readFileSync(disk).byteLength;
+      expect(
+        bytes,
+        `${spec.url} is ${(bytes / 1024 / 1024).toFixed(1)} MB — repack (dedup/prune, no compression)`,
+      ).toBeLessThanOrEqual(4 * 1024 * 1024);
+    }
+  });
+});

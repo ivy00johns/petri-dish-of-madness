@@ -86,6 +86,19 @@ from commercial games.
 | Quaternius — Planter Houseplant | `web/public/models/poly-props/planter-houseplant.glb` (~16 KB) | [poly.pizza](https://poly.pizza/m/bfLOqIV5uP) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.planter` variant (EM-216e; houseplant) |
 | Quaternius — Planter Fern | `web/public/models/poly-props/planter-fern.glb` (~676 KB) | [poly.pizza](https://poly.pizza/m/jqcanvH7D6) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.planter` variant (EM-216e; fern) |
 | Quaternius — Rock Round | `web/public/models/poly-props/rock-round.glb` (~8 KB) | [poly.pizza](https://poly.pizza/m/4MUaQTcDdc) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.rock` variant (EM-216e) |
+| Quaternius — Stone Wall | `web/public/models/poly-props/fence-stone.glb` (~13 KB) | [poly.pizza](https://poly.pizza/m/tdeAOh3LQV) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.fence` variant (EM-248 S5b; stone wall) |
+| Quaternius — Metal Fence | `web/public/models/poly-props/fence-iron.glb` (~84 KB) | [poly.pizza](https://poly.pizza/m/qWKhREFj7H) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.fence` variant (EM-248 S5b; iron railing) |
+| Quaternius — Dumpster | `web/public/models/poly-props/bin-dumpster.glb` (~18 KB) | [poly.pizza](https://poly.pizza/m/PKsbolkZSr) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.bin` variant (EM-248 S5b; dumpster) |
+| CreativeTrio — Trash Bin | `web/public/models/poly-props/bin-recycle.glb` (~24 KB) | [poly.pizza](https://poly.pizza/m/AAX1n0Bt0v) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.bin` variant (EM-248 S5b; recycling bin) |
+| Quaternius — Fire Hydrant | `web/public/models/poly-props/hydrant-q.glb` (~44 KB) | [poly.pizza](https://poly.pizza/m/DKkMQbEklp) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.hydrant` variant (EM-248 S5b) |
+| Kay Lousberg — Fire Hydrant | `web/public/models/poly-props/hydrant-kl.glb` (~29 KB) | [poly.pizza](https://poly.pizza/m/thffn9bO75) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.hydrant` variant (EM-248 S5b) |
+| Isa Lousberg — Fountain | `web/public/models/poly-props/fountain-isa.glb` (~82 KB) | [poly.pizza](https://poly.pizza/m/WHc7dwttlk) | Isa Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.fountain` variant (EM-248 S5b) |
+| Quaternius — Arrow Sign | `web/public/models/poly-props/sign-arrow.glb` (~7 KB) | [poly.pizza](https://poly.pizza/m/dwmvPHHCdq) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.sign` variant (EM-248 S5b; directional) |
+| Quaternius — Town Sign | `web/public/models/poly-props/sign-town.glb` (~67 KB) | [poly.pizza](https://poly.pizza/m/VSZubp0ru3) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.sign` variant (EM-248 S5b; board) |
+| Quaternius — Pallet | `web/public/models/poly-props/crate-pallet.glb` (~10 KB) | [poly.pizza](https://poly.pizza/m/cUAsYHDqfD) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.crate` variant (EM-248 S5b; pallet) |
+| Quaternius — Cardboard Boxes | `web/public/models/poly-props/crate-stack.glb` (~7 KB) | [poly.pizza](https://poly.pizza/m/bs6ikOeTrR) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.crate` variant (EM-248 S5b; box stack) |
+| Quaternius — Barrel | `web/public/models/poly-props/barrel-wood.glb` (~73 KB) | [poly.pizza](https://poly.pizza/m/ONdghDBByN) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.barrel` variant (EM-248 S5b; wood cask) |
+| Kenney — Barrel Open | `web/public/models/poly-props/barrel-open.glb` (~18 KB) | [poly.pizza](https://poly.pizza/m/XgpQjnKmIS) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `PROP_POOLS.barrel` variant (EM-248 S5b; open barrel) |
 | Kay Lousberg — Building B | `web/public/models/poly/bakery.glb` (~85 KB) | [poly.pizza](https://poly.pizza/m/5XG9i3QzlT) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.bakery` build-type (EM-216b; shopfront stands in — no CC0 "bakery") |
 | CreativeTrio — Colosseum | `web/public/models/poly/bank.glb` (~712 KB) | [poly.pizza](https://poly.pizza/m/83ftBPyiSf) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.bank` build-type (EM-216b; grand columned facade — no CC0 "bank") |
 | iPoly3D — Concert Stage | `web/public/models/poly/theater.glb` (~462 KB) | [poly.pizza](https://poly.pizza/m/CZHsATnid7) | iPoly3D | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_REGISTRY.theater` build-type (EM-216b; open proscenium stage) |
@@ -106,6 +119,22 @@ from commercial games.
 | Quaternius — Hut | `web/public/models/poly/hut.glb` (~36 KB) | [poly.pizza](https://poly.pizza/m/4MJWbyd6vw) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-216e; small dwelling) |
 | Kay Lousberg — Shop Kl | `web/public/models/poly/shop-kl.glb` (~104 KB) | [poly.pizza](https://poly.pizza/m/qOhhGLftam) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-216e; shopfront) |
 | Quaternius — Market Stalls | `web/public/models/poly/market-stalls.glb` (~140 KB) | [poly.pizza](https://poly.pizza/m/jSqGy8V0MQ) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-216e; market stand) |
+| Kay Lousberg — Apartment Block | `web/public/models/poly/apartment-block.glb` (~136 KB) | [poly.pizza](https://poly.pizza/m/otRsYa6pan) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b) |
+| Kay Lousberg — Condo Block | `web/public/models/poly/condo-block.glb` (~103 KB) | [poly.pizza](https://poly.pizza/m/T3oyvK6VEU) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b) |
+| Kay Lousberg — Corner Shop | `web/public/models/poly/shop-corner.glb` (~69 KB) | [poly.pizza](https://poly.pizza/m/EL3ePInr1N) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b) |
+| Quaternius — Grand Hotel | `web/public/models/poly/grand-hotel.glb` (~415 KB) | [poly.pizza](https://poly.pizza/m/ZSYgIuHfYb) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; ornate classical block) |
+| Quaternius — Factory | `web/public/models/poly/factory.glb` (~244 KB) | [poly.pizza](https://poly.pizza/m/ilWoURnbZW) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; works/plant) |
+| Quaternius — Manor | `web/public/models/poly/manor.glb` (~614 KB) | [poly.pizza](https://poly.pizza/m/Sl3ZTrWRwn) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; mansard manor) |
+| Kenney — Glass Tower | `web/public/models/poly/glass-tower.glb` (~26 KB) | [poly.pizza](https://poly.pizza/m/jIRx0AhYOR) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; glass office tower) |
+| CreativeTrio — Barn | `web/public/models/poly/barn.glb` (~247 KB) | [poly.pizza](https://poly.pizza/m/A6UkPq33aZ) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; red barn) |
+| Kenney — Civic Modern | `web/public/models/poly/civic-modern.glb` (~88 KB) | [poly.pizza](https://poly.pizza/m/h7Jaq7bqMq) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; rooftop+canopy block) |
+| CreativeTrio — Cabin Shed | `web/public/models/poly/house-cabin.glb` (~233 KB) | [poly.pizza](https://poly.pizza/m/HTx7PZt6Zm) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; log cabin) |
+| Quaternius — Houses | `web/public/models/poly/house-terrace.glb` (~159 KB) | [poly.pizza](https://poly.pizza/m/vCoDG5hFyI) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; terrace row) |
+| Kenney — Large Building | `web/public/models/poly/house-walkup.glb` (~73 KB) | [poly.pizza](https://poly.pizza/m/3IhrYZp6tP) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; apartment walk-up) |
+| Quaternius — Houses | `web/public/models/poly/house-duplex.glb` (~255 KB) | [poly.pizza](https://poly.pizza/m/gEjAC1UvVU) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; two-home duplex) |
+| Kay Lousberg — Building | `web/public/models/poly/cafe.glb` (~89 KB) | [poly.pizza](https://poly.pizza/m/7lMEpT2ICD) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-248 S5b; shopfront/cafe) |
+| Quaternius — Small Building | `web/public/models/poly/boutique.glb` (~224 KB) | [poly.pizza](https://poly.pizza/m/6q5cwgep0I) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-248 S5b; mansard shop/boutique) |
+| Quaternius — Market Stand | `web/public/models/poly/kiosk.glb` (~82 KB) | [poly.pizza](https://poly.pizza/m/DGIM5HGISb) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-248 S5b; market kiosk) |
 
 All vendored GLBs were re-packed headlessly with `@gltf-transform` (gltf→glb
 embedding, `resample`/`dedup`/`prune`); no art content was authored or altered
@@ -139,3 +168,15 @@ market, smithy, temple, school, clinic, granary) its own distinct silhouettes.
 All repacked with `@gltf-transform` (`copy`/`dedup`/`prune`, no DRACO/meshopt)
 and toonified at load time; no art was authored or altered. New payload ~4.6 MB
 (the Quaternius "Crops" garden plot is the bulk at ~1.9 MB).
+
+**EM-248 (S5b) — generic-bucket variety.** Nine new CC0 building GLBs (the rows
+above tagged `MODEL_POOLS.generic` variant (EM-248 S5b)) widening the DOMINANT
+generic pool — ~86% of agent-authored buildings collapse there, so it carried
+the worst repeat-asset look. Picked to DIFFER from the existing grey city-kit
+blocks: colorful KayKit apartments/condo/corner-shop, ornate Quaternius
+classical halls (grand hotel / mansard manor), a Quaternius works/plant, a
+CreativeTrio red barn, and a Kenney glass office tower — all toon-family, all
+**verified `"Licence":"CC0 1.0"` on poly.pizza before vendoring** (CC-BY
+candidates were rejected). Repacked with `@gltf-transform` (`copy`/`dedup`/
+`prune`, no DRACO/meshopt), footprint-measured to the city convention (≤3.4u
+long / ≤4.2u tall, grounded) and lazy-loaded. New payload ~1.9 MB.

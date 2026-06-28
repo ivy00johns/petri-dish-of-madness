@@ -194,6 +194,15 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/townhouse-c.glb`, scale: 0.66, yOffset: 0.009 },   // Quaternius town house — 2.90u
     { url: `${POLY}/house-twostory.glb`, scale: 2.063, yOffset: 0 },   // Kenney two-storey — 2.90u
     { url: `${POLY}/hut.glb`, scale: 2.474, yOffset: -0.004 },         // Quaternius hut — 2.90u
+    // EM-248 (S5b) — new CC0 residential silhouettes (poly.pizza, toon family;
+    // auto-measured to the ≤3.4u/≤4.2u city footprint, grounded). Chosen DISTINCT
+    // from the suburban/storybook/townhouse members above: a CreativeTrio log
+    // cabin, a Quaternius stacked terrace row, a Kenney apartment walk-up, and a
+    // Quaternius two-home duplex — adding cabin/terrace/walk-up/duplex shapes.
+    { url: `${POLY}/house-cabin.glb`, scale: 6.638, yOffset: 0 },        // CreativeTrio log cabin — 2.90u
+    { url: `${POLY}/house-terrace.glb`, scale: 1.985, yOffset: -0.001 }, // Quaternius terrace row — 2.90u
+    { url: `${POLY}/house-walkup.glb`, scale: 2.0, yOffset: 0 },         // Kenney apartment walk-up — 2.68u, 4.16u tall
+    { url: `${POLY}/house-duplex.glb`, scale: 1.51, yOffset: 0.012 },    // Quaternius two-home duplex — 2.90u
   ],
   // Storefronts — three Kenney commercial blocks + two literal shop GLBs
   // (EM-216d) so shops vary beyond the city-kit blocks. Slot 0 stays
@@ -208,6 +217,13 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     // EM-216e — new CC0 shopfronts (poly.pizza, auto-measured + grounded).
     { url: `${POLY}/shop-kl.glb`, scale: 1.445, yOffset: 0 },           // Kay Lousberg shop — 2.90u
     { url: `${POLY}/market-stalls.glb`, scale: 1.789, yOffset: 0.011 }, // Quaternius market stand — 2.90u
+    // EM-248 (S5b) — new CC0 shopfronts (poly.pizza, toon family; auto-measured +
+    // grounded). DISTINCT from the city-kit commercial blocks + open market
+    // stalls above: a Kay Lousberg green shopfront (cafe), a Quaternius mansard
+    // shop (boutique), and a Quaternius striped-awning market kiosk.
+    { url: `${POLY}/cafe.glb`, scale: 1.4, yOffset: 0 },          // Kay Lousberg shopfront — 2.83u, 4.16u tall
+    { url: `${POLY}/boutique.glb`, scale: 0.809, yOffset: 0.018 }, // Quaternius mansard shop — 2.90u, 4.02u tall
+    { url: `${POLY}/kiosk.glb`, scale: 2.185, yOffset: 0.01 },    // Quaternius market kiosk — 2.60u
   ],
   // EM-216c — the GENERIC catch-all is the MOST-repeated structure in practice:
   // agents author abstract civic/economic kinds ('social', 'commerce', 'rule',
@@ -258,6 +274,90 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },       // CreativeTrio church — 2.90u, 3.88u tall
     { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },        // Quaternius bell tower — 1.87u, 4.0u tall
     { url: `${POLY}/windmill.glb`, scale: 0.35, yOffset: 0.012 },      // Quaternius tower windmill — 2.77u, 4.0u tall
+    // EM-248 (S5b) — new CC0 generic-bucket silhouettes (poly.pizza, all CC0,
+    // toon family: KayKit/Quaternius/CreativeTrio/Kenney). Picked to DIFFER from
+    // the grey city-kit blocks above — colorful KayKit apartments/shop, ornate
+    // Quaternius classical halls, a Quaternius works/plant, a CreativeTrio barn,
+    // a Kenney glass tower. Auto-measured to the city footprint (≤3.4u long /
+    // ≤4.2u tall) and grounded; lazy-loaded. Widens the dominant generic pool
+    // away from the "row of grey towers" look.
+    { url: `${POLY}/apartment-block.glb`, scale: 1.37, yOffset: 0 },      // KayKit apartment + water tank — 2.75u, 4.18u tall
+    { url: `${POLY}/condo-block.glb`, scale: 1.44, yOffset: 0 },          // KayKit colorful row block — 2.89u
+    { url: `${POLY}/shop-corner.glb`, scale: 1.45, yOffset: 0 },          // KayKit corner shop w/ awning — 2.90u
+    { url: `${POLY}/grand-hotel.glb`, scale: 0.6245, yOffset: 0.009 },    // Quaternius ornate classical block — 2.90u
+    { url: `${POLY}/factory.glb`, scale: 0.3683, yOffset: 0.01 },         // Quaternius works/plant w/ chimney — 2.90u
+    { url: `${POLY}/manor.glb`, scale: 0.5073, yOffset: 0.007 },          // Quaternius mansard manor — 2.90u
+    { url: `${POLY}/glass-tower.glb`, scale: 1.45, yOffset: 0 },          // Kenney blue glass office tower — 1.80u, 4.18u tall
+    { url: `${POLY}/barn.glb`, scale: 4.1192, yOffset: 0 },               // CreativeTrio red barn — 2.90u
+    { url: `${POLY}/civic-modern.glb`, scale: 1.25, yOffset: 0 },         // Kenney rooftop+canopy civic block — 2.90u
+  ],
+  // EM-248 (S5b) — INDUSTRIAL variety. Slot 0 = MODEL_REGISTRY default; members
+  // are verbatim already-validated tuples (warehouse/factory/silo/windmill/port).
+  farm: [
+    { url: `${KENNEY_CITY}/industrial-h.glb`, scale: 2.4, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.farm
+    { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 },
+    { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 },
+    { url: `${POLY}/windmill.glb`, scale: 0.35, yOffset: 0.012 },
+  ],
+  workshop: [
+    { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.workshop
+    { url: `${KENNEY_CITY}/industrial-h.glb`, scale: 2.4, yOffset: 0 },
+    { url: `${POLY}/smithy.glb`, scale: 0.8, yOffset: 0 },
+    { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },
+  ],
+  // EM-248 (S5b) — CIVIC variety. Slot 0 = MODEL_REGISTRY default; members are
+  // verbatim already-validated civic/landmark tuples.
+  library: [
+    { url: `${POLY}/library.glb`, scale: 2.35, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.library
+    { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },
+    { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 },
+  ],
+  clocktower: [
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.clocktower
+    { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },
+    { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 },
+    { url: `${POLY}/office-tower.glb`, scale: 0.616, yOffset: 0.008 },
+  ],
+};
+
+/**
+ * EM-248 (S5b) — per-anchor VARIETY pools for PLACE anchors, mirroring
+ * MODEL_POOLS. A place kind with a pool renders one of several distinct GLBs,
+ * picked deterministically from the place id (resolvePlaceModel) so repeated
+ * homes/workplaces aren't clones — stable across frame/reload/fork (EM-155).
+ * Every member is a (url, scale, yOffset) tuple copied verbatim from an already
+ * footprint-validated MODEL_REGISTRY / PLACE_MODELS / MODEL_POOLS row, so the
+ * anchor footprint (≤3.4u long / ≤5.5u tall / grounded) holds by construction.
+ * Slot 0 is the PLACE_MODELS default so the no-id path agrees with the pool.
+ */
+export const PLACE_POOLS: Partial<Record<PlaceKind, ModelSpec[]>> = {
+  home: [
+    { url: `${KENNEY_CITY}/suburban-b.glb`, scale: 1.8, yOffset: 0 },  // slot 0 = PLACE_MODELS.home
+    { url: `${KENNEY_CITY}/suburban-a.glb`, scale: 2.3, yOffset: 0 },
+    { url: `${POLY}/house-modern.glb`, scale: 3.3, yOffset: 0 },
+    { url: `${POLY}/house-fantasy.glb`, scale: 1.1, yOffset: 0 },
+  ],
+  work: [
+    { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 2.0, yOffset: 0 }, // slot 0 = PLACE_MODELS.work
+    { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 },
+    { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },
+    { url: `${POLY}/office-tower.glb`, scale: 0.616, yOffset: 0.008 },
+  ],
+  social: [
+    { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.6, yOffset: 0 }, // slot 0 = PLACE_MODELS.social
+    { url: `${POLY}/bathhouse.glb`, scale: 0.32, yOffset: 0.32 },
+    { url: `${POLY}/market.glb`, scale: 1.4, yOffset: 0 },
+  ],
+  governance: [
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 }, // slot 0 = PLACE_MODELS.governance
+    { url: `${POLY}/library.glb`, scale: 2.35, yOffset: 0 },
+    { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },
+    { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },
+  ],
+  wild: [
+    { url: `${POLY}/park.glb`, scale: 2.3, yOffset: 0 }, // slot 0 = PLACE_MODELS.wild
+    { url: `${POLY}/garden.glb`, scale: 1.65, yOffset: 0 },
   ],
 };
 
@@ -284,6 +384,7 @@ export function allModelSpecs(): ModelSpec[] {
     ...Object.values(PLACE_MODELS),
     ...Object.values(CHARACTER_MODELS),
     ...Object.values(MODEL_POOLS).flat(),
+    ...Object.values(PLACE_POOLS).flat(),
     ...VILLAGER_POOL,
   ].filter((s): s is ModelSpec => s != null);
   // De-dupe by url (a model may serve several keys / pools).
