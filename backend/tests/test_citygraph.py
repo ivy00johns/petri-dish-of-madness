@@ -308,11 +308,14 @@ def test_templates_are_pure_deterministic():
            template("village", 1337, density="high").to_dict()
 
 
-def test_template_geometric_falls_back_to_grid_recording_kind():
-    g = template("pentagon", 1337)
+def test_template_unknown_kind_falls_back_to_grid_recording_kind():
+    # EM-245 (S3b): pentagon/radial/ring are now LIVE (route to master_plan — see
+    # test_template_geometric_now_routes_to_master_plan); only a TRULY unknown kind
+    # still falls back to grid topology while recording the requested kind.
+    g = template("hexagon", 1337)
     base = classic_grid(1337)
     assert [e.id for e in g.edges] == [e.id for e in base.edges]   # grid topology
-    assert g.template == "pentagon"   # records the requested kind (for the warning + UI)
+    assert g.template == "hexagon"   # records the requested kind (for the warning + UI)
 
 
 def test_citygraph_template_field_round_trips():
@@ -322,3 +325,77 @@ def test_citygraph_template_field_round_trips():
     d = classic_grid(1337).to_dict()
     d.pop("template", None)
     assert CityGraph.from_dict(d).template == "grid"
+
+
+# ── EM-245 (S3b): master_plan generators + diff_graphs (pure) ──────────────────
+from petridish.engine.citygraph import master_plan, diff_graphs, MASTER_PLAN_KINDS
+import math
+
+
+def test_master_plan_grid_is_classic_grid():
+    assert [e.id for e in master_plan("grid", None, 1337).edges] == [e.id for e in classic_grid(1337).edges]
+
+
+def test_master_plan_pentagon_has_perimeter_and_spokes():
+    g = master_plan("pentagon", None, 1337)
+    assert any(n.id == "n:pent:c" for n in g.nodes)            # center
+    assert sum(1 for n in g.nodes if n.id.startswith("n:pent:")) == 6   # 5 perimeter + center
+    assert len(g.edges) == 10                                   # 5 perimeter + 5 spokes
+    # perimeter nodes sit on a circle (equal radius from center)
+    c = next(n for n in g.nodes if n.id == "n:pent:c")
+    radii = [math.hypot(n.x - c.x, n.z - c.z) for n in g.nodes if n.id != "n:pent:c"]
+    assert max(radii) - min(radii) < 1e-6
+
+
+def test_master_plan_radial_and_ring_nonempty_deterministic():
+    for kind in ("radial", "ring"):
+        a = master_plan(kind, None, 1337)
+        b = master_plan(kind, None, 1337)
+        assert len(a.edges) > 0 and a.to_dict() == b.to_dict()
+
+
+def test_diff_grid_to_pentagon_is_full_swap():
+    cur = classic_grid(1337)
+    tgt = master_plan("pentagon", None, 1337)
+    d = diff_graphs(cur, tgt)
+    # ids disjoint ⇒ add every target edge, remove every current edge
+    assert {e.id for e in d["add_edges"]} == {e.id for e in tgt.edges}
+    assert set(d["remove_edge_ids"]) == {e.id for e in cur.edges}
+
+
+def test_diff_same_graph_is_empty():
+    g = classic_grid(1337)
+    d = diff_graphs(g, master_plan("grid", None, 1337))
+    assert d["add_edges"] == [] and d["remove_edge_ids"] == []
+
+
+def test_diff_is_deterministic_ordered():
+    cur, tgt = classic_grid(1337), master_plan("pentagon", None, 1337)
+    assert diff_graphs(cur, tgt) == diff_graphs(cur, tgt)
+
+
+# ── EM-245 (S4 handoff): template() routes geometric kinds to master_plan ───────
+def test_template_geometric_now_routes_to_master_plan():
+    g = template("pentagon", 1337)
+    mp = master_plan("pentagon", {}, 1337)
+    assert [e.id for e in g.edges] == [e.id for e in mp.edges]   # NOT the grid fallback anymore
+    assert g.template == "pentagon"
+
+
+def test_radial_master_plan_is_one_connected_component():
+    # EM-245 review fix: the inner ring must spoke to the shared center (was a
+    # disconnected floating ring). Assert every node is reachable from any node.
+    g = master_plan("radial", None, 1337)
+    adj: dict[str, set] = {}
+    for e in g.edges:
+        adj.setdefault(e.a, set()).add(e.b)
+        adj.setdefault(e.b, set()).add(e.a)
+    seen: set = set()
+    stack = [g.nodes[0].id]
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        stack.extend(m for m in adj.get(n, ()) if m not in seen)
+    assert len(seen) == len(g.nodes)  # fully connected

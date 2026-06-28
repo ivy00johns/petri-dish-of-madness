@@ -14,9 +14,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .citygraph import (CityGraph, classic_grid, template, apply_build_road,
-                        nearest_node, apply_demolish_road, apply_car_policy)
+                        nearest_node, apply_demolish_road, apply_car_policy,
+                        master_plan, diff_graphs, MASTER_PLAN_KINDS)
 
 logger = logging.getLogger(__name__)
+
+# EM-245 (S3b) — the morph budget: up to this many edge ops per tick when an
+# active master plan is morphing the city toward its target (tune vs a live run).
+MORPH_EDGES_PER_TICK: int = 4
 
 
 def _block_get(block: Any, key: str, default: Any) -> Any:
@@ -1310,13 +1315,77 @@ class World:
         _density = getattr(_profile, "density", "medium") if _profile is not None else "medium"
         _size = getattr(_profile, "size", 5) if _profile is not None else 5
         self.city_graph: CityGraph = template(_kind, self.city_seed, size=_size, density=_density)
-        if _kind not in ("grid", "greenfield", "village"):
+        # EM-245 (S3b) — geometric presets are now LIVE (template() routes them to
+        # master_plan); their non-axis-aligned visual renders through EM-247's mesh
+        # once ROAD_MESH_ENABLED is on. Only a TRULY unknown kind still grid-falls-back.
+        if _kind in ("pentagon", "radial", "ring"):
+            logger.info(
+                "city template %r is live (EM-245 S3b generators); its non-axis-aligned "
+                "visual renders through EM-247's mesh once ROAD_MESH_ENABLED is on.", _kind)
+        elif _kind not in ("grid", "greenfield", "village"):
             logger.warning(
-                "city template %r needs EM-245 (S3b generators) + EM-247 (meshing) — "
-                "starting on the grid; the requested kind is recorded for when they land.", _kind)
+                "city template %r is unknown — starting on the grid; the requested kind "
+                "is recorded for the UI.", _kind)
         _policy = getattr(_profile, "car_policy", "cars") if _profile is not None else "cars"
         if _policy in ("cars", "pedestrian", "mixed"):
             self.city_graph.car_policy = _policy
+
+        # EM-245 (S3b) — the active master plan ({kind, params, seed} while a
+        # vote-adopted city morph is in progress, else None). Inactive (None) ⇒
+        # step_master_plan_morph is a no-op ⇒ existing runs stay byte-identical.
+        # The target is RE-DERIVED each tick (light snapshot); the morph is a pure
+        # fn of (stored plan, current graph) so replay/fork reproduce it.
+        self.master_plan: dict | None = None
+
+    def step_master_plan_morph(self) -> list[dict]:
+        """EM-245 (S3b) — advance an active master-plan morph by up to
+        MORPH_EDGES_PER_TICK ops toward the target (adds before removes, seeded
+        order), mutating self.city_graph. Emits road_built/road_demolished; on
+        convergence clears self.master_plan + emits master_plan_complete. Pure fn
+        of (self.master_plan, self.city_graph) → replay/fork reproduce it."""
+        plan = self.master_plan
+        if not plan:
+            return []
+        from .citygraph import _seeded_unit, CityNode, CityEdge
+        target = master_plan(plan["kind"], plan.get("params"), int(plan["seed"]))
+        d = diff_graphs(self.city_graph, target)
+        # converged?
+        if not d["add_edges"] and not d["remove_edge_ids"]:
+            self.master_plan = None
+            return [{"kind": "master_plan_complete", "actor_id": "system", "actor_type": "system",
+                     "text": f"🏙 The {plan['kind']} master plan is complete.",
+                     "payload": {"kind": plan["kind"]}}]
+        events: list[dict] = []
+        budget = MORPH_EDGES_PER_TICK
+        # ADDS first (never shrink below target mid-morph). Seeded-stable order.
+        tgt_node = {n.id: n for n in target.nodes}
+        for e in sorted(d["add_edges"], key=lambda e: _seeded_unit(int(plan["seed"]), f"morph:add:{e.id}")):
+            if budget <= 0:
+                break
+            for nid in (e.a, e.b):                       # ensure endpoint nodes exist
+                if not any(n.id == nid for n in self.city_graph.nodes) and nid in tgt_node:
+                    tn = tgt_node[nid]
+                    self.city_graph.nodes.append(CityNode(id=tn.id, x=tn.x, z=tn.z, kind=tn.kind))
+            self.city_graph.edges.append(CityEdge(id=e.id, a=e.a, b=e.b,
+                                                  road_class=e.road_class, car_policy=e.car_policy))
+            events.append({"kind": "road_built", "actor_id": "system", "actor_type": "system",
+                           "text": "🛣 A new road takes shape (master plan).",
+                           "payload": {"edge_id": e.id, "morph": plan["kind"]}})
+            budget -= 1
+        # then REMOVES (raw — the morph target guarantees validity; bypasses the
+        # EM-244 individual one-road-floor).
+        if budget > 0:
+            rm = sorted(d["remove_edge_ids"], key=lambda eid: _seeded_unit(int(plan["seed"]), f"morph:rm:{eid}"))[:budget]
+            rm_set = set(rm)
+            self.city_graph.edges = [e for e in self.city_graph.edges if e.id not in rm_set]
+            still = {nid for e in self.city_graph.edges for nid in (e.a, e.b)}
+            tgt_ids = {n.id for n in target.nodes}
+            self.city_graph.nodes = [n for n in self.city_graph.nodes if n.id in still or n.id in tgt_ids]
+            for eid in rm:
+                events.append({"kind": "road_demolished", "actor_id": "system", "actor_type": "system",
+                               "text": "🚧 A road is cleared (master plan).",
+                               "payload": {"edge_id": eid, "morph": plan["kind"]}})
+        return events
 
     def apply_procgen(self) -> None:
         """Apply the seeded procgen town layout when world.procgen.enabled
@@ -3573,7 +3642,8 @@ class World:
                          "ban_arson", "ban_extortion", "ban_vandalism",
                          "name_town", "demolish", "promote_image", "trial",
                          "amend_constitution", "relocate_center",
-                         "demolish_road", "set_car_policy"}  # EM-244 (S3a)
+                         "demolish_road", "set_car_policy",  # EM-244 (S3a)
+                         "adopt_master_plan"}  # EM-245 (S3b)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -3708,6 +3778,19 @@ class World:
                 if not any(e.id == target for e in self.city_graph.edges):
                     return False, f"street car-policy requires a real road id (got {target!r})", None
             payload = {"scope": scope, "policy": policy, "target": (target or None)}
+        # EM-245 (S3b) — adopt_master_plan carries the plan KIND on the generic
+        # target arg (like demolish_road's edge id). The kind must be a known
+        # master-plan kind, and only ONE master plan may morph at a time — reject a
+        # new proposal while a morph is already in progress (the one-active guard).
+        if effect == "adopt_master_plan":
+            kind = str(target or "").strip()
+            if kind not in MASTER_PLAN_KINDS:
+                return False, (f"adopt_master_plan requires a known plan kind "
+                               f"{sorted(MASTER_PLAN_KINDS)} (got {kind!r})"), None
+            if self.master_plan is not None:
+                return False, ("a master plan is already in progress — only one at "
+                               "a time (wait for it to finish before adopting another)"), None
+            payload = {"kind": kind, "params": {}}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -3770,7 +3853,8 @@ class World:
             self._active_rule(effect)
             if effect not in ("name_town", "demolish", "promote_image", "trial",
                               "amend_constitution", "relocate_center",
-                              "demolish_road", "set_car_policy") else None  # EM-244 (S3a) — one-shot acts
+                              "demolish_road", "set_car_policy",  # EM-244 (S3a) — one-shot acts
+                              "adopt_master_plan") else None  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
         # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
@@ -3840,7 +3924,8 @@ class World:
                                            # applied). It's per-target scoped at propose time, so
                                            # excluding it from renewal is correct.
                                            "demolish",
-                                           "demolish_road", "set_car_policy") else None  # EM-244 (S3a)
+                                           "demolish_road", "set_car_policy",  # EM-244 (S3a)
+                                           "adopt_master_plan") else None  # EM-245 (S3b)
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -4101,6 +4186,22 @@ class World:
                     "payload": {"proposal_id": rule.id, **info},
                 })
             return
+        # EM-245 (S3b) — adopt_master_plan: a passing vote starts a city morph by
+        # storing the active plan ({kind, params, seed}) on the world; the per-tick
+        # loop hook (step_master_plan_morph) advances it toward the target over
+        # ticks. master_plan_adopted is parked in the same outbox demolish_road uses.
+        if rule.effect == "adopt_master_plan":
+            rule.applied = True
+            p = rule.payload or {}
+            kind = p.get("kind")
+            self.master_plan = {"kind": kind, "params": p.get("params") or {},
+                                "seed": self.city_seed}
+            self.pending_spawn_events.append({
+                "kind": "master_plan_adopted", "actor_id": "system", "actor_type": "system",
+                "text": f"🏙 By vote, the town adopts a {kind} master plan.",
+                "payload": {"proposal_id": rule.id, "kind": kind},
+            })
+            return
         if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
@@ -4247,7 +4348,8 @@ class World:
         # one-shot civic act than an ordinary law, so it shares the demolish-grade
         # 0.7 supermajority bar (the fixed `else` branch below — no config block).
         if rule.effect in ("demolish", "amend_constitution", "relocate_center",
-                           "demolish_road", "set_car_policy"):  # EM-244 (S3a) — irreversible/structural → 0.7
+                           "demolish_road", "set_car_policy",  # EM-244 (S3a) — irreversible/structural → 0.7
+                           "adopt_master_plan"):  # EM-245 (S3b) — structural city morph → 0.7
             if rule.effect == "amend_constitution":
                 try:
                     frac = float(self._constitution_param("ratify_threshold", 0.7))
@@ -7242,6 +7344,12 @@ class World:
                 if lines
             },
         }
+        # EM-245 (S3b) — the active master plan ({kind, params, seed}). Serialized
+        # ONLY while a morph is in progress (additive key; absent ⇒ no active plan
+        # on restore), so a world with no active plan keeps the exact prior key set
+        # and stays byte-identical. The target re-derives from this each tick.
+        if self.master_plan:
+            snap["master_plan"] = self.master_plan
         # Wave D3 / EM-168 — per-lane cap-governor demotion records (lane ->
         # alert-day window). Serialized only when a demotion is outstanding so
         # ungoverned snapshots keep the exact pre-D3 key set; the agents list
@@ -7648,6 +7756,22 @@ class World:
                 world.city_graph = classic_grid(world.city_seed)
         else:
             world.city_graph = classic_grid(world.city_seed)
+        # EM-245 (S3b) — restore the active master plan when present (additive key;
+        # absent ⇒ None ⇒ no morph). The morph is a pure fn of (plan, graph), so a
+        # mid-morph snapshot resumes byte-identically on replay/fork.
+        # ModelBoundary: a master_plan survives ONLY if SHAPE-valid — a known kind
+        # AND a seed. step_master_plan_morph hard-subscripts plan["kind"]/["seed"],
+        # so a non-empty-but-malformed dict ({kind} w/o seed, or an unknown kind)
+        # would wedge the morph in a per-tick swallowed KeyError or silently drive an
+        # unintended grid morph. Validate to None instead (EM-245 pre-ship review).
+        _mp = state.get("master_plan")
+        world.master_plan = (
+            _mp
+            if isinstance(_mp, dict)
+            and _mp.get("kind") in MASTER_PLAN_KINDS
+            and "seed" in _mp
+            else None
+        )
         world.running = False  # a restored/forked world starts paused
         try:
             world.tick_interval_seconds = float(

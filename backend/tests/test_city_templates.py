@@ -72,10 +72,14 @@ def test_world_sets_initial_car_policy_from_profile():
     assert w.city_graph.car_policy == "pedestrian"
 
 
-def test_world_geometric_template_falls_back_to_grid():
+def test_world_geometric_template_is_now_live():
+    # EM-245 (S3b): geometric presets are now LIVE — World seeds the geometric graph
+    # (a master plan seeded at start, no morph) instead of the old grid fallback.
+    # The behavior legitimately changed; the visual rides EM-247's mesh.
     w = _world_with_profile("pentagon")
-    from petridish.engine.citygraph import classic_grid
-    assert [e.id for e in w.city_graph.edges] == [e.id for e in classic_grid(w.city_seed).edges]
+    from petridish.engine.citygraph import master_plan, _PLAN_RADIUS
+    mp = master_plan("pentagon", {"radius": _PLAN_RADIUS}, w.city_seed)
+    assert [e.id for e in w.city_graph.edges] == [e.id for e in mp.edges]   # NOT grid anymore
     assert w.city_graph.template == "pentagon"  # intent recorded
 
 

@@ -35,7 +35,6 @@ Every **open / in-progress** item, ID'd and prioritized. This is the canonical
 | EM-169 | P2 | W17 | frontend | research-v4 §7 | Ambient vehicles: Car Kit traffic on the generated road network (deterministic paths, instanced), parked cars from the prop scatter. **PR #44 (2026-06-24):** deterministic `trafficLayout` fleet (interior streets only, seeded → replay-safe EM-155) + `Traffic.tsx` clock-driven sweep; non-interactive (EM-157) + reduced-motion-safe. Deps EM-152, EM-153 | in-progress | PR #44 |
 | EM-176 | P2 | W17 | frontend | user 2026-06-11 | Bring vehicles back when they're playable: parked-car emission disabled at the generator (`CARS_ENABLED=false`, cityLayout) — static cars read as a distraction before they have a purpose. Keys/registry/GLBs/licenses all kept; EM-169's ambient traffic on the road graph is the re-entry point (flip the flag + moving cars together) **— PR #44 (2026-06-24): `CARS_ENABLED` flipped on together with the ambient traffic.** | in-progress | PR #44 |
 | EM-214 | P3 | W20 | backend+frontend | Wave I · I5 (stretch) | **Voices / audio** — agent spoken lines via the browser **Web Speech API** ($0, client-side, no network) for v1; free SFX/music gen is NOT mature (slow, GPU-bound) → DEFERRED. Optional cloud TTS (Google free tier) only if server-side audio files are ever wanted. **Deferred at wave-I 2026-06-19** (user-chosen: full arc I1→I4, audio is a stretch with no agent demand yet — re-enter when voices are wanted). | open | defer wave-I |
-| EM-245 | P2 | W25 | backend+frontend | layout-spec 2026-06-27 | **S3b — master plans (morph):** parametric pentagon/radial/ring/grid generators ratified by ~70% vote; the city **morphs** toward target over ticks (deterministic diff+schedule), buildings preserved-or-relocated; needs arbitrary-angle rendering. Deps EM-239, EM-243, EM-247. Spec `…s3-governance-master-plans` §S3b | open | — |
 
 _Next free ID: EM-249. (EM-240 taken by the crime engine; EM-241/242 reserved for the EM-240 persona content/management-UI follow-ons.)_
 
@@ -74,10 +73,13 @@ _Next free ID: EM-249. (EM-240 taken by the crime engine; EM-241/242 reserved fo
   variety, standalone) **and W25** (geometry: **EM-247** procedural road meshing → **EM-245** master
   plans/morph). **Sequencing:** EM-239 is the keystone (P0 — everything deps on it) — **✅ shipped
   2026-06-27, PR #58** (S1 spine: backend `CityGraph` + render-from-graph, byte-identical EM-155);
-  EM-243–248 now unblocked. **W24 COMPLETE** (EM-243/244/246/248 + EM-239 spine). **W25:** **EM-247**
-  (S5a procedural road meshing) **✅ shipped 2026-06-28, PR #63** — any-angle road geometry behind the
-  `ROAD_MESH_ENABLED` flag (default OFF; tile path the byte-identical default until a human visual
-  sign-off). **Last remaining: EM-245** (S3b master-plan morph) — pentagon/radial/ring generators +
-  vote-gated morph, rendered through EM-247's mesh; it also completes EM-246's geometric presets.
-  After EM-245, the agent-controlled city-layout initiative is complete (modulo the EM-247 visual
-  sign-off, which is the user's eyeball: flip the flag + confirm a pentagon renders at 60fps).
+  EM-243–248 now unblocked. **✅ INITIATIVE COMPLETE (2026-06-28)** — all 7 sub-projects shipped:
+  EM-239 (S1 spine, PR #58), EM-243 (S2 `build_road`, PR #60), EM-244 (S3a demolish/car-policy,
+  PR #61), EM-246 (S4 templates, PR #62), EM-247 (S5a procedural meshing, PR #63), EM-245 (S3b
+  master-plan morph, PR #64), EM-248 (S5b assets, PR #59). Agents now author the city end-to-end:
+  build roads, vote to demolish / ban cars, vote a pentagon/radial topology and watch it morph,
+  start a run from a template — all deterministic + EM-155-safe. **One deferred user gate:** the
+  EM-247 geometric **visual sign-off** — flip `ROAD_MESH_ENABLED` on and confirm a pentagon renders
+  at 60fps before retiring the tile path (browser automation was unavailable in the build session).
+  Recorded refinements (non-blocking): surface the layout-governance effects in the agent menu;
+  the S5a visual-polish iteration (atlas/lane-markings/LOD/culling); `size`-scaled templates.

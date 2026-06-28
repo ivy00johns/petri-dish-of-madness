@@ -633,6 +633,16 @@ class TickLoop:
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("miracle expiry failed: %s", exc)
 
+        # EM-245 (S3b) — advance an active master-plan morph (deterministic k
+        # edges/tick, standalone system events, turn_id null). An INACTIVE plan
+        # (None) is a no-op, so existing runs stay byte-identical.
+        try:
+            for evt in self._world.step_master_plan_morph():
+                evt.setdefault("turn_id", None)
+                self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("master-plan morph step failed: %s", exc)
+
         # W8 — slow-cadence chaos layer: on an `act_every_n_ticks`-aligned tick,
         # each living animal takes ONE animal turn (mostly zero-LLM reflex). It is
         # SCHEDULED as a background task (not awaited) so a slow/unreachable animal
