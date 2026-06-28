@@ -282,6 +282,7 @@ export function citySignature(
   places: readonly Place[] | null | undefined,
   citySeed: number | null | undefined,
   neighborhoods?: readonly Neighborhood[] | null,
+  cityGraph?: { nodes: readonly unknown[]; edges: readonly unknown[] } | null,
 ): string {
   const head = citySeed ?? 'default';
   const body = (places ?? [])
@@ -297,7 +298,10 @@ export function citySignature(
     .map((n) => `${n.id}:${n.tier}`)
     .sort()
     .join(',');
-  return `${head}|${body}|${tiers}`;
+  // EM-243 (S2): fold the graph's node/edge COUNTS (not the object) so a built
+  // road re-renders live while idle polls (identical counts) never churn the memo.
+  const graph = cityGraph ? `${cityGraph.nodes.length}:${cityGraph.edges.length}` : '';
+  return `${head}|${body}|${tiers}|${graph}`;
 }
 
 /**
@@ -309,14 +313,20 @@ export function useCityPlan(
   world: CityWorld,
 ): { plan: CityPlan; center: { x: number; z: number } } {
   const { places = [], city_seed: citySeed, neighborhoods, city_graph } = world;
-  // EM-239 (S1): city_graph is INTENTIONALLY absent from citySignature and the
-  // useMemo deps. In S1 the graph is seed-determined and constant, so citySeed
-  // already captures it — but city_graph is a fresh object every snapshot poll,
-  // so adding it to the deps would churn the memo every tick and break the
-  // "never rebuilds instance buffers" invariant documented above.
+  // EM-243 (S2): the graph now MUTATES (agents build_road), so it MUST shape the
+  // memo or a built road never re-renders live (it would only appear on reload).
+  // EM-239 (S1) deliberately excluded it because the graph was seed-constant and a
+  // fresh object every poll would churn the memo each tick. We reconcile both by
+  // depending on the graph's node/edge COUNTS (primitives), not the object: counts
+  // change exactly when a road is added but are identical across idle polls — so
+  // live growth renders WITHOUT breaking the "never rebuilds instance buffers"
+  // invariant. (S3, which mutates edges in place at constant count, will need a
+  // content hash here instead of counts.)
+  const graphNodeCount = city_graph?.nodes.length ?? 0;
+  const graphEdgeCount = city_graph?.edges.length ?? 0;
   const sig = useMemo(
-    () => citySignature(places, citySeed, neighborhoods),
-    [places, citySeed, neighborhoods],
+    () => citySignature(places, citySeed, neighborhoods, city_graph),
+    [places, citySeed, neighborhoods, graphNodeCount, graphEdgeCount],
   );
   const ref = useRef<{
     sig: string;

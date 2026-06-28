@@ -73,6 +73,9 @@ Mood: neutral
   id=b5 'Hearth Library' kind=workshop status=planned at=home funds=5/80 progress=0/100
   id=b6 'Market Awning' kind=workshop status=under_construction at=market funds=20/20 progress=0/100
 
+=== 🛣 NEARBY LAYOUT ===
+  Nearby layout: can build a road east, north. Blocked: west (road), south (road). Cars: cars.
+
 === ACTIVE RULES ===
   [ubi] Daily bread for all
 
@@ -98,6 +101,7 @@ Mood: neutral
   arson (building_id=b6) - burn this building (a crime; witnesses lose trust)
   place_prop (kind, place?) - place a decoration (bench, lamp, tree, statue, planter, fountain...) here or at a chosen place
   create_image (prompt) - paint art from a short text prompt for your town
+  build_road (direction: north|south|east|west) - extend a street one block
 
 ⚠ SAYING you will do something does NOT do it — words alone change nothing; back your talk with a real action. You have a FULL range: gossip and scheme, trade and give, forage and work, befriend and feud, propose and vote on rules, and propose / fund / BUILD projects that grow the town. Chase what YOUR character wants — and remember the city only rises if someone actually builds and governs it, so turn your ambitions into proposals, funding, build_steps, and votes.
 

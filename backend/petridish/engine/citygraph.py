@@ -112,3 +112,99 @@ def classic_grid(seed: int) -> CityGraph:
             edges.append(CityEdge(id=f"e:{a}->{b}", a=a, b=b))
 
     return CityGraph(seed=int(seed), nodes=nodes, edges=edges)
+
+
+# ── EM-243 (S2): bounded, deterministic individual road growth ────────────────
+# The frozen 5x5 grid spans tile-index [-13, 12] (6 road lines, all ≡ 2 mod 5).
+# MAX_CITY_BLOCKS=9 widens that to a 9x9 envelope = 10 lines = index [-23, 22].
+# A segment is one BLOCK_PITCH = 5 index steps (5 * TILE = 13.0u).
+MAX_CITY_BLOCKS: int = 9
+MIN_IDX: int = -23
+MAX_IDX: int = 22
+
+# direction -> (di, dj) in tile-index space (east = +x, north = +z; the N/S label
+# is cosmetic and may be flipped to match the on-screen compass — determinism is
+# unaffected since ids derive from (i, j), not from the label).
+DIR_DELTA: dict[str, tuple[int, int]] = {
+    "east": (5, 0), "west": (-5, 0), "north": (0, 5), "south": (0, -5),
+}
+
+
+def _parse_node(node_id: str) -> tuple[int, int]:
+    """'n:{i}:{j}' -> (i, j). Raises ValueError on a malformed id."""
+    parts = node_id.split(":")
+    if len(parts) != 3 or parts[0] != "n":
+        raise ValueError(f"malformed node id: {node_id!r}")
+    return int(parts[1]), int(parts[2])
+
+
+def _ordered_edge(id_a: str, id_b: str) -> tuple[str, str, str]:
+    """Order two node ids by (i, j) ascending and build the edge id — reproducing
+    classic_grid's a->b convention (horizontal by i, vertical by j), so a grown
+    grid's edge ids match what a larger classic_grid would emit. Returns (id, a, b)."""
+    a, b = sorted([id_a, id_b], key=_parse_node)
+    return f"e:{a}->{b}", a, b
+
+
+def _in_bounds(i: int, j: int) -> bool:
+    return MIN_IDX <= i <= MAX_IDX and MIN_IDX <= j <= MAX_IDX
+
+
+def nearest_node(graph: CityGraph, x: float, z: float) -> CityNode | None:
+    """The graph node closest (Euclidean) to a world (x, z). None on an empty graph.
+    Note: callers map a place's (x, y) -> (x, z) here (place.y is the world z)."""
+    if not graph.nodes:
+        return None
+    return min(graph.nodes, key=lambda n: (n.x - x) ** 2 + (n.z - z) ** 2)
+
+
+def extendable_directions(graph: CityGraph, node_id: str) -> dict[str, str]:
+    """For each cardinal direction from node_id: 'open' (in-bounds, no edge yet),
+    'road' (an edge already runs that way), or 'edge' (out of the city envelope).
+    Empty dict if node_id is malformed."""
+    try:
+        fi, fj = _parse_node(node_id)
+    except ValueError:
+        return {}
+    edge_ids = {e.id for e in graph.edges}
+    out: dict[str, str] = {}
+    for d, (di, dj) in DIR_DELTA.items():
+        ni, nj = fi + di, fj + dj
+        if not _in_bounds(ni, nj):
+            out[d] = "edge"
+            continue
+        eid, _, _ = _ordered_edge(node_id, _node_id(ni, nj))
+        out[d] = "road" if eid in edge_ids else "open"
+    return out
+
+
+def apply_build_road(
+    graph: CityGraph, from_node_id: str, direction: str,
+) -> tuple[bool, str, dict | None]:
+    """Extend the graph one segment from from_node_id in direction (N/S/E/W).
+    Pure validation + in-place mutation on success. Adds the target node if absent
+    and the connecting edge. Returns (ok, reason, info). info on success:
+    {from_node, direction, new_node_id, new_edge_id}."""
+    if direction not in DIR_DELTA:
+        return False, f"unknown direction '{direction}' (use north/south/east/west)", None
+    if not any(n.id == from_node_id for n in graph.nodes):
+        return False, "no anchor node there to build from", None
+    try:
+        fi, fj = _parse_node(from_node_id)
+    except ValueError:
+        return False, "the anchor node id is malformed", None
+    di, dj = DIR_DELTA[direction]
+    ni, nj = fi + di, fj + dj
+    if not _in_bounds(ni, nj):
+        return False, "that way is the edge of the city (out of bounds)", None
+    new_node_id = _node_id(ni, nj)
+    new_edge_id, a, b = _ordered_edge(from_node_id, new_node_id)
+    if any(e.id == new_edge_id for e in graph.edges):
+        return False, "there's already a road that way", None
+    if not any(n.id == new_node_id for n in graph.nodes):
+        graph.nodes.append(CityNode(id=new_node_id, x=tile_center(ni), z=tile_center(nj)))
+    graph.edges.append(CityEdge(id=new_edge_id, a=a, b=b))
+    return True, "ok", {
+        "from_node": from_node_id, "direction": direction,
+        "new_node_id": new_node_id, "new_edge_id": new_edge_id,
+    }

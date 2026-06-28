@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0",
+  "ticket": "EM-243",
+  "lens": "qe-agent MANDATORY QA gate (re-run of 4 adversarial lenses + independent gate re-run)",
+  "status": "PASS_WITH_ISSUES",
+  "scores": {
+    "contract_conformance": {
+      "score": 4,
+      "notes": "build_road wired end-to-end: ACTION_SCHEMA enum includes it in BOTH single ('action') and multi ('actions[].action') paths; TOOL_REGISTRY marks it reflex (background agents can build, aligned with no-throttle north star); _apply_action_inner routes to world.action_build_road -> _emit_world_result; success emits kind='road_built' with payload{action,from_node,direction,new_node_id,new_edge_id}; failures surface as parse_failure events with actionable text/payload.error. Perception (nearby_layout) and menu added in lock-step (EM-108) in _assemble_context only when _layout is not None AND energy>=cost. Backend edge ids reproduce classic_grid's a->b convention; frontend ENV_MIN/ENV_MAX (-23/22) match backend MIN_IDX/MAX_IDX. Two contract nits: (a) MEDIUM dead config knob max_city_blocks parsed+documented but never read (hardcoded constants in citygraph.py/cityLayout.ts), an operator trap and backend/frontend coupling footgun; (b) LOW schema if/then direction validation only fires for single-action shape, multi-action relies solely on the action-layer guard (which is airtight). Not <3."
+    },
+    "correctness": {
+      "score": 3,
+      "notes": "Backend correct and ship-ready: determinism/replay airtight (apply_build_road/nearest_node/extendable_directions pure, grid-position-derived ids, grow-only, snapshot round-trip byte-identical, fork/replay reproduce verbatim). Verb validity airtight: all four illegal vectors (floating anchor, build-on-existing-edge, out-of-bounds, unaffordable) refused with clear reason and ZERO graph mutation; fully-enclosed node yields clean refusals + build_nearby_layout returns None (perception/menu lock-step). HOWEVER one HIGH frontend correctness gap: useCityPlan memo (CityScape.tsx:317-320) keys on citySignature(places,citySeed,neighborhoods) and intentionally EXCLUDES city_graph; S2 makes the graph mutable, so a built road changes only city_graph content -> signature unchanged -> memo never recomputes -> grown road does NOT render live until an unrelated signature change or full reload. Not data loss (backend/snapshot/replay correct, reload shows roads) but it defeats the stated S2 frontend goal of rendering grown roads live."
+    },
+    "security": {
+      "score": 5,
+      "notes": "No exploit surface. nearest_node only ever returns an existing graph node (no floating anchors); apply_build_road re-checks anchor existence and refuses duplicate/reverse edges via _ordered_edge id normalization; _in_bounds enforces the [-23,22] envelope (verified marching east stops at n:22:2). Energy deducted ONLY on success and floored at 0 (agent.energy=max(0.0,energy-cost) sits AFTER the not-ok guard) — no negative-energy path; blocked/missing-direction builds drain 0; energy==cost(8) floors to exactly 0. Grow-only confirmed (grep for any node/edge remove/pop/del is empty; no demolish/teardown verb). Unknown/empty direction rejected cleanly in both single- and multi-action paths. Agents cannot specify the anchor (args carry only direction)."
+    },
+    "coverage": {
+      "score": 3,
+      "notes": "Backend +18 tests (10 in test_build_road.py + 8 in test_citygraph.py); world3d +2 tests (cityLayout.test.ts now 59); golden fixture em161_protagonist_prompt_pre_diet.txt regenerated (+4 lines, purely additive); EM-239 byte-identical golden gate + size guards (background 25-agent <5000, ~391 chars headroom) pass. GAP: no test catches the HIGH live-render memo bug — cityLayout.test.ts calls computeCityPlan DIRECTLY with a mutated graph, bypassing the useCityPlan memo, so the missing city_graph signature dep is invisible to the suite. Also no frontend test exercises road_built feed rendering. Coverage is strong on backend/determinism but blind to the one shipped frontend regression."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "No scope leakage. True EM-243 diff (base 0c1079b after the already-merged EM-248 PR #59 ancestor) touches only the intended files: citygraph.py, world.py, runtime.py, config/loader.py, config/world.yaml, em161 fixture, test_build_road.py, test_citygraph.py, cityLayout.ts(+.test.ts), plan doc. No S3 leakage (no demolish/teardown, no claim_lot/building-placement, no master-plan/morph; car_policy read-only). Golden fixture additive only. Working-tree backend/imagegen + world.city25.yaml edits from git status are pre-existing/unrelated and NOT part of the committed EM-243 work. Only untracked debris is the workflow build dir."
+    }
+  },
+  "test_results": {
+    "backend": {
+      "command": ".venv/bin/python -m pytest backend/tests/ -q",
+      "passed": 1638,
+      "failed": 0,
+      "warnings": 1,
+      "duration_s": 45.55,
+      "notes": "1638 passed, 1 warning (StarletteDeprecationWarning, pre-existing/unrelated). Baseline ~1620; +18 from EM-243."
+    },
+    "frontend_world3d": {
+      "command": "cd web && npx vitest run src/components/world3d",
+      "test_files": 24,
+      "passed": 563,
+      "failed": 0,
+      "duration_s": 3.91,
+      "notes": "24 test files, 563 tests passed; cityLayout.test.ts at 59."
+    },
+    "typecheck": {
+      "command": "cd web && npx tsc -b --force",
+      "exit_code": 0,
+      "notes": "Clean."
+    }
+  },
+  "lens_verdicts": [
+    { "lens": "EM-155 determinism / replay (adversarial)", "verdict": "clean" },
+    { "lens": "Verb validity + energy", "verdict": "issues" },
+    { "lens": "Scope + regression (adversarial)", "verdict": "clean" },
+    { "lens": "Prompt-diet + end-to-end integration (adversarial)", "verdict": "issues" }
+  ],
+  "blockers": [],
+  "issues": [
+    {
+      "severity": "HIGH",
+      "lens": "Prompt-diet + end-to-end integration",
+      "location": "web/src/components/world3d/CityScape.tsx:317-320 (citySignature :281-300; useCityPlan deps :319)",
+      "description": "Live-render gap defeating the stated S2 frontend goal. useCityPlan memo signature/deps exclude city_graph; S2 makes the graph mutable, so building a road changes only city_graph content -> signature unchanged -> memo never recomputes -> computeCityPlan never re-runs with the grown graph. Newly built roads do not appear in the live 3D world until an unrelated signature change (new place / district tier-up) or full reload. Not data loss (backend/snapshot/replay correct; reload shows roads). Fix: fold a cheap graph fingerprint (edge count or graph.version) into citySignature so the plan rebuilds only when a road is actually built. Update the now-stale S1 comment at lines 312-316. NOTE: per the explicit gate rules this is not a CRITICAL blocker (no data loss/crash/security), so it does not flip the gate to proceed=false, but it MUST be fixed before the S2 frontend slice is declared done."
+    },
+    {
+      "severity": "MEDIUM",
+      "lens": "Verb validity + energy / EM-155 determinism (both)",
+      "location": "backend/petridish/config/loader.py:73,1386,2591 + config/world.yaml vs engine/citygraph.py:121-123 and web/src/components/world3d/cityLayout.ts:279-280",
+      "description": "Dead/decoupled config knob. WorldParams.max_city_blocks is parsed and documented in world.yaml as the growth envelope ('see citygraph.MAX_CITY_BLOCKS') but is NEVER read; actual bounds are hardcoded in THREE independent places (citygraph MIN_IDX/MAX_IDX -23/22, citygraph MAX_CITY_BLOCKS 9, cityLayout ENV_MIN/ENV_MAX -23/22). Verified: World(max_city_blocks=15) still stops east at n:22:2. Operator trap (raising does nothing, lowering does not restrict) + latent backend/frontend divergence footgun if a future change wires the knob into backend bounds but not the hardcoded frontend ENV_MAX (grown nodes silently clipped by inEnvelope on render). Determinism currently SAFE (hardcoded constants guarantee agreement). Fix: wire the single config value into both sides or delete the knob + misleading comment."
+    },
+    {
+      "severity": "LOW",
+      "lens": "Verb validity + energy",
+      "location": "backend/petridish/agents/runtime.py:318-321 (ACTION_SCHEMA allOf if/then) vs :184 (actions[] items)",
+      "description": "Schema direction validation is single-action-only. The if/then keys on root action==build_road; a multi-action turn {actions:[...]} has no root action, so it never fires for nested build_road. Verified the unknown/no-direction multi-action variants pass _validate_schema (return None). NOT a hole: action_build_road normalizes (str().strip().lower()) and refuses unknown/empty direction at ZERO graph mutation and ZERO energy drain. But the PR-added schema guard only protects half the invocation surface."
+    },
+    {
+      "severity": "LOW",
+      "lens": "Prompt-diet + end-to-end integration",
+      "location": "web/src/components/feed/EventFeed.tsx:341-375 + web/src/types/index.ts:344-443",
+      "description": "road_built is a new event kind not added to the EventKind union or CATEGORIES. Open union tolerates it (no typecheck failure) and default feed renders it, but when ANY category filter chip is focused, visibleEvents filters on KIND_TO_CATEGORY[e.kind] ?? '' and focus.has('') is false -> road_built is HIDDEN in a filtered feed. Consistent with peer uncategorized kinds (building_demolished, image_posted, god_voice_heard), so a pre-existing pattern, not a regression. Low-cost fix: add road_built (and the building kinds) to the 'actions' category + the EventKind union."
+    },
+    {
+      "severity": "LOW",
+      "lens": "Prompt-diet + end-to-end integration",
+      "location": "web/src/components/world3d/cityLayout.ts:903 + web/src/components/world3d/worldSpace.ts:33",
+      "description": "Follow-up (a), genuinely S3+. plan.extent (=33.8, hardcoded to TILE_MIN) is computed-but-unused (no consumer in web/src). Scene framing (WORLD_REACH=56.1, ground/fog/pan-clamp/camera) is tuned to the 5x5 envelope; a road grown to the cap reaches tile_center(22)=58.5u, just past WORLD_REACH, so only heavily-grown roads poke past the grass apron/fog. Latent, only at substantial growth; camera/envelope rework for grown cities is correctly S3+, not a day-1 blocker."
+    },
+    {
+      "severity": "LOW",
+      "lens": "EM-155 determinism / replay",
+      "location": "backend/petridish/agents/runtime.py:2680-2686 (_assemble_context) + world.py:3234-3258 (action_build_road)",
+      "description": "Multi-action-turn perception staleness (deterministic, not a replay break). nearby_layout affordance computed once at context assembly; each build_road mutates the graph in-place, so a second build_road in the same turn re-runs nearest_node on the mutated graph and may pick a different anchor or fail against what perception advertised. Fully deterministic (reproducible state, clear _fail_event), so replay/fork reproduce byte-for-byte. Minor in-turn menu/resolution UX mismatch only."
+    },
+    {
+      "severity": "INFO",
+      "lens": "Verb validity + energy / Scope+regression",
+      "location": "backend/petridish/engine/world.py:3236; runtime.py build_nearby_layout; engine/citygraph.py DIR_DELTA",
+      "description": "Cosmetic notes: (1) action_build_road is case/whitespace tolerant while the single-action schema enum is strict-lowercase — harmless (strictly more restrictive). (2) Default car_policy='cars' renders the awkward 'Cars: cars.' line (read-only, phrasing nit). (3) DIR_DELTA north=(0,+5) N/S label is cosmetic and may not match on-screen compass; determinism unaffected (ids derive from i,j)."
+    },
+    {
+      "severity": "INFO",
+      "lens": "Prompt-diet + end-to-end integration",
+      "location": "backend/tests/test_wave_d2_prompt_diet.py:39",
+      "description": "Stale module-docstring number: 'protagonist ~6_862 chars' now measures 7185 (EM-243 added ~157 chars). Free-text comment; no assertion references it. Protagonist byte-identity is enforced by the regenerated em161 fixture. No functional impact."
+    }
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "PASS_WITH_ISSUES. Gate rules satisfied for proceed=true: zero CRITICAL blockers, contract_conformance=4 (>=3), security=5 (>=3), and no lens returned verdict 'blocker' (two clean, two issues). All three gates re-run independently and reproduced clean: backend 1638 passed / 0 failed, world3d vitest 563 passed / 0 failed, tsc -b --force exit 0. Backend, contracts, determinism/replay, verb-validity, energy, and prompt-diet are solid and ship-ready. The HIGH useCityPlan memo gap (grown roads do not render live until reload) does NOT trip any proceed=false condition per the stated rules, but it is the single must-fix item before the S2 FRONTEND slice can be called done — it defeats the headline visible feature and is invisible to the current test suite (cityLayout.test.ts bypasses the memo). Recommend landing the citySignature graph-fingerprint fix (and ideally a regression test for it) before declaring EM-243 S2 frontend complete; the MEDIUM dead config knob should be wired or deleted to remove the operator trap / divergence footgun."
+  }
+}

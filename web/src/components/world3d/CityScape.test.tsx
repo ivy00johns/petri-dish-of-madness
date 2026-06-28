@@ -312,12 +312,23 @@ describe('citySignature (plan memo key)', () => {
     expect(citySignature(moved, null)).not.toBe(citySignature(TOWN, null));
   });
 
-  it('is keyed on (places, city_seed, neighborhoods) ONLY — buildings/day never churn the memo (EM-174)', () => {
-    // The EM-155 determinism contract: same places + seed (+ neighborhood
-    // tiers, EM-123) ⇒ the same memoized plan, no matter what the rest of the
-    // snapshot is doing. The arity guard catches a quietly-added input.
-    expect(citySignature.length).toBe(3);
+  it('is keyed on (places, city_seed, neighborhoods, city_graph) — buildings/day never churn the memo (EM-174/EM-243)', () => {
+    // The EM-155 determinism contract: same places + seed (+ neighborhood tiers,
+    // EM-123, + graph node/edge counts, EM-243) ⇒ the same memoized plan, no
+    // matter what the rest of the snapshot is doing. The arity guard catches a
+    // quietly-added input (EM-243 deliberately added the 4th: city_graph).
+    expect(citySignature.length).toBe(4);
     expect(citySignature(TOWN, 1337)).toBe(citySignature(TOWN.map((p) => ({ ...p })), 1337));
+  });
+
+  it('EM-243: a grown graph (more edges) churns the memo; an idle poll (same counts) does not', () => {
+    const g0 = { nodes: [{}, {}], edges: [{}] };
+    const idlePoll = { nodes: [{}, {}], edges: [{}] };       // fresh object, SAME counts
+    const grown = { nodes: [{}, {}, {}], edges: [{}, {}] };  // a road was built (+1 node, +1 edge)
+    // idle snapshot poll (new object, identical counts) ⇒ stable ⇒ no buffer churn
+    expect(citySignature(TOWN, 1337, undefined, idlePoll)).toBe(citySignature(TOWN, 1337, undefined, g0));
+    // a built road (counts grow) ⇒ signature changes ⇒ plan re-derives ⇒ road renders live
+    expect(citySignature(TOWN, 1337, undefined, grown)).not.toBe(citySignature(TOWN, 1337, undefined, g0));
   });
 
   it('EM-123: a district tier change churns the memo; tier-1/absent does not', () => {
