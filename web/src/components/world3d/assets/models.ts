@@ -258,6 +258,22 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },       // CreativeTrio church — 2.90u, 3.88u tall
     { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },        // Quaternius bell tower — 1.87u, 4.0u tall
     { url: `${POLY}/windmill.glb`, scale: 0.35, yOffset: 0.012 },      // Quaternius tower windmill — 2.77u, 4.0u tall
+    // EM-248 (S5b) — new CC0 generic-bucket silhouettes (poly.pizza, all CC0,
+    // toon family: KayKit/Quaternius/CreativeTrio/Kenney). Picked to DIFFER from
+    // the grey city-kit blocks above — colorful KayKit apartments/shop, ornate
+    // Quaternius classical halls, a Quaternius works/plant, a CreativeTrio barn,
+    // a Kenney glass tower. Auto-measured to the city footprint (≤3.4u long /
+    // ≤4.2u tall) and grounded; lazy-loaded. Widens the dominant generic pool
+    // away from the "row of grey towers" look.
+    { url: `${POLY}/apartment-block.glb`, scale: 1.37, yOffset: 0 },      // KayKit apartment + water tank — 2.75u, 4.18u tall
+    { url: `${POLY}/condo-block.glb`, scale: 1.44, yOffset: 0 },          // KayKit colorful row block — 2.89u
+    { url: `${POLY}/shop-corner.glb`, scale: 1.45, yOffset: 0 },          // KayKit corner shop w/ awning — 2.90u
+    { url: `${POLY}/grand-hotel.glb`, scale: 0.6245, yOffset: 0.009 },    // Quaternius ornate classical block — 2.90u
+    { url: `${POLY}/factory.glb`, scale: 0.3683, yOffset: 0.01 },         // Quaternius works/plant w/ chimney — 2.90u
+    { url: `${POLY}/manor.glb`, scale: 0.5073, yOffset: 0.007 },          // Quaternius mansard manor — 2.90u
+    { url: `${POLY}/glass-tower.glb`, scale: 1.45, yOffset: 0 },          // Kenney blue glass office tower — 1.80u, 4.18u tall
+    { url: `${POLY}/barn.glb`, scale: 4.1192, yOffset: 0 },               // CreativeTrio red barn — 2.90u
+    { url: `${POLY}/civic-modern.glb`, scale: 1.25, yOffset: 0 },         // Kenney rooftop+canopy civic block — 2.90u
   ],
   // EM-248 (S5b) — INDUSTRIAL variety. Slot 0 = MODEL_REGISTRY default; members
   // are verbatim already-validated tuples (warehouse/factory/silo/windmill/port).

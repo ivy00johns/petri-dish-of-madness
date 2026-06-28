@@ -106,6 +106,15 @@ from commercial games.
 | Quaternius — Hut | `web/public/models/poly/hut.glb` (~36 KB) | [poly.pizza](https://poly.pizza/m/4MJWbyd6vw) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-216e; small dwelling) |
 | Kay Lousberg — Shop Kl | `web/public/models/poly/shop-kl.glb` (~104 KB) | [poly.pizza](https://poly.pizza/m/qOhhGLftam) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-216e; shopfront) |
 | Quaternius — Market Stalls | `web/public/models/poly/market-stalls.glb` (~140 KB) | [poly.pizza](https://poly.pizza/m/jSqGy8V0MQ) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-216e; market stand) |
+| Kay Lousberg — Apartment Block | `web/public/models/poly/apartment-block.glb` (~136 KB) | [poly.pizza](https://poly.pizza/m/otRsYa6pan) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b) |
+| Kay Lousberg — Condo Block | `web/public/models/poly/condo-block.glb` (~103 KB) | [poly.pizza](https://poly.pizza/m/T3oyvK6VEU) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b) |
+| Kay Lousberg — Corner Shop | `web/public/models/poly/shop-corner.glb` (~69 KB) | [poly.pizza](https://poly.pizza/m/EL3ePInr1N) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b) |
+| Quaternius — Grand Hotel | `web/public/models/poly/grand-hotel.glb` (~415 KB) | [poly.pizza](https://poly.pizza/m/ZSYgIuHfYb) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; ornate classical block) |
+| Quaternius — Factory | `web/public/models/poly/factory.glb` (~244 KB) | [poly.pizza](https://poly.pizza/m/ilWoURnbZW) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; works/plant) |
+| Quaternius — Manor | `web/public/models/poly/manor.glb` (~614 KB) | [poly.pizza](https://poly.pizza/m/Sl3ZTrWRwn) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; mansard manor) |
+| Kenney — Glass Tower | `web/public/models/poly/glass-tower.glb` (~26 KB) | [poly.pizza](https://poly.pizza/m/jIRx0AhYOR) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; glass office tower) |
+| CreativeTrio — Barn | `web/public/models/poly/barn.glb` (~247 KB) | [poly.pizza](https://poly.pizza/m/A6UkPq33aZ) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; red barn) |
+| Kenney — Civic Modern | `web/public/models/poly/civic-modern.glb` (~88 KB) | [poly.pizza](https://poly.pizza/m/h7Jaq7bqMq) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; rooftop+canopy block) |
 
 All vendored GLBs were re-packed headlessly with `@gltf-transform` (gltf→glb
 embedding, `resample`/`dedup`/`prune`); no art content was authored or altered
@@ -139,3 +148,15 @@ market, smithy, temple, school, clinic, granary) its own distinct silhouettes.
 All repacked with `@gltf-transform` (`copy`/`dedup`/`prune`, no DRACO/meshopt)
 and toonified at load time; no art was authored or altered. New payload ~4.6 MB
 (the Quaternius "Crops" garden plot is the bulk at ~1.9 MB).
+
+**EM-248 (S5b) — generic-bucket variety.** Nine new CC0 building GLBs (the rows
+above tagged `MODEL_POOLS.generic` variant (EM-248 S5b)) widening the DOMINANT
+generic pool — ~86% of agent-authored buildings collapse there, so it carried
+the worst repeat-asset look. Picked to DIFFER from the existing grey city-kit
+blocks: colorful KayKit apartments/condo/corner-shop, ornate Quaternius
+classical halls (grand hotel / mansard manor), a Quaternius works/plant, a
+CreativeTrio red barn, and a Kenney glass office tower — all toon-family, all
+**verified `"Licence":"CC0 1.0"` on poly.pizza before vendoring** (CC-BY
+candidates were rejected). Repacked with `@gltf-transform` (`copy`/`dedup`/
+`prune`, no DRACO/meshopt), footprint-measured to the city convention (≤3.4u
+long / ≤4.2u tall, grounded) and lazy-loaded. New payload ~1.9 MB.

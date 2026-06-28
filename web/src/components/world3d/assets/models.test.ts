@@ -185,17 +185,23 @@ describe('every non-null ModelSpec', () => {
     },
   );
 
-  it('total vendored payload stays within the 28 MB budget', () => {
-    // Budget raised 15→28 MB at EM-216e (wide-ranging asset expansion toward the
-    // EW-grade dense city). These GLBs are LAZY-loaded via drei useGLTF/preload —
-    // they are NOT eager bundle weight that blocks first paint. The guard still
-    // catches a runaway doubling; selective extraction + per-file footprint
-    // validation + url dedup keep individual additions honest.
-    const total = specs.reduce(
-      (sum, s) => sum + readFileSync(diskPath(s)).byteLength,
-      0,
-    );
-    expect(total).toBeLessThanOrEqual(28 * 1024 * 1024);
+  // EM-248: the payload guard is a runaway-catch, NOT a count throttle. GLBs are
+  // LAZY-loaded via drei useGLTF/preload — they are NOT first-paint bundle weight,
+  // so adding MORE variety is free at load time. The total ceiling only catches an
+  // accidental whole-kit dump; the per-file cap catches the real failure (a file
+  // vendored without dedup/prune, or with the wrong compression). 15→28 (EM-216e)
+  // → 64 MB total + 4 MB/file (EM-248).
+  it('no single vendored GLB exceeds the 4 MB per-file sanity cap', () => {
+    for (const s of specs) {
+      const bytes = readFileSync(diskPath(s)).byteLength;
+      expect(bytes, `${s.url} is ${(bytes / 1024 / 1024).toFixed(1)} MB — repack (dedup/prune, no compression)`)
+        .toBeLessThanOrEqual(4 * 1024 * 1024);
+    }
+  });
+
+  it('total vendored payload stays within the 64 MB runaway-catch', () => {
+    const total = specs.reduce((sum, s) => sum + readFileSync(diskPath(s)).byteLength, 0);
+    expect(total).toBeLessThanOrEqual(64 * 1024 * 1024);
   });
 });
 
