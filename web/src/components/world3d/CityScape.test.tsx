@@ -56,6 +56,7 @@ import {
   CHUNK_SPLIT_8,
   GRID_CENTER,
   PEDESTRIAN_ROAD_COLOR,
+  ROAD_MESH_ENABLED,
   chunkCount,
   chunkIndexOf,
   chunkInstances,
@@ -455,6 +456,32 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
       const chunked = chunkInstances(e.instances, CENTER).flat();
       expect(chunked).toHaveLength(e.instances.length);
       expect(new Set(chunked).size).toBe(e.instances.length);
+    }
+  });
+});
+
+describe('ROAD_MESH_ENABLED flag (EM-247 S5a — tile path is the byte-identical default)', () => {
+  it('defaults to false (the byte-identical-default guard; a flip is a deliberate, reviewed change)', () => {
+    expect(ROAD_MESH_ENABLED).toBe(false);
+  });
+
+  it('flag off ⇒ the EM-239/243 road TILES render unchanged and no <RoadMesh> is mounted', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { container } = render(<CityScape world={{ places: TOWN, city_seed: null }} />);
+      // the road-tile pieces still render through the unchanged CityPiece path
+      // (the same byte-identical assertion idiom the render smoke uses)
+      const roadTiles = container.querySelectorAll('[name^="city-road_straight-"]');
+      expect(roadTiles.length).toBe(chunkInstances(PLAN.pieces.road_straight, CENTER).length);
+      expect(roadTiles.length).toBeGreaterThan(0);
+      // …and the procedural mesh path is wholly absent while the flag is off
+      expect(container.querySelectorAll('[name="roadmesh"]').length).toBe(0);
+      expect(container.querySelectorAll('[name^="road-ribbons"]').length).toBe(0);
+      expect(container.querySelectorAll('[name^="road-intersections"]').length).toBe(0);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
     }
   });
 });
