@@ -194,6 +194,15 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/townhouse-c.glb`, scale: 0.66, yOffset: 0.009 },   // Quaternius town house — 2.90u
     { url: `${POLY}/house-twostory.glb`, scale: 2.063, yOffset: 0 },   // Kenney two-storey — 2.90u
     { url: `${POLY}/hut.glb`, scale: 2.474, yOffset: -0.004 },         // Quaternius hut — 2.90u
+    // EM-248 (S5b) — new CC0 residential silhouettes (poly.pizza, toon family;
+    // auto-measured to the ≤3.4u/≤4.2u city footprint, grounded). Chosen DISTINCT
+    // from the suburban/storybook/townhouse members above: a CreativeTrio log
+    // cabin, a Quaternius stacked terrace row, a Kenney apartment walk-up, and a
+    // Quaternius two-home duplex — adding cabin/terrace/walk-up/duplex shapes.
+    { url: `${POLY}/house-cabin.glb`, scale: 6.638, yOffset: 0 },        // CreativeTrio log cabin — 2.90u
+    { url: `${POLY}/house-terrace.glb`, scale: 1.985, yOffset: -0.001 }, // Quaternius terrace row — 2.90u
+    { url: `${POLY}/house-walkup.glb`, scale: 2.0, yOffset: 0 },         // Kenney apartment walk-up — 2.68u, 4.16u tall
+    { url: `${POLY}/house-duplex.glb`, scale: 1.51, yOffset: 0.012 },    // Quaternius two-home duplex — 2.90u
   ],
   // Storefronts — three Kenney commercial blocks + two literal shop GLBs
   // (EM-216d) so shops vary beyond the city-kit blocks. Slot 0 stays
@@ -208,6 +217,13 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     // EM-216e — new CC0 shopfronts (poly.pizza, auto-measured + grounded).
     { url: `${POLY}/shop-kl.glb`, scale: 1.445, yOffset: 0 },           // Kay Lousberg shop — 2.90u
     { url: `${POLY}/market-stalls.glb`, scale: 1.789, yOffset: 0.011 }, // Quaternius market stand — 2.90u
+    // EM-248 (S5b) — new CC0 shopfronts (poly.pizza, toon family; auto-measured +
+    // grounded). DISTINCT from the city-kit commercial blocks + open market
+    // stalls above: a Kay Lousberg green shopfront (cafe), a Quaternius mansard
+    // shop (boutique), and a Quaternius striped-awning market kiosk.
+    { url: `${POLY}/cafe.glb`, scale: 1.4, yOffset: 0 },          // Kay Lousberg shopfront — 2.83u, 4.16u tall
+    { url: `${POLY}/boutique.glb`, scale: 0.809, yOffset: 0.018 }, // Quaternius mansard shop — 2.90u, 4.02u tall
+    { url: `${POLY}/kiosk.glb`, scale: 2.185, yOffset: 0.01 },    // Quaternius market kiosk — 2.60u
   ],
   // EM-216c — the GENERIC catch-all is the MOST-repeated structure in practice:
   // agents author abstract civic/economic kinds ('social', 'commerce', 'rule',

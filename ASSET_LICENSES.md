@@ -115,6 +115,13 @@ from commercial games.
 | Kenney — Glass Tower | `web/public/models/poly/glass-tower.glb` (~26 KB) | [poly.pizza](https://poly.pizza/m/jIRx0AhYOR) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; glass office tower) |
 | CreativeTrio — Barn | `web/public/models/poly/barn.glb` (~247 KB) | [poly.pizza](https://poly.pizza/m/A6UkPq33aZ) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; red barn) |
 | Kenney — Civic Modern | `web/public/models/poly/civic-modern.glb` (~88 KB) | [poly.pizza](https://poly.pizza/m/h7Jaq7bqMq) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.generic` variant (EM-248 S5b; rooftop+canopy block) |
+| CreativeTrio — Cabin Shed | `web/public/models/poly/house-cabin.glb` (~233 KB) | [poly.pizza](https://poly.pizza/m/HTx7PZt6Zm) | CreativeTrio | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; log cabin) |
+| Quaternius — Houses | `web/public/models/poly/house-terrace.glb` (~159 KB) | [poly.pizza](https://poly.pizza/m/vCoDG5hFyI) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; terrace row) |
+| Kenney — Large Building | `web/public/models/poly/house-walkup.glb` (~73 KB) | [poly.pizza](https://poly.pizza/m/3IhrYZp6tP) | Kenney | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; apartment walk-up) |
+| Quaternius — Houses | `web/public/models/poly/house-duplex.glb` (~255 KB) | [poly.pizza](https://poly.pizza/m/gEjAC1UvVU) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.house` variant (EM-248 S5b; two-home duplex) |
+| Kay Lousberg — Building | `web/public/models/poly/cafe.glb` (~89 KB) | [poly.pizza](https://poly.pizza/m/7lMEpT2ICD) | Kay Lousberg | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-248 S5b; shopfront/cafe) |
+| Quaternius — Small Building | `web/public/models/poly/boutique.glb` (~224 KB) | [poly.pizza](https://poly.pizza/m/6q5cwgep0I) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-248 S5b; mansard shop/boutique) |
+| Quaternius — Market Stand | `web/public/models/poly/kiosk.glb` (~82 KB) | [poly.pizza](https://poly.pizza/m/DGIM5HGISb) | Quaternius | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) | `MODEL_POOLS.stall` variant (EM-248 S5b; market kiosk) |
 
 All vendored GLBs were re-packed headlessly with `@gltf-transform` (gltf→glb
 embedding, `resample`/`dedup`/`prune`); no art content was authored or altered
