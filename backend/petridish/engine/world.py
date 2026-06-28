@@ -3500,6 +3500,26 @@ class World:
             raise ValueError("already destroyed")
         return self._demolish_building(building, "god", "god")
 
+    def god_adopt_master_plan(self, kind: str) -> dict:
+        """EM-247/EM-245 — god OVERRIDE: adopt a master plan IMMEDIATELY, bypassing
+        the 0.7 vote (the same god-parity as god_demolish bypassing governance). Sets
+        self.master_plan so the per-tick step_master_plan_morph begins; the city
+        reshapes toward the target over ticks (renders via the EM-247 mesh). Raises
+        ValueError (unknown kind / a plan already active) so the API can 4xx. Returns
+        the master_plan_adopted event."""
+        kind = str(kind or "").strip().lower()
+        if kind not in MASTER_PLAN_KINDS:
+            raise ValueError(f"unknown master plan kind {kind!r} (use {sorted(MASTER_PLAN_KINDS)})")
+        if self.master_plan is not None:
+            raise ValueError("a master plan is already in progress")
+        self.master_plan = {"kind": kind, "params": {}, "seed": int(self.city_seed)}
+        return {
+            "kind": "master_plan_adopted",
+            "actor_id": "system",
+            "text": f"\U0001f3d9 By divine decree, the city begins morphing toward a {kind} plan.",
+            "payload": {"kind": kind, "by": "god"},
+        }
+
     def god_reskin(self, building_id: str, skin: str) -> dict:
         """God re-skins ANY building (override — no owner gate), reusing the exact
         skin field + clamp of action_set_building_skin. An empty skin clears it
