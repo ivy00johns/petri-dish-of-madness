@@ -37,6 +37,31 @@ export interface Neighborhood {
   progress: number;    // completed megaprojects toward the next tier
 }
 
+/** EM-239 (S1) — the authoritative road graph (mirrors backend
+ *  engine/citygraph.py). S1 ships axis-aligned junctions only. */
+export interface CityGraphNode {
+  id: string;
+  x: number;
+  z: number;
+  kind: 'junction'; // S3 widens to 'roundabout' | 'plaza' | 'dead_end'
+}
+
+export interface CityGraphEdge {
+  id: string;
+  a: string; // node id
+  b: string; // node id
+  road_class: 'street';
+  car_policy: 'inherit'; // S3 adds 'cars' | 'pedestrian' | 'mixed'
+}
+
+export interface CityGraph {
+  version: number;
+  seed: number;
+  car_policy: 'cars'; // S3 adds 'pedestrian' | 'mixed'
+  nodes: CityGraphNode[];
+  edges: CityGraphEdge[];
+}
+
 // Wave E (EM-113, contracts/wave-e.md shared vocabulary): the relationship
 // type vocabulary grows partner/family/mentor/feud. Open union — the chips /
 // graph tolerate unknown future types (they fall back to the neutral register).
@@ -285,6 +310,10 @@ export interface WorldState {
   // renders as f(snapshot, city_seed). Optional/additive (pre-W15 backends and
   // snapshots lack it); consumers default with `city_seed ?? 1337`.
   city_seed?: number | null;
+  // EM-239 (S1) — the authoritative road graph. When present the 3D city
+  // renders FROM it; when absent (pre-S1 snapshots) the renderer falls back
+  // to the hardcoded grid. Additive/optional — fallback discipline.
+  city_graph?: CityGraph | null;
   // Wave I (EM-210/213): the image gallery (agent-generated art) and the id of
   // the image currently promoted over the plaza. Both optional/additive so a
   // pre-Wave-I backend (or a snapshot predating the atelier) stays valid; the
