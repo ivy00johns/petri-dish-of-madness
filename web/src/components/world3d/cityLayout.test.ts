@@ -1226,3 +1226,78 @@ describe('EM-244 (S3a) — car policy shapes the plan (tiles + cars)', () => {
     expect(pedestrianStreetIds(null).size).toBe(0);
   });
 });
+
+// ── EM-246 (S4) — greenfield / near-empty graph renders without crashing ──────
+//
+// A greenfield run starts the city as a single central-block plaza (4 nodes /
+// 4 edges, mirroring backend citygraph._greenfield / _CENTRAL_IDX = (−3, 2))
+// instead of the full 5×5 grid — the "maybe they build nothing" start. The
+// EM-243 graph-driven renderer must compute a VALID plan from this near-empty
+// graph without throwing (the spec §6 greenfield safety bar). The frozen-grid
+// fallback derivations (blocks / lots / landmarks from `places`) are unaffected;
+// only roads / streets / pedestrian tiles read the sparse graph. The additive
+// `template` field is metadata only — it never shapes the render.
+
+/** The minimal greenfield graph: the central block's 4 corner nodes + its 4
+ *  perimeter edges (mirrors backend citygraph._greenfield, _CENTRAL_IDX = lo/hi
+ *  = −3/2). Built with the EM-239/EM-243 tc(i) tile-center + n:i:j / e:a->b id
+ *  idiom, plus the additive EM-246 template tag. */
+function greenfieldGraph(seed = DEFAULT_CITY_SEED): CityGraph {
+  const lo = -3, hi = 2; // the central block's corner tile indices (closest to origin)
+  const node = (i: number, j: number) =>
+    ({ id: `n:${i}:${j}`, x: tc(i), z: tc(j), kind: 'junction' as const });
+  const edge = (ai: number, aj: number, bi: number, bj: number) => {
+    const a = `n:${ai}:${aj}`, b = `n:${bi}:${bj}`;
+    return { id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const };
+  };
+  return {
+    version: 1,
+    seed,
+    car_policy: 'cars' as const,
+    template: 'greenfield',
+    nodes: [node(lo, lo), node(hi, lo), node(lo, hi), node(hi, hi)],
+    edges: [
+      edge(lo, lo, hi, lo), // south side
+      edge(lo, hi, hi, hi), // north side
+      edge(lo, lo, lo, hi), // west side
+      edge(hi, lo, hi, hi), // east side
+    ],
+  };
+}
+
+describe('EM-246 (S4) — greenfield / near-empty graph renders without crashing', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('a minimal central-plaza graph computes a valid plan (no crash)', () => {
+    const g = greenfieldGraph(seed);
+
+    let plan: CityPlan | undefined;
+    expect(() => {
+      plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g });
+    }, 'a near-empty greenfield graph must compute a plan, not throw').not.toThrow();
+    expect(plan).toBeTruthy();
+    const greenfield = plan!;
+
+    // The plaza renders some road tiles (its 4-edge perimeter ring), far fewer
+    // than the full 5×5 grid (greenfield is sparse — the one-road floor holds).
+    const full = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: classicGridGraph(seed) });
+    expect(roadInstances(greenfield).length, 'the plaza must lay ≥ 1 road tile').toBeGreaterThan(0);
+    expect(
+      roadInstances(greenfield).length,
+      'greenfield must be sparser than the full grid',
+    ).toBeLessThan(roadInstances(full).length);
+
+    // The plan is still structurally complete: the frozen-grid fallback
+    // derivations (vocabulary totality + the 25 blocks) are unaffected by the
+    // sparse graph — only the road field shrank.
+    expect(Object.keys(greenfield.pieces)).toEqual([...CITY_PIECE_KEYS]);
+    expect(greenfield.blocks.length).toBe(GRID_BLOCKS * GRID_BLOCKS);
+
+    // The default-cars greenfield adds no pedestrian tiles (byte-identical
+    // baseline discipline — the template field is metadata only).
+    expect(greenfield.pedestrianTiles).toEqual([]);
+
+    // No orphan road tiles: the perimeter ring is connected (no rendering gap).
+    expectNoOrphanRoads(greenfield, 'greenfield plaza');
+  });
+});

@@ -10,6 +10,7 @@ byte-identical test enforces agreement):
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 TILE: float = 2.6
@@ -61,6 +62,7 @@ class CityGraph:
     seed: int
     version: int = 1
     car_policy: str = "cars"  # global default (S3 flips it for "ban cars")
+    template: str = "grid"  # EM-246 (S4) — the run-start profile kind (records intent)
     nodes: list[CityNode] = field(default_factory=list)
     edges: list[CityEdge] = field(default_factory=list)
 
@@ -69,6 +71,7 @@ class CityGraph:
             "version": self.version,
             "seed": self.seed,
             "car_policy": self.car_policy,
+            "template": self.template,
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
         }
@@ -79,6 +82,7 @@ class CityGraph:
             seed=int(d.get("seed", 1337)),
             version=int(d.get("version", 1)),
             car_policy=str(d.get("car_policy", "cars")),
+            template=str(d.get("template", "grid")),
             nodes=[CityNode.from_dict(n) for n in d.get("nodes", [])],
             edges=[CityEdge.from_dict(e) for e in d.get("edges", [])],
         )
@@ -254,3 +258,91 @@ def apply_car_policy(
         edge.car_policy = policy
         return True, "ok", {"scope": "street", "policy": policy, "edge_id": target}
     return False, f"car-policy scope must be 'city' or 'street' (got {scope!r}; 'district' not yet supported)", None
+
+
+# ── EM-246 (S4): run-start templates ───────────────────────────────────────────
+# grid/greenfield/village ship now (axis-aligned); pentagon/radial/ring need
+# EM-245 (master_plan) + EM-247 (meshing) → grid fallback.
+TEMPLATE_KINDS: frozenset[str] = frozenset({"grid", "greenfield", "village"})
+_DENSITY_KEEP: dict[str, float] = {"low": 0.4, "medium": 0.6, "high": 0.8}
+# the central block's two lattice lines closest to the origin (lo, hi)
+_CENTRAL_IDX: tuple[int, int] = (-3, 2)
+
+
+def _seeded_unit(seed: int, key: str) -> float:
+    """Deterministic [0,1) from (seed, key) — stdlib sha1, pure (village sparsity)."""
+    h = hashlib.sha1(f"{seed}:{key}".encode("utf-8")).hexdigest()
+    return int(h[:8], 16) / 0x100000000
+
+
+def _central_plaza_edges() -> list[tuple[int, int, int, int]]:
+    """The four edges of the central block as (ia, ja, ib, jb) index pairs."""
+    lo, hi = _CENTRAL_IDX
+    return [
+        (lo, lo, hi, lo), (lo, hi, hi, hi),  # south + north sides
+        (lo, lo, lo, hi), (hi, lo, hi, hi),  # west + east sides
+    ]
+
+
+def _build_from_index_edges(seed: int, idx_edges, template_kind: str) -> CityGraph:
+    """Assemble a CityGraph from (ia,ja,ib,jb) index-edge tuples — nodes derived
+    from the endpoints, edges via _ordered_edge (classic_grid's id convention)."""
+    nodes: dict[str, CityNode] = {}
+    edges: list[CityEdge] = []
+    seen: set[str] = set()
+    for ia, ja, ib, jb in idx_edges:
+        aid, bid = _node_id(ia, ja), _node_id(ib, jb)
+        for nid, (i, j) in ((aid, (ia, ja)), (bid, (ib, jb))):
+            if nid not in nodes:
+                nodes[nid] = CityNode(id=nid, x=tile_center(i), z=tile_center(j))
+        eid, a, b = _ordered_edge(aid, bid)
+        if eid not in seen:
+            seen.add(eid)
+            edges.append(CityEdge(id=eid, a=a, b=b))
+    return CityGraph(seed=int(seed), template=template_kind,
+                     nodes=list(nodes.values()), edges=edges)
+
+
+def _greenfield(seed: int) -> CityGraph:
+    """Minimal: a single central-block plaza (4 nodes / 4 edges). Agents build the
+    rest. Non-empty (one-road floor holds), the 'maybe they build nothing' start."""
+    return _build_from_index_edges(seed, _central_plaza_edges(), "greenfield")
+
+
+def _village(seed: int, density: str) -> CityGraph:
+    """Sparse axis-aligned scatter: classic_grid's edges thinned by a seeded keep
+    probability, with the central plaza always kept (connected, non-empty core).
+    Organic (non-axis-aligned) village waits for S5a."""
+    keep = _DENSITY_KEEP.get(density, 0.6)
+    full = classic_grid(seed)
+    # central edges via _ordered_edge — the canonical id matching classic_grid's.
+    core = {_ordered_edge(_node_id(ia, ja), _node_id(ib, jb))[0]
+            for (ia, ja, ib, jb) in _central_plaza_edges()}
+    kept = [e for e in full.edges
+            if e.id in core or _seeded_unit(seed, f"village:{e.id}") < keep]
+    keep_ids = {e.id for e in kept}
+    live = {nid for e in kept for nid in (e.a, e.b)}
+    nodes = [n for n in full.nodes if n.id in live]
+    g = CityGraph(seed=int(seed), template="village", nodes=nodes,
+                  edges=[e for e in full.edges if e.id in keep_ids])
+    return g
+
+
+def template(kind: str, seed: int, *, size: int = 5, density: str = "medium") -> CityGraph:
+    """Build the run-start CityGraph for a city profile. grid/greenfield/village
+    ship now; pentagon/radial/ring fall back to grid (need EM-245 + EM-247) but
+    record the requested kind in `.template` so the caller can warn + the UI reflect
+    intent. `size` is RESERVED — accepted for forward-compat but NOT yet honored:
+    greenfield is a fixed central plaza and village thins the canonical 5x5, so the
+    extent is fixed for now (scaling it is a follow-up, tracked with the geometric
+    presets that ride EM-245/EM-247). grid is always the canonical 5x5."""
+    if kind == "grid":
+        return classic_grid(seed)  # .template defaults to 'grid'
+    if kind == "greenfield":
+        return _greenfield(seed)
+    if kind == "village":
+        return _village(seed, density)
+    # unknown / geometric: grid topology, but record the requested kind.
+    g = classic_grid(seed)
+    g.template = kind
+    return g

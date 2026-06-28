@@ -1,0 +1,101 @@
+{
+  "schema_version": "1.0",
+  "task": "EM-246 (S4) — city templates / city profile (grid/greenfield/village + geometric fallback)",
+  "status": "PASS_WITH_ISSUES",
+  "gate_reran": true,
+  "scores": {
+    "contract_conformance": {
+      "score": 4,
+      "notes": "Core contracts fully met: byte-identical grid default (node/edge ids+order == classic_grid), additive CityGraph.template field (to_dict adds it, from_dict defaults 'grid' for pre-EM-246 snapshots), deterministic per (kind,seed,density), geometric pentagon/radial/ring fall back to classic_grid topology while recording requested kind + warning fires once at build time, snapshot/fork round-trip byte-identical. Docked one point: the `size` profile knob is a documented contract that does not deliver — template() docstring asserts 'size is honored by greenfield/village extent' but template() never forwards size to _greenfield/_village; verified live that size=5 and size=99 yield byte-identical greenfield AND village graphs."
+    },
+    "correctness": {
+      "score": 4,
+      "notes": "All gates green; determinism, greenfield near-empty safety (4-node plaza, every frontend graph-derivation shape-guarded, build_nearby_layout returns str|None with 0 crashes), one-road connectivity floor (greenfield 4-edge plaza; village force-keeps central 4-cycle across 50 seeds x 3 densities), and snapshot round-trip all verified. Only correctness wrinkle is the inert `size` param — deterministic and non-crashing, but silently ignores operator intent."
+    },
+    "security": {
+      "score": 5,
+      "notes": "No attack surface introduced. Pure deterministic graph generation (only nondeterminism source is hashlib.sha1 seeded on f'{seed}:{key}', _seeded_unit in [0,1) cross-platform stable). Config parsing clamps/validates all inputs (template lowercased, density->medium fallback, car_policy->cars, size max(1,int)), malformed/non-dict 'city:' block falls back to all-grid defaults. No I/O, no eval, no untrusted deserialization beyond additive snapshot keys."
+    },
+    "coverage": {
+      "score": 4,
+      "notes": "+16 new backend tests (test_city_templates.py + test_citygraph.py) and +1 frontend greenfield render test; full suites green. Gap: NO test catches the `size` no-op — test_city_profile_parses_fields only asserts size PARSES to 7, never that it affects the emitted graph. A regression test asserting size's documented effect (or asserting it is reserved/inert) would close the doc-vs-behavior gap."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "git diff 9a46c1a..HEAD touches only intended files (citygraph.py, loader.py, world.py, two backend tests, config/world.yaml, web/src/types/index.ts, cityLayout.test.ts, plan doc). NO image-provider/imagegen leakage — the working-tree imagegen/world.city25.yaml edits from the start snapshot live on a different branch and are absent here. No S5a master-plan generators (EM-245) or S5b meshing (EM-247) leaked; geometric presets honestly fall back."
+    }
+  },
+  "test_results": {
+    "backend": {
+      "command": ".venv/bin/python -m pytest backend/tests/ -q",
+      "passed": 1681,
+      "failed": 0,
+      "warnings": 1,
+      "duration_s": 46.21,
+      "result": "PASS"
+    },
+    "frontend_world3d": {
+      "command": "cd web && /usr/local/bin/npx vitest run src/components/world3d",
+      "test_files": 24,
+      "passed": 578,
+      "failed": 0,
+      "duration_s": 4.02,
+      "result": "PASS"
+    },
+    "typecheck": {
+      "command": "cd web && /usr/local/bin/npx tsc -b --force",
+      "exit_code": 0,
+      "result": "PASS"
+    }
+  },
+  "blockers": [],
+  "issues": [
+    {
+      "severity": "MEDIUM",
+      "consensus": "flagged by 4/4 lenses (3 as MEDIUM, 1 as LOW)",
+      "location": "backend/petridish/engine/citygraph.py:331-344 (template docstring line 335); config/world.yaml:482; backend/petridish/config/loader.py CityProfileParams.size + _parse_city_profile",
+      "description": "`size` city-profile knob is a silent no-op with misleading docs. It is plumbed end-to-end (config -> _parse_city_profile with max(1,int(...)) -> World.__init__ -> template(size=...)) but template() never forwards it to _greenfield(seed) or _village(seed, density). Verified live: template('greenfield',1337,size=5).to_dict() == size=99, and identically for village. The template() docstring asserts 'size is honored by greenfield/village extent (grid stays canonical)' (FALSE for greenfield/village), and the loader/world.yaml comments call it an 'extent hint (greenfield/village)'. No crash, no determinism break, no back-compat impact, no regression. Recommended fix: either honor size in _greenfield/_village extent, or relabel docs/comments to 'size: reserved, not yet honored' in all three places.",
+      "blocking": false
+    },
+    {
+      "severity": "LOW",
+      "location": "backend/petridish/engine/world.py:1308-1318",
+      "description": "Inner city-profile fields read with raw getattr(_profile, ...) instead of the project's _block_get(_profile, ...) accessor. If params.city were ever a plain dict, getattr(dict, 'template', 'grid') silently returns grid/medium/5/cars defaults. Not reachable through load_config (always builds CityProfileParams) or from_snapshot (defaults WorldParams()), so low severity — robustness/consistency nit, determinism unaffected.",
+      "blocking": false
+    },
+    {
+      "severity": "LOW",
+      "location": "backend/petridish/config/loader.py _parse_city_profile (template = str(raw.get('template', d.template)).strip().lower() or d.template)",
+      "description": "An explicitly-null template ('template:' or 'template: null') coerces to literal 'none' (str(None)='None'->'none', truthy so the 'or d.template' grid fallback does NOT fire). Run still boots safely (routes through geometric fallback -> grid topology) but records template='none' and emits a spurious EM-245 geometric-fallback warning. A null scalar should coerce to grid default like a non-dict block does. Edge case only; density/car_policy/size all handle null safely.",
+      "blocking": false
+    },
+    {
+      "severity": "INFO",
+      "location": "backend/petridish/engine/citygraph.py:74,85 (to_dict/from_dict); world.py to/from_snapshot",
+      "description": "A new grid snapshot gains an additive 'template':'grid' key, so a re-saved pre-EM-246 snapshot is not literally byte-for-byte identical at the full-dict level. Topology (node/edge ids+order) IS byte-identical and from_dict defaults absent->'grid', so the back-compat/determinism contract holds at the level it is defined; flagged only because the plan leans on the phrase 'byte-identical'. Matches stated additive-field design intent.",
+      "blocking": false
+    },
+    {
+      "severity": "INFO",
+      "location": "backend/petridish/engine/citygraph.py _village (~308-325)",
+      "description": "village can emit road components disconnected from the central plaza (randomly kept edges need not touch the core). The central-plaza 4-cycle is force-kept and verified present across 50 seeds x 3 densities, so the one-road floor + connected core hold. Disconnected satellite roads are acceptable by design (agents build_road to connect); determinism unaffected.",
+      "blocking": false
+    },
+    {
+      "severity": "INFO",
+      "location": "web/src/components/world3d/cityLayout.ts:883-1008 (blocks/lots/landmarks)",
+      "description": "Greenfield sparsifies only the ROAD graph, not the built environment — block classification, platted lots, and landmark anchors derive from `places` (full town), not city_graph, so a template:greenfield run still renders all 25 blocks of lots + every config landmark; only the 4-edge plaza ring is sparse. By design (frozen-grid fallback for non-road derivations); greenfield != visually empty unless the operator also trims the places list. Non-crashing, documented in the new test.",
+      "blocking": false
+    },
+    {
+      "severity": "INFO",
+      "location": "backend citygraph.to_dict/from_dict + web/src/types/index.ts:70 (template?: string)",
+      "description": "Template name is plumbed end-to-end (snapshot city_graph.template + additive frontend type) but no UI component renders the label — a deferred-by-plan visible label, not a silent gap. Lives only nested under city_graph (no top-level snapshot key). A future read-only label can read snapshot.city_graph.template with no further backend work.",
+      "blocking": false
+    }
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "All three gates re-run independently and PASS (backend 1681 passed / 0 failed; frontend world3d 578 passed / 24 files; tsc -b --force exit 0). No CRITICAL blocker. contract_conformance=4 (>=3). security=5 (>=3). All 4 adversarial lenses returned verdict 'issues' — NONE returned 'blocker'. The single consensus MEDIUM (inert `size` knob with overclaiming docs) plus LOW/INFO findings are doc-honesty/robustness/cosmetic gaps that do not threaten determinism, byte-identical default, back-compat, greenfield safety, snapshot round-trip, or scope. Recommend filing the `size` no-op as a follow-up doc/behavior fix; not a merge blocker."
+  }
+}

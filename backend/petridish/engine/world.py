@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import random
 import re
@@ -12,8 +13,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .citygraph import (CityGraph, classic_grid, apply_build_road, nearest_node,
-                        apply_demolish_road, apply_car_policy)
+from .citygraph import (CityGraph, classic_grid, template, apply_build_road,
+                        nearest_node, apply_demolish_road, apply_car_policy)
+
+logger = logging.getLogger(__name__)
 
 
 def _block_get(block: Any, key: str, default: Any) -> Any:
@@ -1296,11 +1299,24 @@ class World:
         # from the derivable baseline, so a fresh world stays byte-identical.
         self.neighborhoods: dict[str, Neighborhood] = self._derive_neighborhoods()
 
-        # EM-239 (S1) — the authoritative road graph. S1 seeds it from the
-        # frozen classic_grid template (pure fn of city_seed); it serializes in
+        # EM-239 (S1) — the authoritative road graph. It serializes in
         # to_snapshot() and restores in from_snapshot(). Roads are first-class
         # state here; lots/zones/landmarks/streets keep deriving frontend-side.
-        self.city_graph: CityGraph = classic_grid(self.city_seed)
+        # EM-246 (S4) — seed the road graph from the run-start city profile
+        # (config world.city). grid → classic_grid (byte-identical default);
+        # greenfield/village ship now; geometric kinds fall back to grid + warn.
+        _profile = _block_get(params, "city", None)
+        _kind = getattr(_profile, "template", "grid") if _profile is not None else "grid"
+        _density = getattr(_profile, "density", "medium") if _profile is not None else "medium"
+        _size = getattr(_profile, "size", 5) if _profile is not None else 5
+        self.city_graph: CityGraph = template(_kind, self.city_seed, size=_size, density=_density)
+        if _kind not in ("grid", "greenfield", "village"):
+            logger.warning(
+                "city template %r needs EM-245 (S3b generators) + EM-247 (meshing) — "
+                "starting on the grid; the requested kind is recorded for when they land.", _kind)
+        _policy = getattr(_profile, "car_policy", "cars") if _profile is not None else "cars"
+        if _policy in ("cars", "pedestrian", "mixed"):
+            self.city_graph.car_policy = _policy
 
     def apply_procgen(self) -> None:
         """Apply the seeded procgen town layout when world.procgen.enabled

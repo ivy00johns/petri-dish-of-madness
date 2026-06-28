@@ -36,7 +36,6 @@ Every **open / in-progress** item, ID'd and prioritized. This is the canonical
 | EM-176 | P2 | W17 | frontend | user 2026-06-11 | Bring vehicles back when they're playable: parked-car emission disabled at the generator (`CARS_ENABLED=false`, cityLayout) — static cars read as a distraction before they have a purpose. Keys/registry/GLBs/licenses all kept; EM-169's ambient traffic on the road graph is the re-entry point (flip the flag + moving cars together) **— PR #44 (2026-06-24): `CARS_ENABLED` flipped on together with the ambient traffic.** | in-progress | PR #44 |
 | EM-214 | P3 | W20 | backend+frontend | Wave I · I5 (stretch) | **Voices / audio** — agent spoken lines via the browser **Web Speech API** ($0, client-side, no network) for v1; free SFX/music gen is NOT mature (slow, GPU-bound) → DEFERRED. Optional cloud TTS (Google free tier) only if server-side audio files are ever wanted. **Deferred at wave-I 2026-06-19** (user-chosen: full arc I1→I4, audio is a stretch with no agent demand yet — re-enter when voices are wanted). | open | defer wave-I |
 | EM-245 | P2 | W25 | backend+frontend | layout-spec 2026-06-27 | **S3b — master plans (morph):** parametric pentagon/radial/ring/grid generators ratified by ~70% vote; the city **morphs** toward target over ticks (deterministic diff+schedule), buildings preserved-or-relocated; needs arbitrary-angle rendering. Deps EM-239, EM-243, EM-247. Spec `…s3-governance-master-plans` §S3b | open | — |
-| EM-246 | P2 | W24 | backend+frontend | layout-spec 2026-06-27 | **S4 — city templates / "city profile":** run-start `city:` block in `config/world.yaml` (template+params+policy) seeding the initial graph (a template = a master plan seeded at start; reuses EM-245 generators); grid/greenfield/village now, geometric presets ride EM-247; feeds parallel-worlds EM-112 / arena EM-119. Deps EM-239. Spec `…s4-templates` | open | — |
 | EM-247 | P1 | W25 | frontend | layout-spec 2026-06-27 | **S5a — procedural road meshing:** runtime extrusion of road ribbons + procedural intersection/roundabout/plaza geometry from the graph (any angle), raw-instanced toon atlas + chunked culling + LOD (deep-research-v4 §4); supersedes the 5 road tiles behind a visual sign-off. Gates EM-245 + geometric S4 presets. Deps EM-239. Spec `…s5-assets-meshing` §S5a | open | — |
 
 _Next free ID: EM-249. (EM-240 taken by the crime engine; EM-241/242 reserved for the EM-240 persona content/management-UI follow-ons.)_
@@ -76,7 +75,8 @@ _Next free ID: EM-249. (EM-240 taken by the crime engine; EM-241/242 reserved fo
   variety, standalone) **and W25** (geometry: **EM-247** procedural road meshing → **EM-245** master
   plans/morph). **Sequencing:** EM-239 is the keystone (P0 — everything deps on it) — **✅ shipped
   2026-06-27, PR #58** (S1 spine: backend `CityGraph` + render-from-graph, byte-identical EM-155);
-  EM-243–248 now unblocked. **Shipped:** EM-243 (S2 `build_road`, PR #60), EM-248 (S5b assets, PR #59),
-  **EM-244** (S3a vote-gated demolish + car-policy, PR #61 — ban-cars/all-sidewalks + teardown via the
-  town-hall vote, live-rendered, EM-155-safe). W24 remaining: **EM-246** (S4 templates). W25: **EM-247**
-  (S5a procedural road meshing) gates **EM-245** (S3b master-plan morph) + the geometric EM-246 presets.
+  EM-243–248 now unblocked. **W24 COMPLETE** — EM-243 (S2 `build_road`, PR #60), EM-248 (S5b assets,
+  PR #59), EM-244 (S3a demolish + car-policy, PR #61), **EM-246** (S4 city templates grid/greenfield/
+  village, PR #62) all shipped. **W25 remaining:** **EM-247** (S5a procedural road meshing) gates
+  **EM-245** (S3b master-plan morph) + the geometric presets (pentagon/radial/ring) for both S3b and
+  EM-246's templates. After EM-247→EM-245, the agent-controlled city-layout initiative is complete.

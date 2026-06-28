@@ -472,6 +472,18 @@ world:
   # Change the value to reroll the city layout. Default 1337 when absent.
   city_seed: 1337
 
+  # EM-246 (S4) — the run-start city profile. Seeds the initial CityGraph via
+  # citygraph.template() (seed reuses city_seed); the graph rides the snapshot so
+  # replay/fork stay byte-identical (EM-155). grid → classic_grid (byte-identical
+  # pre-EM-246); greenfield → a minimal central plaza; village → a seeded-sparse
+  # grid. Geometric presets (pentagon/radial/ring) fall back to grid + a logged
+  # warning until EM-245 (generators) + EM-247 (meshing) land. Absent ⇒ grid.
+  city:
+    template: grid          # grid | greenfield | village (pentagon/radial/ring → grid until EM-245)
+    size: 5                 # RESERVED — parsed but not yet honored (extent is fixed for now)
+    density: medium         # low | medium | high — village sparsity
+    car_policy: cars        # starting global graph car policy (votes can change it)
+
   # W10 / EM-085 — persist runs by default so run history + replay survive
   # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
   # Path rule: a RELATIVE path resolves against the repo root (the parent of

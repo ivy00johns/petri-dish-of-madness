@@ -62,6 +62,12 @@ export interface CityGraph {
   // EM-244 (S3a): the city-scope default. 'pedestrian' is the headline "ban
   // cars + all sidewalks" — every 'inherit' edge resolves to it.
   car_policy: 'cars' | 'pedestrian' | 'mixed';
+  // EM-246 (S4): the run-start city profile kind (grid|greenfield|village; a
+  // geometric kind like pentagon falls back to grid + records intent). READ-ONLY
+  // METADATA — the renderer ignores it (the graph's nodes/edges drive the render,
+  // so the default 'grid' path stays byte-identical). Optional/additive so
+  // pre-EM-246 snapshots stay valid; absent ⇒ 'grid'.
+  template?: string;
   nodes: CityGraphNode[];
   edges: CityGraphEdge[];
 }
