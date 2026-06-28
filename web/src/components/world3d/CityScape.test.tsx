@@ -337,6 +337,22 @@ describe('citySignature (plan memo key)', () => {
     expect(citySignature(TOWN, 1337, undefined, grown)).not.toBe(citySignature(TOWN, 1337, undefined, g0));
   });
 
+  it('EM-244: a car_policy flip at CONSTANT counts churns the memo (city + per-edge)', () => {
+    // The S3a HIGH: set_car_policy mutates policy WITHOUT changing node/edge counts,
+    // so a count-only signature would miss it and the tint/parked-car removal would
+    // not render live. citySignature must fold car_policy too.
+    const cars = { nodes: [{}, {}], edges: [{ id: 'e1', car_policy: 'inherit' }], car_policy: 'cars' };
+    const cityPed = { nodes: [{}, {}], edges: [{ id: 'e1', car_policy: 'inherit' }], car_policy: 'pedestrian' };
+    const edgePed = { nodes: [{}, {}], edges: [{ id: 'e1', car_policy: 'pedestrian' }], car_policy: 'cars' };
+    // city-scope ban-cars: same counts, different city policy ⇒ signature changes
+    expect(citySignature(TOWN, 1337, undefined, cityPed)).not.toBe(citySignature(TOWN, 1337, undefined, cars));
+    // street-scope: one edge flips to pedestrian ⇒ signature changes
+    expect(citySignature(TOWN, 1337, undefined, edgePed)).not.toBe(citySignature(TOWN, 1337, undefined, cars));
+    // an idle re-poll of the SAME policy state is still stable (no churn)
+    const carsPoll = { nodes: [{}, {}], edges: [{ id: 'e1', car_policy: 'inherit' }], car_policy: 'cars' };
+    expect(citySignature(TOWN, 1337, undefined, carsPoll)).toBe(citySignature(TOWN, 1337, undefined, cars));
+  });
+
   it('EM-123: a district tier change churns the memo; tier-1/absent does not', () => {
     const baseline = [
       { id: 'farm', name: 'Farm', zone_kind: 'farm', tier: 1, progress: 0 },

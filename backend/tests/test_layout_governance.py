@@ -321,3 +321,32 @@ def test_replaying_same_proposals_yields_identical_graph():
 
     a, b = _run(), _run()
     assert a.city_graph.to_dict() == b.city_graph.to_dict()
+
+
+# ── EM-244 pre-ship review fix: a 2nd building demolish-by-vote APPLIES ────────
+# (regression for the pre-existing bug the adversarial pass found: 'demolish' was
+# missing from action_vote's renewal-exclusion, so a 2nd public-demolish was
+# misclassified as a renewal of the still-active first and NEVER applied.)
+def test_second_building_demolish_by_vote_applies_not_renewed():
+    from petridish.engine.world import Building
+    w = _gov_world()
+    gov = next(p for p in w.places.values() if p.kind == "governance")
+    b1 = Building(id="bld_t1", name="Old Hall", kind="library", location=gov.id,
+                  owner_id="public", status="operational")
+    b2 = Building(id="bld_t2", name="Old Mill", kind="workshop", location=gov.id,
+                  owner_id="public", status="operational")
+    w.buildings[b1.id] = b1
+    w.buildings[b2.id] = b2
+    agent = next(iter(w.agents.values()))
+
+    ok, reason, r1 = w.action_propose_rule(agent, "demolish", "raze the old hall", target=b1.id)
+    assert ok, reason
+    _ratify(w, r1)
+    assert b1.status == "destroyed"
+
+    # the SECOND demolish (a DIFFERENT building) must apply, not be renewed away
+    ok, reason, r2 = w.action_propose_rule(agent, "demolish", "raze the old mill", target=b2.id)
+    assert ok, reason
+    _ratify(w, r2)
+    assert r2.status == "active", f"2nd demolish was {r2.status} (renewal bug not fixed)"
+    assert b2.status == "destroyed"

@@ -3818,6 +3818,12 @@ class World:
                     if rule.effect not in ("name_town", "promote_image", "trial",
                                            "amend_constitution",
                                            "relocate_center",
+                                           # EM-244: 'demolish' is a one-shot per-target ACT (the
+                                           # 3814 comment even says so) but was missing here, so a
+                                           # 2nd building-demolish vote was wrongly renewed (never
+                                           # applied). It's per-target scoped at propose time, so
+                                           # excluding it from renewal is correct.
+                                           "demolish",
                                            "demolish_road", "set_car_policy") else None  # EM-244 (S3a)
                 )
                 if existing is not None and existing.id != rule.id:

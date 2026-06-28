@@ -252,3 +252,15 @@ def test_demolish_road_is_pure_deterministic():
     apply_demolish_road(a, "e:n:7:2->n:12:2"); apply_demolish_road(b, "e:n:7:2->n:12:2")
     apply_car_policy(a, "city", "pedestrian"); apply_car_policy(b, "city", "pedestrian")
     assert a.to_dict() == b.to_dict()
+
+
+def test_demolish_road_refuses_the_last_road():
+    # EM-244: a one-road floor — demolishing to zero edges would let the frontend's
+    # empty-graph guard resurrect the hardcoded 5x5 grid (the opposite of intent).
+    from petridish.engine.citygraph import CityGraph, CityNode, CityEdge
+    g = CityGraph(seed=1, nodes=[CityNode(id="n:2:2", x=0.0, z=0.0),
+                                 CityNode(id="n:7:2", x=13.0, z=0.0)],
+                  edges=[CityEdge(id="e:n:2:2->n:7:2", a="n:2:2", b="n:7:2")])
+    ok, reason, info = apply_demolish_road(g, "e:n:2:2->n:7:2")
+    assert not ok and info is None and "last road" in reason
+    assert len(g.edges) == 1  # unchanged

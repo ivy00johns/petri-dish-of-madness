@@ -222,6 +222,12 @@ def apply_demolish_road(graph: CityGraph, edge_id: str) -> tuple[bool, str, dict
     edge = next((e for e in graph.edges if e.id == edge_id), None)
     if edge is None:
         return False, f"no such road to tear down ({edge_id})", None
+    # EM-244 (S3a): keep at least one road. A city demolished to zero edges would
+    # leave the frontend's graph-vs-fallback guard (an empty edge list reads as
+    # "absent/corrupt graph") resurrecting the hardcoded 5x5 grid — the opposite of
+    # the vote's intent. A one-road floor keeps the graph authoritative + non-empty.
+    if len(graph.edges) <= 1:
+        return False, "can't tear down the last road in the city", None
     a, b = edge.a, edge.b
     graph.edges = [e for e in graph.edges if e.id != edge_id]
     still = {nid for e in graph.edges for nid in (e.a, e.b)}
