@@ -544,7 +544,7 @@ function PedestrianRoadPads({
  * is the existing tile path UNCHANGED, so every EM-239/243/244/246 golden +
  * byte-identical assertion still holds. Do NOT retire the tile path here.
  */
-export const ROAD_MESH_ENABLED = false;
+export const ROAD_MESH_ENABLED = true; // EM-247 visual sign-off (TEMP — revert if not signed off)
 
 /** A road-tile piece key (the EM-239/243 instanced road slabs). */
 function isRoadPieceKey(key: CityPieceKey): boolean {

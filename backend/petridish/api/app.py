@@ -1425,6 +1425,30 @@ async def god_clear_props_endpoint(body: GodClearPropsBody = GodClearPropsBody()
     return {"cleared": len(events), "removed": len(events)}
 
 
+class GodAdoptMasterPlanBody(BaseModel):
+    kind: str = Field(min_length=1, max_length=24)
+
+
+@app.post("/api/god/adopt_master_plan")
+async def god_adopt_master_plan_endpoint(body: GodAdoptMasterPlanBody):
+    """EM-247/EM-245 — god override: adopt a master plan IMMEDIATELY (demo / visual
+    sign-off; bypasses the 0.7 vote like god_demolish bypasses governance). Sets
+    world.master_plan so the per-tick morph begins; the city reshapes toward the
+    target (pentagon/radial/ring/grid) over ticks, rendered via the EM-247 mesh.
+    422 unknown kind / a plan already active; 503 when the world isn't initialized."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    try:
+        evt = _world.god_adopt_master_plan(body.kind)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    evt.setdefault("turn_id", None)
+    evt["actor_type"] = "god"
+    _loop._emit_event(evt)
+    _loop._broadcast_world_state()
+    return {"status": "ok", "kind": body.kind.strip().lower(), "morphing": True}
+
+
 class GodDemolishBody(BaseModel):
     building_id: str = Field(min_length=1, max_length=120)
 

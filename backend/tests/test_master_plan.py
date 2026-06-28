@@ -271,3 +271,18 @@ def test_corrupt_master_plan_snapshot_degrades_to_none():
         w2 = World.from_snapshot(snap)
         assert w2.master_plan is None, f"corrupt {bad!r} should degrade to None"
         assert w2.step_master_plan_morph() == []  # no wedge, no spurious morph
+
+
+def test_god_adopt_master_plan_sets_and_validates():
+    # EM-247 sign-off: god override adopts a master plan immediately (bypasses the
+    # 0.7 vote like god_demolish bypasses governance), and validates kind + one-active.
+    import pytest
+    w = _world()
+    evt = w.god_adopt_master_plan("pentagon")
+    assert evt["kind"] == "master_plan_adopted"
+    assert w.master_plan and w.master_plan["kind"] == "pentagon"
+    with pytest.raises(ValueError):
+        w.god_adopt_master_plan("radial")          # one active plan at a time
+    w.master_plan = None
+    with pytest.raises(ValueError):
+        w.god_adopt_master_plan("hexagon")         # unknown kind
