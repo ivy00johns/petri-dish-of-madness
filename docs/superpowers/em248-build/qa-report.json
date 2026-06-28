@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "Matches the plan's interfaces exactly. resolvePlaceModel(kind: string, id?: string): ModelSpec | null is back-compatible (id optional); PLACE_POOLS: Partial<Record<PlaceKind, ModelSpec[]>> mirrors MODEL_POOLS shape; allModelSpecs() includes ...Object.values(PLACE_POOLS).flat(); Building.tsx:366 threads place.id into resolvePlaceModel. Task 2 adds farm/workshop/library/clocktower to MODEL_POOLS consumed by the unchanged resolveStructureModel. No interface drift from the plan."
+    },
+    "correctness": {
+      "score": 5,
+      "notes": "Determinism/EM-155 holds: pick is Math.floor(hashUnit(id) * pool.length) % pool.length where hashUnit (worldSpace.ts:676) is a pure FNV-1a string hash — no Math.random, no Date/clock, no mutable module state (grep confirmed none in either source file). Same id -> same object reference across calls (test asserts .toBe). No-id path returns the PLACE_MODELS/MODEL_REGISTRY default = pool slot 0 by construction. Own-property hasOwnProperty.call guards preserved on both PLACE_POOLS and PLACE_MODELS lookups, so model-authored evil kinds (constructor/__proto__/...) never walk the prototype chain (evil-kind tests green)."
+    },
+    "security": {
+      "score": 5,
+      "notes": "No new attack surface. Prototype-pollution hardening intact: every lookup is Object.prototype.hasOwnProperty.call(...)-guarded; the 7 EVIL_KINDS cases for resolvePlaceModel all return null. Inputs are model-authored strings but only ever index guarded own-property maps. No file/network/eval introduced; pure data + pure functions."
+    },
+    "coverage": {
+      "score": 5,
+      "notes": "Tests have teeth, not vacuous. Distribution assertions (new Set(picks).size > 1 over 24 ids per pool; >=3 for generic) WOULD fail if the impl returned only slot 0 — confirmed by reasoning and by the green run actually distributing across size-2..4 pools. Anti-vacuity guard: models.test asserts poolEntries.length > 0 so an empty PLACE_POOLS cannot pass. Slot-0 invariant tested at url level in both models.test (PLACE_POOLS + MODEL_POOLS blocks) and structureModel.test (no-id path .toBe default). Footprint/ground/exists-on-disk re-measured from the real GLBs via allModelSpecs() which now includes PLACE_POOLS. Determinism, unknown-kind null, and back-compat no-id paths all covered."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "git status --short shows ONLY the 5 source/test files (Building.tsx, models.ts, structureModel.ts, models.test.ts, structureModel.test.ts) + the plan doc + the em248-build/ report dir. NO new .glb, NO ASSET_LICENSES.md change, nothing from Task 3+ (vendoring). The payload-guard test still reads the original 28 MB total budget (Task 6 reframe correctly NOT applied in this 1-2 slice). No VariantKey/operationalVariant routing changes."
+    }
+  },
+  "test_results": {
+    "vitest_models": "src/components/world3d/assets/models.test.ts — 1 file passed, 129/129 tests passed",
+    "vitest_structureModel": "src/components/world3d/structureModel.test.ts — 1 file passed, 69/69 tests passed",
+    "vitest_world3d_full": "src/components/world3d — 24 files passed, 543/543 tests passed",
+    "tsc_b_force": "tsc -b --force — exit 0 (clean)"
+  },
+  "blockers": [],
+  "issues": [
+    {
+      "severity": "info",
+      "description": "Slot-0 is verified at url level by the tests, but reading the data shows pool[0] also matches the default on scale AND yOffset for all 9 new pools (home/work/social/governance/wild + farm/workshop/library/clocktower). So an id that hashes to slot 0 renders byte-identically to the no-id path — a strength, not a gap."
+    },
+    {
+      "severity": "info",
+      "description": "The structureModel.test 'with an id ... distributed pool member' block iterates Object.entries(PLACE_POOLS) and would pass vacuously if the map were empty; non-vacuity is enforced cross-file by models.test's poolEntries.length > 0 assertion. Both suites are present and green, so coverage is real, but the guarantee is split across two files."
+    },
+    {
+      "severity": "info",
+      "description": "resolvePlaceModel's no-id branch returns the PLACE_MODELS[kind] object reference (which the test asserts via .toBe), not pool[0]; pool[0] is a separate but content-identical literal. Consistent with the existing resolveStructureModel/MODEL_POOLS idiom — intentional, no behavioral difference."
+    }
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "All four gates green (129 + 69 models/structureModel, 543 full world3d, tsc exit 0). Determinism/EM-155, slot-0 invariant (url + scale + yOffset), variety-actually-engages (tests have teeth), call-site wiring (Building.tsx threads place.id), footprint/license integrity (allModelSpecs includes PLACE_POOLS; all members are already-validated reused tuples), and scope discipline (only the 5 files + docs, no .glb/ASSET_LICENSES/Task-3+ leak) all hold. contract_conformance=5 and security=5 clear the gate thresholds; no CRITICAL blockers."
+  }
+}
