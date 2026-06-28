@@ -966,3 +966,65 @@ describe('EM-123 — district maturity drives extra street life', () => {
     expect(JSON.stringify(over)).not.toBe(JSON.stringify(base));
   });
 });
+
+// ── EM-239 (S1) — render city FROM the CityGraph, byte-identical to the grid ──
+
+// Build the classic_grid graph exactly as backend engine/citygraph.py emits it
+// (node id `n:i:j`, edge id `e:a->b`, tile center (i + 0.5) * TILE). The
+// byte-identical gate proves the graph-derived road-tile predicate reproduces
+// the hardcoded frozen grid field-for-field.
+const ROAD_IDX = [-13, -8, -3, 2, 7, 12];
+const tc = (i: number) => (i + 0.5) * TILE; // TILE is already imported in the test
+function classicGridGraph(seed = 1337) {
+  const nodes = [];
+  for (const j of ROAD_IDX) for (const i of ROAD_IDX)
+    nodes.push({ id: `n:${i}:${j}`, x: tc(i), z: tc(j), kind: 'junction' as const });
+  const edges = [];
+  for (const j of ROAD_IDX) for (let k = 0; k < ROAD_IDX.length - 1; k++) {
+    const a = `n:${ROAD_IDX[k]}:${j}`, b = `n:${ROAD_IDX[k + 1]}:${j}`;
+    edges.push({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+  }
+  for (const i of ROAD_IDX) for (let k = 0; k < ROAD_IDX.length - 1; k++) {
+    const a = `n:${i}:${ROAD_IDX[k]}`, b = `n:${i}:${ROAD_IDX[k + 1]}`;
+    edges.push({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+  }
+  return { version: 1, seed, car_policy: 'cars' as const, nodes, edges };
+}
+
+describe('EM-239 byte-identical graph rendering', () => {
+  const seed = DEFAULT_CITY_SEED;
+  const places: Place[] = TOWN; // reuse the shipped-shape town fixture
+
+  it('classic_grid graph yields a plan identical to the no-graph fallback', () => {
+    const fallback = computeCityPlan({ places, city_seed: seed });
+    const fromGraph = computeCityPlan({ places, city_seed: seed, city_graph: classicGridGraph(seed) });
+    expect(fromGraph).toEqual(fallback);
+  });
+
+  it('absent city_graph still renders via the legacy path', () => {
+    const plan = computeCityPlan({ places, city_seed: seed, city_graph: null });
+    expect(plan.pieces.road_straight.length).toBeGreaterThan(0);
+    expect(plan.blocks.length).toBe(GRID_BLOCKS * GRID_BLOCKS);
+  });
+
+  it('type-corrupt city_graph degrades to the grid without throwing', () => {
+    // ModelBoundary (EM-239): a corrupt graph (nodes/edges not real arrays) must
+    // fall back to the hardcoded grid byte-identically, never throw during the
+    // render-path computeCityPlan call (upstream of the per-piece boundary).
+    const fallback = JSON.stringify(computeCityPlan({ places, city_seed: seed }));
+    const corrupt: unknown[] = [
+      { nodes: 'str', edges: 'str' },
+      { nodes: 5, edges: [{ a: 'x', b: 'y' }] },
+      { edges: [{ a: 'x', b: 'y' }] }, // no nodes key
+      { edges: { length: 1 } },
+      { version: 1, seed, car_policy: 'cars', nodes: [], edges: [] }, // empty
+    ];
+    for (const bad of corrupt) {
+      let plan;
+      expect(() => {
+        plan = computeCityPlan({ places, city_seed: seed, city_graph: bad as never });
+      }, JSON.stringify(bad)).not.toThrow();
+      expect(JSON.stringify(plan), JSON.stringify(bad)).toBe(fallback);
+    }
+  });
+});

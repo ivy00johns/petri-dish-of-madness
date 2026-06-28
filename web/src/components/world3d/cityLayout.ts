@@ -58,7 +58,7 @@
  * Math.atan2(dx, dz), so +X ⇒ π/2, −Z ⇒ π, −X ⇒ −π/2.
  */
 
-import type { Place, Neighborhood } from '../../types';
+import type { Place, Neighborhood, CityGraph } from '../../types';
 import { placeToWorld, hashUnit, slotLayout } from './worldSpace';
 
 // ── Frozen vocabulary (Wave D1 contract — the registry imports this) ────────
@@ -159,6 +159,10 @@ export interface CityWorld {
   // plan, never filler buildings (EM-174). Absent ⇒ every district is tier 1
   // and the plan is byte-identical to pre-EM-123.
   neighborhoods?: Neighborhood[] | null;
+  // EM-239 (S1) — the authoritative road graph. When present, roads + street
+  // lines derive from it; when absent, the hardcoded frozen grid is used
+  // (fallback discipline). Same byte-identical output for the classic_grid.
+  city_graph?: CityGraph | null;
 }
 
 export interface CityPlan {
@@ -279,6 +283,70 @@ function inGrid(i: number, j: number): boolean {
 
 function isRoadTile(i: number, j: number): boolean {
   return inGrid(i, j) && (isRoadIndex(i) || isRoadIndex(j));
+}
+
+/** Recover a tile index from a world coordinate (inverse of tileCenter). */
+function tileIndexOf(world: number): number {
+  return Math.round(world / TILE - 0.5);
+}
+
+/** Build the set of road-tile "i,j" keys from the graph's edges (each edge is
+ *  axis-aligned; mark every tile index between its endpoints). For the
+ *  classic_grid this reproduces the hardcoded isRoadTile set exactly, so the
+ *  plan is byte-identical. S2-ready: partial graphs mark only their segments. */
+function roadTileSetFrom(graph: CityGraph | null | undefined): Set<string> {
+  const set = new Set<string>();
+  // Fall back unless the graph carries REAL node + edge arrays. ModelBoundary
+  // (EM-239): a type-corrupt / partially-written graph must degrade to the
+  // hardcoded grid, never throw — computeCityPlan runs in CityScape's
+  // useCityPlan upstream of the per-piece <ModelBoundary>, so a throw here would
+  // crash the whole 3D world instead of falling back.
+  if (
+    !graph ||
+    !Array.isArray(graph.nodes) ||
+    !Array.isArray(graph.edges) ||
+    !graph.edges.length
+  ) {
+    // Fallback: today's hardcoded full grid.
+    for (let j = TILE_MIN; j <= TILE_MAX; j++)
+      for (let i = TILE_MIN; i <= TILE_MAX; i++)
+        if (isRoadTile(i, j)) set.add(`${i},${j}`);
+    return set;
+  }
+  const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+  for (const e of graph.edges) {
+    const a = nodeById.get(e.a);
+    const b = nodeById.get(e.b);
+    if (!a || !b) continue;
+    const ai = tileIndexOf(a.x), aj = tileIndexOf(a.z), bi = tileIndexOf(b.x), bj = tileIndexOf(b.z);
+    if (ai === bi) {
+      const lo = Math.min(aj, bj), hi = Math.max(aj, bj);
+      for (let j = lo; j <= hi; j++) if (inGrid(ai, j)) set.add(`${ai},${j}`);
+    } else if (aj === bj) {
+      const lo = Math.min(ai, bi), hi = Math.max(ai, bi);
+      for (let i = lo; i <= hi; i++) if (inGrid(i, aj)) set.add(`${i},${aj}`);
+    }
+  }
+  return set;
+}
+
+/** Road-line tile indices on one axis, derived from the graph (for street
+ *  naming). Fallback = the hardcoded isRoadIndex lines. ns lines run along Z at
+ *  constant x; ew lines run along X at constant z. */
+function roadLineIndicesFrom(
+  graph: CityGraph | null | undefined,
+  axis: 'ns' | 'ew',
+): number[] {
+  // Same ModelBoundary guard as roadTileSetFrom: a type-corrupt graph (nodes
+  // not a real array) degrades to the hardcoded road lines, never throws.
+  if (!graph || !Array.isArray(graph.nodes) || !graph.nodes.length) {
+    const out: number[] = [];
+    for (let i = TILE_MIN; i <= TILE_MAX; i++) if (isRoadIndex(i)) out.push(i);
+    return out;
+  }
+  const s = new Set<number>();
+  for (const n of graph.nodes) s.add(tileIndexOf(axis === 'ns' ? n.x : n.z));
+  return [...s].sort((p, q) => p - q);
 }
 
 /**
@@ -426,12 +494,11 @@ const STREET_LABEL_CROSS = [-2 * BLOCK_PITCH, 0, 2 * BLOCK_PITCH];
  * are `main` and carry mid-block label anchors; the outer ring road stays
  * unlabeled (sparse-label law).
  */
-export function computeStreets(seed: number): CityStreet[] {
+export function computeStreets(seed: number, graph?: CityGraph | null): CityStreet[] {
   const used = new Set<number>();
   const out: CityStreet[] = [];
   for (const axis of ['ns', 'ew'] as const) {
-    for (let i = TILE_MIN; i <= TILE_MAX; i++) {
-      if (!isRoadIndex(i)) continue;
+    for (const i of roadLineIndicesFrom(graph, axis)) {
       const at = tileCenter(i);
       const main = i !== TILE_MIN && i !== TILE_MAX; // ring road ⇒ not main
       const start = Math.floor(h(seed, `street-name-${axis}`, i) * STREET_NAME_BANK_SIZE);
@@ -463,14 +530,20 @@ function emptyPieces(): Record<CityPieceKey, CityInstance[]> {
   return out;
 }
 
-/** Roads: classify every road tile from its actual road neighbors. */
-function emitRoads(pieces: Record<CityPieceKey, CityInstance[]>): void {
+/** Roads: classify every road tile from its actual road neighbors. The
+ *  road-tile set comes from the CityGraph (EM-239) — for the classic_grid it
+ *  reproduces isRoadTile exactly, so the emitted pieces are byte-identical. */
+function emitRoads(
+  pieces: Record<CityPieceKey, CityInstance[]>,
+  roadTiles: Set<string>,
+): void {
+  const isRoad = (i: number, j: number) => roadTiles.has(`${i},${j}`);
   for (let j = TILE_MIN; j <= TILE_MAX; j++) {
     for (let i = TILE_MIN; i <= TILE_MAX; i++) {
-      if (!isRoadTile(i, j)) continue;
+      if (!isRoad(i, j)) continue;
       let mask = 0;
       for (const d of SIDES) {
-        if (isRoadTile(i + d.dx, j + d.dz)) mask |= d.bit;
+        if (isRoad(i + d.dx, j + d.dz)) mask |= d.bit;
       }
       if (mask === 0) continue;
       const x = tileCenter(i);
@@ -681,7 +754,11 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     if (n && n.id) tierById.set(String(n.id), Math.max(1, Math.floor(n.tier ?? 1)));
   }
 
-  emitRoads(pieces);
+  // EM-239 (S1) — roads derive from the authoritative CityGraph when present
+  // (fallback discipline: absent ⇒ the hardcoded frozen grid). For the
+  // classic_grid the derived road-tile set is byte-identical to the old grid.
+  const roadTiles = roadTileSetFrom(world.city_graph);
+  emitRoads(pieces, roadTiles);
 
   const landmarks = computeLandmarks(places);
 
@@ -804,7 +881,7 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     realLots,
     blockLots,
     emptyLots,
-    streets: computeStreets(seed), // EM-188: seeded names, part of the plan
+    streets: computeStreets(seed, world.city_graph), // EM-188: seeded names, part of the plan
     extent: Math.abs(tileCenter(TILE_MIN)) + TILE / 2, // 33.8: outer ring road edge
   };
 }

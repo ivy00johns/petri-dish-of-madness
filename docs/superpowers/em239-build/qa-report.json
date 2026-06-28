@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "Cross-language constants match exactly on both sides: TILE=2.6 (cityLayout.ts:101, citygraph.py tile_center), ROAD_TILE_INDICES=(-13,-8,-3,2,7,12), road-line predicate ((i-2)%5==0). Node id format f\"n:{i}:{j}\" and edge id f\"e:{a}->{b}\" match the plan. Forward-compat fields (CityEdge.road_class='street', car_policy='inherit'; CityGraph.car_policy='cars'; CityNode.kind='junction') are stored in to_dict/from_dict but never branched on in render or engine logic, exactly as the S1 plan requires. The snapshot key is additive (world.py:7118 to_snapshot adds city_graph alongside city_seed). Optional+nullable typing on both sides (types/index.ts WorldState.city_graph?: CityGraph|null; cityLayout.ts CityWorld.city_graph?). Impl matches plan precisely; the post-fix guards do not change any contract surface (S1 classic_grid output is byte-identical)."
+    },
+    "correctness": {
+      "score": 5,
+      "notes": "The byte-identical acceptance bar (EM-155) HOLDS and the two prior HIGH defects on malformed/type-corrupt input are now RESOLVED. Re-verified independently: backend regression test_from_snapshot_degrades_on_corrupt_graph PASSES (exercises {nodes:'xxx'}, {nodes:[{id}]} missing x/z, no-nodes-key, {}, None) — from_snapshot (world.py:7522-7532) now requires isinstance(_cg, dict) AND isinstance(_cg.get('nodes'), list) AND non-empty nodes, then wraps CityGraph.from_dict in try/except (KeyError, TypeError, ValueError) falling back to classic_grid(world.city_seed), with the else branch also deriving classic_grid. Frontend type-corrupt regression test PASSES — roadTileSetFrom (cityLayout.ts:304-315) and roadLineIndicesFrom (cityLayout.ts:342-346) both guard with Array.isArray(graph.nodes)/Array.isArray(graph.edges) before any dereference, degrading to the hardcoded grid with no throw. The byte-identical test (6 passing) confirms classic_grid graph yields a plan identical to the no-graph fallback (deep + JSON.stringify order-sensitive). Migration derives correctly off the RESTORED seed. No determinism divergence; no remaining crash path."
+    },
+    "security": {
+      "score": 5,
+      "notes": "Low attack surface: pure deterministic data refactor with no I/O, auth, network, eval, code-deserialization, or untrusted-string interpolation. classic_grid is a pure function of seed; no random/time/datetime/secrets/uuid/os.environ. The prior availability concern (denial-of-render on a malformed/partially-written city_graph) is now closed on BOTH sides: from_snapshot degrades to classic_grid via the isinstance(nodes,list) check + try/except, and the frontend computeCityPlan render path degrades to the hardcoded grid via Array.isArray guards in roadTileSetFrom/roadLineIndicesFrom. A corrupt or forked snapshot can no longer crash restore or the 3D world. No injection or privilege issues; surface remains minimal."
+    },
+    "test_coverage": {
+      "score": 5,
+      "notes": "Backend test_citygraph.py covers shape/id-format, round-trip, derive-when-absent migration, classic_grid determinism, AND the new negative path test_from_snapshot_degrades_on_corrupt_graph (passing — {nodes:'xxx'}, {nodes:[{id}]} missing x/z, no-nodes-key, {}, None). Frontend cityLayout.test.ts adds the 'type-corrupt' regression (passing — asserts no-throw + byte-identical fallback for {nodes:'str'}, {nodes:5}, no-nodes-key, {edges:{length:1}}, empty graph) alongside the 'byte-identical' suite (6 passing). The malformed-input gap flagged in the prior pass is now closed on both sides; happy-path determinism, migration, and graceful-degradation are all locked in by shipped tests. Full suites green: backend 1620 passed, frontend world3d 534 passed."
+    },
+    "scope_adherence": {
+      "score": 5,
+      "notes": "Strict S1 (roads-as-first-class spine) only. The fix commit (52d6c67) hardens the existing S1 files (world.py from_snapshot guard + try/except, cityLayout.ts Array.isArray guards) and adds the two regression tests — no scope creep. No agent build verbs (S2), no governance/votes/master-plans (S3), no templates (S4), no GLB/asset-registry/meshing (S5). classic_grid still emits only the frozen axis-aligned grid; forward-compat fields remain stored-not-acted-upon. The unrelated uncommitted image-provider changes (backend/petridish/imagegen/provider.py, config/world.yaml, config/world.city25.yaml, backend/tests/test_imagegen_providers.py) are a different concern, outside the EM-239 scope, and must not be folded into the EM-239 commit."
+    }
+  },
+  "test_results": {
+    "backend": "PASS — .venv/bin/python -m pytest backend/tests/ -q => 1620 passed, 1 warning in 44.14s (matches expectation). Regression: backend/tests/test_citygraph.py::test_from_snapshot_degrades_on_corrupt_graph => 1 passed.",
+    "frontend": "PASS — cd web && npx vitest run src/components/world3d => Test Files 24 passed (24), Tests 534 passed (534) (matches expectation). Regressions: cityLayout.test.ts -t 'type-corrupt' => 1 passed; -t 'byte-identical' => 6 passed.",
+    "typecheck": "PASS — cd web && npx tsc -b --force => exit 0 (project-references build; the only non-vacuous check given files:[] tsconfigs)."
+  },
+  "blockers": [],
+  "issues": [
+    "Forward-compat fields (road_class, car_policy, CityNode.kind) are round-tripped but have no S1 round-trip/default test asserting unknown values survive to_dict->from_dict; harmless today but worth a guard test before S2/S3 begin acting on them.",
+    "Working tree carries unrelated uncommitted image-provider changes (backend/petridish/imagegen/provider.py, config/world.yaml, config/world.city25.yaml, backend/tests/test_imagegen_providers.py). These are a DIFFERENT concern, OUTSIDE the EM-239 scope, and must NOT be folded into the EM-239 commit. They are not a blocker."
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "All three gates are green and re-verified independently: backend 1620 passed, frontend world3d 534 passed, typecheck (tsc -b --force) exit 0. Both prior HIGH blockers are genuinely RESOLVED, confirmed by reading the fixed code (commit 52d6c67) and running the shipped regression tests: BACKEND from_snapshot now validates isinstance(_cg.get('nodes'), list) and wraps CityGraph.from_dict in try/except falling back to classic_grid(world.city_seed) (test_from_snapshot_degrades_on_corrupt_graph PASSES); FRONTEND roadTileSetFrom and roadLineIndicesFrom now guard with Array.isArray(graph.nodes)/Array.isArray(graph.edges) before dereferencing (type-corrupt test PASSES, no throw, byte-identical fallback). The EM-155 byte-identical acceptance bar still HOLDS (byte-identical test: 6 passing). Gate-rule check: no CRITICAL blocker, contract_conformance=5 (>=3), security=5 (>=3). With both prior HIGH blockers resolved and all gates green, status is PASS with blockers []. proceed=true."
+  }
+}

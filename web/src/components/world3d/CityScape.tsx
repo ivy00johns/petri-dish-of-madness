@@ -308,7 +308,12 @@ export function citySignature(
 export function useCityPlan(
   world: CityWorld,
 ): { plan: CityPlan; center: { x: number; z: number } } {
-  const { places = [], city_seed: citySeed, neighborhoods } = world;
+  const { places = [], city_seed: citySeed, neighborhoods, city_graph } = world;
+  // EM-239 (S1): city_graph is INTENTIONALLY absent from citySignature and the
+  // useMemo deps. In S1 the graph is seed-determined and constant, so citySeed
+  // already captures it — but city_graph is a fresh object every snapshot poll,
+  // so adding it to the deps would churn the memo every tick and break the
+  // "never rebuilds instance buffers" invariant documented above.
   const sig = useMemo(
     () => citySignature(places, citySeed, neighborhoods),
     [places, citySeed, neighborhoods],
@@ -321,7 +326,7 @@ export function useCityPlan(
   if (!ref.current || ref.current.sig !== sig) {
     ref.current = {
       sig,
-      plan: computeCityPlan({ places, city_seed: citySeed, neighborhoods }),
+      plan: computeCityPlan({ places, city_seed: citySeed, neighborhoods, city_graph }),
       center: GRID_CENTER,
     };
   }
