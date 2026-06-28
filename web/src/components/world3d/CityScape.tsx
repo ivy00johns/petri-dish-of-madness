@@ -52,6 +52,7 @@ import type { Place, Neighborhood } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
+  DEFAULT_CITY_SEED,
   TILE,
   type CityInstance,
   type CityPieceKey,
@@ -62,6 +63,7 @@ import { CITY_MODEL_REGISTRY } from './assets/cityModels';
 import type { ModelSpec } from './assets/models';
 import { useToonGLTF } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
+import { RoadMesh } from './RoadMesh';
 import { toonMaterial } from './toon';
 
 // ── Chunking (pure, exported for tests) ──────────────────────────────────────
@@ -530,6 +532,25 @@ function PedestrianRoadPads({
   );
 }
 
+// ── EM-247 (S5a): procedural road-mesh flag (default OFF) ────────────────────
+
+/**
+ * EM-247 (S5a): when true, the road network renders as procedural geometry
+ * (<RoadMesh>, any-angle ribbons from the CityGraph) instead of the EM-239/243
+ * road TILES. Default **false** — the tile path is the byte-identical default +
+ * fallback, and flipping this on is a deliberate, reviewed change pending the
+ * human visual sign-off (atlas / lane markings / crosswalks / LOD are the
+ * spec's deferred "budget real iteration"). With the flag off the road render
+ * is the existing tile path UNCHANGED, so every EM-239/243/244/246 golden +
+ * byte-identical assertion still holds. Do NOT retire the tile path here.
+ */
+export const ROAD_MESH_ENABLED = false;
+
+/** A road-tile piece key (the EM-239/243 instanced road slabs). */
+function isRoadPieceKey(key: CityPieceKey): boolean {
+  return key.startsWith('road_');
+}
+
 /**
  * THE city (Wave D1.5 + EM-174). Mounted by CozyWorld inside the canvas —
  * every road tile, platted-lot pad, park tree, prop and parked car of the
@@ -540,15 +561,27 @@ function PedestrianRoadPads({
 export function CityScape({ world }: { world: CityWorld }) {
   const { plan, center } = useCityPlan(world);
   const entries = useMemo(() => renderableEntries(plan, CITY_MODEL_REGISTRY), [plan]);
+  // EM-247 (S5a): branch ONLY the road rendering. With the flag OFF (default)
+  // drawEntries === entries, so the road TILES render through the same
+  // CityPiece path as every other piece — byte-identical to pre-EM-247. With it
+  // ON, the road-tile pieces drop out and <RoadMesh> renders the procedural
+  // roads instead; every non-road piece (buildings/props/lots/landmarks) is
+  // untouched in both modes.
+  const drawEntries = ROAD_MESH_ENABLED
+    ? entries.filter((e) => !isRoadPieceKey(e.key))
+    : entries;
   return (
     <group name="cityscape">
-      {entries.map(({ key, spec, instances }) => (
+      {drawEntries.map(({ key, spec, instances }) => (
         // One boundary per piece key: a failed GLB silently skips THAT piece
         // (fallback null — absence, not a hole) and never unmounts the canvas.
         <ModelBoundary key={key} fallback={null}>
           <CityPiece pieceKey={key} spec={spec} instances={instances} center={center} />
         </ModelBoundary>
       ))}
+      {ROAD_MESH_ENABLED && (
+        <RoadMesh graph={world.city_graph} seed={world.city_seed ?? DEFAULT_CITY_SEED} />
+      )}
       {plan.emptyLots.length > 0 && (
         <EmptyLotPads instances={plan.emptyLots} center={center} />
       )}
