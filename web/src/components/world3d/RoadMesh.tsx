@@ -169,7 +169,18 @@ export function RoadMesh({
   graph?: CityGraph | null;
   seed: number;
 }) {
-  const data = useMemo(() => buildRoadMesh(graph, seed), [graph, seed]);
+  // EM-247 perf (S3b-readiness): key the build on a CONTENT signature, NOT the graph
+  // object. Snapshot polling swaps world.city_graph by reference every tick (the
+  // EM-243/244 lesson), so an identity dep would rebuild + re-instance the whole road
+  // mesh every poll once the flag is on. Node/edge counts change on build_road /
+  // demolish / S3b morph; car_policy rides for a future surface change. (When S3b
+  // mutates node.kind at constant count, extend this sig with a kinds hash.)
+  const graphSig = graph
+    ? `${graph.nodes.length}:${graph.edges.length}:${graph.car_policy ?? ''}`
+    : '';
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: rebuild on
+  // graph CONTENT (graphSig), not object identity, to avoid per-poll churn.
+  const data = useMemo(() => buildRoadMesh(graph, seed), [graphSig, seed]);
 
   const ribbonMats = useMemo(
     () => data.ribbons.map((r) => ribbonMatrix(r, new THREE.Matrix4())),
