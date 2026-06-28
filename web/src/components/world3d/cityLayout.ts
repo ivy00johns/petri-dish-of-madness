@@ -58,7 +58,7 @@
  * Math.atan2(dx, dz), so +X ⇒ π/2, −Z ⇒ π, −X ⇒ −π/2.
  */
 
-import type { Place, Neighborhood, CityGraph } from '../../types';
+import type { Place, Neighborhood, CityGraph, CityGraphEdge } from '../../types';
 import { placeToWorld, hashUnit, slotLayout } from './worldSpace';
 
 // ── Frozen vocabulary (Wave D1 contract — the registry imports this) ────────
@@ -196,6 +196,14 @@ export interface CityPlan {
    * the EM-155 byte-identical deterministic output.
    */
   streets: CityStreet[];
+  /**
+   * EM-244 (S3a): road tiles whose covering edge resolves to a 'pedestrian'
+   * car policy — rendered by CityScape as a tinted sidewalk surface variant
+   * (PEDESTRIAN_ROAD_COLOR). EMPTY for the default (city 'cars') / no-graph
+   * plan, so the byte-identical baseline is preserved; a pedestrianization
+   * vote (set_car_policy) fills it. Same envelope loop order as emitRoads.
+   */
+  pedestrianTiles: CityInstance[];
   /** Outer half-size of the city (Chebyshev from the world origin). */
   extent: number;
 }
@@ -362,6 +370,88 @@ function roadLineIndicesFrom(
   const s = new Set<number>();
   for (const n of graph.nodes) s.add(tileIndexOf(axis === 'ns' ? n.x : n.z));
   return [...s].sort((p, q) => p - q);
+}
+
+// ── EM-244 (S3a): car policy — pedestrian roads lose cars + render tinted ─────
+
+/**
+ * The EFFECTIVE car policy of one edge: an 'inherit' edge defers to the graph
+ * (city) policy; an explicit edge policy overrides it. Pure. When the graph is
+ * absent (no-graph fallback) an 'inherit' edge reads as the default 'cars', so
+ * the byte-identical baseline never gains a pedestrian zone.
+ */
+export function pedestrianPolicyFor(
+  graph: Pick<CityGraph, 'car_policy'> | null | undefined,
+  edge: CityGraphEdge,
+): 'cars' | 'pedestrian' | 'mixed' {
+  if (edge.car_policy === 'inherit') return graph?.car_policy ?? 'cars';
+  return edge.car_policy;
+}
+
+/**
+ * The road-tile "i,j" keys covered by an edge whose effective policy resolves
+ * to 'pedestrian'. EMPTY for the default (city 'cars' + all-'inherit' edges)
+ * graph and for the no-graph fallback — so the EM-239/EM-243 byte-identical
+ * plan is preserved; only a real pedestrianization populates it. Mirrors
+ * `roadTileSetFrom`'s axis-aligned tile walk + ModelBoundary guard.
+ */
+function pedestrianTileSetFrom(graph: CityGraph | null | undefined): Set<string> {
+  const set = new Set<string>();
+  if (
+    !graph ||
+    !Array.isArray(graph.nodes) ||
+    !Array.isArray(graph.edges) ||
+    !graph.edges.length
+  ) {
+    return set; // no graph ⇒ no pedestrian tiles (default path untouched)
+  }
+  const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+  for (const e of graph.edges) {
+    if (pedestrianPolicyFor(graph, e) !== 'pedestrian') continue;
+    const a = nodeById.get(e.a);
+    const b = nodeById.get(e.b);
+    if (!a || !b) continue;
+    const ai = tileIndexOf(a.x), aj = tileIndexOf(a.z), bi = tileIndexOf(b.x), bj = tileIndexOf(b.z);
+    if (ai === bi) {
+      const lo = Math.min(aj, bj), hi = Math.max(aj, bj);
+      for (let j = lo; j <= hi; j++) if (inEnvelope(ai, j)) set.add(`${ai},${j}`);
+    } else if (aj === bj) {
+      const lo = Math.min(ai, bi), hi = Math.max(ai, bi);
+      for (let i = lo; i <= hi; i++) if (inEnvelope(i, aj)) set.add(`${i},${aj}`);
+    }
+  }
+  return set;
+}
+
+/**
+ * The set of CityStreet ids (`${axis}:${tileIndex}`, mirroring computeStreets)
+ * whose road line carries at least one edge resolving to 'pedestrian'. Those
+ * streets get NO ambient traffic (Traffic.tsx). EMPTY for the default/cars
+ * graph and the no-graph fallback ⇒ the fleet is byte-identical; city-scope
+ * 'pedestrian' makes every 'inherit' edge pedestrian ⇒ every street ⇒ no cars.
+ */
+export function pedestrianStreetIds(graph: CityGraph | null | undefined): Set<string> {
+  const out = new Set<string>();
+  if (
+    !graph ||
+    !Array.isArray(graph.nodes) ||
+    !Array.isArray(graph.edges) ||
+    !graph.edges.length
+  ) {
+    return out;
+  }
+  const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+  for (const e of graph.edges) {
+    if (pedestrianPolicyFor(graph, e) !== 'pedestrian') continue;
+    const a = nodeById.get(e.a);
+    const b = nodeById.get(e.b);
+    if (!a || !b) continue;
+    const ai = tileIndexOf(a.x), aj = tileIndexOf(a.z);
+    const bi = tileIndexOf(b.x), bj = tileIndexOf(b.z);
+    if (ai === bi) out.add(`ns:${ai}`);      // constant x ⇒ a north-south street line
+    else if (aj === bj) out.add(`ew:${aj}`); // constant z ⇒ an east-west street line
+  }
+  return out;
 }
 
 /**
@@ -698,6 +788,7 @@ function emitCurbLife(
   bz: number,
   pieces: Record<CityPieceKey, CityInstance[]>,
   tier = 1,
+  pedestrianTiles: Set<string> = new Set(),
 ): void {
   const wx = bx * BLOCK_PITCH;
   const wz = bz * BLOCK_PITCH;
@@ -732,7 +823,14 @@ function emitCurbLife(
     // EM-169's ambient traffic gives vehicles a purpose. The keys, registry
     // entries, GLBs, and license rows all stay; flip CARS_ENABLED to bring
     // them back (EM-169 replaces this with moving traffic on the road graph).
-    if (CARS_ENABLED && h(seed, `car-${s}`, bx, bz) < CAR_SIDE_CHANCE) {
+    // EM-244 (S3a): no parked cars curbside a 'pedestrian' road tile (the
+    // adjacent road tile is block center ± BLOCK_PITCH/2 on this side). The
+    // set is empty on the default/no-graph path, so the gate is a no-op there
+    // (h(...) still evaluated ⇒ the seeded fleet stays byte-identical).
+    const curbPedestrian = pedestrianTiles.has(
+      `${tileIndexOf(wx + side.dx * (BLOCK_PITCH / 2))},${tileIndexOf(wz + side.dz * (BLOCK_PITCH / 2))}`,
+    );
+    if (CARS_ENABLED && !curbPedestrian && h(seed, `car-${s}`, bx, bz) < CAR_SIDE_CHANCE) {
       const roadDist = BLOCK_PITCH / 2; // road centerline off the block center
       const curbPull = TILE * 0.32;
       const lateral = (h(seed, `car-at-${s}`, bx, bz) - 0.5) * (BLOCK_TILES * TILE - TILE);
@@ -777,6 +875,10 @@ export function computeCityPlan(world: CityWorld): CityPlan {
   // classic_grid the derived road-tile set is byte-identical to the old grid.
   const roadTiles = roadTileSetFrom(world.city_graph);
   emitRoads(pieces, roadTiles);
+
+  // EM-244 (S3a): road tiles whose covering edge resolves to 'pedestrian'.
+  // Empty unless a vote set a pedestrian policy ⇒ the default plan is unchanged.
+  const pedestrianTileKeys = pedestrianTileSetFrom(world.city_graph);
 
   const landmarks = computeLandmarks(places);
 
@@ -884,7 +986,20 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     // Curb life dresses every block's road edges (landmark blocks included —
     // sidewalk props on their road edges are explicitly fine). EM-123: a
     // matured district fills its sidewalks in (strict superset of tier-1).
-    emitCurbLife(seed, b.bx, b.bz, pieces, b.tier);
+    // EM-244 (S3a): parked cars skip pedestrian-road curbs (empty set ⇒ no-op).
+    emitCurbLife(seed, b.bx, b.bz, pieces, b.tier, pedestrianTileKeys);
+  }
+
+  // EM-244 (S3a): flatten the pedestrian road tiles into render instances
+  // (same envelope loop order as emitRoads ⇒ deterministic). Empty for the
+  // default/cars/no-graph plan, so the byte-identical baseline is preserved.
+  const pedestrianTiles: CityInstance[] = [];
+  for (let j = ENV_MIN; j <= ENV_MAX; j++) {
+    for (let i = ENV_MIN; i <= ENV_MAX; i++) {
+      if (pedestrianTileKeys.has(`${i},${j}`)) {
+        pedestrianTiles.push({ x: tileCenter(i), z: tileCenter(j), rotY: 0 });
+      }
+    }
   }
 
   // EM-174: ALL platted lots render as pavement pads from day 0 — the
@@ -900,6 +1015,7 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     blockLots,
     emptyLots,
     streets: computeStreets(seed, world.city_graph), // EM-188: seeded names, part of the plan
+    pedestrianTiles, // EM-244 (S3a): tinted-surface road tiles (empty by default)
     extent: Math.abs(tileCenter(TILE_MIN)) + TILE / 2, // 33.8: outer ring road edge
   };
 }

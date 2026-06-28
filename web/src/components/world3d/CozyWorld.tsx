@@ -648,7 +648,11 @@ export function CozyWorld({
         {/* EM-169: ambient moving traffic on the road grid (deterministic
             fleet, clock-driven sweep, reduced-motion-safe). Sibling of the
             scene so it shares the frame loop + world space; no handlers. */}
-        <Traffic seed={world?.city_seed ?? DEFAULT_CITY_SEED} streets={cityPlan.streets} />
+        <Traffic
+          seed={world?.city_seed ?? DEFAULT_CITY_SEED}
+          streets={cityPlan.streets}
+          graph={world?.city_graph ?? null}
+        />
         {/* EM-127 (partial): golden-hour dust motes — additive set dressing,
             reduced-motion-safe, off the replay surface. Sibling of the scene so
             it shares the frame loop + world space. */}

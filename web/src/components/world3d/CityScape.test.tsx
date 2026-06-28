@@ -24,9 +24,11 @@ import type { Place } from '../../types';
 import {
   computeCityPlan,
   CITY_PIECE_KEYS,
+  TILE,
   type CityInstance,
   type CityPlan,
 } from './cityLayout';
+import type { CityGraph } from '../../types';
 import { CITY_MODEL_REGISTRY } from './assets/cityModels';
 import type { ModelSpec } from './assets/models';
 
@@ -53,6 +55,7 @@ import {
   CHUNK_SPLIT_4,
   CHUNK_SPLIT_8,
   GRID_CENTER,
+  PEDESTRIAN_ROAD_COLOR,
   chunkCount,
   chunkIndexOf,
   chunkInstances,
@@ -138,6 +141,9 @@ describe('renderableEntries (plan → render mapping, rule 10)', () => {
       // EM-188: street names are layout metadata too — render-inert here
       // (labels render via StreetLabels in CozyWorld, never this instancer).
       streets: [],
+      // EM-244 (S3a): pedestrian surface tiles — render-inert for this entry
+      // mapping test (rendered by PedestrianRoadPads, never this instancer).
+      pedestrianTiles: [],
       extent: 33,
     };
     const entries = renderableEntries(v2Plan, CITY_MODEL_REGISTRY);
@@ -379,6 +385,50 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
     const padMeshes = container.querySelectorAll('[name^="city-pad-"]');
     expect(padMeshes.length).toBe(padChunks);
     expect(padMeshes.length).toBeGreaterThan(0);
+  });
+
+  // EM-244 (S3a): a pedestrianized city paints its roads with the tint variant.
+  const ROAD_IDX = [-13, -8, -3, 2, 7, 12];
+  const tc = (i: number) => (i + 0.5) * TILE;
+  function pedestrianCityGraph(): CityGraph {
+    const nodes = [];
+    for (const j of ROAD_IDX) for (const i of ROAD_IDX)
+      nodes.push({ id: `n:${i}:${j}`, x: tc(i), z: tc(j), kind: 'junction' as const });
+    const edges = [];
+    for (const j of ROAD_IDX) for (let k = 0; k < ROAD_IDX.length - 1; k++) {
+      const a = `n:${ROAD_IDX[k]}:${j}`, b = `n:${ROAD_IDX[k + 1]}:${j}`;
+      edges.push({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+    }
+    for (const i of ROAD_IDX) for (let k = 0; k < ROAD_IDX.length - 1; k++) {
+      const a = `n:${i}:${ROAD_IDX[k]}`, b = `n:${i}:${ROAD_IDX[k + 1]}`;
+      edges.push({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+    }
+    return { version: 1, seed: 1337, car_policy: 'pedestrian', nodes, edges };
+  }
+
+  it('EM-244: no pedestrian-tint meshes by default; a pedestrian city paints them', () => {
+    expect(PEDESTRIAN_ROAD_COLOR).toMatch(/^#[0-9a-f]{6}$/i); // a real tint, distinct from PAD_COLOR
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // Default (no graph) ⇒ zero pedestrian-surface meshes (byte-identical city).
+      const plain = render(<CityScape world={{ places: TOWN, city_seed: null }} />);
+      expect(plain.container.querySelectorAll('[name^="city-pedestrian-"]').length).toBe(0);
+      cleanup();
+      // City-scope pedestrian ⇒ the tinted surface paints the road tiles.
+      const g = pedestrianCityGraph();
+      const expectedChunks = chunkInstances(
+        computeCityPlan({ places: TOWN, city_seed: null, city_graph: g }).pedestrianTiles,
+        CENTER,
+      ).length;
+      const banned = render(<CityScape world={{ places: TOWN, city_seed: null, city_graph: g }} />);
+      const pedMeshes = banned.container.querySelectorAll('[name^="city-pedestrian-"]');
+      expect(pedMeshes.length).toBe(expectedChunks);
+      expect(pedMeshes.length).toBeGreaterThan(0);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 
   it('renders every plan instance exactly once across all chunks', () => {

@@ -33,7 +33,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Building, Place, Neighborhood } from '../../types';
+import type { Building, Place, Neighborhood, CityGraph } from '../../types';
 import { placeToWorld, slotLayout, SLOT_BASE_RADIUS } from './worldSpace';
 import {
   TILE,
@@ -53,6 +53,8 @@ import {
   computeCityPlan,
   computeLandmarks,
   computeStreets,
+  pedestrianPolicyFor,
+  pedestrianStreetIds,
   snapToBlockCenter,
   streetNameAt,
   type CityInstance,
@@ -975,7 +977,7 @@ describe('EM-123 — district maturity drives extra street life', () => {
 // the hardcoded frozen grid field-for-field.
 const ROAD_IDX = [-13, -8, -3, 2, 7, 12];
 const tc = (i: number) => (i + 0.5) * TILE; // TILE is already imported in the test
-function classicGridGraph(seed = 1337) {
+function classicGridGraph(seed = 1337): CityGraph {
   const nodes = [];
   for (const j of ROAD_IDX) for (const i of ROAD_IDX)
     nodes.push({ id: `n:${i}:${j}`, x: tc(i), z: tc(j), kind: 'junction' as const });
@@ -1134,5 +1136,93 @@ describe('EM-243 (S2) — tessellation of extended / irregular axis-aligned grap
 
     // The break is clean: no road tile is left orphaned (no rendering gap/throw).
     expectNoOrphanRoads(partial, 'partial grid');
+  });
+});
+
+// ── EM-244 (S3a) — car policy: pedestrian roads lose cars + tint the surface ──
+//
+// `car_policy` was dormant since S1. These laws pin the live behavior: the
+// effective per-edge policy ('inherit' defers to the city), a city-scope
+// 'pedestrian' ban (every road tile tinted, every curbside car gone), a single
+// pedestrian street, and the CRITICAL invariant — the default/cars graph adds
+// NOTHING (byte-identical to EM-239/EM-243).
+
+const CAR_PIECE_KEYS = ['car_a', 'car_b', 'car_c'] as const;
+const carCount = (plan: CityPlan) => CAR_PIECE_KEYS.reduce((n, k) => n + plan.pieces[k].length, 0);
+
+describe('EM-244 (S3a) — pedestrianPolicyFor (effective edge policy)', () => {
+  const cityCars = { car_policy: 'cars' as const };
+  const cityPed = { car_policy: 'pedestrian' as const };
+  const cityMixed = { car_policy: 'mixed' as const };
+  const edge = (car_policy: 'inherit' | 'cars' | 'pedestrian' | 'mixed') =>
+    ({ id: 'e', a: 'a', b: 'b', road_class: 'street' as const, car_policy });
+
+  it("'inherit' resolves to the graph (city) policy", () => {
+    expect(pedestrianPolicyFor(cityCars, edge('inherit'))).toBe('cars');
+    expect(pedestrianPolicyFor(cityPed, edge('inherit'))).toBe('pedestrian');
+    expect(pedestrianPolicyFor(cityMixed, edge('inherit'))).toBe('mixed');
+  });
+
+  it('an explicit edge policy overrides the city policy', () => {
+    expect(pedestrianPolicyFor(cityCars, edge('pedestrian'))).toBe('pedestrian');
+    expect(pedestrianPolicyFor(cityPed, edge('cars'))).toBe('cars');
+  });
+
+  it('a null/absent graph reads an inherit edge as the default cars', () => {
+    expect(pedestrianPolicyFor(null, edge('inherit'))).toBe('cars');
+    expect(pedestrianPolicyFor(undefined, edge('inherit'))).toBe('cars');
+    // …but an explicit edge still wins with no graph.
+    expect(pedestrianPolicyFor(null, edge('pedestrian'))).toBe('pedestrian');
+  });
+});
+
+describe('EM-244 (S3a) — car policy shapes the plan (tiles + cars)', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('CRITICAL: a default (cars) graph adds no pedestrian tiles — byte-identical', () => {
+    const fallback = computeCityPlan({ places: TOWN, city_seed: seed });
+    const fromGraph = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: classicGridGraph(seed) });
+    expect(fallback.pedestrianTiles).toEqual([]);
+    expect(fromGraph.pedestrianTiles).toEqual([]);
+    // the whole plan stays byte-identical (the EM-239 golden, made explicit here)
+    expect(JSON.stringify(fromGraph)).toBe(JSON.stringify(fallback));
+    expect(carCount(fromGraph)).toBe(carCount(fallback));
+    expect(carCount(fromGraph)).toBeGreaterThan(0); // cars still park by default
+  });
+
+  it('city-scope pedestrian: every road tile tinted + every parked car gone (the headline)', () => {
+    const g = { ...classicGridGraph(seed), car_policy: 'pedestrian' as const };
+    const plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g });
+    // Every road tile becomes a pedestrian surface tile.
+    expect(plan.pedestrianTiles.length).toBe(roadInstances(plan).length);
+    expect(plan.pedestrianTiles.length).toBeGreaterThan(0);
+    // pedestrianStreetIds covers every interior street ⇒ the whole fleet is off.
+    const ped = pedestrianStreetIds(g);
+    for (const s of plan.streets) expect(ped.has(s.id)).toBe(true);
+    // No parked cars survive a citywide ban.
+    expect(carCount(plan)).toBe(0);
+  });
+
+  it('a single pedestrian street tints only its tiles + flags only its line', () => {
+    const g = classicGridGraph(seed);
+    const target = g.edges.find((e) => e.id === 'e:n:7:2->n:12:2')!;
+    target.car_policy = 'pedestrian';
+    const plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g });
+    // The tinted tiles are exactly the edge's covered tiles: (7..12, 2).
+    const keys = new Set(plan.pedestrianTiles.map((t) => `${Math.round(t.x / TILE - 0.5)},${Math.round(t.z / TILE - 0.5)}`));
+    for (const i of [7, 8, 9, 10, 11, 12]) expect(keys.has(`${i},2`)).toBe(true);
+    expect(plan.pedestrianTiles.length).toBe(6);
+    // Only the ew:2 line is pedestrian; the rest still carry cars.
+    const ped = pedestrianStreetIds(g);
+    expect(ped.has('ew:2')).toBe(true);
+    expect(ped.size).toBe(1);
+    expect(carCount(plan)).toBeGreaterThan(0); // the rest of the city keeps its cars
+  });
+
+  it('mixed / no-graph leave pedestrian tiles empty (only pedestrian changes behavior)', () => {
+    const mixed = { ...classicGridGraph(seed), car_policy: 'mixed' as const };
+    expect(computeCityPlan({ places: TOWN, city_seed: seed, city_graph: mixed }).pedestrianTiles).toEqual([]);
+    expect(computeCityPlan({ places: TOWN, city_seed: seed, city_graph: null }).pedestrianTiles).toEqual([]);
+    expect(pedestrianStreetIds(null).size).toBe(0);
   });
 });

@@ -52,6 +52,7 @@ import type { Place, Neighborhood } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
+  TILE,
   type CityInstance,
   type CityPieceKey,
   type CityPlan,
@@ -473,6 +474,51 @@ function EmptyLotPads({
   );
 }
 
+// ── EM-244 (S3a): pedestrian road surface tint (procedural overlay) ──────────
+
+/** Pedestrian-road tint — a cool flagstone wash distinct from the warm paving
+ *  pads (PAD_COLOR), so a pedestrianized street reads as "sidewalk, no cars". */
+export const PEDESTRIAN_ROAD_COLOR = '#9fb0a6';
+
+/** Full-tile flagstone overlay (TILE×TILE), sitting just above the road slab
+ *  so it tints the surface without z-fighting the road tile beneath it. */
+const PEDESTRIAN_GEOMETRY = new THREE.BoxGeometry(TILE, 0.06, TILE).translate(0, 0.06, 0);
+
+/**
+ * The pedestrian road tiles, instanced like EmptyLotPads (chunked, raycast-
+ * dead, StaticDrawUsage) in a single tinted toon material — the EM-244 (S3a)
+ * surface variant that marks where a `set_car_policy` vote banned cars. Empty
+ * for the default/cars/no-graph plan, so it adds nothing to the baseline city.
+ * Purely procedural ⇒ no ModelBoundary needed.
+ */
+function PedestrianRoadPads({
+  instances,
+  center,
+}: {
+  instances: CityInstance[];
+  center: { x: number; z: number };
+}) {
+  const chunks = useMemo(() => chunkInstances(instances, center), [instances, center]);
+  const part = useMemo<CityPart>(
+    () => ({ geometry: PEDESTRIAN_GEOMETRY, material: toonMaterial(PEDESTRIAN_ROAD_COLOR) }),
+    [],
+  );
+  return (
+    <>
+      {chunks.map((chunk, ci) => (
+        <CityChunkMesh
+          key={`ped:${ci}`}
+          name={`city-pedestrian-${ci}`}
+          part={part}
+          spec={PAD_SPEC}
+          instances={chunk}
+          castShadow={false}
+        />
+      ))}
+    </>
+  );
+}
+
 /**
  * THE city (Wave D1.5 + EM-174). Mounted by CozyWorld inside the canvas —
  * every road tile, platted-lot pad, park tree, prop and parked car of the
@@ -494,6 +540,9 @@ export function CityScape({ world }: { world: CityWorld }) {
       ))}
       {plan.emptyLots.length > 0 && (
         <EmptyLotPads instances={plan.emptyLots} center={center} />
+      )}
+      {plan.pedestrianTiles.length > 0 && (
+        <PedestrianRoadPads instances={plan.pedestrianTiles} center={center} />
       )}
     </group>
   );
