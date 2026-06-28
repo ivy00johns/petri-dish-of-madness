@@ -11,6 +11,7 @@ byte-identical test enforces agreement):
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 
 TILE: float = 2.6
@@ -330,19 +331,104 @@ def _village(seed: int, density: str) -> CityGraph:
 
 def template(kind: str, seed: int, *, size: int = 5, density: str = "medium") -> CityGraph:
     """Build the run-start CityGraph for a city profile. grid/greenfield/village
-    ship now; pentagon/radial/ring fall back to grid (need EM-245 + EM-247) but
-    record the requested kind in `.template` so the caller can warn + the UI reflect
-    intent. `size` is RESERVED — accepted for forward-compat but NOT yet honored:
-    greenfield is a fixed central plaza and village thins the canonical 5x5, so the
-    extent is fixed for now (scaling it is a follow-up, tracked with the geometric
-    presets that ride EM-245/EM-247). grid is always the canonical 5x5."""
+    ship now; EM-245 (S3b) makes pentagon/radial/ring LIVE — they now route to
+    `master_plan` (a geometric plan seeded at start, no morph) instead of the grid
+    fallback, recording the requested kind in `.template`. Their non-axis-aligned
+    *visual* renders correctly through EM-247's mesh once `ROAD_MESH_ENABLED` is on.
+    Truly unknown kinds still fall back to grid topology (kind recorded for the
+    warning + UI). `size` is RESERVED — accepted for forward-compat but NOT yet
+    honored: greenfield is a fixed central plaza and village thins the canonical
+    5x5, so the extent is fixed for now (scaling it is a follow-up). grid is always
+    the canonical 5x5."""
     if kind == "grid":
         return classic_grid(seed)  # .template defaults to 'grid'
     if kind == "greenfield":
         return _greenfield(seed)
     if kind == "village":
         return _village(seed, density)
-    # unknown / geometric: grid topology, but record the requested kind.
+    # EM-245 (S3b) — geometric presets are now live (a master plan seeded at start,
+    # no morph); the geometric visual rides EM-247's mesh under ROAD_MESH_ENABLED.
+    if kind in ("pentagon", "radial", "ring"):
+        return master_plan(kind, {"radius": _PLAN_RADIUS}, seed)
+    # truly unknown: grid topology, but record the requested kind.
     g = classic_grid(seed)
     g.template = kind
     return g
+
+
+# ── EM-245 (S3b): parametric master-plan generators + diff ─────────────────────
+# Pure fn of (kind, params, seed). Geometric kinds use their OWN deterministic id
+# scheme (positions are off the tile lattice); EM-247's buildRoadMesh reads x,z so
+# any ids render. grid reuses classic_grid.
+MASTER_PLAN_KINDS: frozenset[str] = frozenset({"pentagon", "radial", "ring", "grid"})
+_PLAN_RADIUS = 26.0   # world units (within the 9x9 envelope ~ +-32)
+
+
+def _ordered_edge_geom(id_a: str, id_b: str) -> tuple[str, str, str]:
+    """Edge id for geometric (non-lattice) node ids: order lexicographically for a
+    stable canonical id (the lattice _ordered_edge parses n:i:j, which geom ids aren't)."""
+    a, b = sorted([id_a, id_b])
+    return f"e:{a}->{b}", a, b
+
+
+def _ring_plan(prefix: str, seed: int, sides: int, radius: float,
+               with_center: bool, with_ring: bool) -> CityGraph:
+    """A perimeter polygon of `sides` nodes on a circle + optional center + spokes."""
+    nodes: list[CityNode] = []
+    edges: list[CityEdge] = []
+    pts: list[str] = []
+    for k in range(sides):
+        ang = (k / sides) * 2 * math.pi
+        nid = f"n:{prefix}:{k}"
+        nodes.append(CityNode(id=nid, x=radius * math.cos(ang), z=radius * math.sin(ang)))
+        pts.append(nid)
+    if with_ring:
+        for k in range(sides):
+            a, b = pts[k], pts[(k + 1) % sides]
+            eid, ea, eb = _ordered_edge_geom(a, b)
+            edges.append(CityEdge(id=eid, a=ea, b=eb))
+    if with_center:
+        cid = f"n:{prefix}:c"
+        nodes.append(CityNode(id=cid, x=0.0, z=0.0, kind="roundabout"))
+        for k, p in enumerate(pts):
+            eid, ea, eb = _ordered_edge_geom(p, cid)
+            edges.append(CityEdge(id=eid, a=ea, b=eb))
+    return CityGraph(seed=int(seed), nodes=nodes, edges=edges)
+
+
+def master_plan(kind: str, params: dict | None, seed: int) -> CityGraph:
+    """Target CityGraph for a master plan. Pure fn of (kind, params, seed).
+    Unknown kind ⇒ classic_grid (safe fallback). `template` records the kind."""
+    p = params or {}
+    radius = float(p.get("radius", _PLAN_RADIUS))
+    if kind == "grid":
+        return classic_grid(seed)
+    if kind == "pentagon":
+        g = _ring_plan("pent", seed, int(p.get("sides", 5)), radius, True, True)
+    elif kind == "radial":
+        # two concentric rings + spokes to a roundabout center
+        outer = _ring_plan("radO", seed, int(p.get("spokes", 8)), radius, True, True)
+        inner = _ring_plan("radI", seed, int(p.get("spokes", 8)), radius * 0.5, False, True)
+        g = CityGraph(seed=int(seed), nodes=outer.nodes + inner.nodes, edges=outer.edges + inner.edges)
+    elif kind == "ring":
+        g = _ring_plan("ring", seed, int(p.get("sides", 8)), radius, False, True)
+    else:
+        return classic_grid(seed)
+    g.template = kind
+    return g
+
+
+def diff_graphs(current: CityGraph, target: CityGraph) -> dict:
+    """Node/edge add+remove sets to morph `current` toward `target`, matched by id
+    (a geometric target's ids are disjoint from the grid ⇒ full swap). Deterministic
+    order (target order for adds, current order for removes)."""
+    cur_node_ids = {n.id for n in current.nodes}
+    cur_edge_ids = {e.id for e in current.edges}
+    tgt_node_ids = {n.id for n in target.nodes}
+    tgt_edge_ids = {e.id for e in target.edges}
+    return {
+        "add_nodes": [n for n in target.nodes if n.id not in cur_node_ids],
+        "add_edges": [e for e in target.edges if e.id not in cur_edge_ids],
+        "remove_node_ids": [n.id for n in current.nodes if n.id not in tgt_node_ids],
+        "remove_edge_ids": [e.id for e in current.edges if e.id not in tgt_edge_ids],
+    }

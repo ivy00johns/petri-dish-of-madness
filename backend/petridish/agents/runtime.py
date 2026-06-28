@@ -1889,7 +1889,8 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "name_town", "demolish", "promote_image",
                          "trial", "amend_constitution", "relocate_center",
-                         "demolish_road", "set_car_policy"}  # EM-244 (S3a)
+                         "demolish_road", "set_car_policy",  # EM-244 (S3a)
+                         "adopt_master_plan"}  # EM-245 (S3b)
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -1958,6 +1959,18 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                 target = str(args.get("target") or "").strip()
                 if not any(e.id == target for e in world.city_graph.edges):
                     return "set_car_policy street scope requires args.target = a real road id"
+        # EM-245 (S3b) — adopt_master_plan carries the plan KIND on args.target
+        # (mirror demolish_road's target check so the gate AGREES with the world):
+        # the kind must be known, and only ONE master plan may morph at a time.
+        if effect == "adopt_master_plan":
+            from ..engine.citygraph import MASTER_PLAN_KINDS
+            kind = str(args.get("target") or "").strip()
+            if kind not in MASTER_PLAN_KINDS:
+                return (f"adopt_master_plan requires args.target = a known plan kind "
+                        f"{sorted(MASTER_PLAN_KINDS)}")
+            if getattr(world, "master_plan", None) is not None:
+                return ("a master plan is already in progress — only one at a time "
+                        "(wait for it to finish before adopting another)")
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
