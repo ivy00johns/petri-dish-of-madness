@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "subject": "EM-248 (S5b) vendoring half — Tasks 3-5 (commits 693cb88 generic, a140b49 house/stall, 8e26cc0 props)",
+  "verified_by": "lead (QE-role; agent-spawning classifier temporarily unavailable — all verification was read-only: curl/test/diff)",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "Built exactly to plan Tasks 3-5: 9 GLBs appended to MODEL_POOLS.generic, 4 to house, 3 to stall, 13 across 7 new PROP_POOLS (fence/bin/hydrant/fountain/sign/crate/barrel). Slot 0 of every pool unchanged. Payload-guard reframed to 64 MB total + 4 MB/file per plan Task 6 Step 1. Pool-widening only — no VariantKey/routing change."
+    },
+    "correctness": {
+      "score": 5,
+      "notes": "Footprints measured from the real GLBs and scale-converged (models.test.ts it.each green). Pool picks remain pure functions of entity id via hashUnit (resolveStructureModel/propModel UNCHANGED) — determinism/EM-155 intact. No-id path returns slot 0."
+    },
+    "security": {
+      "score": 5,
+      "notes": "HARD-RULE CC0 audit: all 29 new poly.pizza sources independently verified '\"Licence\":\"CC0 1.0\"' at origin (29/29, zero CC-BY). Authors all in the established toon CC0 family (Quaternius/Kenney/Kay Lousberg/CreativeTrio/Isa Lousberg). No game-ripped art. Vendor agents rejected CC-BY candidates (Poly-by-Google hotel/hospital/museum/mall) — discipline held."
+    },
+    "coverage": {
+      "score": 5,
+      "notes": "models.test.ts footprint/license/orphan/per-file-cap/total-budget all green for the new files; propModels.test.ts PROP_POOLS block (>=2 distinct, slot-0, distributes, exists-on-disk, licensed) green for all 7 new pools. Full world3d suite 560 pass, 0 regressions."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "git diff 7cd3641..HEAD touches ONLY web/src/components/world3d/{models,propModels,structureModel,Building}+tests, ASSET_LICENSES.md, docs, and new GLBs under poly/ + poly-props/. No backend/*, no kenney-city/ disturbance, no unrelated files (40 files total)."
+    }
+  },
+  "test_results": {
+    "cc0_audit": "29/29 sources confirmed CC0 1.0 at poly.pizza (exhaustive, not sampled)",
+    "models.test.ts": "139 passed (generic wave) / 146 passed (after house+stall)",
+    "propModels.test.ts": "14 passed",
+    "structureModel.test.ts": "69 passed",
+    "combined_asset_suites": "229 passed",
+    "full_world3d_suite": "560 passed (24 files, +17 vs 543 EM-239 baseline, 0 regressions)",
+    "tsc_b_force": "exit 0",
+    "payload": "28 MB total (< 64 MB cap); largest single GLB 1.97 MB (< 4 MB/file cap)"
+  },
+  "blockers": [],
+  "issues": [
+    {"severity": "LOW", "description": "fountain PROP_POOLS pool is at the minimum 2 members (no clean CC0 birdbath/tiered piece exists on poly.pizza). Acceptable; can widen later if a good CC0 source appears."},
+    {"severity": "INFO", "description": "hydrant pool uses two distinct fire-hydrant silhouettes and barrel uses wood+open barrels (no CC0 pump/standpipe or street oil-drum exists). Honest substitutions, logged by the vendor agent."}
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "All gates green (229 combined asset tests, 560 full world3d, tsc 0); the hard CC0-only rule is exhaustively satisfied (29/29 verified CC0 at source); determinism (EM-155) and slot-0 invariants intact; scope clean. security=5 and contract_conformance=5 clear the gate thresholds; zero CRITICAL blockers. The ONLY remaining acceptance step is the user's live-walk visual sign-off (plan Task 6) — a HITL gate, not a code blocker."
+  }
+}

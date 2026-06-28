@@ -1,7 +1,9 @@
-# EM-248 (S5b — Building Variety) — Build Results · Tasks 1–2 slice
+# EM-248 (S5b — Building Variety) — Build Results
 
-**Status: ✅ COMPLETE on branch `feat/em248-building-variety`. QA gate PASS (`proceed=true`, 5/5, 0 blockers).**
-This is the **pure-code rewire half** of EM-248 (the user explicitly asked to "start task 1 now, stop before vendoring"). **Tasks 3–6 (new CC0 GLB vendoring + live-walk sign-off) are deliberately NOT in this slice** — they need network access + human aesthetic asset selection and remain queued.
+**Status: ✅ CODE-COMPLETE on branch `feat/em248-building-variety` (Tasks 1–5 + payload-guard reframe). Two QA gates PASS. The ONLY remaining step is the user's live-walk visual sign-off (plan Task 6).**
+Built in two phases: (1) the **pure-code rewire** (Tasks 1–2), then — after the user lifted the "stop before vendoring" hold and explicitly approved vendoring — (2) the **vendoring half** (Tasks 3–5: ~29 new CC0 GLBs). Not merged, no PR (no instruction). See the "Vendoring half" section at the bottom for Tasks 3–5.
+
+> History note: Tasks 1–2 first shipped as a "stop before vendoring" slice per the user's instruction; the user then approved vendoring, and Tasks 3–5 landed on the same branch.
 
 Orchestrated build (subagents via Agent tool — no Workflow mode, no ultracode reminder this turn): one frontend implementation agent, lead-run wave gate, mandatory QE gate. Not merged, not PR'd (no instruction to).
 
@@ -57,3 +59,32 @@ No new imagery, no UI/styling/className change — this is data-pipeline logic i
 - [x] End-state report (this file)
 - N/A — imagery / ux-review / render-sanity / design-token-guard / deployment (no visual/styling change; recorded). Live walk = plan Task 6 (post-vendoring).
 - **Intentionally INCOMPLETE:** Tasks 3–6 (vendoring + live walk) — out of this slice by user instruction ("stop before vendoring").
+
+---
+
+## Vendoring half (Tasks 3–5) — DONE ✅
+
+After the user approved vendoring, three waves landed (one frontend agent each, lead-gated + committed per wave), then a consolidated QE gate.
+
+| Wave | Commit | What | Pool effect |
+|---|---|---|---|
+| Task 3 — generic (dominant 86% bucket) | `693cb88` | 9 CC0 building GLBs | `MODEL_POOLS.generic` 23 → 32 |
+| Task 4 — residential + commercial | `a140b49` | 4 homes + 3 shops | `house` 12 → 16, `stall` 7 → 10 |
+| Task 5 — props | `8e26cc0` | 13 CC0 prop GLBs | 7 new `PROP_POOLS` (fence/bin/hydrant/fountain/sign/crate/barrel) |
+
+**~29 new CC0 GLBs**, all from the established toon family (Quaternius / Kenney / Kay Lousberg / CreativeTrio / Isa Lousberg via poly.pizza), repacked `copy→dedup→prune` (no compression), footprints measured + scale-converged.
+
+### Consolidated QE gate (`qa-report-vendor.json`) — PASS, `proceed=true`, 5/5, 0 blockers
+- **CC0 audit (the hard rule): 29/29 verified `"Licence":"CC0 1.0"` at source — exhaustive, not sampled. Zero CC-BY.** Vendor agents *rejected* CC-BY candidates (Poly-by-Google hotel/hospital/museum/mall) on their own.
+- Gates: combined asset suites 229 pass; full world3d **560** (24 files, +17 vs the 543 EM-239 baseline, 0 regressions); `tsc -b --force` exit 0.
+- Determinism (EM-155) intact — resolvers unchanged, picks pure-fn-of-id; slot-0 invariant holds on url+scale+yOffset for every new pool.
+- Payload **28 MB** (< 64 MB cap); largest GLB 1.97 MB (< 4 MB/file cap).
+- Scope clean — `git diff 7cd3641..HEAD` = 40 files, all within world3d/models/docs/ASSET_LICENSES; no backend, no `kenney-city/` disturbance.
+
+### Honest gaps (no silent drops)
+- `fountain` prop pool is at the minimum 2 members (no clean CC0 birdbath/tiered piece exists). `hydrant` = 2 distinct hydrant silhouettes, `barrel` = wood+open (no CC0 pump/standpipe or street oil-drum exists). Logged, not forced.
+- `tower-setback` (Task 3) dropped — no scale satisfies the footprint.
+
+## Remaining (Task 6 — the only open item)
+- **Live render walk (HITL, user's call):** start the stack, confirm the generic-tower monoculture is visibly broken, homes/shops/anchors vary, and the new props render as real toon art. This is the spec's acceptance gate. Code + tests + license are all green and committed; this is a visual sign-off, not a code blocker.
+- **Not merged / no PR / ledger still `open`** — awaiting the user's call after the live walk.
