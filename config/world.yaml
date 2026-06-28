@@ -480,7 +480,7 @@ world:
   # warning until EM-245 (generators) + EM-247 (meshing) land. Absent ⇒ grid.
   city:
     template: grid          # grid | greenfield | village (pentagon/radial/ring → grid until EM-245)
-    size: 5                 # extent hint (greenfield/village); grid stays canonical 5x5
+    size: 5                 # RESERVED — parsed but not yet honored (extent is fixed for now)
     density: medium         # low | medium | high — village sparsity
     car_policy: cars        # starting global graph car policy (votes can change it)
 

@@ -840,7 +840,7 @@ class CityProfileParams:
     initial CityGraph via citygraph.template(). Absent/empty ⇒ grid (byte-identical
     pre-EM-246). seed reuses world.city_seed."""
     template: str = "grid"      # grid|greenfield|village (pentagon|radial|ring → grid until EM-245)
-    size: int = 5               # extent hint (greenfield/village); grid stays canonical
+    size: int = 5               # RESERVED extent hint — parsed but NOT yet honored (follow-up)
     density: str = "medium"     # low|medium|high — village sparsity
     car_policy: str = "cars"    # starting global graph car policy (S3a can change it)
 
@@ -2127,7 +2127,11 @@ def _parse_city_profile(raw: dict | None) -> "CityProfileParams":
     if not isinstance(raw, dict):
         return CityProfileParams()
     d = CityProfileParams()
-    template = str(raw.get("template", d.template)).strip().lower() or d.template
+    # `raw.get("template")` (no default) is None for BOTH a missing key and an
+    # explicit `template:` / `template: null` — `or d.template` coerces either to
+    # the grid default, so a null scalar doesn't become the literal string "none"
+    # (which would route through the geometric-fallback + emit a spurious warning).
+    template = str(raw.get("template") or d.template).strip().lower() or d.template
     density = str(raw.get("density", d.density)).strip().lower()
     if density not in ("low", "medium", "high"):
         density = d.density

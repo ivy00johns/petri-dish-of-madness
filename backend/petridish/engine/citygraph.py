@@ -332,7 +332,10 @@ def template(kind: str, seed: int, *, size: int = 5, density: str = "medium") ->
     """Build the run-start CityGraph for a city profile. grid/greenfield/village
     ship now; pentagon/radial/ring fall back to grid (need EM-245 + EM-247) but
     record the requested kind in `.template` so the caller can warn + the UI reflect
-    intent. `size` is honored by greenfield/village extent (grid stays canonical)."""
+    intent. `size` is RESERVED — accepted for forward-compat but NOT yet honored:
+    greenfield is a fixed central plaza and village thins the canonical 5x5, so the
+    extent is fixed for now (scaling it is a follow-up, tracked with the geometric
+    presets that ride EM-245/EM-247). grid is always the canonical 5x5."""
     if kind == "grid":
         return classic_grid(seed)  # .template defaults to 'grid'
     if kind == "greenfield":

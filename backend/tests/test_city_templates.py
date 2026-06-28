@@ -23,6 +23,16 @@ def test_city_profile_absent_block_defaults(tmp_path):
     assert p.template == "grid" and p.density == "medium" and p.car_policy == "cars"
 
 
+def test_city_profile_null_template_coerces_to_grid():
+    # EM-246 review fix: `template:` / `template: null` (key present, value None)
+    # must default to grid — NOT become the literal string 'none' (which would route
+    # through the geometric fallback + emit a spurious "needs EM-245" warning).
+    from petridish.config.loader import _parse_city_profile
+    assert _parse_city_profile({"template": None}).template == "grid"
+    assert _parse_city_profile({"template": ""}).template == "grid"
+    assert _parse_city_profile({"template": "  "}).template == "grid"
+
+
 # ── EM-246 (S4): World.__init__ seeds city_graph from the profile ──────────────
 from petridish.engine.world import World
 from petridish.engine.world import AgentState, PlaceState
