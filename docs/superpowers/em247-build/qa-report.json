@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "ticket": "EM-247 (S5a) procedural road meshing",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "Flag-off byte-identical invariant is the contract and it HOLDS, test-proven. ROAD_MESH_ENABLED defaults false (CityScape.tsx:547). With the flag off the ternary `drawEntries = ROAD_MESH_ENABLED ? entries.filter(...) : entries` short-circuits to the SAME `entries` reference (no filter, no reorder, no new array) and `{ROAD_MESH_ENABLED && <RoadMesh/>}` evaluates false so no roadmesh group mounts and buildRoadMesh is never called. CityScape.test.tsx asserts flag===false, road tile count unchanged, and no roadmesh/road-ribbons/road-intersections groups present. Diff is additive (+27/-0 on CityScape.test, single -1 line is entries.map->drawEntries.map)."
+    },
+    "correctness": {
+      "score": 5,
+      "notes": "Ribbon orientation math verified numerically against the installed three lib across axis-aligned, diagonal, and negative-coordinate edges: q=setFromAxisAngle(+Y,-atan2(dz,dx)) aligns the length axis with edge direction (dot=1.0000), width axis perpendicular (dot=0.0000); the -rotY sign is correct (matches THREE makeRotationY +X->(cos,0,-sin) convention), not mirrored. buildRoadMesh is pure/deterministic (no RNG/clock/mutable state; _seed accepted but intentionally unused; iterates graph.edges then graph.nodes in array order). NaN/Infinity safe: dangling edges and length===0 edges skipped before atan2. Width scaling, roundabout outerR=4>innerR=2, and node.kind dispatch all correct."
+    },
+    "security": {
+      "score": 5,
+      "notes": "No security surface. No new runtime deps (no package.json/lock changes; THREE + R3F already present). Meshes set noopRaycast (EM-157 raycast-dead). toonMaterial() is a cached factory returning shared instances (no per-render churn). No network, no eval, no user-input parsing. Working-tree image-provider changes (backend/petridish/imagegen/provider.py, config/*.yaml, test_imagegen_providers.py) are pre-existing and OUTSIDE the EM-247 commit range — not part of this slice."
+    },
+    "coverage": {
+      "score": 4,
+      "notes": "34 new tests: roadMeshData.test.ts (9 — purity/determinism, pentagon toEqual, dangling/zero-length skips, any-angle), RoadMesh.test.tsx (3 — empty/null graph -> 0 meshes, non-empty buckets), CityScape.test.tsx (+2/22 — flag-off guard: flag false, tiles unchanged, no roadmesh mount). Full world3d suite 592 pass. Solid for the as-shipped (flag-off) slice. Held at 4 because the flag-ON paths (roundabout/plaza/wide-road branches) are exercised only via `as any` casts since real types pin kind='junction'/road_class='street', and the per-poll memo behavior under real snapshot polling has no regression test — both are pre-flag-on concerns, not as-shipped gaps."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "Committed range (9b7c9f9..HEAD) is exactly the 6 intended frontend files (roadMeshData.ts/.test.ts, RoadMesh.tsx/.test.tsx, CityScape.tsx/.test.tsx) + the EM-247 plan doc, 935 insertions / 1 deletion. No backend or unrelated committed drift. Tile path / cityLayout.ts untouched; flag not flipped. Deferred items (atlas/UV, lane markings, crosswalks, LOD, chunked culling, roundabout/plaza fidelity, 60fps pentagon visual sign-off) explicitly recorded in the plan and commit body, not silently dropped."
+    }
+  },
+  "test_results": {
+    "frontend_world3d": {
+      "command": "cd web && npx vitest run src/components/world3d",
+      "test_files_passed": 26,
+      "test_files_total": 26,
+      "tests_passed": 592,
+      "tests_total": 592,
+      "tests_failed": 0,
+      "new_tests_added": 34,
+      "baseline_before": 578,
+      "delta": 14
+    },
+    "typecheck": {
+      "command": "cd web && npx tsc -b --force",
+      "exit_code": 0
+    }
+  },
+  "blockers": [],
+  "issues": [
+    {
+      "severity": "MEDIUM",
+      "location": "web/src/components/world3d/RoadMesh.tsx:172",
+      "description": "data = useMemo(() => buildRoadMesh(graph, seed), [graph, seed]) keys on the city_graph OBJECT identity. Per the documented EM-243/244 lesson (CityScape.tsx:280-344), snapshot polling replaces world.city_graph by reference every poll, so this memo busts on every poll: buildRoadMesh + all matrix useMemos recompute and each bucket re-uploads its full instanceMatrix + recomputes boundingSphere per poll (per-poll, not per-frame, so NOT a frame-loop leak). HARMLESS as shipped because ROAD_MESH_ENABLED=false means RoadMesh never mounts. Pre-flag-on fix: memo on a content signature (node/edge counts + road_class/kind) like citySignature, not on graph object identity.",
+      "blocking": false,
+      "gate": "deferred to eventual flag-on human sign-off"
+    },
+    {
+      "severity": "LOW",
+      "location": "web/src/components/world3d/RoadMesh.tsx:140-158 (useRoundaboutBucket)",
+      "description": "Fresh new THREE.RingGeometry allocated inside useMemo with no .dispose() of the prior geometry; R3F does not dispose geometry passed positionally via args. Combined with the per-poll memo bust this would leak a RingGeometry per poll under flag-on. LATENT today: CityGraphNode.kind is pinned to the literal 'junction' (types/index.ts:46) so data.roundabouts is always empty from real data and the RingGeometry is never created in production. UNIT_PLANE (ribbons/patches/plazas) is module-level/shared and has no such leak. Fix when flipping on or when S3b emits roundabout nodes: dispose prior geometry on rebuild or cache by inner/outer ratio.",
+      "blocking": false,
+      "gate": "deferred; latent until S3b roundabouts + flag-on"
+    },
+    {
+      "severity": "LOW",
+      "location": "web/src/components/world3d/RoadMesh.tsx:27-30,59-64 (ROAD_Y / ribbonMatrix)",
+      "description": "All ribbons share ROAD_Y=0.04 with no polygonOffset and each ribbon spans its full edge length centered on the midpoint (runs through the node center), so incident ribbons overlap coplanarly at identical Y at every node. Masked in the common case by the intersection patch at JUNCTION_Y=0.05 over a 3.0-unit square, but at shallow-angle meets the sliver can extend past the patch and z-fight. Overlaps the spec's deferred crosswalk/junction-fidelity bucket; recorded for the visual sign-off (resolve with per-road-class Y offset / polygonOffset / junction trimming).",
+      "blocking": false,
+      "gate": "deferred visual fidelity (flag-on sign-off)"
+    },
+    {
+      "severity": "INFO",
+      "location": "web/src/components/world3d/roadMeshData.ts:59-77",
+      "description": "Roundabout/plaza/avenue/boulevard branches are forward-compat dead code under current types (kind pinned 'junction', road_class pinned 'street'); reached only via `as any` in tests. Intentional and documented as S3b/S4 readiness. The defensive (n as {kind?}) / (e as {road_class?}) casts plus length===0 / missing-endpoint skips mean the generator never throws on real graphs.",
+      "blocking": false,
+      "gate": "none — informational"
+    }
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "All 4 adversarial lenses returned verdict=clean. No CRITICAL blockers. contract_conformance=5 (>=3), security=5 (>=3). Independently re-verified: world3d vitest 592/592 pass across 26 files (0 regressions, +14 vs 578 baseline), tsc -b --force exit 0, ROAD_MESH_ENABLED=false at CityScape.tsx:547, diff scope = 6 frontend files + plan doc (935/+1-). The single MEDIUM (per-poll graph-identity memo) and the two LOW items are flag-ON-only / deferred-visual concerns that are harmless in the as-shipped flag-off state and explicitly scoped to the eventual human flag-on sign-off; per gate rules deferred VISUAL polish (atlas/LOD/culling/roundabout fidelity) is a non-defect and not gated. The MEDIUM memo fix is the recommended top pre-flag-on action."
+  }
+}
