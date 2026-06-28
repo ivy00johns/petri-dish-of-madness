@@ -259,6 +259,74 @@ export const MODEL_POOLS: Partial<Record<VariantKey, ModelSpec[]>> = {
     { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },        // Quaternius bell tower — 1.87u, 4.0u tall
     { url: `${POLY}/windmill.glb`, scale: 0.35, yOffset: 0.012 },      // Quaternius tower windmill — 2.77u, 4.0u tall
   ],
+  // EM-248 (S5b) — INDUSTRIAL variety. Slot 0 = MODEL_REGISTRY default; members
+  // are verbatim already-validated tuples (warehouse/factory/silo/windmill/port).
+  farm: [
+    { url: `${KENNEY_CITY}/industrial-h.glb`, scale: 2.4, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.farm
+    { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 },
+    { url: `${POLY}/granary.glb`, scale: 0.45, yOffset: 0 },
+    { url: `${POLY}/windmill.glb`, scale: 0.35, yOffset: 0.012 },
+  ],
+  workshop: [
+    { url: `${KENNEY_CITY}/industrial-g.glb`, scale: 2.0, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.workshop
+    { url: `${KENNEY_CITY}/industrial-h.glb`, scale: 2.4, yOffset: 0 },
+    { url: `${POLY}/smithy.glb`, scale: 0.8, yOffset: 0 },
+    { url: `${POLY}/dock.glb`, scale: 1.91, yOffset: 0.8 },
+  ],
+  // EM-248 (S5b) — CIVIC variety. Slot 0 = MODEL_REGISTRY default; members are
+  // verbatim already-validated civic/landmark tuples.
+  library: [
+    { url: `${POLY}/library.glb`, scale: 2.35, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.library
+    { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },
+    { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 },
+  ],
+  clocktower: [
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 },  // slot 0 = MODEL_REGISTRY.clocktower
+    { url: `${POLY}/bell-tower.glb`, scale: 0.84, yOffset: 0 },
+    { url: `${POLY}/lighthouse.glb`, scale: 0.28, yOffset: 0.03 },
+    { url: `${POLY}/office-tower.glb`, scale: 0.616, yOffset: 0.008 },
+  ],
+};
+
+/**
+ * EM-248 (S5b) — per-anchor VARIETY pools for PLACE anchors, mirroring
+ * MODEL_POOLS. A place kind with a pool renders one of several distinct GLBs,
+ * picked deterministically from the place id (resolvePlaceModel) so repeated
+ * homes/workplaces aren't clones — stable across frame/reload/fork (EM-155).
+ * Every member is a (url, scale, yOffset) tuple copied verbatim from an already
+ * footprint-validated MODEL_REGISTRY / PLACE_MODELS / MODEL_POOLS row, so the
+ * anchor footprint (≤3.4u long / ≤5.5u tall / grounded) holds by construction.
+ * Slot 0 is the PLACE_MODELS default so the no-id path agrees with the pool.
+ */
+export const PLACE_POOLS: Partial<Record<PlaceKind, ModelSpec[]>> = {
+  home: [
+    { url: `${KENNEY_CITY}/suburban-b.glb`, scale: 1.8, yOffset: 0 },  // slot 0 = PLACE_MODELS.home
+    { url: `${KENNEY_CITY}/suburban-a.glb`, scale: 2.3, yOffset: 0 },
+    { url: `${POLY}/house-modern.glb`, scale: 3.3, yOffset: 0 },
+    { url: `${POLY}/house-fantasy.glb`, scale: 1.1, yOffset: 0 },
+  ],
+  work: [
+    { url: `${KENNEY_CITY}/commercial-e.glb`, scale: 2.0, yOffset: 0 }, // slot 0 = PLACE_MODELS.work
+    { url: `${KENNEY_CITY}/commercial-a.glb`, scale: 2.6, yOffset: 0 },
+    { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },
+    { url: `${POLY}/office-tower.glb`, scale: 0.616, yOffset: 0.008 },
+  ],
+  social: [
+    { url: `${KENNEY_FANTASY_TOWN}/fountain.glb`, scale: 1.6, yOffset: 0 }, // slot 0 = PLACE_MODELS.social
+    { url: `${POLY}/bathhouse.glb`, scale: 0.32, yOffset: 0.32 },
+    { url: `${POLY}/market.glb`, scale: 1.4, yOffset: 0 },
+  ],
+  governance: [
+    { url: `${KENNEY_CITY}/civic-n.glb`, scale: 1.45, yOffset: 0 }, // slot 0 = PLACE_MODELS.governance
+    { url: `${POLY}/library.glb`, scale: 2.35, yOffset: 0 },
+    { url: `${POLY}/church.glb`, scale: 3.644, yOffset: 0.187 },
+    { url: `${POLY}/bank.glb`, scale: 0.87, yOffset: 0.27 },
+  ],
+  wild: [
+    { url: `${POLY}/park.glb`, scale: 2.3, yOffset: 0 }, // slot 0 = PLACE_MODELS.wild
+    { url: `${POLY}/garden.glb`, scale: 1.65, yOffset: 0 },
+  ],
 };
 
 /**
@@ -284,6 +352,7 @@ export function allModelSpecs(): ModelSpec[] {
     ...Object.values(PLACE_MODELS),
     ...Object.values(CHARACTER_MODELS),
     ...Object.values(MODEL_POOLS).flat(),
+    ...Object.values(PLACE_POOLS).flat(),
     ...VILLAGER_POOL,
   ].filter((s): s is ModelSpec => s != null);
   // De-dupe by url (a model may serve several keys / pools).

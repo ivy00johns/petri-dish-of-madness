@@ -362,7 +362,8 @@ export function Building({ place, onPick }: BuildingProps) {
   useCursor(hovered && Boolean(onPick));
 
   // EM-150: the place-anchor GLB, or null = stay procedural (social/wild).
-  const spec = resolvePlaceModel(place.kind);
+  // EM-248: thread place.id so the anchor draws from its PLACE_POOLS variety.
+  const spec = resolvePlaceModel(place.kind, place.id);
 
   // label height tuned per structure footprint (GLB anchors measure shorter
   // than the procedural town hall but TALLER than the market/cottage: the

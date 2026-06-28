@@ -35,6 +35,7 @@ import {
   MODEL_REGISTRY,
   MODEL_POOLS,
   PLACE_MODELS,
+  PLACE_POOLS,
   VILLAGER_POOL,
   allModelSpecs,
   type ModelSpec,
@@ -271,6 +272,30 @@ describe('MODEL_POOLS (EM-216b variety)', () => {
           Math.abs(min.y * spec.scale + spec.yOffset),
           `${variant} ${spec.url} ground`,
         ).toBeLessThan(0.15);
+      }
+    }
+  });
+});
+
+describe('PLACE_POOLS (EM-248 anchor variety)', () => {
+  const poolEntries = Object.entries(PLACE_POOLS) as Array<[PlaceKind, ModelSpec[]]>;
+
+  it('each pool has ≥2 distinct GLBs and includes its PLACE_MODELS default at slot 0', () => {
+    expect(poolEntries.length).toBeGreaterThan(0);
+    for (const [kind, pool] of poolEntries) {
+      expect(pool.length, kind).toBeGreaterThanOrEqual(2);
+      expect(new Set(pool.map((s) => s.url)).size, `${kind} dup urls`).toBe(pool.length);
+      expect(pool[0].url, `${kind} slot 0`).toBe(PLACE_MODELS[kind]!.url);
+    }
+  });
+
+  it('every pool member fits the anchor footprint and sits on the ground', () => {
+    for (const [kind, pool] of poolEntries) {
+      for (const spec of pool) {
+        const { size, min } = glbBounds(readGlbJson(diskPath(spec)));
+        expect(Math.max(size.x, size.z) * spec.scale, `${kind} ${spec.url} xz`).toBeLessThanOrEqual(3.4);
+        expect(size.y * spec.scale, `${kind} ${spec.url} y`).toBeLessThanOrEqual(5.5);
+        expect(Math.abs(min.y * spec.scale + spec.yOffset), `${kind} ${spec.url} ground`).toBeLessThan(0.15);
       }
     }
   });
