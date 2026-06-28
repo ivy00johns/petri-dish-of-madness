@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .citygraph import CityGraph, classic_grid
+
 
 def _block_get(block: Any, key: str, default: Any) -> Any:
     """Read `key` from an optional config block that may be a dataclass, a plain
@@ -1292,6 +1294,12 @@ class World:
         # feature is inert. Serialized in to_snapshot() ONLY once a tier diverges
         # from the derivable baseline, so a fresh world stays byte-identical.
         self.neighborhoods: dict[str, Neighborhood] = self._derive_neighborhoods()
+
+        # EM-239 (S1) — the authoritative road graph. S1 seeds it from the
+        # frozen classic_grid template (pure fn of city_seed); it serializes in
+        # to_snapshot() and restores in from_snapshot(). Roads are first-class
+        # state here; lots/zones/landmarks/streets keep deriving frontend-side.
+        self.city_graph: CityGraph = classic_grid(self.city_seed)
 
     def apply_procgen(self) -> None:
         """Apply the seeded procgen town layout when world.procgen.enabled
@@ -7104,6 +7112,10 @@ class World:
             # generated city ring as f(snapshot, city_seed). Additive key;
             # consumers default with `city_seed ?? 1337` when absent.
             "city_seed": self.city_seed,
+            # EM-239 (S1) — the authoritative road graph (additive key, like
+            # city_seed). The frontend renders FROM this when present and falls
+            # back to the hardcoded grid when absent (old snapshots).
+            "city_graph": self.city_graph.to_dict(),
             # EM-145 — queued-but-undelivered god whispers, so a restart/restore
             # no longer eats them (additive key; consumers may ignore).
             "pending_whispers": {
@@ -7503,6 +7515,15 @@ class World:
         # snapshot lacks the key and restores the default 1337, matching the
         # frontend's `city_seed ?? 1337` so fork/replay render the same city.
         world.city_seed = _int(state.get("city_seed", 1337), 1337)
+        # EM-239 (S1) — restore the road graph verbatim when present, else derive
+        # classic_grid for pre-S1 snapshots (derive-on-load migration; never a
+        # hole). __init__ built the graph with the PRE-restore seed, so re-derive
+        # explicitly here off the restored city_seed on the migration path.
+        _cg = state.get("city_graph")
+        if isinstance(_cg, dict) and _cg.get("nodes"):
+            world.city_graph = CityGraph.from_dict(_cg)
+        else:
+            world.city_graph = classic_grid(world.city_seed)
         world.running = False  # a restored/forked world starts paused
         try:
             world.tick_interval_seconds = float(
