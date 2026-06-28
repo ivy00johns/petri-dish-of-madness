@@ -1028,3 +1028,111 @@ describe('EM-239 byte-identical graph rendering', () => {
     }
   });
 });
+
+// ── EM-243 (S2) — tessellation of extended / irregular axis-aligned graphs ────
+//
+// S1 only exercised the FULL 5×5 grid (byte-identical to the hardcoded grid).
+// S2 lets agents grow the graph by one axis-aligned segment (apply_build_road),
+// producing graphs the renderer never saw: a stub poking out past the frozen
+// envelope, or a grid with an interior edge missing. The mask classification
+// (END_ROT/TEE_ROT/CORNER_ROT) is graph-driven, so it should tessellate these
+// without a gap or a throw. These tests build the grown/partial graph by
+// mutating the EM-239 classicGridGraph fixture, mirroring apply_build_road's ids
+// (node `n:17:2`, edge `e:n:12:2->n:17:2`) and the EM-239 road-tile idiom (find
+// a piece by its tileCenter coords; the connectivity law = no orphan tile).
+
+/** The road piece at tile (i, j), or undefined, scanning every road kind. */
+function roadPieceAt(plan: CityPlan, i: number, j: number): { key: CityPieceKey; inst: CityInstance } | undefined {
+  for (const key of ROAD_KEYS) {
+    const inst = plan.pieces[key].find((p) => Math.abs(p.x - tc(i)) < 1e-9 && Math.abs(p.z - tc(j)) < 1e-9);
+    if (inst) return { key, inst };
+  }
+  return undefined;
+}
+
+/** EM-239 connectivity idiom: every road tile neighbors ≥ 1 other road tile. */
+function expectNoOrphanRoads(plan: CityPlan, label: string) {
+  const roads = roadInstances(plan);
+  for (const r of roads) {
+    const hasNeighbor = roads.some(
+      (o) => o !== r && Math.abs(Math.hypot(o.x - r.x, o.z - r.z) - TILE) < 0.02,
+    );
+    expect(hasNeighbor, `${label}: orphan road tile at (${r.x}, ${r.z})`).toBe(true);
+  }
+}
+
+describe('EM-243 (S2) — tessellation of extended / irregular axis-aligned graphs', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('a single east extension renders a road_end stub + re-classifies its anchor (no gap, no throw)', () => {
+    const base = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: classicGridGraph(seed) });
+
+    // Mirror apply_build_road: append node n:17:2 + edge e:n:12:2->n:17:2 (the
+    // ids the backend emits extending east one BLOCK_PITCH off the right ring).
+    const g = classicGridGraph(seed);
+    g.nodes.push({ id: 'n:17:2', x: tc(17), z: tc(2), kind: 'junction' as const });
+    g.edges.push({ id: 'e:n:12:2->n:17:2', a: 'n:12:2', b: 'n:17:2', road_class: 'street' as const, car_policy: 'inherit' as const });
+
+    let plan: CityPlan | undefined;
+    expect(() => {
+      plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g });
+    }, 'a grown graph must tessellate, not throw').not.toThrow();
+    expect(plan).toBeTruthy();
+    const grown = plan!;
+
+    // The far end of the new segment caps as a dead-end stub at exactly (17, 2).
+    const stub = grown.pieces.road_end.find((p) => Math.abs(p.x - tc(17)) < 1e-9 && Math.abs(p.z - tc(2)) < 1e-9);
+    expect(stub, 'the extension should cap with a road_end stub at (17, 2)').toBeTruthy();
+    expect(grown.pieces.road_end.length, 'exactly one new dead-end').toBe(base.pieces.road_end.length + 1);
+
+    // No gap: every interior tile of the new segment (13..16 at j=2) renders as a
+    // horizontal straight, bridging the anchor to the stub.
+    for (const i of [13, 14, 15, 16]) {
+      const seg = roadPieceAt(grown, i, 2);
+      expect(seg, `gap in the extension: no road tile at (${i}, 2)`).toBeTruthy();
+      expect(seg!.key, `(${i}, 2) should be a straight`).toBe('road_straight');
+    }
+    expect(grown.pieces.road_straight.length, 'four new straight segments').toBe(base.pieces.road_straight.length + 4);
+
+    // The anchor n:12:2 was a right-edge tee (3 neighbors); gaining the east
+    // neighbor promotes it to a 4-way cross — the reclassification S2 must handle.
+    const anchor = roadPieceAt(grown, 12, 2);
+    expect(anchor!.key, 'anchor (12, 2) should reclassify tee → cross').toBe('road_cross');
+    expect(grown.pieces.road_cross.length).toBe(base.pieces.road_cross.length + 1);
+    expect(grown.pieces.road_tee.length).toBe(base.pieces.road_tee.length - 1);
+
+    // …and the stub is not an orphan — it neighbors the segment (no rendering gap).
+    expectNoOrphanRoads(grown, 'east extension');
+  });
+
+  it('classifies tee / straight correctly on a partial (non-full) grid (no gap, no throw)', () => {
+    // Drop one interior horizontal edge to force a reclassification at both ends.
+    const g = classicGridGraph(seed);
+    g.edges = g.edges.filter((e) => e.id !== 'e:n:7:2->n:12:2');
+
+    let plan: CityPlan | undefined;
+    expect(() => {
+      plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g });
+    }, 'a partial grid must tessellate, not throw').not.toThrow();
+    expect(plan).toBeTruthy();
+    const partial = plan!;
+
+    // The removed segment's interior-only tiles (8..11 at j=2) disappear — they
+    // were carried solely by that horizontal edge (i=8..11 are not road columns).
+    for (const i of [8, 9, 10, 11]) {
+      expect(roadPieceAt(partial, i, 2), `tile (${i}, 2) should be gone after the edge is removed`).toBeUndefined();
+    }
+
+    // (7, 2): was a 4-way cross; losing its east neighbor leaves N|S|W ⇒ a tee.
+    const teeEnd = roadPieceAt(partial, 7, 2);
+    expect(teeEnd!.key, '(7, 2) should reclassify cross → tee').toBe('road_tee');
+
+    // (12, 2): was a right-edge tee; losing its west neighbor leaves only the
+    // vertical ring N|S ⇒ a straight (the horizontal stub is gone).
+    const straightEnd = roadPieceAt(partial, 12, 2);
+    expect(straightEnd!.key, '(12, 2) should reclassify tee → straight').toBe('road_straight');
+
+    // The break is clean: no road tile is left orphaned (no rendering gap/throw).
+    expectNoOrphanRoads(partial, 'partial grid');
+  });
+});

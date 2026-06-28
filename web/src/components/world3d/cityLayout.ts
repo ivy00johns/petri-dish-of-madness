@@ -269,6 +269,16 @@ const B_MAX = (GRID_BLOCKS - 1) / 2;
 const TILE_MIN = -13;
 const TILE_MAX = 12;
 
+/**
+ * EM-243 (S2): agents grow roads past the frozen 5×5 into the 9×9 growth
+ * envelope — tile-index [−23, 22], mirroring backend `citygraph.MIN_IDX/MAX_IDX`
+ * (`MAX_CITY_BLOCKS = 9`). The hardcoded fallback grid stays 5×5; only a real
+ * `CityGraph` reaches this far, so grown segments still render (no gap) while the
+ * no-graph baseline is byte-identical to before.
+ */
+const ENV_MIN = -23;
+const ENV_MAX = 22;
+
 function tileCenter(i: number): number {
   return (i + 0.5) * TILE;
 }
@@ -279,6 +289,11 @@ function isRoadIndex(i: number): boolean {
 
 function inGrid(i: number, j: number): boolean {
   return i >= TILE_MIN && i <= TILE_MAX && j >= TILE_MIN && j <= TILE_MAX;
+}
+
+/** Inside the 9×9 growth envelope (the renderable bound for grown graphs). */
+function inEnvelope(i: number, j: number): boolean {
+  return i >= ENV_MIN && i <= ENV_MAX && j >= ENV_MIN && j <= ENV_MAX;
 }
 
 function isRoadTile(i: number, j: number): boolean {
@@ -321,10 +336,10 @@ function roadTileSetFrom(graph: CityGraph | null | undefined): Set<string> {
     const ai = tileIndexOf(a.x), aj = tileIndexOf(a.z), bi = tileIndexOf(b.x), bj = tileIndexOf(b.z);
     if (ai === bi) {
       const lo = Math.min(aj, bj), hi = Math.max(aj, bj);
-      for (let j = lo; j <= hi; j++) if (inGrid(ai, j)) set.add(`${ai},${j}`);
+      for (let j = lo; j <= hi; j++) if (inEnvelope(ai, j)) set.add(`${ai},${j}`);
     } else if (aj === bj) {
       const lo = Math.min(ai, bi), hi = Math.max(ai, bi);
-      for (let i = lo; i <= hi; i++) if (inGrid(i, aj)) set.add(`${i},${aj}`);
+      for (let i = lo; i <= hi; i++) if (inEnvelope(i, aj)) set.add(`${i},${aj}`);
     }
   }
   return set;
@@ -538,8 +553,11 @@ function emitRoads(
   roadTiles: Set<string>,
 ): void {
   const isRoad = (i: number, j: number) => roadTiles.has(`${i},${j}`);
-  for (let j = TILE_MIN; j <= TILE_MAX; j++) {
-    for (let i = TILE_MIN; i <= TILE_MAX; i++) {
+  // EM-243 (S2): iterate the full 9×9 growth envelope so grown segments render.
+  // Tiles absent from `roadTiles` are skipped, so the frozen 5×5 fallback and
+  // the classic_grid graph stay byte-identical (j-outer/i-inner order unchanged).
+  for (let j = ENV_MIN; j <= ENV_MAX; j++) {
+    for (let i = ENV_MIN; i <= ENV_MAX; i++) {
       if (!isRoad(i, j)) continue;
       let mask = 0;
       for (const d of SIDES) {
