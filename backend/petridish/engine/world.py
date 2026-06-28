@@ -7759,8 +7759,19 @@ class World:
         # EM-245 (S3b) — restore the active master plan when present (additive key;
         # absent ⇒ None ⇒ no morph). The morph is a pure fn of (plan, graph), so a
         # mid-morph snapshot resumes byte-identically on replay/fork.
+        # ModelBoundary: a master_plan survives ONLY if SHAPE-valid — a known kind
+        # AND a seed. step_master_plan_morph hard-subscripts plan["kind"]/["seed"],
+        # so a non-empty-but-malformed dict ({kind} w/o seed, or an unknown kind)
+        # would wedge the morph in a per-tick swallowed KeyError or silently drive an
+        # unintended grid morph. Validate to None instead (EM-245 pre-ship review).
         _mp = state.get("master_plan")
-        world.master_plan = _mp if isinstance(_mp, dict) and _mp else None
+        world.master_plan = (
+            _mp
+            if isinstance(_mp, dict)
+            and _mp.get("kind") in MASTER_PLAN_KINDS
+            and "seed" in _mp
+            else None
+        )
         world.running = False  # a restored/forked world starts paused
         try:
             world.tick_interval_seconds = float(

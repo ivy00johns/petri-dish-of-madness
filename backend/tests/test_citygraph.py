@@ -380,3 +380,22 @@ def test_template_geometric_now_routes_to_master_plan():
     mp = master_plan("pentagon", {}, 1337)
     assert [e.id for e in g.edges] == [e.id for e in mp.edges]   # NOT the grid fallback anymore
     assert g.template == "pentagon"
+
+
+def test_radial_master_plan_is_one_connected_component():
+    # EM-245 review fix: the inner ring must spoke to the shared center (was a
+    # disconnected floating ring). Assert every node is reachable from any node.
+    g = master_plan("radial", None, 1337)
+    adj: dict[str, set] = {}
+    for e in g.edges:
+        adj.setdefault(e.a, set()).add(e.b)
+        adj.setdefault(e.b, set()).add(e.a)
+    seen: set = set()
+    stack = [g.nodes[0].id]
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        stack.extend(m for m in adj.get(n, ()) if m not in seen)
+    assert len(seen) == len(g.nodes)  # fully connected

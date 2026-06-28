@@ -406,10 +406,18 @@ def master_plan(kind: str, params: dict | None, seed: int) -> CityGraph:
     if kind == "pentagon":
         g = _ring_plan("pent", seed, int(p.get("sides", 5)), radius, True, True)
     elif kind == "radial":
-        # two concentric rings + spokes to a roundabout center
-        outer = _ring_plan("radO", seed, int(p.get("spokes", 8)), radius, True, True)
-        inner = _ring_plan("radI", seed, int(p.get("spokes", 8)), radius * 0.5, False, True)
-        g = CityGraph(seed=int(seed), nodes=outer.nodes + inner.nodes, edges=outer.edges + inner.edges)
+        # two concentric rings + spokes to a SHARED roundabout center. The outer
+        # ring carries the center ('n:radO:c') + its spokes; the inner ring's nodes
+        # also spoke to that SAME center, so the plan is one connected component
+        # (a floating inner ring with no inter-ring/center link was a topology bug).
+        spokes = int(p.get("spokes", 8))
+        outer = _ring_plan("radO", seed, spokes, radius, True, True)
+        inner = _ring_plan("radI", seed, spokes, radius * 0.5, False, True)
+        edges = list(outer.edges) + list(inner.edges)
+        for n in inner.nodes:
+            eid, ea, eb = _ordered_edge_geom(n.id, "n:radO:c")
+            edges.append(CityEdge(id=eid, a=ea, b=eb))
+        g = CityGraph(seed=int(seed), nodes=outer.nodes + inner.nodes, edges=edges)
     elif kind == "ring":
         g = _ring_plan("ring", seed, int(p.get("sides", 8)), radius, False, True)
     else:

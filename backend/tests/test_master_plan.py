@@ -257,3 +257,17 @@ def test_building_relocation_is_deferred_buildings_keep_location():
         if w.master_plan is None:
             break
     assert w.buildings["bld_keep"].location == place.id   # backend never relocated it
+
+
+def test_corrupt_master_plan_snapshot_degrades_to_none():
+    # EM-245 review fix (MEDIUM): a SHAPE-corrupt master_plan in a snapshot must
+    # degrade to None — not survive and wedge/misfire the morph engine.
+    w = _world()
+    base = w.to_snapshot()
+    for bad in ({"kind": "pentagon"}, {"seed": 5}, {"kind": "hexagon", "seed": 1},
+                "x", 123, [], {}):
+        snap = dict(base)
+        snap["master_plan"] = bad
+        w2 = World.from_snapshot(snap)
+        assert w2.master_plan is None, f"corrupt {bad!r} should degrade to None"
+        assert w2.step_master_plan_morph() == []  # no wedge, no spurious morph
