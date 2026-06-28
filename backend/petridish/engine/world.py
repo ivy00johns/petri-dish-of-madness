@@ -7520,8 +7520,14 @@ class World:
         # hole). __init__ built the graph with the PRE-restore seed, so re-derive
         # explicitly here off the restored city_seed on the migration path.
         _cg = state.get("city_graph")
-        if isinstance(_cg, dict) and _cg.get("nodes"):
-            world.city_graph = CityGraph.from_dict(_cg)
+        if isinstance(_cg, dict) and isinstance(_cg.get("nodes"), list) and _cg["nodes"]:
+            try:
+                world.city_graph = CityGraph.from_dict(_cg)
+            except (KeyError, TypeError, ValueError):
+                # Corrupt / partially-written graph (e.g. nodes missing x/z) ->
+                # degrade to the derived grid. ModelBoundary (EM-239): a forked/
+                # restored corrupt snapshot must never crash from_snapshot.
+                world.city_graph = classic_grid(world.city_seed)
         else:
             world.city_graph = classic_grid(world.city_seed)
         world.running = False  # a restored/forked world starts paused

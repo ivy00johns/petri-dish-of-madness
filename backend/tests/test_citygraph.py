@@ -90,3 +90,29 @@ def test_snapshot_round_trip_is_graph_stable():
     snap1 = w.to_snapshot()
     snap2 = World.from_snapshot(snap1).to_snapshot()
     assert snap2["city_graph"] == snap1["city_graph"]
+
+
+def test_from_snapshot_degrades_on_corrupt_graph():
+    # ModelBoundary (EM-239): a type-corrupt / partially-written city_graph must
+    # degrade to classic_grid(restored_seed) — from_snapshot must NEVER crash on
+    # a corrupted or partially-written snapshot (fork/restore resilience).
+    from petridish.engine.world import World
+    w = _min_world()
+    base = w.to_snapshot()
+    seed = base["city_seed"]
+    expected = classic_grid(seed).to_dict()
+    corrupt = [
+        {"nodes": "xxx", "edges": []},            # nodes truthy but not a list
+        {"nodes": [{"id": "n"}], "edges": []},    # node dict missing x/z
+        {"nodes": 5, "edges": [{"a": "x", "b": "y"}]},  # nodes not a list
+        {"edges": [{"a": "x", "b": "y"}]},        # no nodes key at all
+        {},                                        # empty dict
+        {"nodes": []},                             # empty node list
+        "not-a-dict",                              # not even a dict
+        None,                                      # explicit null
+    ]
+    for bad in corrupt:
+        snap = dict(base)
+        snap["city_graph"] = bad
+        restored = World.from_snapshot(snap)  # must not raise
+        assert restored.city_graph.to_dict() == expected, f"failed on {bad!r}"

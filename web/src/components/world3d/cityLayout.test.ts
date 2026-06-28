@@ -1006,4 +1006,25 @@ describe('EM-239 byte-identical graph rendering', () => {
     expect(plan.pieces.road_straight.length).toBeGreaterThan(0);
     expect(plan.blocks.length).toBe(GRID_BLOCKS * GRID_BLOCKS);
   });
+
+  it('type-corrupt city_graph degrades to the grid without throwing', () => {
+    // ModelBoundary (EM-239): a corrupt graph (nodes/edges not real arrays) must
+    // fall back to the hardcoded grid byte-identically, never throw during the
+    // render-path computeCityPlan call (upstream of the per-piece boundary).
+    const fallback = JSON.stringify(computeCityPlan({ places, city_seed: seed }));
+    const corrupt: unknown[] = [
+      { nodes: 'str', edges: 'str' },
+      { nodes: 5, edges: [{ a: 'x', b: 'y' }] },
+      { edges: [{ a: 'x', b: 'y' }] }, // no nodes key
+      { edges: { length: 1 } },
+      { version: 1, seed, car_policy: 'cars', nodes: [], edges: [] }, // empty
+    ];
+    for (const bad of corrupt) {
+      let plan;
+      expect(() => {
+        plan = computeCityPlan({ places, city_seed: seed, city_graph: bad as never });
+      }, JSON.stringify(bad)).not.toThrow();
+      expect(JSON.stringify(plan), JSON.stringify(bad)).toBe(fallback);
+    }
+  });
 });

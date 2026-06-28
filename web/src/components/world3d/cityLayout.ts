@@ -296,7 +296,17 @@ function tileIndexOf(world: number): number {
  *  plan is byte-identical. S2-ready: partial graphs mark only their segments. */
 function roadTileSetFrom(graph: CityGraph | null | undefined): Set<string> {
   const set = new Set<string>();
-  if (!graph || !graph.edges?.length) {
+  // Fall back unless the graph carries REAL node + edge arrays. ModelBoundary
+  // (EM-239): a type-corrupt / partially-written graph must degrade to the
+  // hardcoded grid, never throw — computeCityPlan runs in CityScape's
+  // useCityPlan upstream of the per-piece <ModelBoundary>, so a throw here would
+  // crash the whole 3D world instead of falling back.
+  if (
+    !graph ||
+    !Array.isArray(graph.nodes) ||
+    !Array.isArray(graph.edges) ||
+    !graph.edges.length
+  ) {
     // Fallback: today's hardcoded full grid.
     for (let j = TILE_MIN; j <= TILE_MAX; j++)
       for (let i = TILE_MIN; i <= TILE_MAX; i++)
@@ -327,7 +337,9 @@ function roadLineIndicesFrom(
   graph: CityGraph | null | undefined,
   axis: 'ns' | 'ew',
 ): number[] {
-  if (!graph || !graph.nodes?.length) {
+  // Same ModelBoundary guard as roadTileSetFrom: a type-corrupt graph (nodes
+  // not a real array) degrades to the hardcoded road lines, never throws.
+  if (!graph || !Array.isArray(graph.nodes) || !graph.nodes.length) {
     const out: number[] = [];
     for (let i = TILE_MIN; i <= TILE_MAX; i++) if (isRoadIndex(i)) out.push(i);
     return out;
