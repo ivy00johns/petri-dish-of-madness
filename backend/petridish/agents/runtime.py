@@ -941,6 +941,12 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
     if blocked:
         line += f" Blocked: {', '.join(blocked)}."
     line += f" Cars: {cars}."
+    # EM-244 (S3a): surface an open layout vote so agents can vote (one clause, diet-safe).
+    open_layout = next((r for r in world.rules.values()
+                        if getattr(r, "status", "") == "proposed"
+                        and getattr(r, "effect", "") in ("demolish_road", "set_car_policy")), None)
+    if open_layout is not None:
+        line += f" Open vote: {open_layout.effect} (vote yes/no)."
     return line
 
 
@@ -1882,7 +1888,8 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # was reachable only by bypassing the gate in tests).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "name_town", "demolish", "promote_image",
-                         "trial", "amend_constitution", "relocate_center"}
+                         "trial", "amend_constitution", "relocate_center",
+                         "demolish_road", "set_car_policy"}  # EM-244 (S3a)
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -1931,6 +1938,26 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                 return "promote_image requires args.image_id = the id of a gallery image to hang over the plaza"
             if not any(g.get("image_id") == image_id for g in gallery):
                 return f"promote_image requires args.image_id of a real gallery image (got '{image_id}')"
+        # EM-244 (S3a) — demolish_road needs a REAL road id (mirror demolish's
+        # target check so the gate AGREES with world.action_propose_rule).
+        if effect == "demolish_road":
+            target = str(args.get("target") or "").strip()
+            if not any(e.id == target for e in world.city_graph.edges):
+                return "demolish_road requires args.target = the id of a real road to tear down"
+        # EM-244 (S3a) — set_car_policy needs a valid {scope, policy}; street scope
+        # needs a real edge target. 'district' is deferred (mirror the world).
+        if effect == "set_car_policy":
+            from ..engine.citygraph import CAR_POLICIES, CAR_SCOPES
+            scope = str(args.get("scope") or "city").strip()
+            policy = str(args.get("policy") or "").strip()
+            if policy not in CAR_POLICIES:
+                return f"set_car_policy requires args.policy in {sorted(CAR_POLICIES)}"
+            if scope not in CAR_SCOPES:
+                return "set_car_policy scope must be 'city' or 'street' ('district' not yet supported)"
+            if scope == "street":
+                target = str(args.get("target") or "").strip()
+                if not any(e.id == target for e in world.city_graph.edges):
+                    return "set_car_policy street scope requires args.target = a real road id"
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -5849,8 +5876,13 @@ class AgentRuntime:
             op = args.get("op")
             article_id = args.get("article_id") or (
                 args.get("target") if effect == "amend_constitution" else None)
+            # EM-244 (S3a) — set_car_policy carries scope/policy; demolish_road reuses
+            # the generic target arg (the world handler reads them off the kwargs).
+            scope = args.get("scope")
+            policy = args.get("policy")
             ok, reason, rule = self.world.action_propose_rule(
-                agent, effect, text, name, target, image_id, op, article_id)
+                agent, effect, text, name, target, image_id, op, article_id,
+                scope=scope, policy=policy)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)

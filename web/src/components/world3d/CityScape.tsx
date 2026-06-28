@@ -52,6 +52,7 @@ import type { Place, Neighborhood } from '../../types';
 import {
   CITY_PIECE_KEYS,
   computeCityPlan,
+  TILE,
   type CityInstance,
   type CityPieceKey,
   type CityPlan,
@@ -282,7 +283,11 @@ export function citySignature(
   places: readonly Place[] | null | undefined,
   citySeed: number | null | undefined,
   neighborhoods?: readonly Neighborhood[] | null,
-  cityGraph?: { nodes: readonly unknown[]; edges: readonly unknown[] } | null,
+  cityGraph?: {
+    nodes: readonly unknown[];
+    edges: readonly { id?: string; car_policy?: string }[];
+    car_policy?: string;
+  } | null,
 ): string {
   const head = citySeed ?? 'default';
   const body = (places ?? [])
@@ -301,7 +306,20 @@ export function citySignature(
   // EM-243 (S2): fold the graph's node/edge COUNTS (not the object) so a built
   // road re-renders live while idle polls (identical counts) never churn the memo.
   const graph = cityGraph ? `${cityGraph.nodes.length}:${cityGraph.edges.length}` : '';
-  return `${head}|${body}|${tiers}|${graph}`;
+  // EM-244 (S3a): car_policy mutates at CONSTANT node/edge counts (city default or a
+  // single edge), so the counts above miss it — fold the city policy + every
+  // non-'inherit' edge policy (sorted, so poll order never churns). All-default
+  // (city 'cars', edges 'inherit') ⇒ 'cars:' ⇒ stable; only a ratified ban-cars /
+  // street vote changes it, re-rendering the tint + parked-car removal live.
+  const policy = cityGraph
+    ? `${cityGraph.car_policy ?? 'cars'}:` +
+      cityGraph.edges
+        .filter((e) => e.car_policy && e.car_policy !== 'inherit')
+        .map((e) => `${e.id}=${e.car_policy}`)
+        .sort()
+        .join(',')
+    : '';
+  return `${head}|${body}|${tiers}|${graph}|${policy}`;
 }
 
 /**
@@ -313,21 +331,15 @@ export function useCityPlan(
   world: CityWorld,
 ): { plan: CityPlan; center: { x: number; z: number } } {
   const { places = [], city_seed: citySeed, neighborhoods, city_graph } = world;
-  // EM-243 (S2): the graph now MUTATES (agents build_road), so it MUST shape the
-  // memo or a built road never re-renders live (it would only appear on reload).
-  // EM-239 (S1) deliberately excluded it because the graph was seed-constant and a
-  // fresh object every poll would churn the memo each tick. We reconcile both by
-  // depending on the graph's node/edge COUNTS (primitives), not the object: counts
-  // change exactly when a road is added but are identical across idle polls — so
-  // live growth renders WITHOUT breaking the "never rebuilds instance buffers"
-  // invariant. (S3, which mutates edges in place at constant count, will need a
-  // content hash here instead of counts.)
-  const graphNodeCount = city_graph?.nodes.length ?? 0;
-  const graphEdgeCount = city_graph?.edges.length ?? 0;
-  const sig = useMemo(
-    () => citySignature(places, citySeed, neighborhoods, city_graph),
-    [places, citySeed, neighborhoods, graphNodeCount, graphEdgeCount],
-  );
+  // EM-243 (S2) / EM-244 (S3a): the graph MUTATES — agents build_road (changes
+  // node/edge counts) AND ratify set_car_policy (changes car_policy at CONSTANT
+  // counts). A count-only memo dep caught build_road but missed car_policy (the
+  // S3a HIGH). citySignature now folds BOTH counts and car_policy; we compute it
+  // every render (a cheap string concat over ~tens of nodes, run per snapshot-poll
+  // — NOT per frame) and let the ref-cache below gate the expensive computeCityPlan
+  // rebuild on the sig string. So a built road OR a ratified car-policy renders
+  // live, while idle polls (identical sig) never rebuild instance buffers.
+  const sig = citySignature(places, citySeed, neighborhoods, city_graph);
   const ref = useRef<{
     sig: string;
     plan: CityPlan;
@@ -473,6 +485,51 @@ function EmptyLotPads({
   );
 }
 
+// ── EM-244 (S3a): pedestrian road surface tint (procedural overlay) ──────────
+
+/** Pedestrian-road tint — a cool flagstone wash distinct from the warm paving
+ *  pads (PAD_COLOR), so a pedestrianized street reads as "sidewalk, no cars". */
+export const PEDESTRIAN_ROAD_COLOR = '#9fb0a6';
+
+/** Full-tile flagstone overlay (TILE×TILE), sitting just above the road slab
+ *  so it tints the surface without z-fighting the road tile beneath it. */
+const PEDESTRIAN_GEOMETRY = new THREE.BoxGeometry(TILE, 0.06, TILE).translate(0, 0.06, 0);
+
+/**
+ * The pedestrian road tiles, instanced like EmptyLotPads (chunked, raycast-
+ * dead, StaticDrawUsage) in a single tinted toon material — the EM-244 (S3a)
+ * surface variant that marks where a `set_car_policy` vote banned cars. Empty
+ * for the default/cars/no-graph plan, so it adds nothing to the baseline city.
+ * Purely procedural ⇒ no ModelBoundary needed.
+ */
+function PedestrianRoadPads({
+  instances,
+  center,
+}: {
+  instances: CityInstance[];
+  center: { x: number; z: number };
+}) {
+  const chunks = useMemo(() => chunkInstances(instances, center), [instances, center]);
+  const part = useMemo<CityPart>(
+    () => ({ geometry: PEDESTRIAN_GEOMETRY, material: toonMaterial(PEDESTRIAN_ROAD_COLOR) }),
+    [],
+  );
+  return (
+    <>
+      {chunks.map((chunk, ci) => (
+        <CityChunkMesh
+          key={`ped:${ci}`}
+          name={`city-pedestrian-${ci}`}
+          part={part}
+          spec={PAD_SPEC}
+          instances={chunk}
+          castShadow={false}
+        />
+      ))}
+    </>
+  );
+}
+
 /**
  * THE city (Wave D1.5 + EM-174). Mounted by CozyWorld inside the canvas —
  * every road tile, platted-lot pad, park tree, prop and parked car of the
@@ -494,6 +551,9 @@ export function CityScape({ world }: { world: CityWorld }) {
       ))}
       {plan.emptyLots.length > 0 && (
         <EmptyLotPads instances={plan.emptyLots} center={center} />
+      )}
+      {plan.pedestrianTiles.length > 0 && (
+        <PedestrianRoadPads instances={plan.pedestrianTiles} center={center} />
       )}
     </group>
   );

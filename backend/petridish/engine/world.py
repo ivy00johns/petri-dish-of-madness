@@ -12,7 +12,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .citygraph import CityGraph, classic_grid, apply_build_road, nearest_node
+from .citygraph import (CityGraph, classic_grid, apply_build_road, nearest_node,
+                        apply_demolish_road, apply_car_policy)
 
 
 def _block_get(block: Any, key: str, default: Any) -> Any:
@@ -3524,6 +3525,7 @@ class World:
         name: str | None = None, target: str | None = None,
         image_id: str | None = None,
         op: str | None = None, article_id: str | None = None,
+        scope: str | None = None, policy: str | None = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -3554,7 +3556,8 @@ class World:
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
                          "name_town", "demolish", "promote_image", "trial",
-                         "amend_constitution", "relocate_center"}
+                         "amend_constitution", "relocate_center",
+                         "demolish_road", "set_car_policy"}  # EM-244 (S3a)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -3667,6 +3670,28 @@ class World:
                                f"propose a DIFFERENT place or legislate something "
                                f"else"), None
             payload = {"target": target}
+        # EM-244 (S3a) — demolish_road carries the TARGET edge id (like demolish's
+        # building target). A teardown of an absent road is meaningless.
+        if effect == "demolish_road":
+            target = str(target or "").strip()
+            if not any(e.id == target for e in self.city_graph.edges):
+                return False, f"demolish_road requires a real road id (got {target!r})", None
+            payload = {"target": target}
+        # EM-244 (S3a) — set_car_policy carries {scope, policy, target?}. city = the
+        # headline ban-cars; street = one edge (target). 'district' is deferred.
+        if effect == "set_car_policy":
+            from .citygraph import CAR_POLICIES, CAR_SCOPES
+            scope = str(scope or "city").strip()
+            policy = str(policy or "").strip()
+            if policy not in CAR_POLICIES:
+                return False, f"car policy must be one of {sorted(CAR_POLICIES)}", None
+            if scope not in CAR_SCOPES:
+                return False, f"car-policy scope must be 'city' or 'street' ('district' not yet supported)", None
+            if scope == "street":
+                target = str(target or "").strip()
+                if not any(e.id == target for e in self.city_graph.edges):
+                    return False, f"street car-policy requires a real road id (got {target!r})", None
+            payload = {"scope": scope, "policy": policy, "target": (target or None)}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -3728,7 +3753,8 @@ class World:
         active = (
             self._active_rule(effect)
             if effect not in ("name_town", "demolish", "promote_image", "trial",
-                              "amend_constitution", "relocate_center") else None
+                              "amend_constitution", "relocate_center",
+                              "demolish_road", "set_car_policy") else None  # EM-244 (S3a) — one-shot acts
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
         # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
@@ -3791,7 +3817,14 @@ class World:
                     self._active_rule(rule.effect)
                     if rule.effect not in ("name_town", "promote_image", "trial",
                                            "amend_constitution",
-                                           "relocate_center") else None
+                                           "relocate_center",
+                                           # EM-244: 'demolish' is a one-shot per-target ACT (the
+                                           # 3814 comment even says so) but was missing here, so a
+                                           # 2nd building-demolish vote was wrongly renewed (never
+                                           # applied). It's per-target scoped at propose time, so
+                                           # excluding it from renewal is correct.
+                                           "demolish",
+                                           "demolish_road", "set_car_policy") else None  # EM-244 (S3a)
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -4024,6 +4057,34 @@ class World:
                 },
             })
             return
+        # EM-244 (S3a) — demolish_road: a passing vote tears down the target edge
+        # (+ any freed dead-end node). road_demolished is parked in the same outbox
+        # demolish/promote_image use (drained by the loop's _flush_spawn_events).
+        if rule.effect == "demolish_road":
+            rule.applied = True
+            edge_id = (rule.payload or {}).get("target")
+            ok, _reason, info = apply_demolish_road(self.city_graph, edge_id)
+            if ok:
+                self.pending_spawn_events.append({
+                    "kind": "road_demolished", "actor_id": "system", "actor_type": "system",
+                    "text": "🚧 By vote, a road is torn down.",
+                    "payload": {"proposal_id": rule.id, **info},
+                })
+            return
+        # EM-244 (S3a) — set_car_policy: a passing vote sets the city or a street's
+        # car policy. car_policy_set parked in the same outbox.
+        if rule.effect == "set_car_policy":
+            rule.applied = True
+            p = rule.payload or {}
+            ok, _reason, info = apply_car_policy(
+                self.city_graph, p.get("scope", "city"), p.get("policy", "cars"), p.get("target"))
+            if ok:
+                self.pending_spawn_events.append({
+                    "kind": "car_policy_set", "actor_id": "system", "actor_type": "system",
+                    "text": f"🚦 By vote, {p.get('scope')} car policy → {p.get('policy')}.",
+                    "payload": {"proposal_id": rule.id, **info},
+                })
+            return
         if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
@@ -4169,7 +4230,8 @@ class World:
         # EM-183 — relocate_center re-anchors the town's civic heart, a weightier,
         # one-shot civic act than an ordinary law, so it shares the demolish-grade
         # 0.7 supermajority bar (the fixed `else` branch below — no config block).
-        if rule.effect in ("demolish", "amend_constitution", "relocate_center"):
+        if rule.effect in ("demolish", "amend_constitution", "relocate_center",
+                           "demolish_road", "set_car_policy"):  # EM-244 (S3a) — irreversible/structural → 0.7
             if rule.effect == "amend_constitution":
                 try:
                     frac = float(self._constitution_param("ratify_threshold", 0.7))

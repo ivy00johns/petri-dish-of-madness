@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { computeStreets } from './cityLayout';
+import { computeStreets, TILE } from './cityLayout';
+import type { CityGraph } from '../../types';
 import {
   CAR_KINDS,
   carOffset,
@@ -73,5 +74,64 @@ describe('carOffset (EM-169)', () => {
     const b = carOffset(c, span, 2.0 + period);
     expect(a.x).toBeCloseTo(b.x, 4);
     expect(a.z).toBeCloseTo(b.z, 4);
+  });
+});
+
+// ── EM-244 (S3a) — car policy gates ambient traffic ──────────────────────────
+//
+// A 'pedestrian' street loses its cars; a city-scope 'pedestrian' graph zeroes
+// the fleet (the headline ban). The CRITICAL invariant: no graph / a city
+// 'cars' graph yields the byte-identical fleet (the EM-169 baseline).
+
+const ROAD_IDX = [-13, -8, -3, 2, 7, 12];
+const tc = (i: number) => (i + 0.5) * TILE;
+/** The classic_grid graph (mirrors backend citygraph.py) at a city policy. */
+function gridGraph(carPolicy: 'cars' | 'pedestrian' | 'mixed' = 'cars'): CityGraph {
+  const nodes = [];
+  for (const j of ROAD_IDX) for (const i of ROAD_IDX)
+    nodes.push({ id: `n:${i}:${j}`, x: tc(i), z: tc(j), kind: 'junction' as const });
+  const edges = [];
+  for (const j of ROAD_IDX) for (let k = 0; k < ROAD_IDX.length - 1; k++) {
+    const a = `n:${ROAD_IDX[k]}:${j}`, b = `n:${ROAD_IDX[k + 1]}:${j}`;
+    edges.push({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+  }
+  for (const i of ROAD_IDX) for (let k = 0; k < ROAD_IDX.length - 1; k++) {
+    const a = `n:${i}:${ROAD_IDX[k]}`, b = `n:${i}:${ROAD_IDX[k + 1]}`;
+    edges.push({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+  }
+  return { version: 1, seed: 1337, car_policy: carPolicy, nodes, edges };
+}
+
+describe('computeTraffic — EM-244 (S3a) car policy', () => {
+  it('CRITICAL: no graph (or a cars graph) yields the byte-identical fleet', () => {
+    expect(computeTraffic(1337, streets, null)).toEqual(cars);
+    expect(computeTraffic(1337, streets, undefined)).toEqual(cars);
+    const gCars = gridGraph('cars');
+    expect(computeTraffic(1337, computeStreets(1337, gCars), gCars)).toEqual(cars);
+  });
+
+  it('city-scope pedestrian zeroes the whole fleet (the headline ban)', () => {
+    const gPed = gridGraph('pedestrian');
+    const pedStreets = computeStreets(1337, gPed);
+    expect(cars.length).toBeGreaterThan(0); // sanity: there WAS a fleet
+    expect(computeTraffic(1337, pedStreets, gPed)).toEqual([]);
+  });
+
+  it("'mixed' city policy keeps the cars (only 'pedestrian' bans them)", () => {
+    const gMixed = gridGraph('mixed');
+    expect(computeTraffic(1337, computeStreets(1337, gMixed), gMixed)).toEqual(cars);
+  });
+
+  it('a single pedestrian street drops only that street’s car', () => {
+    const g = gridGraph('cars');
+    g.edges.find((e) => e.id === 'e:n:7:2->n:12:2')!.car_policy = 'pedestrian';
+    const gated = computeTraffic(1337, streets, g);
+    const baseIds = new Set(cars.map((c) => c.id));
+    const gatedIds = new Set(gated.map((c) => c.id));
+    // the pedestrianized ew:2 street never carries a car…
+    expect(gatedIds.has('car:ew:2')).toBe(false);
+    // …and every other baseline car is untouched.
+    for (const id of baseIds) if (id !== 'car:ew:2') expect(gatedIds.has(id)).toBe(true);
+    expect(gated.length).toBe(cars.length - (baseIds.has('car:ew:2') ? 1 : 0));
   });
 });

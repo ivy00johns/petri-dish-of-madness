@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "ticket": "EM-244 (S3a) — vote-gated demolish_road + set_car_policy",
+  "branch": "feat/em244-vote-demolish-carpolicy",
+  "head": "adccc25",
+  "status": "PASS_WITH_ISSUES",
+  "scores": {
+    "contract_conformance": {
+      "score": 3,
+      "notes": "Backend rule-effect contract fully conforms (vote-gating, 0.7 supermajority, apply-on-activation-only, no-renewal via BOTH exclusion lists, validation + runtime defense-in-depth agree) and demolish_road re-renders live correctly (it changes edge count, which the count-based citySignature catches). The cars/mixed/default + no-graph baseline is byte-identical (EM-239/EM-243 goldens + new explicit golden pass). The notable gap: the HEADLINE 'car_policy goes live' is NOT met live for set_car_policy — the city PLAN (pedestrian tint + parked-car removal) only updates after a page reload because citySignature/useCityPlan key on node/edge COUNTS, and set_car_policy mutates car_policy at constant counts. Data is correct on the broadcast graph and the render is correct post-reload, so this is a one-path reactivity gap, not wholesale non-conformance — hence 3, not below."
+    },
+    "correctness": {
+      "score": 4,
+      "notes": "Backend ops are pure/deterministic; snapshot round-trip byte-identical; replay-stable. Vote gating verified end-to-end (governance gate first; failed vote applies nothing; stale/vanished target is a silent no-op, no crash, no phantom event). Demolish cascade is provably safe (lot pool is place-derived, independent of road edges; assignBuildingLots is total via slotLayout fallback; backend apply_* fail soft on missing targets). Deduction: the set_car_policy live-render HIGH yields a visibly half-applied state (moving traffic stops via Traffic.tsx raw-graph ref dep, but tint stays off and curbside cars remain) until reload. A pre-existing demolish-2nd-building renewal-misclassification MEDIUM exists in the SHARED machinery but was NOT introduced by EM-244 (EM-244 actually demonstrates the correct fix pattern)."
+    },
+    "security": {
+      "score": 5,
+      "notes": "No security surface. Pure governance/render feature: no auth, no I/O, no untrusted deserialization beyond existing snapshot round-trip. Args str()-coerced identically in both the world gate and runtime gate; bad policy/scope/edge rejected consistently. No new network/secret/imagegen surface (imagegen changes in the opening status snapshot belong to a different branch and are not in this diff)."
+    },
+    "coverage": {
+      "score": 3,
+      "notes": "25 net-new backend tests (test_citygraph.py +60, test_layout_governance.py +323) + 12 net-new frontend tests (CityScape +50, cityLayout +94, trafficLayout +62); all green, tsc clean. Gap: every new FE test exercises the pure layer or a FRESH mount with an already-pedestrian graph — none re-render an EXISTING useCityPlan/hook across a car_policy FLIP at constant node/edge counts, which is exactly the stale-cache path the HIGH lives in. A useCityPlan rerender test (cars -> pedestrian, assert pedestrianTiles 0 -> >0) would have caught it. The suite gives false confidence on live reactivity."
+    },
+    "scope": {
+      "score": 5,
+      "notes": "Scope exactly as intended (15 files: backend citygraph/world/runtime + 2 test files + plan doc; frontend types + world3d render/layout + 3 test files). No imagegen/config/provider drift in fe4a3ce..HEAD. No S3b leakage: no master_plan/diff_graph/morph/relocate-build/non-axis-aligned geometry; pedestrian overlay is an axis-aligned BoxGeometry at rotY:0. S3a correctly rides assignBuildingLots re-derivation (buildings are place-anchored and do not move on demolish)."
+    }
+  },
+  "test_results": {
+    "backend": { "command": ".venv/bin/python -m pytest backend/tests/ -q", "passed": 1663, "failed": 0, "skipped": 0, "warnings": 1, "note": "warning is pre-existing starlette/httpx deprecation; baseline 1638 + 25 net-new" },
+    "frontend": { "command": "cd web && npx vitest run src/components/world3d", "test_files": 24, "passed": 576, "failed": 0, "note": "baseline 564 + 12 net-new" },
+    "typecheck": { "command": "cd web && npx tsc -b --force", "exit_code": 0 }
+  },
+  "blockers": [],
+  "issues": [
+    {
+      "severity": "HIGH",
+      "lens": "EM-155 determinism + LIVE-RENDER reactivity",
+      "location": "web/src/components/world3d/CityScape.tsx:304 (citySignature graph fold) + :326-331 (useCityPlan deps)",
+      "description": "A ratified set_car_policy vote does NOT re-render the city plan live — pedestrian tint (PedestrianRoadPads) and parked-car removal (emitCurbLife) only appear after a page reload. citySignature folds ONLY node/edge COUNTS and set_car_policy mutates car_policy at constant counts, so the memo signature is byte-identical and the stale cached plan is returned. Proven: citySignature('cars' grid) === citySignature('pedestrian' grid) === '1337|p1:0:0:governance:::||36:60', and a useCityPlan rerender across the flip leaves pedestrianTiles at 0. Ambient moving traffic (Traffic.tsx:47, raw graph-object ref dep) DOES react, producing a visibly half-applied live state. The author's own comment (CityScape.tsx:324-325) foresaw needing a content hash for S3 but did not add it; S3a is this ticket. Defeats the 'car_policy goes live' headline for set_car_policy (both city + street scope). Fix: fold graph.car_policy + a per-edge car_policy hash into citySignature AND into the useCityPlan dep list (and key Traffic on a car_policy-derived dep, not the raw object). Recommended must-fix before merge.",
+      "blocking": false
+    },
+    {
+      "severity": "MEDIUM",
+      "lens": "Integration + prompt-diet",
+      "location": "web cityLayout.ts roadTileSetFrom/pedestrian* guards + backend citygraph.py apply_demolish_road",
+      "description": "Demolish-everything edge case resurrects the city: apply_demolish_road has no last-edge guard, so edges:[] makes the FE treat the graph as missing/corrupt and snap the full 5x5 grid back (traffic returns, active pedestrian policy nullified). Reachable but unlikely. Fix: guard last edge in apply_demolish_road, or distinguish explicitly-empty from missing in the FE fallback.",
+      "blocking": false
+    },
+    {
+      "severity": "MEDIUM",
+      "lens": "Governance correctness",
+      "location": "backend/petridish/engine/world.py:3816-3822 (action_vote renewal-exclusion list)",
+      "description": "PRE-EXISTING (NOT introduced by EM-244): 'demolish' is omitted from the vote-time renewal-exclusion list, so a 2nd demolish vote for a DIFFERENT building ratifies but is reclassified as a renewal and never applied. EM-244 correctly avoided this for its own effects (added them to BOTH propose-time and vote-time lists). Fix the precedent by adding 'demolish' to the vote-time list. Does not block EM-244.",
+      "blocking": false
+    },
+    {
+      "severity": "LOW",
+      "lens": "multiple",
+      "location": "world.py duplicate-proposal guard; Traffic.tsx memo; runtime.py nudge; EventFeed categories",
+      "description": "Cluster of non-blocking nits: (1) demolish_road/set_car_policy use per-EFFECT not per-TARGET duplicate guard (only one open layout vote at a time city-wide) — conservative, diverges from the demolish precedent it claims to mirror; throughput limit vs the 'do MORE' north-star. (2) Traffic memo depends on the raw graph object (new ref each poll) — recomputes the full fleet every poll and is the incidental reason traffic reacts while the plan does not; should be content-keyed alongside the HIGH fix. (3) nearby_layout open-vote nudge sits after an early return so it is hidden exactly where demolish_road matters, and scans rules globally vs the plan's 'district-scoped' wording (redundant — OPEN PROPOSALS block always lists votes). (4) road_demolished/car_policy_set absent from EventKind union + feed CATEGORIES, so they vanish when any category chip is focused (matches road_built precedent; companion rule_passed carries filterable narration). (5) OPEN PROPOSALS header states simple-majority for all proposals but these ratify at 0.7 (pre-existing, broadened). (6) emitCurbLife parked-car gate checks only block-edge midpoint tile (exact for city-scope ban; approximate for a single street). (7) FE test coverage gap on the constant-count flip (see coverage score)."
+    }
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "No CRITICAL blocker, contract_conformance=3 (not <3), security=5 (not <3), and no lens returned 'blocker' (verdicts: issues, issues, clean, issues). All three gates re-run independently and green: backend 1663 passed / 0 failed, frontend 576 passed / 0 failed, tsc -b --force exit 0. Gate mechanically passes. STRONG RECOMMENDATION: fix the HIGH (set_car_policy non-live-render via content-hash in citySignature/useCityPlan + content-keyed Traffic dep) before merge — it defeats the 'car_policy goes live' headline for set_car_policy and ships a visibly half-applied state until reload; it is a well-understood frontend-only memo-keying change the author already scoped in their own comment."
+  }
+}

@@ -51,13 +51,17 @@ export interface CityGraphEdge {
   a: string; // node id
   b: string; // node id
   road_class: 'street';
-  car_policy: 'inherit'; // S3 adds 'cars' | 'pedestrian' | 'mixed'
+  // EM-244 (S3a): widened from the dormant S1 literal. 'inherit' defers to the
+  // graph (city) policy; 'cars'/'pedestrian'/'mixed' override it for this edge.
+  car_policy: 'inherit' | 'cars' | 'pedestrian' | 'mixed';
 }
 
 export interface CityGraph {
   version: number;
   seed: number;
-  car_policy: 'cars'; // S3 adds 'pedestrian' | 'mixed'
+  // EM-244 (S3a): the city-scope default. 'pedestrian' is the headline "ban
+  // cars + all sidewalks" — every 'inherit' edge resolves to it.
+  car_policy: 'cars' | 'pedestrian' | 'mixed';
   nodes: CityGraphNode[];
   edges: CityGraphEdge[];
 }

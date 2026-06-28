@@ -192,3 +192,75 @@ def test_extendable_directions_classifies_open_road_edge():
     dirs_corner = extendable_directions(g, "n:22:22")
     # n:22:22 doesn't exist yet; but extendable_directions parses the id and bounds-checks
     assert dirs_corner["east"] == "edge" and dirs_corner["north"] == "edge"
+
+
+# ── EM-244 (S3a): vote-gated demolish + car-policy (pure graph ops) ────────────
+from petridish.engine.citygraph import apply_demolish_road, apply_car_policy, CAR_POLICIES
+
+
+def test_demolish_road_removes_edge_and_orphaned_node():
+    g = classic_grid(1337)
+    # build a dead-end stub so its far node is orphan-removable on demolish
+    apply_build_road(g, "n:12:2", "east")  # adds n:17:2 + e:n:12:2->n:17:2
+    n0, e0 = len(g.nodes), len(g.edges)
+    ok, reason, info = apply_demolish_road(g, "e:n:12:2->n:17:2")
+    assert ok, reason
+    assert info["edge_id"] == "e:n:12:2->n:17:2"
+    assert "n:17:2" in info["removed_node_ids"]      # the stub's far node had no other edge
+    assert len(g.edges) == e0 - 1 and len(g.nodes) == n0 - 1
+    assert not any(e.id == "e:n:12:2->n:17:2" for e in g.edges)
+
+
+def test_demolish_road_keeps_still_connected_nodes():
+    g = classic_grid(1337)
+    # an interior edge: both endpoints keep other edges, so no node is removed
+    ok, reason, info = apply_demolish_road(g, "e:n:7:2->n:12:2")
+    assert ok, reason
+    assert info["removed_node_ids"] == []
+    assert any(n.id == "n:7:2" for n in g.nodes) and any(n.id == "n:12:2" for n in g.nodes)
+
+
+def test_demolish_road_rejects_unknown_edge():
+    g = classic_grid(1337)
+    ok, reason, info = apply_demolish_road(g, "e:nope->nope")
+    assert not ok and info is None and "no such road" in reason
+
+
+def test_car_policy_city_sets_graph_default():
+    g = classic_grid(1337)
+    ok, reason, info = apply_car_policy(g, "city", "pedestrian")
+    assert ok and g.car_policy == "pedestrian" and info["scope"] == "city"
+
+
+def test_car_policy_street_sets_one_edge():
+    g = classic_grid(1337)
+    ok, reason, info = apply_car_policy(g, "street", "pedestrian", "e:n:7:2->n:12:2")
+    assert ok and info["edge_id"] == "e:n:7:2->n:12:2"
+    edge = next(e for e in g.edges if e.id == "e:n:7:2->n:12:2")
+    assert edge.car_policy == "pedestrian"
+
+
+def test_car_policy_rejects_bad_policy_scope_and_target():
+    g = classic_grid(1337)
+    assert not apply_car_policy(g, "city", "flying")[0]
+    assert not apply_car_policy(g, "district", "pedestrian")[0]   # deferred
+    assert not apply_car_policy(g, "street", "pedestrian", "e:nope")[0]
+
+
+def test_demolish_road_is_pure_deterministic():
+    a, b = classic_grid(1337), classic_grid(1337)
+    apply_demolish_road(a, "e:n:7:2->n:12:2"); apply_demolish_road(b, "e:n:7:2->n:12:2")
+    apply_car_policy(a, "city", "pedestrian"); apply_car_policy(b, "city", "pedestrian")
+    assert a.to_dict() == b.to_dict()
+
+
+def test_demolish_road_refuses_the_last_road():
+    # EM-244: a one-road floor — demolishing to zero edges would let the frontend's
+    # empty-graph guard resurrect the hardcoded 5x5 grid (the opposite of intent).
+    from petridish.engine.citygraph import CityGraph, CityNode, CityEdge
+    g = CityGraph(seed=1, nodes=[CityNode(id="n:2:2", x=0.0, z=0.0),
+                                 CityNode(id="n:7:2", x=13.0, z=0.0)],
+                  edges=[CityEdge(id="e:n:2:2->n:7:2", a="n:2:2", b="n:7:2")])
+    ok, reason, info = apply_demolish_road(g, "e:n:2:2->n:7:2")
+    assert not ok and info is None and "last road" in reason
+    assert len(g.edges) == 1  # unchanged

@@ -26,6 +26,7 @@ import {
   type TrafficCar as TrafficCarT,
 } from './trafficLayout';
 import type { CityStreet } from './cityLayout';
+import type { CityGraph } from '../../types';
 
 const PREFERS_REDUCED_MOTION =
   typeof window !== 'undefined' &&
@@ -35,11 +36,15 @@ const PREFERS_REDUCED_MOTION =
 interface TrafficProps {
   seed: number;
   streets: readonly CityStreet[];
+  // EM-244 (S3a): the road graph carries per-edge + city car policy; a
+  // 'pedestrian' street/city loses its cars. Optional/null so the pre-S3 +
+  // no-graph paths render the byte-identical fleet.
+  graph?: CityGraph | null;
 }
 
 /** The whole ambient fleet. */
-export function Traffic({ seed, streets }: TrafficProps) {
-  const cars = useMemo(() => computeTraffic(seed, streets), [seed, streets]);
+export function Traffic({ seed, streets, graph }: TrafficProps) {
+  const cars = useMemo(() => computeTraffic(seed, streets, graph), [seed, streets, graph]);
   const span = useMemo(() => trafficSpan(streets), [streets]);
   if (!TRAFFIC_ENABLED || cars.length === 0) return null;
   return (

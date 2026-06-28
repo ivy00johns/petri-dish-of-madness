@@ -208,3 +208,49 @@ def apply_build_road(
         "from_node": from_node_id, "direction": direction,
         "new_node_id": new_node_id, "new_edge_id": new_edge_id,
     }
+
+
+# ── EM-244 (S3a): vote-gated demolish + car-policy (pure graph ops) ────────────
+CAR_POLICIES: frozenset[str] = frozenset({"cars", "pedestrian", "mixed"})
+CAR_SCOPES: frozenset[str] = frozenset({"city", "street"})  # 'district' deferred (no edge->district map)
+
+
+def apply_demolish_road(graph: CityGraph, edge_id: str) -> tuple[bool, str, dict | None]:
+    """Remove the edge `edge_id`; also remove either endpoint node that is left with
+    NO remaining edges (a freed dead-end stub). Pure + deterministic. Returns
+    (ok, reason, info); info = {edge_id, removed_node_ids (sorted)}."""
+    edge = next((e for e in graph.edges if e.id == edge_id), None)
+    if edge is None:
+        return False, f"no such road to tear down ({edge_id})", None
+    # EM-244 (S3a): keep at least one road. A city demolished to zero edges would
+    # leave the frontend's graph-vs-fallback guard (an empty edge list reads as
+    # "absent/corrupt graph") resurrecting the hardcoded 5x5 grid — the opposite of
+    # the vote's intent. A one-road floor keeps the graph authoritative + non-empty.
+    if len(graph.edges) <= 1:
+        return False, "can't tear down the last road in the city", None
+    a, b = edge.a, edge.b
+    graph.edges = [e for e in graph.edges if e.id != edge_id]
+    still = {nid for e in graph.edges for nid in (e.a, e.b)}
+    removed = sorted(nid for nid in (a, b) if nid not in still)
+    if removed:
+        graph.nodes = [n for n in graph.nodes if n.id not in removed]
+    return True, "ok", {"edge_id": edge_id, "removed_node_ids": removed}
+
+
+def apply_car_policy(
+    graph: CityGraph, scope: str, policy: str, target: str | None = None,
+) -> tuple[bool, str, dict | None]:
+    """Set the car policy. scope='city' sets graph.car_policy; scope='street' sets
+    one edge's car_policy (target=edge id). 'district' is deferred. Pure."""
+    if policy not in CAR_POLICIES:
+        return False, f"car policy must be one of {sorted(CAR_POLICIES)} (got {policy!r})", None
+    if scope == "city":
+        graph.car_policy = policy
+        return True, "ok", {"scope": "city", "policy": policy}
+    if scope == "street":
+        edge = next((e for e in graph.edges if e.id == target), None)
+        if edge is None:
+            return False, f"no such street to set policy on ({target})", None
+        edge.car_policy = policy
+        return True, "ok", {"scope": "street", "policy": policy, "edge_id": target}
+    return False, f"car-policy scope must be 'city' or 'street' (got {scope!r}; 'district' not yet supported)", None

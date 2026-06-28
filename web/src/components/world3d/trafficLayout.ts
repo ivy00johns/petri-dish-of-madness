@@ -18,7 +18,8 @@
  */
 
 import { hashUnit } from './worldSpace';
-import type { CityStreet } from './cityLayout';
+import { pedestrianStreetIds, type CityStreet } from './cityLayout';
+import type { CityGraph } from '../../types';
 
 /** Master switch (EM-176 re-entry point — flip to false for the pre-W17 look). */
 export const TRAFFIC_ENABLED = true;
@@ -58,14 +59,20 @@ export function trafficSpan(streets: readonly CityStreet[]): number {
   return m + MARGIN;
 }
 
-/** Deterministic car fleet for a seed + the city's streets (interior only). */
+/** Deterministic car fleet for a seed + the city's streets (interior only).
+ *  EM-244 (S3a): a street whose road line resolves to a 'pedestrian' car
+ *  policy gets NO cars; a city-scope 'pedestrian' graph zeroes the whole fleet
+ *  (the headline ban). `graph` absent / city 'cars' ⇒ byte-identical fleet. */
 export function computeTraffic(
   seed: number,
   streets: readonly CityStreet[],
+  graph?: CityGraph | null,
 ): TrafficCar[] {
+  const pedestrian = pedestrianStreetIds(graph);
   const out: TrafficCar[] = [];
   for (const s of streets) {
     if (!s.main) continue; // ring road stays empty
+    if (pedestrian.has(s.id)) continue; // EM-244 (S3a): pedestrian streets carry no cars
     const hh = (p: string) => hashUnit(`traffic:${seed}:${s.id}:${p}`);
     if (hh('spawn') > EMPTY_ABOVE) continue;
     const dir: 1 | -1 = hh('dir') < 0.5 ? 1 : -1;
