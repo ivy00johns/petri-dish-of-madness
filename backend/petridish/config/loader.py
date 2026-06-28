@@ -314,6 +314,14 @@ world:
   # W15 / EM-155 — deterministic seed for the generated 3D city ring.
   # MUST stay in sync with config/world.yaml.
   city_seed: 1337
+  # EM-246 (S4) — the run-start city profile. Seeds the initial CityGraph via
+  # citygraph.template() (seed reuses city_seed). Absent/grid ⇒ byte-identical
+  # pre-EM-246 (classic_grid). MUST stay in sync with config/world.yaml.
+  city:
+    template: grid          # grid | greenfield | village (pentagon/radial/ring → grid until EM-245)
+    size: 5
+    density: medium
+    car_policy: cars
 
 places:
   # Wave D1.5 / contracts/wave-d1.5.md — the city grid (~15 places over the
@@ -824,6 +832,17 @@ class DistrictGrowthParams:
     enabled: bool = True
     completions_per_tier: int = 2
     max_tier: int = 4
+
+
+@dataclass
+class CityProfileParams:
+    """EM-246 (S4) — the run-start city profile (config `world.city`). Seeds the
+    initial CityGraph via citygraph.template(). Absent/empty ⇒ grid (byte-identical
+    pre-EM-246). seed reuses world.city_seed."""
+    template: str = "grid"      # grid|greenfield|village (pentagon|radial|ring → grid until EM-245)
+    size: int = 5               # extent hint (greenfield/village); grid stays canonical
+    density: str = "medium"     # low|medium|high — village sparsity
+    car_policy: str = "cars"    # starting global graph car policy (S3a can change it)
 
 
 @dataclass
@@ -1583,6 +1602,10 @@ class WorldParams:
     # no new snapshot keys). Inert for un-districted (procgen) towns.
     district_growth: DistrictGrowthParams = field(
         default_factory=DistrictGrowthParams)
+    # EM-246 (S4) — the run-start city profile (config `world.city`). Seeds the
+    # initial CityGraph via citygraph.template() at World.__init__. Absent/empty
+    # ⇒ grid (byte-identical pre-EM-246: classic_grid(city_seed)).
+    city: CityProfileParams = field(default_factory=CityProfileParams)
 
 
 @dataclass
@@ -2095,6 +2118,27 @@ def _parse_district_growth(raw: dict | None) -> "DistrictGrowthParams":
         completions_per_tier=_pos_int("completions_per_tier", d.completions_per_tier),
         max_tier=_pos_int("max_tier", d.max_tier),
     )
+
+
+def _parse_city_profile(raw: dict | None) -> "CityProfileParams":
+    """Parse `world.city` (EM-246). Absent/malformed ⇒ grid defaults. template/
+    density/car_policy clamp to known values (unknown template is KEPT — template()
+    falls back to grid + warns, so a future preset name doesn't break the loader)."""
+    if not isinstance(raw, dict):
+        return CityProfileParams()
+    d = CityProfileParams()
+    template = str(raw.get("template", d.template)).strip().lower() or d.template
+    density = str(raw.get("density", d.density)).strip().lower()
+    if density not in ("low", "medium", "high"):
+        density = d.density
+    car_policy = str(raw.get("car_policy", d.car_policy)).strip().lower()
+    if car_policy not in ("cars", "pedestrian", "mixed"):
+        car_policy = d.car_policy
+    try:
+        size = max(1, int(raw.get("size", d.size)))
+    except (TypeError, ValueError):
+        size = d.size
+    return CityProfileParams(template=template, size=size, density=density, car_policy=car_policy)
 
 
 def _parse_relationships(raw: dict | None) -> RelationshipParams:
@@ -2638,6 +2682,7 @@ def _parse_world(
         coherence=_parse_coherence(w.get("coherence")),
         miracles=_parse_miracles(w.get("miracles")),
         district_growth=_parse_district_growth(w.get("district_growth")),
+        city=_parse_city_profile(w.get("city")),
     )
 
     places = [

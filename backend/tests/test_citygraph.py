@@ -264,3 +264,61 @@ def test_demolish_road_refuses_the_last_road():
     ok, reason, info = apply_demolish_road(g, "e:n:2:2->n:7:2")
     assert not ok and info is None and "last road" in reason
     assert len(g.edges) == 1  # unchanged
+
+
+# ── EM-246 (S4): run-start templates (grid/greenfield/village + fallback) ──────
+from petridish.engine.citygraph import template, TEMPLATE_KINDS
+
+
+def test_template_grid_equals_classic_grid():
+    g = template("grid", 1337)
+    base = classic_grid(1337)
+    # identical topology; template field records the kind
+    assert [n.id for n in g.nodes] == [n.id for n in base.nodes]
+    assert [e.id for e in g.edges] == [e.id for e in base.edges]
+    assert g.template == "grid"
+
+
+def test_template_greenfield_is_minimal_nonempty():
+    g = template("greenfield", 1337)
+    assert g.template == "greenfield"
+    assert 1 <= len(g.edges) < len(classic_grid(1337).edges)   # minimal but ≥1 road
+    assert len(g.nodes) >= 2
+    # every edge endpoint resolves to a node (no dangling)
+    ids = {n.id for n in g.nodes}
+    assert all(e.a in ids and e.b in ids for e in g.edges)
+
+
+def test_template_village_is_sparser_than_grid_and_connected_core():
+    g = template("village", 1337, density="medium")
+    full = classic_grid(1337)
+    assert g.template == "village"
+    assert 0 < len(g.edges) < len(full.edges)   # sparse
+    ids = {n.id for n in g.nodes}
+    assert all(e.a in ids and e.b in ids for e in g.edges)   # no dangling edges
+
+
+def test_templates_are_pure_deterministic():
+    for kind in ("grid", "greenfield", "village"):
+        a = template(kind, 1337)
+        b = template(kind, 1337)
+        assert a.to_dict() == b.to_dict()
+    # density changes village sparsity deterministically
+    assert template("village", 1337, density="low").to_dict() != \
+           template("village", 1337, density="high").to_dict()
+
+
+def test_template_geometric_falls_back_to_grid_recording_kind():
+    g = template("pentagon", 1337)
+    base = classic_grid(1337)
+    assert [e.id for e in g.edges] == [e.id for e in base.edges]   # grid topology
+    assert g.template == "pentagon"   # records the requested kind (for the warning + UI)
+
+
+def test_citygraph_template_field_round_trips():
+    g = template("village", 1337)
+    assert CityGraph.from_dict(g.to_dict()).template == "village"
+    # absent template key in an old snapshot ⇒ 'grid'
+    d = classic_grid(1337).to_dict()
+    d.pop("template", None)
+    assert CityGraph.from_dict(d).template == "grid"
