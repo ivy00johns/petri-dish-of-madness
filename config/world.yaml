@@ -28,6 +28,8 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+  road_build_energy_cost: 8     # EM-243 (S2): energy to extend a road one block (the build_road rate-limiter)
+  max_city_blocks: 9            # EM-243 (S2): growth envelope (9x9 tile-index lattice [-23, 22])
   max_actions_per_turn: 4      # EM-199: one turn = move + fund + say (up to 4) → richer feed, same call rate
 
   # Wave D2 / EM-170 — turn-latency guard. Hard wall-clock budget (seconds) for

@@ -116,3 +116,79 @@ def test_from_snapshot_degrades_on_corrupt_graph():
         snap["city_graph"] = bad
         restored = World.from_snapshot(snap)  # must not raise
         assert restored.city_graph.to_dict() == expected, f"failed on {bad!r}"
+
+
+# ── EM-243 (S2): pure, bounded, deterministic individual road growth ──────────
+from petridish.engine.citygraph import (
+    apply_build_road, nearest_node, extendable_directions,
+    MAX_IDX, MIN_IDX,
+)
+
+
+def test_build_road_extends_one_segment_east():
+    g = classic_grid(1337)
+    n0, e0 = len(g.nodes), len(g.edges)
+    ok, reason, info = apply_build_road(g, "n:12:2", "east")
+    assert ok, reason
+    assert info["new_node_id"] == "n:17:2"
+    assert info["new_edge_id"] == "e:n:12:2->n:17:2"
+    assert len(g.nodes) == n0 + 1 and len(g.edges) == e0 + 1
+    assert any(n.id == "n:17:2" for n in g.nodes)
+
+
+def test_build_road_edge_id_orders_low_index_first():
+    # Extending WEST from the left edge: the new (lower-i) node sorts first in the id.
+    g = classic_grid(1337)
+    ok, reason, info = apply_build_road(g, "n:-13:2", "west")
+    assert ok, reason
+    assert info["new_node_id"] == "n:-18:2"
+    assert info["new_edge_id"] == "e:n:-18:2->n:-13:2"
+
+
+def test_build_road_rejects_out_of_bounds():
+    g = classic_grid(1337)
+    # n:22:2 is the max index; one more east is off the 9x9 envelope.
+    apply_build_road(g, "n:12:2", "east")     # -> n:17:2
+    apply_build_road(g, "n:17:2", "east")     # -> n:22:2 (still in bounds)
+    ok, reason, info = apply_build_road(g, "n:22:2", "east")  # -> n:27:2 OUT
+    assert not ok and info is None
+    assert "edge of the city" in reason
+
+
+def test_build_road_rejects_existing_road():
+    g = classic_grid(1337)
+    # n:7:2 -> n:12:2 is already an edge in the classic grid.
+    ok, reason, info = apply_build_road(g, "n:7:2", "east")
+    assert not ok and "already a road" in reason
+
+
+def test_build_road_rejects_unknown_anchor_and_direction():
+    g = classic_grid(1337)
+    ok, reason, _ = apply_build_road(g, "n:999:999", "east")
+    assert not ok and "anchor" in reason
+    ok, reason, _ = apply_build_road(g, "n:12:2", "upward")
+    assert not ok and "direction" in reason
+
+
+def test_build_road_is_pure_and_deterministic():
+    a, b = classic_grid(1337), classic_grid(1337)
+    for nid, d in [("n:12:2", "east"), ("n:17:2", "east"), ("n:2:12", "north")]:
+        apply_build_road(a, nid, d)
+        apply_build_road(b, nid, d)
+    assert a.to_dict() == b.to_dict()  # identical grown graph
+
+
+def test_nearest_node_picks_closest():
+    g = classic_grid(1337)
+    n = nearest_node(g, tile_center(2) + 0.1, tile_center(2) - 0.1)
+    assert n is not None and n.id == "n:2:2"
+
+
+def test_extendable_directions_classifies_open_road_edge():
+    g = classic_grid(1337)
+    dirs = extendable_directions(g, "n:12:2")  # right edge of the grid, middle row
+    assert dirs["east"] == "open"   # in-bounds, no edge yet
+    assert dirs["west"] == "road"   # n:7:2->n:12:2 exists
+    dirs_corner = extendable_directions(g, "n:22:22")
+    # n:22:22 doesn't exist yet; but extendable_directions parses the id and bounds-checks
+    assert dirs_corner["east"] == "edge" and dirs_corner["north"] == "edge"

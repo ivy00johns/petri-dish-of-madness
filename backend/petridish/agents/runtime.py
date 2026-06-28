@@ -160,6 +160,9 @@ ACTION_SCHEMA = {
                 # remove a decoration prop, cleanly demolish a building you own,
                 # re-skin a building you own.
                 "place_prop", "remove_prop", "demolish", "set_building_skin",
+                # EM-243 (S2) — extend the road graph one axis-aligned block from
+                # the node nearest you, paid in energy (grow-only).
+                "build_road",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -222,6 +225,8 @@ ACTION_SCHEMA = {
                             # Wave K / EM-218–220 — builders'-city reflex tools.
                             "place_prop", "remove_prop", "demolish",
                             "set_building_skin",
+                            # EM-243 (S2) — extend the road graph one block.
+                            "build_road",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -312,6 +317,10 @@ ACTION_SCHEMA = {
              "building_id": {"type": "string"},
              "skin": {"type": "string", "maxLength": 24},
          }}}}},
+        # EM-243 (S2) — build_road requires a cardinal direction.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "build_road"}}},
+         "then": {"properties": {"args": {"required": ["direction"],
+                  "properties": {"direction": {"enum": ["north", "south", "east", "west"]}}}}}},
     ],
 }
 
@@ -457,6 +466,9 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "remove_prop":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "demolish":         {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
     "set_building_skin": {"tier": "reflex", "location_gate": "@building",    "agreement_gate": None},
+    # EM-243 (S2) — extend the road graph one block; offered anywhere (the real
+    # gate is energy + an open direction, computed in _assemble_context).
+    "build_road":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -908,6 +920,29 @@ def _diet_visible_districts(world: World, agent: AgentState) -> set[str] | None:
     if not district:
         return None
     return {district, _DIET_CORE_DISTRICT}
+
+
+def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = None) -> str | None:
+    """EM-243 (S2) — a compact, diet-safe perception line for road-building:
+    extendable directions from the node nearest `place`, plus the car policy.
+    Returns None when nothing is extendable (diet: omit empty blocks)."""
+    from ..engine.citygraph import nearest_node, extendable_directions
+    node = (next((n for n in world.city_graph.nodes if n.id == force_node_id), None)
+            if force_node_id else nearest_node(world.city_graph, float(place.x), float(place.y)))
+    if node is None:
+        return None
+    dirs = extendable_directions(world.city_graph, node.id)
+    openable = [d for d, s in dirs.items() if s == "open"]
+    if not openable:
+        return None
+    blocked = [f"{d} ({s})" for d, s in dirs.items() if s != "open"]
+    cars = world.city_graph.car_policy
+    line = f"Nearby layout: can build a road {', '.join(openable)}."
+    if blocked:
+        line += f" Blocked: {', '.join(blocked)}."
+    line += f" Cars: {cars}."
+    return line
+
 
 IDLE_ACTION = {"action": "idle", "args": {}}
 
@@ -2286,6 +2321,7 @@ def _assemble_context(
         return agent.skill_level(skill) >= min_level
 
     valid_actions: list[str] = []
+    nearby_layout_block = ""  # EM-243 (S2) — set when build_road is offered (below)
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
     # (destination/to/null) and burned turns on 'unknown place' world errors.
@@ -2635,6 +2671,18 @@ def _assemble_context(
         valid_actions.append(
             f"feed_pet (animal_id) - feed a co-located animal to restore its "
             f"energy (a hungry pet declines): {feed_list}")
+
+    # ── EM-243 (S2) — road-building perception + menu (only when affordable AND a
+    # direction is extendable). build_nearby_layout returns None when nothing is
+    # open, so a fully-enclosed node adds NO line (diet: omit empties) and the
+    # menu entry stays in lock-step with the perception (EM-108 menu/resolution
+    # agreement). The perception is ONE line, injected into the prompt below.
+    _here = world.places.get(agent.location)
+    _layout = build_nearby_layout(world, _here) if _here is not None else None
+    if _layout is not None and agent.energy >= world.params.road_build_energy_cost:
+        valid_actions.append(
+            "build_road (direction: north|south|east|west) - extend a street one block")
+        nearby_layout_block = f"\n=== 🛣 NEARBY LAYOUT ===\n  {_layout}\n"
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
     # Offered to EVERY agent (no location gate) whenever a decree is live, so the
@@ -3318,7 +3366,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
 {project_text}
-{constitution_block}
+{nearby_layout_block}{constitution_block}
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
 
@@ -5959,6 +6007,11 @@ class AgentRuntime:
         elif action == "set_building_skin":
             result = self.world.action_set_building_skin(
                 agent, args.get("building_id", ""), args.get("skin", ""))
+            return _emit_world_result(result, base, thought)
+
+        # ── EM-243 (S2) — extend the road graph one axis-aligned block ──────────
+        elif action == "build_road":
+            result = self.world.action_build_road(agent, args)
             return _emit_world_result(result, base, thought)
 
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────

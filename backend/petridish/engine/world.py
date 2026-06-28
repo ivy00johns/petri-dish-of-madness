@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .citygraph import CityGraph, classic_grid
+from .citygraph import CityGraph, classic_grid, apply_build_road, nearest_node
 
 
 def _block_get(block: Any, key: str, default: Any) -> Any:
@@ -3231,6 +3231,46 @@ class World:
                 f"{building.name} isn't yours to demolish — propose a demolish "
                 f"rule and let the town vote (a public structure needs governance).")
         return self._demolish_building(building, agent.id, "owner")
+
+    def action_build_road(self, agent: AgentState, args: dict) -> dict:
+        """EM-243 (S2) — an agent extends the road graph one axis-aligned segment
+        from the node nearest their location, paid in energy. Grow-only (no
+        teardown). Returns a `road_built` event dict, or a clear `_fail_event`."""
+        direction = str((args or {}).get("direction", "")).strip().lower()
+        place = self.places.get(agent.location)
+        if place is None:
+            return self._fail_event(
+                agent.id, "build_road", "no_location",
+                f"{agent.name} can't build a road from nowhere.")
+        cost = self.params.road_build_energy_cost
+        if agent.energy < cost:
+            return self._fail_event(
+                agent.id, "build_road", "too_tired",
+                f"{agent.name} is too tired to build a road (needs {cost:.0f} energy).")
+        # place.x/place.y are the world (x, z); the graph node uses (x, z).
+        from_node = nearest_node(self.city_graph, float(place.x), float(place.y))
+        if from_node is None:
+            return self._fail_event(
+                agent.id, "build_road", "no_graph",
+                f"{agent.name} finds no road to build from.")
+        ok, reason, info = apply_build_road(self.city_graph, from_node.id, direction)
+        if not ok:
+            return self._fail_event(
+                agent.id, "build_road", reason,
+                f"{agent.name} tried to build a road but: {reason}.")
+        agent.energy = max(0.0, agent.energy - cost)
+        return {
+            "kind": "road_built",
+            "actor_id": agent.id,
+            "text": f"{agent.name} builds a new road heading {direction}.",
+            "payload": {
+                "action": "build_road",
+                "from_node": info["from_node"],
+                "direction": direction,
+                "new_node_id": info["new_node_id"],
+                "new_edge_id": info["new_edge_id"],
+            },
+        }
 
     def action_set_building_skin(
         self, agent: AgentState, building_id: str, skin: str

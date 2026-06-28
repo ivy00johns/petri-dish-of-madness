@@ -69,6 +69,8 @@ world:
   ubi_amount: 2
   memory_window: 12
   attack_energy_cost: 6
+  road_build_energy_cost: 8
+  max_city_blocks: 9
   # Wave D2 / EM-170 — per-turn LLM budget (seconds). MUST stay in sync with
   # config/world.yaml. 0/absent disables the guard entirely.
   turn_llm_budget_seconds: 0
@@ -1380,6 +1382,8 @@ class WorldParams:
     ubi_amount: int = 2
     memory_window: int = 12
     attack_energy_cost: float = 6.0
+    road_build_energy_cost: float = 8.0  # EM-243 (S2) — meaningful but not rare (cf. attack 6)
+    max_city_blocks: int = 9             # EM-243 (S2) — growth envelope (9x9); see citygraph.MAX_CITY_BLOCKS
     # EM-199 — multi-action turns: the max number of actions one LLM turn may
     # resolve from a single `actions` sequence (move + fund + say → 3 feed lines
     # from one call). A generous guardrail (4× the old single-action limit), NOT
@@ -2583,6 +2587,8 @@ def _parse_world(
         ubi_amount=int(w.get("ubi_amount", 2)),
         memory_window=int(w.get("memory_window", 12)),
         attack_energy_cost=float(w.get("attack_energy_cost", 6)),
+        road_build_energy_cost=float(w.get("road_build_energy_cost", 8)),
+        max_city_blocks=int(w.get("max_city_blocks", 9)),
         # EM-199 — multi-action turns cap; absent ⇒ 4 (move+fund+say+one more).
         max_actions_per_turn=int(w.get("max_actions_per_turn", 4)),
         # Wave D2 / EM-170 — absent/0 ⇒ guard disabled (today's behavior).
