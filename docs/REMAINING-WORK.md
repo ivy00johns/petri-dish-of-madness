@@ -35,8 +35,26 @@ Every **open / in-progress** item, ID'd and prioritized. This is the canonical
 | EM-169 | P2 | W17 | frontend | research-v4 §7 | Ambient vehicles: Car Kit traffic on the generated road network (deterministic paths, instanced), parked cars from the prop scatter. **PR #44 (2026-06-24):** deterministic `trafficLayout` fleet (interior streets only, seeded → replay-safe EM-155) + `Traffic.tsx` clock-driven sweep; non-interactive (EM-157) + reduced-motion-safe. Deps EM-152, EM-153 | in-progress | PR #44 |
 | EM-176 | P2 | W17 | frontend | user 2026-06-11 | Bring vehicles back when they're playable: parked-car emission disabled at the generator (`CARS_ENABLED=false`, cityLayout) — static cars read as a distraction before they have a purpose. Keys/registry/GLBs/licenses all kept; EM-169's ambient traffic on the road graph is the re-entry point (flip the flag + moving cars together) **— PR #44 (2026-06-24): `CARS_ENABLED` flipped on together with the ambient traffic.** | in-progress | PR #44 |
 | EM-214 | P3 | W20 | backend+frontend | Wave I · I5 (stretch) | **Voices / audio** — agent spoken lines via the browser **Web Speech API** ($0, client-side, no network) for v1; free SFX/music gen is NOT mature (slow, GPU-bound) → DEFERRED. Optional cloud TTS (Google free tier) only if server-side audio files are ever wanted. **Deferred at wave-I 2026-06-19** (user-chosen: full arc I1→I4, audio is a stretch with no agent demand yet — re-enter when voices are wanted). | open | defer wave-I |
+| EM-249 | P2 | W26 | backend | society plan 2026-06-29 | **`RelationshipState.scope`** (default `"local"`, serialize-when-non-default) — the cheap multi-city down-payment so relationship/faith/war edges stay forward-compatible; nothing reshapes when cities land. *Lands early the same `scope` field EM-117 later consumes for city-city.* | open | — |
+| EM-250 | P2 | W26 | backend | society plan 2026-06-29 | **Meme primitive + shared seams (Wave O keystone — do NOT split):** `Meme` dataclass (`rumor\|idea\|ideology\|image`, open `kind` so Religion adds `faith`) + `_plant_belief`/`_attach_meme`/`_distort_text` + `_recompute_groups` (extracted from `recompute_factions` so culture-camps/congregations share one clusterer) + `CommunicationParams` + determinism golden. Build-once substrate the whole portfolio rides | open | — |
+| EM-251 | P2 | W26 | backend | society plan 2026-06-29 | Transmission verbs (reflex): `spread_rumor` (clones `deceive` belief-plant, trust-**positive**, no crime) + `send_letter`/`mailbox` — the first non-co-located directed channel, deterministic next-turn delivery (snapshot-safe like `pending_skill_requests`). Deps EM-250 | open | — |
+| EM-252 | P2 | W26 | backend | society plan 2026-06-29 | `diffuse_culture()` round-boundary subsystem: passive seeded diffusion (one co-located hop/carrier, `_seed_int`-gated) + `_distort_text` per-hop mutation + half-life/decay prune (zero-carrier meme dies). Deps EM-250 | open | — |
+| EM-253 | P2 | W26 | backend | society plan 2026-06-29 | Culture lifecycle: `create_meme`/`adopt_meme`, **visual memes** (extend `create_image` to auto-register an image-meme + drifted repaint on adopt, free Pollinations lane), virality scoring, culture-camp clustering via `_recompute_groups`. Deps EM-250, EM-252 | open | — |
+| EM-254 | P2 | W26 | backend | society plan 2026-06-29 | Culture governance: `canonize_meme` (70% lane → sets `town_motif_ref`, the Religion seam) + `ban_gossip` (agreement-gate, clones `ban_stealing`). Deps EM-253 | open | — |
+| EM-255 | P2 | W26 | frontend | society plan 2026-06-29 | Culture frontend: `Meme`/`CultureCamp` types, **Meme Lineage panel** (image family tree via `parent_id`/`generation` — the marquee visual-meme demo), culture-camp chips (reuse faction chrome), dominant-motif banner. Deps EM-250–254 | open | — |
+| EM-256 | P1 | W26 | backend | society plan 2026-06-29 | **War data model + grievance subsystem:** `WarState` + `world.wars`/`grievances` (directional group-scope notoriety analog), `_register_war_act` (group-scope `_register_crime`, fed by ordinary cross-faction crime), `advance_war` decay, faction-snapshot writer fix (emit `war_band`/`treasury_pledged`), determinism golden. Deps EM-120 ✅, EM-240 ✅ | open | — |
+| EM-257 | P1 | W26 | backend | society plan 2026-06-29 | War governance lane: `declare_war`/`peace_treaty` effects (clone the `trial` effect) on a **faction-scoped 70%** electorate (isolated `_evaluate_rule` branch substituting the faction roster for `living`), reparations (clone `trial_fine` split) + loser-leader set to the unused `exiled` `crime_status`. Deps EM-256 | open | — |
+| EM-258 | P1 | W26 | backend | society plan 2026-06-29 | **Combat primitive (the one genuinely new mechanic):** reflex `action_clash` seeded deterministic stat contest (energy→existing `check_death` war-death, morale/retreat, `floor()` float-drift guard) + `muster`/war-band bonding (clones `recruit`/`accept_contract`). Deps EM-256, EM-257 | open | — |
+| EM-259 | P1 | W26 | backend+frontend | society plan 2026-06-29 | War `siege` (routes through existing `_damage_building`) + exhaustion auto-resolution in `advance_war` + frontend (`War` type, red `conflict`-lane war feed, ⚔ belligerent faction badges). Deps EM-258 | open | — |
+| EM-260 | P2 | W26 | backend | society plan 2026-06-29 | Religion plumbing: `Faith` object in `self.faiths` (seeded **invented** name/deity/tenets — no real religions), `AgentState.faith_id`/`devotion`, `co_religionist` relationship type, determinism golden. Deps EM-250 | open | — |
+| EM-261 | P2 | W26 | backend | society plan 2026-06-29 | Religion founding: reflex `found_faith` + `consecrate_faith` (70% lane) + **temple-as-seat** (attach a `function` devotion buff to the catalogued-but-empty `temple` kind via `_WORK_BUFF_KINDS`, `commemorates` the faith). Deps EM-260, EM-254 | open | — |
+| EM-262 | P2 | W26 | backend | society plan 2026-06-29 | Religion emergence: reflex `proselytize` (calls EM-250 `_plant_belief`, trust-positive, +`co_religionist`, raises devotion, seeded resistance) + `worship` ritual (clones `action_work` buff-at-place) + `recompute_congregations` + deterministic schism forking. Deps EM-260, EM-253 | open | — |
+| EM-263 | P2 | W26 | backend+frontend | society plan 2026-06-29 | Religion conflict surface + frontend: `excommunicate`, `declare_hostility` (war casus-belli hook → `Faith.hostile_to`, consumed by EM-256 grievance seam), faith badges + congregation hulls (reuse faction hulls). Deps EM-262, EM-256 | open | — |
+| EM-264 | P1 | W27 | frontend | building-layout 2026-06-29 | **Graph-derived buildable zones (SA — building-layout keystone):** new `cityFaces.ts` `planarFaces(graph)` walks the road graph's enclosed regions → each becomes a buildable **zone** (loose polygon + empty `rules` hook); `computeCityPlan` branches behind `GRAPH_LOTS_ENABLED` (default-off byte-identical, EM-155) to place buildings into zones via the existing `assignBuildingLots` (lot grid a *suggestion* — overflow/gaps OK). Fixes "pentagon roads, grid buildings". Loose-not-precise: only crashes / silently-dropped regions fail. Deps EM-247 ✅ | open | — |
+| EM-265 | P2 | W27 | backend+frontend | building-layout 2026-06-29 | **Agent-authored zone rules (SB):** vote-gated `propose_zone_rule(zone, hint+density_cap)` on the EM-244/245 governance machinery (`action_propose_rule`/`_evaluate_rule` 0.7/`_on_rule_activated` + no-renewal); stable zone identity across morphs; district-scoped `nearby_zones` perception; rules render (tint/label, content-keyed `citySignature`). Advisory metadata only. Deps EM-264 | open | — |
+| EM-266 | P2 | W27 | backend+frontend | building-layout 2026-06-29 | **Zone-targeted emergent building (SC):** agents target a zone when building and may honor/ignore/**break** its rules (wrong type, over-cap, choke the core all succeed — *a finding, not a bug*); "build nothing" stays valid; renderer shows the mess honestly (cram/overflow); optional `zone_violation` observation record. Building stays free (no new vote). Deps EM-265 | open | — |
 
-_Next free ID: EM-249. (EM-240 taken by the crime engine; EM-241/242 reserved for the EM-240 persona content/management-UI follow-ons.)_
+_Next free ID: EM-267. (EM-240 taken by the crime engine; EM-241/242 reserved for the EM-240 persona content/management-UI follow-ons; EM-249–263 = Wave O society systems; EM-264–266 = Wave P agent-controlled building layout.)_
 
 ## Active-wave notes
 
@@ -83,3 +101,52 @@ _Next free ID: EM-249. (EM-240 taken by the crime engine; EM-241/242 reserved fo
   at 60fps before retiring the tile path (browser automation was unavailable in the build session).
   Recorded refinements (non-blocking): surface the layout-governance effects in the agent menu;
   the S5a visual-polish iteration (atlas/lane-markings/LOD/culling); `size`-scaled templates.
+
+- **EM-249–263 (Wave O — Emergent Society Systems)** entered 2026-06-29 via `plan-intake` from the
+  approved 4-feature portfolio plan (`/Users/johns/.claude/plans/goofy-roaming-clarke.md`), itself
+  built from a 3-agent codebase audit + a 3-architect design fan-out. Fills the **white space** an
+  audit found missing *and* absent from FUTURE.md: **religion/faith**, **culture/memes as a
+  propagating object**, **organized violence (war)**, and **gossip/rumor + async letters**. Framed
+  as the next *deepen-the-first-city-before-a-second* track (orthogonal to multi-city EM-109/110) —
+  **single-city now but multi-city-ready** (every new object carries an additive `scope`/`city_id`
+  seam; EM-249 is the down-payment). **Two engines + shared substrate:** (a) **Belief & Culture** —
+  the `Meme` primitive (EM-250 keystone, build-once) → transmission (EM-251) + diffusion (EM-252) +
+  culture/visual-memes (EM-253) + governance (EM-254) + frontend (EM-255); (b) **Religion** extends
+  the `Meme` primitive — plumbing (EM-260) → founding/temple-seat (EM-261) → proselytize/worship/
+  schism (EM-262) → conflict+frontend (EM-263); (c) **War** promotes the read-only faction graph to
+  belligerent actors — data/grievance (EM-256) → governance (EM-257) → the one new primitive,
+  seeded combat (EM-258) → siege/auto-resolution/frontend (EM-259). **Sequencing:** EM-249 +
+  **EM-250 (keystone — do NOT split, lands 4 shared seams incl. `_recompute_groups` + `_plant_belief`)**
+  unblock everything; then three tracks parallelize — **War (EM-256→259) is P1 and depends only on
+  the shipped faction + EM-240 substrate** (ship-first, highest drama-per-effort); Culture
+  (EM-251→255) and Religion (EM-260→263, gated on EM-250/253/254) follow. **Determinism keystone
+  holds throughout** (seeded `_seed_int`, serialize-when-non-default, em161 golden byte-identical).
+  **Frozen-constraint note:** war honors *no weapons-as-objects* — death rides the existing
+  `energy`→`check_death` model, siege rides `_damage_building`, war-bands are agent IDs.
+  **Contended seam:** all three insert into `_apply_round_start` — canonical order
+  `recompute_factions → diffuse_culture → recompute_congregations → advance_war → age_agents`, to be
+  enforced as a tested invariant. **Dedup flags:** EM-249 lands early the `scope` field EM-117
+  later consumes (city-city diplomacy); EM-250–255 are the culture *mechanism* that the open EM-128
+  culture-drift *chart* would finally measure.
+
+- **EM-264–266 (Wave P — Agent-Controlled Building Layout)** entered 2026-06-29 via `plan-intake`
+  from the brainstormed design suite `docs/superpowers/specs/2026-06-29-agent-building-layout-*.md`.
+  The **direct continuation of the merged road initiative** (EM-239/247): roads are now an emergent,
+  any-angle, agent-authored graph, but **buildings still sit on the frozen 5×5 grid** —
+  `computeCityPlan` Pass 1 iterates fixed blocks independent of the road graph, so a pentagon road
+  plan renders with grid buildings on top ("you can still see the underlying city layout"). The fix
+  makes buildings **follow the road graph via its planar faces** — but **reframed for chaos/
+  emergence** (user steer 2026-06-29: *"They need freedom to make mistakes as well as part of the
+  madness. They can make rules for areas, and agents can choice to build there if they want. this is
+  a chaos experiment, need flex."*). So the graph derives buildable **ZONES** (loose regions +
+  optional rules), **not** tidy lot assignments; geometric precision is explicitly **not** the crux
+  (only crashes / silently-dropped regions fail); the pentagon inner core is just another zone (choke
+  it = a finding, not a bug). **Three slices:** **EM-264** (SA, P1, frontend keystone — `cityFaces.ts`
+  planar faces → zones → messy placement behind `GRAPH_LOTS_ENABLED`, default-off byte-identical;
+  the *visible* win + the data shape) → **EM-265** (SB, P2 — vote-gated `propose_zone_rule` on the
+  EM-244/245 governance machinery; rules are advisory) → **EM-266** (SC, P2 — agents target zones and
+  may honor/ignore/**break** rules; building stays free; the emergent payoff). The flag + default-off
+  byte-identical path (EM-155) + the content-keyed `citySignature` live-render discipline (the
+  thrice-shipped EM-243/244/247 bug) carry through all three. **Sequencing:** `SA → SB → SC`; SA is
+  frontend-only and shippable alone. Orthogonal to Wave O (society systems) and multi-city
+  (EM-109/110) — this is the *deepen-the-first-city* track applied to urban form.
