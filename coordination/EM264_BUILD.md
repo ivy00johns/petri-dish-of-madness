@@ -21,14 +21,27 @@ Every box ends ✅ (invoked, artifact path) or a one-line deferral reason.
 - [x] `brainstorming` — ✅ specs SA/SB/SC merged to main (prior session).
 - [x] `contract-author` (inline) — ✅ `contracts/em264-build-contract.md`.
 
-### Phase 2 — implement (Workflow)
-- [ ] Lane A agent — `cityFaces.ts` + tests.
-- [ ] Lane B agent — `cityLayout.ts`/`CityScape.tsx` + on-path tests.
+### Phase 2 — implement (Workflow `em264-implement`)
+- [x] Lane A agent — ✅ `cityFaces.ts` + `cityFaces.test.ts` (16 tests).
+- [x] Lane B agent — ✅ `cityLayout.ts`/`CityScape.tsx` + 14 appended on-path tests.
 
-### Phase 3 — verify (Workflow + lead)
-- [ ] Wave gate (lead, inline) — integrated `tsc -b --force` + `vitest run`.
-- [ ] Adversarial verify — algorithm / byte-identical / silent-drop lenses.
-- [ ] `qe-agent` — `coordination/em264-qa-report.json` (QA gate).
+### Phase 3 — verify (Workflow `em264-verify` + lead)
+- [x] Wave gate (lead, inline) — ✅ `tsc -b --force` exit 0; world3d **0 net-new failures**
+  (3 pre-existing `CityScape.test.tsx` ROAD_MESH failures verified by stash).
+- [x] Adversarial verify — ✅ 4 findings raised, 1 refuted (bogus float claim), **3 confirmed**:
+  - LOW: docs said "max |area|" vs the correct winding-sign drop → docs corrected.
+  - MED: `cityFaces.ts` had a literal NUL-byte separator (binary file) → JSON.stringify key.
+  - **HIGH (pillar 2): silent-drop on angular ties** (radial master-plan via EM-245) → fixed
+    (coincident-node merge + collinear-overlap split + distance tie-break + `[]` backstop);
+    radial now decomposes into real sectors. Fix proven real: the 4 new tie tests FAIL on
+    pre-fix code, PASS on the fix. cityFaces 16→22 tests.
+- [x] `qe-agent` — ✅ `coordination/em264-qa-report.json`: PASS, `proceed=true`,
+  contract 5 / security 5 / coverage 5 / regression 5, 0 blockers.
+
+## Outcome
+SA built, hardened, gated, committed on `build/em264-graph-zones`. Ships **OFF**
+(`GRAPH_LOTS_ENABLED=false`, byte-identical). ONE open gate: the **user visual
+sign-off** (flip the flag against a live pentagon/radial), the EM-247 pattern.
 
 ### Deferred / N-A (with reasons)
 - `nano-banana` — N/A: no new imagery; SA reuses existing GLBs (no new assets).

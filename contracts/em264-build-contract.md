@@ -56,7 +56,9 @@ export interface CityFace {
   /** Polygon vertices in world space, same order as `boundary`. */
   poly: { x: number; z: number }[];
   centroid: { x: number; z: number };
-  /** Signed area; the unbounded outer face is dropped by sign + max |area|. */
+  /** Signed area (CCW positive). The unbounded outer face is dropped PER-CYCLE
+   *  by winding SIGN (positive kept), NOT by "largest |area|" — a max-|area|
+   *  drop would wrongly keep a smaller disconnected component's outer ring. */
   area: number;
 }
 
@@ -92,8 +94,9 @@ export function buildZonesFromFaces(
 
 **Algorithm (half-edge / next-edge-by-angle):** for each directed half-edge, the
 next half-edge around a face is the most-clockwise turn at its destination node;
-faces are the closed cycles. Drop the single unbounded outer face (largest |area|
-or opposite winding). Mirror the type-guards in `roadTileSetFrom`
+faces are the closed cycles. Drop the unbounded outer face PER-CYCLE by winding
+sign (keep `area > 0`), NOT by "largest |area|" (a max-|area| drop silently
+discards a smaller disconnected component's real ring). Mirror the type-guards in `roadTileSetFrom`
 (`!graph || !Array.isArray(nodes) || !Array.isArray(edges) || !edges.length` → `[]`).
 Node coordinates are `node.x`, `node.z` (NOT y). Edge endpoints are `edge.a`,
 `edge.b` (node ids).

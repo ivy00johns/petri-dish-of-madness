@@ -347,6 +347,259 @@ describe('determinism — shuffled node/edge order ⇒ identical output', () => 
   });
 });
 
+// ── EM-264 SA defect regression: angular ties must never drop a region ─────────
+// An adversarial review found triggers where a vertex gets two outgoing half-
+// edges at an IDENTICAL atan2 angle — coincident nodes, or a node sitting ON
+// another edge (collinear overlap). The next-by-angle walk then tangles the
+// bounded face into the outer face and the `area > 0` keep-filter silently drops
+// the whole enclosed region (the FORBIDDEN failure). The fix sanitizes first:
+// merge coincident nodes, split collinear overlaps, distance tie-break, and a
+// whole-graph [] backstop. For each clearly-enclosed arrangement we require
+// EITHER full representation OR a clean whole-graph [] — NEVER a partial drop.
+
+function sumArea(faces: CityFace[]): number {
+  return faces.reduce((s, f) => s + f.area, 0);
+}
+
+function polyArea(poly: { x: number; z: number }[]): number {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i];
+    const q = poly[(i + 1) % poly.length];
+    a += p.x * q.z - q.x * p.z;
+  }
+  return Math.abs(a) / 2;
+}
+
+/** Pillar-2 contract: either nothing (clean grid fallback) or the WHOLE enclosed
+ *  area is represented — never some-but-not-all (a silent partial drop). */
+function assertNoPartialDrop(faces: CityFace[], expected: number): void {
+  if (faces.length === 0) return; // sanctioned clean whole-graph [] fallback
+  for (const f of faces) expect(f.area).toBeGreaterThan(0); // no outer face leaked
+  expect(Math.abs(sumArea(faces) - expected)).toBeLessThan(
+    1e-6 * Math.max(1, expected),
+  );
+}
+
+/** Stronger: the fix RESOLVES this case (merge/split) → the region must be fully
+ *  represented (non-empty + full area), NOT bailed to the [] backstop. */
+function assertEnclosed(faces: CityFace[], expected: number): void {
+  expect(faces.length).toBeGreaterThan(0);
+  assertNoPartialDrop(faces, expected);
+}
+
+/** Mirrors backend master_plan('radial'): two concentric rings of `spokes`
+ *  nodes + a SHARED center; every outer spoke (center→o{k}) passes straight
+ *  through the inner node i{k} at the same angle ⇒ collinear overlap + angular
+ *  tie at the center. The split must planarize it into real sectors. */
+function radialGraph(spokes: number, R: number): CityGraph {
+  const nodes: CityGraphNode[] = [node('c', 0, 0)]; // shared center
+  const edges: CityGraphEdge[] = [];
+  const inner = R * 0.5;
+  for (let k = 0; k < spokes; k++) {
+    const ang = (k / spokes) * Math.PI * 2;
+    nodes.push(node(`o${k}`, R * Math.cos(ang), R * Math.sin(ang)));
+    nodes.push(node(`i${k}`, inner * Math.cos(ang), inner * Math.sin(ang)));
+  }
+  for (let k = 0; k < spokes; k++) {
+    const k2 = (k + 1) % spokes;
+    edges.push(edge(`or${k}`, `o${k}`, `o${k2}`)); // outer ring
+    edges.push(edge(`ir${k}`, `i${k}`, `i${k2}`)); // inner ring
+    edges.push(edge(`os${k}`, `o${k}`, 'c')); // outer spoke (through i{k})
+    edges.push(edge(`is${k}`, `i${k}`, 'c')); // inner spoke
+  }
+  return graph(nodes, edges);
+}
+
+describe('planarFaces — angular-tie regression (no silent partial drop)', () => {
+  it('A6: coincident nodes (e ≡ c) → the square survives (merge), not dropped', () => {
+    // a clean unit square a-b-c-d (area 36) PLUS a node e at the exact coords of
+    // c, with edges b-e and e-d (an EM-245 merge artifact). Pre-fix: returns [].
+    const g = graph(
+      [
+        node('a', 0, 0),
+        node('b', 6, 0),
+        node('c', 6, 6),
+        node('d', 0, 6),
+        node('e', 6, 6), // coincident with c (the cliff)
+      ],
+      [
+        edge('1', 'a', 'b'),
+        edge('2', 'b', 'c'),
+        edge('3', 'c', 'd'),
+        edge('4', 'd', 'a'),
+        edge('5', 'b', 'e'),
+        edge('6', 'e', 'd'),
+      ],
+    );
+    let faces: CityFace[] = [];
+    expect(() => {
+      faces = planarFaces(g);
+    }).not.toThrow();
+    assertEnclosed(faces, 36); // 6×6 square fully represented
+  });
+
+  it('A5 control: nudging e to (6.001,6.001) also yields the face (no over-merge)', () => {
+    // The exact-coincidence is the cliff; a 0.001 nudge must NOT merge and the
+    // face is still found via the plain angle walk.
+    const g = graph(
+      [
+        node('a', 0, 0),
+        node('b', 6, 0),
+        node('c', 6, 6),
+        node('d', 0, 6),
+        node('e', 6.001, 6.001), // nudged → distinct node
+      ],
+      [
+        edge('1', 'a', 'b'),
+        edge('2', 'b', 'c'),
+        edge('3', 'c', 'd'),
+        edge('4', 'd', 'a'),
+        edge('5', 'b', 'e'),
+        edge('6', 'e', 'd'),
+      ],
+    );
+    const faces = planarFaces(g);
+    expect(faces.length).toBeGreaterThan(0); // the enclosed region is present
+    for (const f of faces) expect(f.area).toBeGreaterThan(0);
+  });
+
+  it('B3: duplicated shared junction (e ≡ e2) → both squares survive', () => {
+    // Two adjacent squares sharing a corner that got split into coincident e and
+    // e2 (a realistic morph/merge artifact). Both 6×6 squares must come back.
+    //   left square:  a(0,0) b(6,0) e(6,6) d(0,6)
+    //   right square: e2(6,6) f(12,6) g(12,0) b(6,0)
+    const g = graph(
+      [
+        node('a', 0, 0),
+        node('b', 6, 0),
+        node('d', 0, 6),
+        node('e', 6, 6),
+        node('e2', 6, 6), // coincident duplicate of e
+        node('f', 12, 6),
+        node('g', 12, 0),
+      ],
+      [
+        // left square via e
+        edge('l1', 'a', 'b'),
+        edge('l2', 'b', 'e'),
+        edge('l3', 'e', 'd'),
+        edge('l4', 'd', 'a'),
+        // right square via e2
+        edge('r1', 'b', 'g'),
+        edge('r2', 'g', 'f'),
+        edge('r3', 'f', 'e2'),
+        edge('r4', 'e2', 'b'),
+      ],
+    );
+    let faces: CityFace[] = [];
+    expect(() => {
+      faces = planarFaces(g);
+    }).not.toThrow();
+    assertEnclosed(faces, 72); // two 6×6 squares, neither tangled away
+  });
+
+  it('B1: pure collinear overlap (no coincident nodes) → both blocks survive', () => {
+    // b(6,0) has two edges straight up — b→c(6,6) and b→e(6,12) — at the same
+    // +π/2 angle; likewise f→a overlaps d→a on the x=0 line. Encloses 72.
+    const g = graph(
+      [
+        node('a', 0, 0),
+        node('b', 6, 0),
+        node('c', 6, 6),
+        node('d', 0, 6),
+        node('e', 6, 12),
+        node('f', 0, 12),
+      ],
+      [
+        edge('1', 'a', 'b'),
+        edge('2', 'b', 'e'), // long vertical, overlaps b→c
+        edge('3', 'e', 'f'),
+        edge('4', 'f', 'a'), // long vertical, overlaps d→a
+        edge('5', 'b', 'c'),
+        edge('6', 'c', 'd'),
+        edge('7', 'd', 'a'),
+      ],
+    );
+    let faces: CityFace[] = [];
+    expect(() => {
+      faces = planarFaces(g);
+    }).not.toThrow();
+    assertEnclosed(faces, 72); // lower + upper 6×6 squares, neither dropped
+  });
+
+  it('radial master plan → decomposes into real sectors (not one tangled face)', () => {
+    const SPOKES = 6;
+    const R = 26;
+    const g = radialGraph(SPOKES, R);
+    let faces: CityFace[] = [];
+    expect(() => {
+      faces = planarFaces(g);
+    }).not.toThrow();
+    // expected total enclosed = the outer-ring polygon (sectors tile it exactly)
+    const outerPoly = Array.from({ length: SPOKES }, (_, k) => {
+      const ang = (k / SPOKES) * Math.PI * 2;
+      return { x: R * Math.cos(ang), z: R * Math.sin(ang) };
+    });
+    const expected = polyArea(outerPoly);
+    assertNoPartialDrop(faces, expected); // contract: full coverage or clean []
+    // the split RESOLVES the radial tie into 2·spokes sectors (inner triangles +
+    // outer trapezoids) — NOT the [] backstop, NOT one garbage tangled face.
+    expect(faces.length).toBe(2 * SPOKES);
+    assertEnclosed(faces, expected);
+  });
+
+  it('determinism: new tie cases are deep-equal under a node/edge shuffle', () => {
+    const cases: CityGraph[] = [
+      graph(
+        [
+          node('a', 0, 0),
+          node('b', 6, 0),
+          node('c', 6, 6),
+          node('d', 0, 6),
+          node('e', 6, 6),
+        ],
+        [
+          edge('1', 'a', 'b'),
+          edge('2', 'b', 'c'),
+          edge('3', 'c', 'd'),
+          edge('4', 'd', 'a'),
+          edge('5', 'b', 'e'),
+          edge('6', 'e', 'd'),
+        ],
+      ),
+      graph(
+        [
+          node('a', 0, 0),
+          node('b', 6, 0),
+          node('c', 6, 6),
+          node('d', 0, 6),
+          node('e', 6, 12),
+          node('f', 0, 12),
+        ],
+        [
+          edge('1', 'a', 'b'),
+          edge('2', 'b', 'e'),
+          edge('3', 'e', 'f'),
+          edge('4', 'f', 'a'),
+          edge('5', 'b', 'c'),
+          edge('6', 'c', 'd'),
+          edge('7', 'd', 'a'),
+        ],
+      ),
+      radialGraph(6, 26),
+    ];
+    for (const g of cases) {
+      const sh = graph(shuffled(g.nodes), shuffled(g.edges));
+      expect(planarFaces(sh)).toEqual(planarFaces(g));
+      // and the zones derived from them are byte-identical too
+      const za = buildZonesFromFaces(planarFaces(g), 7, zoneByX);
+      const zb = buildZonesFromFaces(planarFaces(sh), 7, zoneByX);
+      expect(JSON.stringify(zb)).toBe(JSON.stringify(za));
+    }
+  });
+});
+
 // ── local point-in-polygon for assertions (independent of the impl) ───────────
 
 function pointInPoly(
