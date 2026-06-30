@@ -933,6 +933,20 @@ _ZONE_NAME_POOL: tuple[str, ...] = (
 )
 _NEARBY_ZONES_MAX: int = 4  # hard line cap (prompt-diet — never the whole graph)
 
+# EM-265 (SB) — the BACKEND pair of the frontend `GRAPH_LOTS_ENABLED` /
+# `ROAD_MESH_ENABLED` flags (web/src/components/world3d/CityScape.tsx). Gates the
+# SB zone-rule system on the AGENT SURFACE only: the `nearby_zones` perception
+# block in build_nearby_layout AND the agent-facing `set_zone_rule` propose_rule
+# effect (its place in the proposable-effects set + its action-gate validation).
+# Default OFF ⇒ SB ships DORMANT: the protagonist prompt is byte-identical (no
+# nearby_zones block) and agent behavior is byte-identical (set_zone_rule is not
+# offered/accepted from an agent), exactly like SA ships dormant. Flip ON (together
+# with the frontend `GRAPH_LOTS_ENABLED`) to activate agent-controlled zoning.
+# NOTE: this is a COMPILE-TIME const (no clock/random — pure); it gates ONLY the
+# runtime agent surface. `world.action_propose_rule` itself stays directly callable
+# (tests + any future god path) regardless of this flag.
+GRAPH_ZONES_ENABLED = False
+
 
 def _zone_display_name(world: "World", zone_id: str) -> str:
     """A deterministic, seeded flavor name for a zone (city block), stable across
@@ -994,12 +1008,16 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
 
     # EM-265 (SB) — district-scoped zone block: the _NEARBY_ZONES_MAX faces nearest
     # the agent's place (the local district horizon — prompt-diet, never the whole
-    # graph), each with its hint + optional cap. GATED on at least one ratified zone
-    # rule existing (zone_rules non-empty): with NO rule the block is omitted, so a
-    # zoning-free world's prompt is byte-identical to pre-SB (law §0.1). Once the
-    # town zones any block, an agent's local district (ruled + still-unzoned
-    # neighbors) becomes perceivable — the scaffold SC's "target a zone" reads from.
-    faces = planar_faces(world.city_graph) if world.city_graph.zone_rules else []
+    # graph), each with its hint + optional cap. GATED on the GRAPH_ZONES_ENABLED
+    # feature flag (NOT on zone_rules being non-empty):
+    #   - flag OFF (default) ⇒ render NOTHING ⇒ the prompt is byte-identical to
+    #     pre-SB (law §0.1), so SB ships dormant.
+    #   - flag ON ⇒ render the district's nearby faces INCLUDING UNZONED ones, so
+    #     an agent can perceive a real zone_id to propose the FIRST set_zone_rule
+    #     even when ZERO rules exist (fixes the chicken-and-egg bootstrap: gating on
+    #     zone_rules-nonempty meant no rule ⇒ no perceivable zone ⇒ no first rule).
+    # The scaffold SC's "target a zone" reads from this block.
+    faces = planar_faces(world.city_graph) if GRAPH_ZONES_ENABLED else []
     if faces:
         px, pz = float(place.x), float(place.y)
         nearest = sorted(
@@ -1971,8 +1989,13 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                          "ban_arson", "name_town", "demolish", "promote_image",
                          "trial", "amend_constitution", "relocate_center",
                          "demolish_road", "set_car_policy",  # EM-244 (S3a)
-                         "adopt_master_plan",  # EM-245 (S3b)
-                         "set_zone_rule"}  # EM-265 (SB)
+                         "adopt_master_plan"}  # EM-245 (S3b)
+        # EM-265 (SB) — set_zone_rule is offered to agents ONLY behind the
+        # GRAPH_ZONES_ENABLED flag (default OFF ⇒ not in the set ⇒ rejected here as
+        # an invalid effect ⇒ agent behavior byte-identical when dormant). The world
+        # method world.action_propose_rule is NOT flag-gated (stays directly callable).
+        if GRAPH_ZONES_ENABLED:
+            valid_effects.add("set_zone_rule")  # EM-265 (SB)
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -2058,7 +2081,7 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # world's checks so the front-gate AGREES with action_propose_rule (EM-108
         # menu/resolution rule): an effect the gate would let through but the world
         # would reject is a dead end for the agent.
-        if effect == "set_zone_rule":
+        if GRAPH_ZONES_ENABLED and effect == "set_zone_rule":
             from ..engine.citygraph import ZONE_HINTS, planar_faces, zone_id_for
             zone_id = str(args.get("zone_id") or args.get("target") or "").strip()
             hint = str(args.get("hint") or "").strip()

@@ -243,8 +243,12 @@ def test_set_zone_rule_never_renews_last_wins():
 
 # ── runtime front-gate AGREES with the world ──────────────────────────────────
 
-def test_runtime_gate_accepts_valid_and_rejects_unknown_zone():
+def test_runtime_gate_accepts_valid_and_rejects_unknown_zone(monkeypatch):
     from petridish.agents.runtime import _validate_world
+    # EM-265 fix: set_zone_rule is offered on the agent surface ONLY behind the
+    # GRAPH_ZONES_ENABLED flag — enable it so the effect-specific validation is
+    # reached (this test goes THROUGH the runtime gate).
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     w = _gov_world()
     agent = next(iter(w.agents.values()))
     # the propose_rule front-gate is skill-gated (rhetoric); grant it so the
@@ -275,8 +279,11 @@ def test_runtime_gate_accepts_valid_and_rejects_unknown_zone():
     assert err and "hint" in err.lower()
 
 
-def test_propose_rule_threads_zone_args_through_dispatch():
+def test_propose_rule_threads_zone_args_through_dispatch(monkeypatch):
     from petridish.agents.runtime import AgentRuntime
+    # EM-265 fix: the dispatch path runs through the runtime gate, so the flag must
+    # be ON for set_zone_rule to be accepted.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     w = _gov_world()
     rt = AgentRuntime(w, _router())
     agent = next(iter(w.agents.values()))
@@ -476,11 +483,13 @@ def _corner_place() -> PlaceState:
     return PlaceState(id="corner", name="NE Corner", x=60, y=60, kind="social")
 
 
-def test_nearby_zones_present_and_size_bounded():
+def test_nearby_zones_present_and_size_bounded(monkeypatch):
     from petridish.agents.runtime import build_nearby_layout, _NEARBY_ZONES_MAX
     w = _gov_world()
-    # the block is gated on the zoning system being ACTIVE (a rule exists), so a
-    # zoning-free prompt stays byte-identical to pre-SB (law §0.1). Activate it.
+    # EM-265 fix: the block is gated on the GRAPH_ZONES_ENABLED flag (NOT on a rule
+    # existing), so a zoning-free prompt stays byte-identical to pre-SB (law §0.1).
+    # Activate the flag; a rule on a face gives it a hint to surface.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     apply_zone_rule(w.city_graph, ZoneRule(zone_id=_zone_ids(w)[0], hint="open"))
     line = build_nearby_layout(w, _corner_place())
     assert line is not None
@@ -489,10 +498,11 @@ def test_nearby_zones_present_and_size_bounded():
     assert line.lower().count(" lots") <= _NEARBY_ZONES_MAX
 
 
-def test_nearby_zones_district_scoped_not_whole_graph():
+def test_nearby_zones_district_scoped_not_whole_graph(monkeypatch):
     # 25 grid faces exist, but only the nearest few are surfaced (diet discipline).
     from petridish.agents.runtime import build_nearby_layout, _NEARBY_ZONES_MAX
     w = _gov_world()
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     apply_zone_rule(w.city_graph, ZoneRule(zone_id=_zone_ids(w)[0], hint="civic"))
     assert len(planar_faces(w.city_graph)) > _NEARBY_ZONES_MAX
     line = build_nearby_layout(w, _corner_place())
@@ -501,9 +511,11 @@ def test_nearby_zones_district_scoped_not_whole_graph():
 
 
 def test_nearby_zones_omitted_when_no_rules_byte_identical():
-    # The §0.1 guarantee: with NO zone rule, the block is omitted entirely (the
-    # zoning-free prompt is byte-identical to pre-SB), even though faces exist.
-    from petridish.agents.runtime import build_nearby_layout
+    # The §0.1 guarantee: with the GRAPH_ZONES_ENABLED flag at its default OFF, the
+    # block is omitted entirely (the zoning-free prompt is byte-identical to pre-SB),
+    # even though faces exist and there are no rules. (Flag-OFF path, default state.)
+    from petridish.agents.runtime import build_nearby_layout, GRAPH_ZONES_ENABLED
+    assert GRAPH_ZONES_ENABLED is False  # ships dormant by default
     w = _gov_world()
     assert not w.city_graph.zone_rules and planar_faces(w.city_graph)
     line = build_nearby_layout(w, _corner_place())
@@ -511,8 +523,9 @@ def test_nearby_zones_omitted_when_no_rules_byte_identical():
     assert "nearby zones" not in line.lower()
 
 
-def test_nearby_zones_reports_hint_and_cap_for_ruled_zone():
+def test_nearby_zones_reports_hint_and_cap_for_ruled_zone(monkeypatch):
     from petridish.agents.runtime import build_nearby_layout
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     w = _gov_world()
     place = _corner_place()
     # zone the face NEAREST the place so it appears in the (nearest-first) block
@@ -528,18 +541,21 @@ def test_nearby_zones_reports_hint_and_cap_for_ruled_zone():
     assert "built" in line.lower()
 
 
-def test_nearby_zones_omitted_when_no_faces():
+def test_nearby_zones_omitted_when_no_faces(monkeypatch):
     # A path graph (one edge, no enclosed face) still has extendable directions, so
     # the layout line builds — but the zones block is OMITTED (no faces).
     from petridish.agents.runtime import build_nearby_layout
+    # flag ON (the block is enabled) — yet there are no faces to list, so the block
+    # must still be omitted regardless.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     w = _gov_world()
     w.city_graph = CityGraph(
         seed=1,
         nodes=[CityNode(id="n:2:2", x=tile_center(2), z=tile_center(2)),
                CityNode(id="n:7:2", x=tile_center(7), z=tile_center(2))],
         edges=[CityEdge(id="e:n:2:2->n:7:2", a="n:2:2", b="n:7:2")],
-        # a stray rule (zoning active) so the block is gated ON — yet there are no
-        # faces to list, so it must still be omitted.
+        # a stray rule present, but with the flag ON the block is gated on the flag,
+        # not the rule; there are still no faces to list, so it must be omitted.
         zone_rules=[ZoneRule(zone_id="gone", hint="market")],
     )
     place = PlaceState(id="p", name="On A Road", x=tile_center(2), y=tile_center(2),
@@ -555,3 +571,107 @@ def test_nearby_zones_deterministic_names():
     w = _gov_world()
     zid = _zone_ids(w)[0]
     assert _zone_display_name(w, zid) == _zone_display_name(w, zid)
+
+
+# ── EM-265 fix: GRAPH_ZONES_ENABLED flag gates the AGENT SURFACE (bootstrap) ────
+
+def test_graph_zones_flag_defaults_off():
+    # SB ships DORMANT: the backend agent-surface flag is OFF by default, mirroring
+    # the frontend GRAPH_LOTS_ENABLED.
+    from petridish.agents import runtime
+    assert runtime.GRAPH_ZONES_ENABLED is False
+
+
+def test_runtime_gate_rejects_set_zone_rule_when_flag_off():
+    # OFF path (default): set_zone_rule is NOT offered on the agent surface, so the
+    # runtime gate rejects it as an invalid effect BEFORE the zone-specific checks —
+    # agent behavior is byte-identical to pre-SB.
+    from petridish.agents.runtime import _validate_world
+    w = _gov_world()
+    agent = next(iter(w.agents.values()))
+    gate = w.skill_gate_for("propose_rule")
+    if gate is not None:
+        agent.skills[gate[0]] = gate[1]
+    zid = _zone_ids(w)[0]
+    err = _validate_world(
+        {"action": "propose_rule",
+         "args": {"effect": "set_zone_rule", "text": "x", "zone_id": zid,
+                  "hint": "residential", "density_cap": 4}},
+        agent, w)
+    assert err and "invalid effect" in err.lower()
+    # set_zone_rule is NOT among the effects the gate would accept while dormant
+    assert "valid:" in err.lower() and "'set_zone_rule'" not in err.split("Valid:")[1]
+
+
+def test_dispatch_rejects_set_zone_rule_when_flag_off():
+    # OFF path: the GATED dispatch (_apply_steps runs _validate_world → dispatch)
+    # refuses set_zone_rule — it emits a parse_failure, never rule_proposed, and no
+    # zone rule is applied, so SB ships byte-identical / dormant. (The world method
+    # action_propose_rule itself stays directly callable — only the agent surface is
+    # gated.)
+    from petridish.agents.runtime import AgentRuntime
+    w = _gov_world()
+    rt = AgentRuntime(w, _router())
+    agent = next(iter(w.agents.values()))
+    gate = w.skill_gate_for("propose_rule")
+    if gate is not None:
+        agent.skills[gate[0]] = gate[1]
+    zid = _zone_ids(w)[0]
+    chain, results = rt._apply_steps(
+        agent,
+        [{"action": "propose_rule",
+          "args": {"effect": "set_zone_rule", "text": "zone it civic",
+                   "zone_id": zid, "hint": "civic", "density_cap": 3}}],
+        "P", "#fff", "")
+    assert not any(e["kind"] == "rule_proposed" for e in chain), chain
+    assert any(e["kind"] == "parse_failure" for e in chain)
+    assert not w.city_graph.zone_rules  # nothing applied while dormant
+
+
+def test_bootstrap_nearby_zones_lists_unzoned_faces_when_flag_on_zero_rules(monkeypatch):
+    # THE BOOTSTRAP REGRESSION (chicken-and-egg fix): with GRAPH_ZONES_ENABLED ON
+    # and ZERO zone rules ratified, build_nearby_layout STILL surfaces a nearby_zones
+    # block listing the district's UNZONED faces — so an agent perceives a real
+    # zone_id to propose the FIRST set_zone_rule. (Pre-fix the block was gated on
+    # zone_rules being non-empty ⇒ no rule ⇒ no perceivable zone ⇒ no first rule.)
+    from petridish.agents.runtime import build_nearby_layout, _NEARBY_ZONES_MAX
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    assert not w.city_graph.zone_rules          # zero rules ratified
+    assert planar_faces(w.city_graph)            # but faces exist
+    line = build_nearby_layout(w, _corner_place())
+    assert line is not None
+    assert "nearby zones:" in line.lower()       # the block IS present
+    assert "unzoned" in line.lower()             # listing UNZONED faces (no rules yet)
+    assert "cap" not in line.lower()             # no density caps without rules
+    assert line.lower().count(" lots") <= _NEARBY_ZONES_MAX  # still diet-bounded
+
+
+def test_agent_path_propose_vote_activate_through_runtime_gate(monkeypatch):
+    # ON path, end-to-end through the RUNTIME agent surface: an agent proposes
+    # set_zone_rule via the GATED dispatch (_apply_steps runs _validate_world →
+    # dispatch — the gate ACCEPTS it), then the town ratifies via action_vote → the
+    # rule activates + applies on the CityGraph.
+    from petridish.agents.runtime import AgentRuntime
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    rt = AgentRuntime(w, _router())
+    proposer = next(iter(w.agents.values()))
+    gate = w.skill_gate_for("propose_rule")
+    if gate is not None:
+        proposer.skills[gate[0]] = gate[1]
+    zid = _zone_ids(w)[0]
+    chain, results = rt._apply_steps(
+        proposer,
+        [{"action": "propose_rule",
+          "args": {"effect": "set_zone_rule", "text": "zone it residential",
+                   "zone_id": zid, "hint": "residential", "density_cap": 4}}],
+        "P", "#fff", "")
+    proposed = next(e for e in chain if e["kind"] == "rule_proposed")
+    rule = w.rules[proposed["payload"]["rule_id"]]
+    assert rule.effect == "set_zone_rule"
+    _ratify(w, rule)
+    assert rule.status == "active"
+    matches = [r for r in w.city_graph.zone_rules if r.zone_id == zid]
+    assert len(matches) == 1
+    assert matches[0].hint == "residential" and matches[0].density_cap == 4
