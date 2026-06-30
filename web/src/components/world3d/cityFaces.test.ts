@@ -699,6 +699,10 @@ describe('EM-265 (SB) — cross-language zone-id consistency (law §0.2)', () =>
   const fixturePath = resolve(process.cwd(), '..', 'contracts/em265-zone-id-fixture.json');
   const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
     cases: { name: string; graph: CityGraph; zone_ids: string[] }[];
+    // EM-265 fix: rounding-tie cases (Python half-up must match JS Math.round on
+    // the 1e-6 merge lattice) live under their own key so the generator-case
+    // assertion above stays exact.
+    tie_cases?: { name: string; graph: CityGraph; zone_ids: string[] }[];
   };
 
   it('the fixture carries the 3 generator cases', () => {
@@ -719,6 +723,19 @@ describe('EM-265 (SB) — cross-language zone-id consistency (law §0.2)', () =>
         .map((z) => z.id)
         .sort();
       expect(zoneIds).toEqual(want);
+    });
+  }
+
+  // EM-265 fix #1 (keystone §0.2): the merge-lattice rounding-tie cases — JS
+  // Math.round (half-up) must agree with the fixed Python floor(v+0.5). A buggy
+  // half-to-even Python port would merge a node the TS port keeps distinct,
+  // producing a different zone-id set; this pins that they don't.
+  for (const c of fixture.tie_cases ?? []) {
+    it(`TS planarFaces zone-id set equals the backend fixture (rounding tie) — ${c.name}`, () => {
+      const tsIds = planarFaces(c.graph)
+        .map((f) => [...f.boundary].sort().join('|'))
+        .sort();
+      expect(tsIds).toEqual([...c.zone_ids].sort());
     });
   }
 });

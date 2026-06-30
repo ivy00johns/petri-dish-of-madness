@@ -675,3 +675,171 @@ def test_agent_path_propose_vote_activate_through_runtime_gate(monkeypatch):
     matches = [r for r in w.city_graph.zone_rules if r.zone_id == zid]
     assert len(matches) == 1
     assert matches[0].hint == "residential" and matches[0].density_cap == 4
+
+
+# ── FINDING #2 — TOCTOU orphan rule: a zone destroyed BETWEEN propose and the ───
+# threshold-crossing vote must NOT activate onto a non-existent zone. action_propose_
+# rule validates the zone is a CURRENT face when the vote OPENS, but a master-plan
+# morph can COMPLETE before the vote lands. _on_rule_activated re-validates and, if
+# the zone vanished, no-ops (the vote still "passed") — no permanent orphan rule.
+
+def test_toctou_zone_destroyed_before_vote_lands_leaves_no_orphan_rule():
+    w = _gov_world()
+    agents = list(w.agents.values())
+    zid = _zone_ids(w)[0]  # a real grid block at propose time
+    ok, reason, rule = w.action_propose_rule(
+        agents[0], "set_zone_rule", "zone it civic", target=zid, hint="civic",
+        density_cap=3)
+    assert ok, reason
+    # Cast yes from 3 of 5 — BELOW the 0.7 supermajority (needs 4), so the vote is
+    # still open (the rule has NOT activated yet).
+    for a in agents[:3]:
+        w.action_vote(a, rule.id, True)
+    assert rule.status == "proposed"
+    assert not w.city_graph.zone_rules
+    # A master plan morphs the city to a pentagon and RUNS TO COMPLETION (clears
+    # self.master_plan), destroying the grid block the pending rule targets. Because
+    # the rule isn't in city_graph.zone_rules yet, _reconcile_zone_rules_after_morph
+    # never sees it — exactly the orphan window.
+    w.master_plan = {"kind": "pentagon", "params": {}, "seed": w.city_seed}
+    for _ in range(1000):
+        if w.master_plan is None:
+            break
+        w.step_master_plan_morph()
+    assert w.master_plan is None, "morph never converged"
+    assert zid not in set(_zone_ids(w)), "the target block should be gone post-morph"
+    # The 4th yes crosses 0.7 and activates the rule onto a VANISHED zone.
+    w.action_vote(agents[3], rule.id, True)
+    assert rule.status == "active"   # the vote still passed
+    assert rule.applied is True      # activation ran (one-shot)
+    # ...but NO orphan rule was grafted onto the non-existent block.
+    assert not any(r.zone_id == zid for r in w.city_graph.zone_rules)
+    assert w.city_graph.zone_rules == []
+    # invariant: every rule that DOES exist binds a real current face (no orphans).
+    post = set(_zone_ids(w))
+    assert all(r.zone_id in post for r in w.city_graph.zone_rules)
+
+
+def test_toctou_surviving_zone_still_applies_normally():
+    # Control: if the zone SURVIVES to activation, the rule applies as usual (the
+    # re-validation is a no-op on the happy path).
+    w = _gov_world()
+    agent = next(iter(w.agents.values()))
+    zid = _zone_ids(w)[0]
+    ok, reason, rule = w.action_propose_rule(
+        agent, "set_zone_rule", "x", target=zid, hint="market", density_cap=5)
+    assert ok, reason
+    _ratify(w, rule)  # no morph in between → zone still current
+    assert rule.status == "active"
+    matches = [r for r in w.city_graph.zone_rules if r.zone_id == zid]
+    assert len(matches) == 1 and matches[0].hint == "market"
+
+
+# ── FINDING #3 — reconcile priority inversion: KEEP must globally outrank ────────
+# RE-POINT. A single mixed pass let an earlier rule's RE-POINT claim a face that a
+# later rule still LITERALLY keeps, dropping the keeper. The two-pass fix claims all
+# keepers first, then re-points the rest only onto faces no keeper owns.
+
+def test_reconcile_keep_outranks_repoint_keeper_not_stolen():
+    w = _gov_world()
+    g = _square("F", 0, 0)
+    fF = planar_faces(g)[0]
+    zidF = zone_id_for(fF.boundary)  # a CURRENT face id
+    # ORDER is load-bearing: the ghost rule is FIRST, so a single-pass reconcile
+    # would let its RE-POINT steal F before the keeper (second) is examined.
+    ghost = ZoneRule(zone_id="ghost|zone", hint="market", density_cap=1)
+    keeper = ZoneRule(zone_id=zidF, hint="residential", density_cap=2)
+    g.zone_rules = [ghost, keeper]
+    w.city_graph = g
+    # The ghost's ORIGINAL face centroid coincides EXACTLY with F (a re-point magnet);
+    # the keeper's original centroid is F too (it still literally owns F).
+    pre = {"ghost|zone": fF.centroid, zidF: fF.centroid}
+    events = w._reconcile_zone_rules_after_morph(pre)
+    # The KEEPER survived on F (its literal id), unchanged — NOT stolen by the ghost.
+    survivors = w.city_graph.zone_rules
+    assert [r.zone_id for r in survivors] == [zidF]
+    assert survivors[0].hint == "residential" and survivors[0].density_cap == 2
+    # The ghost dropped cleanly (no other face to re-point onto), and was logged.
+    drop = next(e for e in events if e["kind"] == "zone_rule_dropped")
+    assert drop["payload"]["zone_id"] == "ghost|zone"
+
+
+def test_reconcile_ghost_repoints_elsewhere_without_stealing_keeper():
+    # Variant: a SECOND surviving face exists, so the ghost re-points THERE instead
+    # of stealing the keeper's face. Keeper survives on its own face either way.
+    w = _gov_world()
+    gF = _square("F", 0, 0)
+    gG = _square("G", 100, 100)  # a second, far-away surviving face
+    fF = planar_faces(gF)[0]
+    fG = planar_faces(gG)[0]
+    zidF = zone_id_for(fF.boundary)
+    zidG = zone_id_for(fG.boundary)
+    combined = CityGraph(seed=1, nodes=gF.nodes + gG.nodes, edges=gF.edges + gG.edges)
+    ghost = ZoneRule(zone_id="ghost|zone", hint="market", density_cap=1)
+    keeper = ZoneRule(zone_id=zidF, hint="residential", density_cap=2)
+    combined.zone_rules = [ghost, keeper]
+    w.city_graph = combined
+    # ghost's original centroid sits on face G (so it should re-point to G, not steal F)
+    pre = {"ghost|zone": fG.centroid, zidF: fF.centroid}
+    events = w._reconcile_zone_rules_after_morph(pre)
+    by_zone = {r.zone_id: r for r in w.city_graph.zone_rules}
+    # keeper kept F; ghost re-pointed onto G — neither dropped, no mis-attach.
+    assert zidF in by_zone and by_zone[zidF].hint == "residential"
+    assert zidG in by_zone and by_zone[zidG].hint == "market"
+    assert not any(e["kind"] == "zone_rule_dropped" for e in events)
+
+
+# ── FINDING #4 — bootstrap: the FIRST rule is proposable from perception alone ───
+# build_nearby_layout must surface the canonical zone_id (the "|"-joined node id) the
+# action gate + action_propose_rule demand — not just the colliding display name —
+# so with the flag ON and ZERO rules an agent can propose the very first rule.
+
+def test_bootstrap_zone_id_parsed_from_perception_is_proposable_end_to_end(monkeypatch):
+    import re
+    from petridish.agents.runtime import build_nearby_layout, _validate_world
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    assert not w.city_graph.zone_rules           # ZERO rules ratified (bootstrap state)
+    agent = next(iter(w.agents.values()))
+    line = build_nearby_layout(w, _corner_place())
+    assert line is not None and "nearby zones:" in line.lower()
+    # The perception EXPOSES the canonical zone_id handle the gate requires.
+    m = re.search(r"\[zone ([^\]]+)\]", line)
+    assert m, f"perception has no [zone <id>] handle: {line}"
+    zid = m.group(1)
+    assert zid in set(_zone_ids(w)), "the parsed handle must be a real current zone"
+    # 1) the parsed handle passes the RUNTIME action gate (skill-gated; grant it).
+    gate = w.skill_gate_for("propose_rule")
+    if gate is not None:
+        agent.skills[gate[0]] = gate[1]
+    err = _validate_world(
+        {"action": "propose_rule",
+         "args": {"effect": "set_zone_rule", "text": "zone it civic",
+                  "zone_id": zid, "hint": "civic", "density_cap": 2}},
+        agent, w)
+    assert not err, f"gate rejected the perceived zone_id: {err}"
+    # 2) and world.action_propose_rule accepts it — the FIRST rule is proposable from
+    #    perception alone (the GRAPH_ZONES_ENABLED bootstrap promise is now real).
+    ok, reason, rule = w.action_propose_rule(
+        agent, "set_zone_rule", "zone it civic", zone_id=zid, hint="civic",
+        density_cap=2)
+    assert ok, reason
+    assert rule.effect == "set_zone_rule"
+    assert rule.payload["zone_id"] == zid
+
+
+def test_bootstrap_perception_shows_zone_id_for_every_listed_zone(monkeypatch):
+    # Each nearby-zone clause carries its raw zone_id handle (names collide across the
+    # seeded pool, so the id — not the name — is the agent's only unambiguous target).
+    import re
+    from petridish.agents.runtime import build_nearby_layout
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    line = build_nearby_layout(w, _corner_place())
+    assert line is not None and "nearby zones:" in line.lower()
+    handles = re.findall(r"\[zone ([^\]]+)\]", line)
+    # one handle per listed zone (each clause has a " lots" count)
+    assert len(handles) == line.lower().count(" lots")
+    current = set(_zone_ids(w))
+    for zid in handles:
+        assert zid in current  # every surfaced handle is a real current zone

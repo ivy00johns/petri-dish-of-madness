@@ -1033,7 +1033,17 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
             lots = max(1, round(abs(f.area) / lot_area)) if lot_area else 1
             rule = rules_by_zone.get(zid)
             hint = rule.hint if rule is not None else "unzoned"
-            clause = f"{_zone_display_name(world, zid)} ({hint}, ~{lots} lots"
+            # EM-265 (SB) bootstrap fix: surface the CANONICAL zone_id (the raw
+            # "|"-joined node-id string) the action gate + action_propose_rule
+            # demand, not just the friendly name. Display names are seeded from a
+            # ~16-name pool and COLLIDE, so a name can't be resolved back to one
+            # zone_id — without the raw id an agent perceives a block it can never
+            # target, so with the flag ON and ZERO rules it could never propose the
+            # FIRST rule. The id is bounded (~36 chars × ≤4 zones) so the diet holds.
+            clause = (
+                f"{_zone_display_name(world, zid)} [zone {zid}] "
+                f"({hint}, ~{lots} lots"
+            )
             if rule is not None and rule.density_cap is not None:
                 built = sum(
                     1 for b in world.buildings.values()

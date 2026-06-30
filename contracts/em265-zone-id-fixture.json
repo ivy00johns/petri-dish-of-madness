@@ -3,7 +3,8 @@
     "issue": "EM-265 SB",
     "purpose": "Cross-language zone-id consistency (law 0.2). Python planar_faces + the TS planarFaces in web/src/components/world3d/cityFaces.ts MUST compute the SAME sorted zone_id set on the SAME nodes/edges. Generated from backend/petridish/engine/citygraph.py \u2014 do not hand-edit.",
     "zone_id_formula": "sorted(boundary_node_ids) joined by \"|\"",
-    "generator": "classic_grid(1337), master_plan(\"pentagon\", None, 1337), master_plan(\"radial\", None, 1337)"
+    "generator": "classic_grid(1337), master_plan(\"pentagon\", None, 1337), master_plan(\"radial\", None, 1337)",
+    "tie_cases_note": "tie_cases[] holds adversarial coincident-node-merge rounding cases that pin the HALF-UP rounding contract (Python math.floor(v+0.5) == JS Math.round). They are kept SEPARATE from cases[] because the frontend cityFaces.test.ts hardcodes a 'carries the 3 generator cases' assertion on fixture.cases."
   },
   "cases": [
     {
@@ -1154,6 +1155,38 @@
         "n:radI:5|n:radI:6|n:radO:c",
         "n:radI:6|n:radI:7|n:radO:6|n:radO:7",
         "n:radI:6|n:radI:7|n:radO:c"
+      ]
+    }
+  ],
+  "tie_cases": [
+    {
+      "name": "rounding_tie",
+      "note": "Coincident-node merge rounding (law 0.2): a near-coincident node pair (e at (6,6) / e2 at (6.0000005,6.0000005)) straddling a 1e-6 half-cell. e2.coord/1e-6 == 6000000.5 is an EXACT half on an EVEN integer, so Python round() (half-to-EVEN) and JS Math.round (half-UP) DIVERGE. Python planar_faces MUST round HALF-UP (math.floor(v+0.5)) to match Math.round: under half-up the two squares stay distinct -> these zone_ids; under the buggy half-even merge e2 would collapse onto e and the second face would become e|p|q|r -> a different SET across languages. Kept in tie_cases (not cases) because the frontend cityFaces.test.ts hardcodes a 'carries the 3 generator cases' assertion on fixture.cases; an orchestrator may add a TS assertion that iterates tie_cases.",
+      "graph": {
+        "nodes": [
+          { "id": "a", "x": 0, "z": 0, "kind": "junction" },
+          { "id": "b", "x": 6, "z": 0, "kind": "junction" },
+          { "id": "e", "x": 6, "z": 6, "kind": "junction" },
+          { "id": "h", "x": 0, "z": 6, "kind": "junction" },
+          { "id": "e2", "x": 6.0000005, "z": 6.0000005, "kind": "junction" },
+          { "id": "p", "x": 12, "z": 6.0000005, "kind": "junction" },
+          { "id": "q", "x": 12, "z": 12, "kind": "junction" },
+          { "id": "r", "x": 6.0000005, "z": 12, "kind": "junction" }
+        ],
+        "edges": [
+          { "id": "s1_1", "a": "a", "b": "b", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s1_2", "a": "b", "b": "e", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s1_3", "a": "e", "b": "h", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s1_4", "a": "h", "b": "a", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_1", "a": "e2", "b": "p", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_2", "a": "p", "b": "q", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_3", "a": "q", "b": "r", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_4", "a": "r", "b": "e2", "road_class": "street", "car_policy": "inherit" }
+        ]
+      },
+      "zone_ids": [
+        "a|b|e|h",
+        "e2|p|q|r"
       ]
     }
   ]

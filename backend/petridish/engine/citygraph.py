@@ -647,7 +647,17 @@ def planar_faces(graph) -> list[Face]:
     for n in sorted_nodes:
         if n.id in canon_of:
             continue  # duplicate id: first (lex-smallest) wins
-        cell = f"{round(n.x / _MERGE_QUANT)}|{round(n.z / _MERGE_QUANT)}"
+        # HALF-UP rounding (math.floor(v + 0.5)) to match JS Math.round on the TS
+        # side (cityFaces.ts). Python's built-in round() is half-to-EVEN, so at an
+        # exact-half lattice value (e.g. x/1e-6 == 1000002.5) it would pick a
+        # DIFFERENT cell than Math.round → a different merge → a different zone_id
+        # SET → a rule tints the wrong block (law §0.2). floor(v+0.5) matches
+        # Math.round on both signs: floor(1000002.5+0.5)=1000003 == Math.round;
+        # floor(-2.5+0.5)=-2 == Math.round(-2.5). (Pinned by the tie fixture case.)
+        cell = (
+            f"{math.floor(n.x / _MERGE_QUANT + 0.5)}"
+            f"|{math.floor(n.z / _MERGE_QUANT + 0.5)}"
+        )
         existing = cell_to_canon.get(cell)
         if existing is not None:
             canon_of[n.id] = existing  # coincident with an earlier node → merge

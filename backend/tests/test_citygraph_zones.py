@@ -358,3 +358,57 @@ def test_fixture_matches_live_generators():
     }
     for case in data["cases"]:
         assert case["zone_ids"] == live[case["name"]]
+
+
+# ── FINDING #1 (law §0.2): coincident-node merge rounding is HALF-UP ─────────────
+# The TS port cityFaces.ts merges coincident nodes with Math.round (half-UP); the
+# Python port MUST match. Python's built-in round() is half-to-EVEN, so at an exact-
+# half lattice value (coord/1e-6 == an *.5 on an even int) it would pick a DIFFERENT
+# merge cell than JS → a different merge → a different zone_id SET → a voted rule
+# tints the WRONG block. planar_faces was fixed to use math.floor(v + 0.5).
+
+def _tie_graph() -> tuple[CityGraph, list[str]]:
+    """The contracts/em265-zone-id-fixture.json `tie_cases[rounding_tie]` graph +
+    its expected (HALF-UP) zone ids, loaded straight from the shared fixture."""
+    data = json.loads(FIXTURE_PATH.read_text())
+    case = next(c for c in data["tie_cases"] if c["name"] == "rounding_tie")
+    return _graph_from_fixture(case["graph"]), case["zone_ids"]
+
+
+def test_merge_rounding_is_half_up_not_half_to_even():
+    # e at (6,6) and e2 at (6.0000005, 6.0000005) straddle a 1e-6 half-cell:
+    # 6.0000005/1e-6 == 6000000.5 (an exact half on an EVEN int). HALF-UP keeps them
+    # DISTINCT (Math.round → 6000001), so the two squares stay separate and the
+    # second face's id is "e2|p|q|r". Python round() (half-to-even → 6000000) would
+    # MERGE e2 onto e and yield "e|p|q|r" instead — the cross-language drift.
+    g, _expected = _tie_graph()
+    zids = sorted(zone_id_for(f.boundary) for f in planar_faces(g))
+    assert zids == ["a|b|e|h", "e2|p|q|r"]
+    # the half-to-even (buggy) outcome must NOT appear
+    assert "e|p|q|r" not in zids
+
+
+def test_fixture_tie_cases_round_trip_through_planar_faces():
+    data = json.loads(FIXTURE_PATH.read_text())
+    assert data["tie_cases"], "fixture must carry at least one rounding-tie case"
+    for case in data["tie_cases"]:
+        graph = _graph_from_fixture(case["graph"])
+        computed = sorted(zone_id_for(f.boundary) for f in planar_faces(graph))
+        assert computed == case["zone_ids"], f"tie fixture mismatch for {case['name']}"
+
+
+def test_tie_case_is_stable_under_shuffle():
+    # planar_faces on the tie graph is deterministic (no clock/random; law §0.3):
+    # the zone-id SET and the exact walk-order boundaries survive a node/edge shuffle.
+    g, expected = _tie_graph()
+    rng = random.Random(2024)
+    nodes_s = list(g.nodes)
+    edges_s = list(g.edges)
+    rng.shuffle(nodes_s)
+    rng.shuffle(edges_s)
+    shuffled = CityGraph(seed=g.seed, nodes=nodes_s, edges=edges_s)
+    fa = planar_faces(g)
+    fb = planar_faces(shuffled)
+    assert sorted(zone_id_for(f.boundary) for f in fa) == sorted(expected)
+    assert sorted(zone_id_for(f.boundary) for f in fb) == sorted(expected)
+    assert [f.boundary for f in fa] == [f.boundary for f in fb]

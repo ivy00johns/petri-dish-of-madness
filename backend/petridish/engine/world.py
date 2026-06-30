@@ -1423,22 +1423,34 @@ class World:
         Deterministic + pure (no clock/random): candidate faces are matched by
         nearest centroid, tie-broken by zone id, and each face is claimed at most
         once (one rule per zone — never a mis-attach). A rule losing its zone to a
-        morph is acceptable + logged — NOT the forbidden silent region drop."""
+        morph is acceptable + logged — NOT the forbidden silent region drop.
+
+        TWO PASSES so KEEP globally outranks RE-POINT (EM-265 SB defect — priority
+        inversion): a single mixed pass let an earlier rule's RE-POINT steal a face
+        that a LATER rule still literally KEEPS, silently dropping the keeper. Pass A
+        claims every face that is still some rule's literal zone_id; Pass B re-points
+        the remainder only onto faces NOT claimed by a keeper, else drops."""
         if not self.city_graph.zone_rules:
             return []
         post_faces = planar_faces(self.city_graph)
         post_ids = {zone_id_for(f.boundary) for f in post_faces}
-        events: list[dict] = []
-        surviving: list[ZoneRule] = []
+        rules = self.city_graph.zone_rules
         claimed: set[str] = set()
-        for rule in self.city_graph.zone_rules:
-            # (a) KEEP — its block id is still a face (and not already taken).
-            if rule.zone_id in post_ids and rule.zone_id not in claimed:
+        # ── Pass A: KEEP every rule whose block id still exists (claims first). ──
+        # zone_ids are unique across rules (apply_zone_rule), so KEEPs never collide
+        # with each other — only with a would-be RE-POINT, which Pass B must yield.
+        keep: dict[int, bool] = {}
+        for i, rule in enumerate(rules):
+            if rule.zone_id in post_ids:
+                keep[i] = True
                 claimed.add(rule.zone_id)
-                surviving.append(rule)
+        # ── Pass B: RE-POINT or DROP every non-kept rule (original order). ──
+        decision: dict[int, str | None] = {}  # i → new_zone_id (RE-POINT) | None (DROP)
+        for i, rule in enumerate(rules):
+            if keep.get(i):
                 continue
-            # (b) RE-POINT — a surviving face matches the original centroid.
             orig = pre_centroids.get(rule.zone_id)
+            new_zid: str | None = None
             if orig is not None:
                 cands = sorted(
                     (
@@ -1455,10 +1467,20 @@ class World:
                 if cands and cands[0][0] <= _MORPH_REPOINT_TOL:
                     new_zid = cands[0][1]
                     claimed.add(new_zid)
-                    rule.zone_id = new_zid
-                    surviving.append(rule)
-                    continue
-            # (c) DROP — the rule's block no longer exists; log it.
+            decision[i] = new_zid
+        # ── Rebuild surviving rules in ORIGINAL order; emit drops in that order. ──
+        events: list[dict] = []
+        surviving: list[ZoneRule] = []
+        for i, rule in enumerate(rules):
+            if keep.get(i):
+                surviving.append(rule)
+                continue
+            new_zid = decision.get(i)
+            if new_zid is not None:
+                rule.zone_id = new_zid
+                surviving.append(rule)
+                continue
+            # DROP — the rule's block no longer exists; log it.
             events.append({
                 "kind": "zone_rule_dropped", "actor_id": "system",
                 "actor_type": "system",
@@ -4358,6 +4380,27 @@ class World:
             zone_id = p.get("zone_id")
             hint = p.get("hint")
             density_cap = p.get("density_cap")
+            # TOCTOU re-validation (EM-265 SB defect): action_propose_rule checks the
+            # zone_id is a CURRENT face when the vote OPENS, but a master-plan morph
+            # can COMPLETE between propose and the threshold-crossing vote, destroying
+            # that block. Applying unconditionally here would graft an ORPHAN rule
+            # onto a non-existent zone, and _reconcile_zone_rules_after_morph never
+            # fires again (it runs only while a morph is in progress) ⇒ a permanent
+            # orphan in every snapshot/fork. Re-check at activation time: if the zone
+            # vanished, silent no-op (the vote still "passed") — exactly demolish's
+            # vanished-target / promote_image's vanished-image pattern. No orphan added.
+            current_zones = {zone_id_for(f.boundary)
+                             for f in planar_faces(self.city_graph)}
+            if str(zone_id) not in current_zones:
+                self.pending_spawn_events.append({
+                    "kind": "zone_rule_dropped", "actor_id": "system",
+                    "actor_type": "system",
+                    "text": ("🗺 A ratified zone rule found its block already gone "
+                             "(reshaped before the vote landed)."),
+                    "payload": {"zone_id": zone_id, "hint": hint,
+                                "density_cap": density_cap, "proposal_id": rule.id},
+                })
+                return
             apply_zone_rule(self.city_graph,
                             ZoneRule(zone_id=str(zone_id), hint=str(hint),
                                      density_cap=density_cap))
