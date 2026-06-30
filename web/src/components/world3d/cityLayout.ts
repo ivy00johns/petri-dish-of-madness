@@ -60,6 +60,12 @@
 
 import type { Place, Neighborhood, CityGraph, CityGraphEdge } from '../../types';
 import { placeToWorld, hashUnit, slotLayout } from './worldSpace';
+// EM-264 (SA): graph-derived buildable zones. Runtime imports are the planar-
+// face algorithm; BuildZone is a TYPE-only import (the additive CityPlan.zones
+// field). cityFaces never runtime-imports cityLayout (contract §1 import-cycle
+// rule), so this one-way runtime edge cityLayout → cityFaces → worldSpace is acyclic.
+import { planarFaces, buildZonesFromFaces } from './cityFaces';
+import type { BuildZone } from './cityFaces';
 
 // ── Frozen vocabulary (Wave D1 contract — the registry imports this) ────────
 
@@ -206,6 +212,16 @@ export interface CityPlan {
   pedestrianTiles: CityInstance[];
   /** Outer half-size of the city (Chebyshev from the world origin). */
   extent: number;
+  /**
+   * EM-264 (SA): graph-derived buildable zones — one per bounded planar face
+   * of the road graph, each wrapping its face + seeded lot pads + zone hint.
+   * ADDITIVE + OPTIONAL: present ONLY on the graph-lots path
+   * (`computeCityPlan(world, { graphLots: true })` with a real CityGraph). On
+   * the default/grid path the key is absent (undefined), so the EM-155
+   * byte-identical baseline is preserved. The source of blockLots/emptyLots/
+   * blocks on that path.
+   */
+  zones?: BuildZone[];
 }
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
@@ -351,6 +367,22 @@ function roadTileSetFrom(graph: CityGraph | null | undefined): Set<string> {
     }
   }
   return set;
+}
+
+/**
+ * EM-264 (SA): true iff the graph carries a REAL node + edge payload. Mirrors
+ * `roadTileSetFrom`'s ModelBoundary guard EXACTLY (not a graph, or nodes/edges
+ * aren't arrays, or there are no edges ⇒ false). Gates the graph-lots branch:
+ * a stub / corrupt / empty graph falls back to the fixed grid, never the
+ * face-derived path — so the byte-identical baseline is safe.
+ */
+export function hasRealGraph(graph: CityGraph | null | undefined): boolean {
+  return (
+    !!graph &&
+    Array.isArray(graph.nodes) &&
+    Array.isArray(graph.edges) &&
+    graph.edges.length > 0
+  );
 }
 
 /** Road-line tile indices on one axis, derived from the graph (for street
@@ -857,7 +889,10 @@ function emitCurbLife(
  * (places, city_seed) — every generated-block lot is a platted pad; ONLY
  * landmark anchors and real W7 buildings put structures in the world.
  */
-export function computeCityPlan(world: CityWorld): CityPlan {
+export function computeCityPlan(
+  world: CityWorld,
+  opts?: { graphLots?: boolean },
+): CityPlan {
   const places = world.places ?? [];
   const seed = world.city_seed ?? DEFAULT_CITY_SEED;
   const pieces = emptyPieces();
@@ -907,6 +942,51 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     return best;
   }
 
+  // Buildable blocks + their platted lots. DEFAULT = the frozen 5×5 plat (the
+  // grid Pass 1 / Pass 2 below). EM-264 (SA), flag-gated OFF by default: derive
+  // them from the road graph's bounded planar FACES instead. roads, landmarks,
+  // realLots, streets, pedestrianTiles + extent are SHARED by both paths.
+  let blocks: CityBlock[];
+  let realLots: Record<string, CityInstance[]>;
+  let blockLots: CityBlockLots[];
+  let emptyLots: CityInstance[];
+  let zones: BuildZone[] | undefined;
+
+  if ((opts?.graphLots ?? false) && hasRealGraph(world.city_graph)) {
+    // EM-264 (SA) — the ONLY behavioral change. Buildable blocks/lots come from
+    // the bounded planar FACES of the road graph (ANY topology: pentagon /
+    // radial), so buildings land inside the road-enclosed blocks instead of the
+    // fixed grid. zoneFor reuses the grid path's nearestPlace + zoneForPlace,
+    // INJECTED so cityFaces never imports cityLayout (contract §1 cycle rule).
+    const zoneFor = (x: number, z: number): CityZone => {
+      const p = nearestPlace(x, z);
+      return p ? zoneForPlace(p) : 'residential';
+    };
+    zones = buildZonesFromFaces(planarFaces(world.city_graph), seed, zoneFor);
+    blockLots = zones.map((zn) => ({
+      cx: zn.face.centroid.x,
+      cz: zn.face.centroid.z,
+      lots: zn.suggestedLots,
+    }));
+    emptyLots = blockLots.flatMap((b) => b.lots);
+    blocks = zones.map((zn) => ({
+      cx: zn.face.centroid.x,
+      cz: zn.face.centroid.z,
+      zone: zn.zoneHint,
+    }));
+    // realLots is UNCHANGED + shared: every landmark block still reserves its
+    // REAL_LOTS_PER_LANDMARK street-front lots for the sim's W7 buildings (same
+    // computeRealLots, same (bz,bx) block-loop order as Pass 2 below), so
+    // assignBuildingLots — reused AS-IS — still claims the landmark block first.
+    realLots = {};
+    for (let bz = -B_MAX; bz <= B_MAX; bz++) {
+      for (let bx = -B_MAX; bx <= B_MAX; bx++) {
+        const claimed = landmarkAt.get(`${bx},${bz}`);
+        if (claimed) realLots[claimed.id] = computeRealLots(seed, bx, bz);
+      }
+    }
+  } else {
+  // ── today's fixed-grid Pass 1 / Pass 2 — byte-identical, UNTOUCHED ──────────
   // Pass 1 — classify all 25 blocks.
   interface BlockInfo {
     bx: number;
@@ -952,9 +1032,9 @@ export function computeCityPlan(world: CityWorld): CityPlan {
 
   // Pass 2 — emit blocks + their contents in deterministic loop order, and
   // collect the generated blocks' platted lots (all pads, EM-174).
-  const blocks: CityBlock[] = [];
-  const realLots: Record<string, CityInstance[]> = {};
-  const blockLots: CityBlockLots[] = [];
+  blocks = [];
+  realLots = {};
+  blockLots = [];
   for (const b of infos) {
     blocks.push({ cx: b.bx * BLOCK_PITCH, cz: b.bz * BLOCK_PITCH, zone: b.zone });
 
@@ -990,9 +1070,16 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     emitCurbLife(seed, b.bx, b.bz, pieces, b.tier, pedestrianTileKeys);
   }
 
+  // EM-174: ALL platted lots render as pavement pads from day 0 — the
+  // generator emits zero zone buildings; only landmark anchors and real W7
+  // buildings ever stand in the world.
+  emptyLots = blockLots.flatMap((b) => b.lots);
+  } // ── end grid path (else) ──────────────────────────────────────────────────
+
   // EM-244 (S3a): flatten the pedestrian road tiles into render instances
   // (same envelope loop order as emitRoads ⇒ deterministic). Empty for the
   // default/cars/no-graph plan, so the byte-identical baseline is preserved.
+  // SHARED by BOTH paths — it reads pedestrianTileKeys, not the blocks.
   const pedestrianTiles: CityInstance[] = [];
   for (let j = ENV_MIN; j <= ENV_MAX; j++) {
     for (let i = ENV_MIN; i <= ENV_MAX; i++) {
@@ -1001,11 +1088,6 @@ export function computeCityPlan(world: CityWorld): CityPlan {
       }
     }
   }
-
-  // EM-174: ALL platted lots render as pavement pads from day 0 — the
-  // generator emits zero zone buildings; only landmark anchors and real W7
-  // buildings ever stand in the world.
-  const emptyLots: CityInstance[] = blockLots.flatMap((b) => b.lots);
 
   return {
     pieces,
@@ -1017,6 +1099,9 @@ export function computeCityPlan(world: CityWorld): CityPlan {
     streets: computeStreets(seed, world.city_graph), // EM-188: seeded names, part of the plan
     pedestrianTiles, // EM-244 (S3a): tinted-surface road tiles (empty by default)
     extent: Math.abs(tileCenter(TILE_MIN)) + TILE / 2, // 33.8: outer ring road edge
+    // EM-264 (SA): additive — the key is present ONLY on the graph-lots path
+    // (grid path leaves `zones` undefined ⇒ omitted ⇒ byte-identical baseline).
+    ...(zones ? { zones } : {}),
   };
 }
 
