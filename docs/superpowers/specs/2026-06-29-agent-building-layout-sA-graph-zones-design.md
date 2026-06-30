@@ -38,7 +38,8 @@ export interface CityFace {
   /** Polygon vertices in world space, same order as boundary. */
   poly: { x: number; z: number }[];
   centroid: { x: number; z: number };
-  /** Signed area; the unbounded outer face is dropped by sign + max-area. */
+  /** Signed area (CCW positive); the unbounded outer face is dropped PER-CYCLE
+   *  by winding sign (positive kept), NOT by largest |area|. */
   area: number;
 }
 
@@ -48,8 +49,9 @@ export function planarFaces(graph: CityGraph | null | undefined): CityFace[];
 - **Algorithm:** standard planar-subdivision face trace — half-edge / next-edge-
   by-angle walk. For each directed half-edge, the next half-edge around the walk
   is the most-clockwise turn at the destination node; faces are the closed
-  cycles. Drop the one unbounded outer face (largest |area|, or the
-  opposite-sign winding).
+  cycles. Drop the unbounded outer face PER-CYCLE by winding sign (keep
+  `area > 0`), NOT by largest |area| — a max-|area| drop silently discards a
+  smaller disconnected component's real outer ring.
 - **Loose, defensive, never throws** (pillar 2). Specifically:
   - **Dangling stubs** (degree-1 nodes): traversed and returned to (they border
     no enclosed region) — produce no spurious face, no crash.

@@ -350,7 +350,15 @@ export function useCityPlan(
   if (!ref.current || ref.current.sig !== sig) {
     ref.current = {
       sig,
-      plan: computeCityPlan({ places, city_seed: citySeed, neighborhoods, city_graph }),
+      // EM-264 (SA): the graph-lots branch is gated by GRAPH_LOTS_ENABLED
+      // (default OFF ⇒ { graphLots: false } ⇒ the untouched grid path, byte-
+      // identical). citySignature already folds node/edge counts + car_policy,
+      // so zone lots (a pure function of the graph's edges) re-derive live on a
+      // graph mutation — no new memo dep needed.
+      plan: computeCityPlan(
+        { places, city_seed: citySeed, neighborhoods, city_graph },
+        { graphLots: GRAPH_LOTS_ENABLED },
+      ),
       center: GRID_CENTER,
     };
   }
@@ -545,6 +553,23 @@ function PedestrianRoadPads({
  * byte-identical assertion still holds. Do NOT retire the tile path here.
  */
 export const ROAD_MESH_ENABLED = true; // EM-247 visual sign-off (TEMP — revert if not signed off)
+
+// ── EM-264 (SA): graph-derived buildable-zone lots (default OFF) ─────────────
+
+/**
+ * EM-264 (SA): when true, computeCityPlan derives buildable blocks / platted
+ * lots from the road graph's bounded planar FACES (any topology: pentagon /
+ * radial) instead of the fixed 5×5 grid plat. Default **false** — the grid plat
+ * is the EM-155 byte-identical default + fallback, and flipping this on is a
+ * deliberate, reviewed change pending the human visual sign-off (confirm
+ * buildings land inside the road-enclosed blocks, no grid-on-pentagon). With
+ * the flag off, computeCityPlan runs the untouched grid path UNCHANGED, so every
+ * EM-155/174/239/243/244/246 golden + byte-identical assertion still holds —
+ * exactly the ROAD_MESH_ENABLED (EM-247) deferred-sign-off pattern. No new
+ * render component: zone lots flow through the existing blockLots/emptyLots/
+ * blocks render path.
+ */
+export const GRAPH_LOTS_ENABLED = false;
 
 /** A road-tile piece key (the EM-239/243 instanced road slabs). */
 function isRoadPieceKey(key: CityPieceKey): boolean {

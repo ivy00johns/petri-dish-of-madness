@@ -32,7 +32,7 @@
  *   • pre-Wave-C district-less snapshots still produce a lawful city
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Building, Place, Neighborhood, CityGraph } from '../../types';
 import { placeToWorld, slotLayout, SLOT_BASE_RADIUS } from './worldSpace';
 import {
@@ -53,6 +53,7 @@ import {
   computeCityPlan,
   computeLandmarks,
   computeStreets,
+  hasRealGraph,
   pedestrianPolicyFor,
   pedestrianStreetIds,
   snapToBlockCenter,
@@ -63,6 +64,28 @@ import {
   type CityPieceKey,
   type CityWorld,
 } from './cityLayout';
+
+// EM-264 (SA): the reactivity test imports citySignature from CityScape. Mock
+// the GLB load path (jsdom can't load GLBs) so importing CityScape never pulls
+// the heavy drei/asset graph — the sibling CityScape.test.tsx idiom.
+// citySignature itself is a pure string function.
+vi.mock('./assets/Model', async () => {
+  const T = await import('three');
+  const cache = new Map<string, InstanceType<typeof T.Group>>();
+  return {
+    useToonGLTF: (url: string) => {
+      let scene = cache.get(url);
+      if (!scene) {
+        scene = new T.Group();
+        scene.add(new T.Mesh(new T.BoxGeometry(1, 1, 1), new T.MeshBasicMaterial()));
+        cache.set(url, scene);
+      }
+      return { scene, animations: [] };
+    },
+  };
+});
+
+import { citySignature } from './CityScape';
 
 /** The Wave D1.5 15-place city grid (mirrors config/world.yaml). */
 const TOWN: Place[] = [
@@ -1299,5 +1322,139 @@ describe('EM-246 (S4) — greenfield / near-empty graph renders without crashing
 
     // No orphan road tiles: the perimeter ring is connected (no rendering gap).
     expectNoOrphanRoads(greenfield, 'greenfield plaza');
+  });
+});
+
+// ── EM-264 (SA) — graph-derived buildable zones (wiring, flag-gated) ──────────
+//
+// Lane B wires the Lane A planar-face algorithm (cityFaces) behind
+// GRAPH_LOTS_ENABLED (default OFF). THE LAW (contract §0): with the flag OFF /
+// no opts the plan is byte-for-byte identical to today — every golden above
+// passes UNCHANGED. These APPEND-only tests pin the on-path behavior
+// (determinism + the pentagon face count) and re-prove the off-path law +
+// the citySignature reactivity that re-derives zone lots on a graph mutation.
+
+/** A pentagon master-plan graph: two concentric pentagons (outer + inner ring)
+ *  joined by 5 radial spokes. By Euler (V=10, E=15 ⇒ F=7) it has 6 BOUNDED
+ *  planar faces — 5 "outer" quads between the rings + 1 inner core pentagon — so
+ *  planarFaces returns 6 (the single unbounded outer face is dropped). Coords
+ *  are world space (NOT on the tile grid), the EM-245 pentagon-topology shape. */
+function pentagonGraph(seed = DEFAULT_CITY_SEED): CityGraph {
+  const ring = (prefix: string, r: number) =>
+    Array.from({ length: 5 }, (_, k) => {
+      const a = Math.PI / 2 + (k * 2 * Math.PI) / 5;
+      return { id: `${prefix}${k}`, x: r * Math.cos(a), z: r * Math.sin(a), kind: 'junction' as const };
+    });
+  const nodes = [...ring('o', 24), ...ring('i', 12)];
+  const edge = (a: string, b: string) =>
+    ({ id: `e:${a}->${b}`, a, b, road_class: 'street' as const, car_policy: 'inherit' as const });
+  const edges = [];
+  for (let k = 0; k < 5; k++) {
+    edges.push(edge(`o${k}`, `o${(k + 1) % 5}`)); // outer ring
+    edges.push(edge(`i${k}`, `i${(k + 1) % 5}`)); // inner ring
+    edges.push(edge(`o${k}`, `i${k}`));           // radial spoke
+  }
+  return { version: 1, seed, car_policy: 'cars' as const, nodes, edges };
+}
+
+describe('EM-264 (SA) — hasRealGraph guard (mirrors roadTileSetFrom)', () => {
+  it('true iff graph + node array + edge array + ≥ 1 edge', () => {
+    expect(hasRealGraph(classicGridGraph())).toBe(true);
+    expect(hasRealGraph(pentagonGraph())).toBe(true);
+    expect(hasRealGraph(null)).toBe(false);
+    expect(hasRealGraph(undefined)).toBe(false);
+    expect(hasRealGraph({ ...classicGridGraph(), nodes: [], edges: [] })).toBe(false); // no edges
+    expect(hasRealGraph({ nodes: 'x', edges: [{ a: 'a', b: 'b' }] } as never)).toBe(false);
+    expect(hasRealGraph({ edges: [{ a: 'a', b: 'b' }] } as never)).toBe(false); // no nodes key
+  });
+});
+
+describe('EM-264 (SA) — off-path byte-identical (THE LAW, contract §0)', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('no opts AND { graphLots:false } both equal the classic_grid no-graph baseline', () => {
+    const baseline = JSON.stringify(computeCityPlan({ places: TOWN, city_seed: seed }));
+    const world = { places: TOWN, city_seed: seed, city_graph: classicGridGraph(seed) };
+    // classic_grid graph == no-graph fallback (EM-239), and graphLots:false is a no-op.
+    expect(JSON.stringify(computeCityPlan(world))).toBe(baseline);
+    expect(JSON.stringify(computeCityPlan(world, { graphLots: false }))).toBe(baseline);
+  });
+
+  it('the additive zones key is ABSENT on the off-path plan (undefined ⇒ omitted)', () => {
+    const world = { places: TOWN, city_seed: seed, city_graph: classicGridGraph(seed) };
+    expect(computeCityPlan(world).zones).toBeUndefined();
+    expect(computeCityPlan(world, { graphLots: false }).zones).toBeUndefined();
+    expect('zones' in computeCityPlan(world)).toBe(false);
+  });
+
+  it('graphLots:true with NO real graph still falls back to the grid (byte-identical)', () => {
+    const baseline = JSON.stringify(computeCityPlan({ places: TOWN, city_seed: seed }));
+    // null / absent / empty graphs fail hasRealGraph ⇒ the untouched grid path.
+    expect(JSON.stringify(computeCityPlan({ places: TOWN, city_seed: seed, city_graph: null }, { graphLots: true }))).toBe(baseline);
+    expect(JSON.stringify(computeCityPlan({ places: TOWN, city_seed: seed }, { graphLots: true }))).toBe(baseline);
+    const empty = { ...classicGridGraph(seed), nodes: [], edges: [] };
+    expect(JSON.stringify(computeCityPlan({ places: TOWN, city_seed: seed, city_graph: empty }, { graphLots: true }))).toBe(baseline);
+  });
+});
+
+describe('EM-264 (SA) — on-path graph-lots determinism + pentagon faces', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('same graph + seed + { graphLots:true } ⇒ JSON.stringify-identical', () => {
+    const g = pentagonGraph(seed);
+    const a = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }, { graphLots: true });
+    const b = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }, { graphLots: true });
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it('shuffled node/edge input order ⇒ identical plan (input-order independent)', () => {
+    const g = pentagonGraph(seed);
+    const shuffled: CityGraph = { ...g, nodes: [...g.nodes].reverse(), edges: [...g.edges].reverse() };
+    const a = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }, { graphLots: true });
+    const c = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: shuffled }, { graphLots: true });
+    expect(JSON.stringify(c)).toBe(JSON.stringify(a));
+  });
+
+  it('a pentagon graph yields 6 zones (5 outer + 1 core) with non-empty lots', () => {
+    const g = pentagonGraph(seed);
+    const plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }, { graphLots: true });
+    expect(plan.zones).toBeDefined();
+    expect(plan.zones!.length).toBe(6);              // 5 outer quads + 1 core face
+    expect(plan.blockLots.length).toBe(6);           // one block per zone, not the 25-grid
+    expect(plan.blocks.length).toBe(6);
+    expect(plan.emptyLots.length).toBeGreaterThan(0); // faces are large enough to seed pads
+    // emptyLots is exactly the zones' suggested pads flattened (the wiring contract).
+    expect(plan.emptyLots).toEqual(plan.zones!.flatMap((z) => z.suggestedLots));
+    expect(plan.blockLots).toEqual(
+      plan.zones!.map((z) => ({ cx: z.face.centroid.x, cz: z.face.centroid.z, lots: z.suggestedLots })),
+    );
+  });
+
+  it('the flag actually fires: graphLots:true differs from the grid path on the same graph', () => {
+    const g = pentagonGraph(seed);
+    const grid = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }); // no opts ⇒ grid plat
+    const graphLots = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }, { graphLots: true });
+    expect(JSON.stringify(graphLots)).not.toBe(JSON.stringify(grid));
+    expect(grid.zones).toBeUndefined();
+    expect(grid.blocks.length).toBe(GRID_BLOCKS * GRID_BLOCKS); // 25 — the fixed grid, untouched
+    // realLots is shared/unchanged across paths (the contract): same place anchors.
+    expect(Object.keys(graphLots.realLots).sort()).toEqual(Object.keys(grid.realLots).sort());
+  });
+});
+
+describe('EM-264 (SA) — citySignature reactivity (graph mutation re-derives, idle poll does not)', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('a graph mutation changes citySignature; a no-op poll does not', () => {
+    const g0 = classicGridGraph(seed);
+    // Idle poll: a fresh-but-identical graph object (same node/edge counts + policy).
+    const idle = classicGridGraph(seed);
+    expect(citySignature(TOWN, seed, undefined, idle)).toBe(citySignature(TOWN, seed, undefined, g0));
+    // Mutation: grow one segment (node + edge counts change) ⇒ the sig changes ⇒
+    // graph-lots zones (a pure fn of the graph's edges) re-derive live, no reload.
+    const grown = classicGridGraph(seed);
+    grown.nodes.push({ id: 'n:17:2', x: tc(17), z: tc(2), kind: 'junction' as const });
+    grown.edges.push({ id: 'e:n:12:2->n:17:2', a: 'n:12:2', b: 'n:17:2', road_class: 'street' as const, car_policy: 'inherit' as const });
+    expect(citySignature(TOWN, seed, undefined, grown)).not.toBe(citySignature(TOWN, seed, undefined, g0));
   });
 });
