@@ -40,8 +40,20 @@ Every box ends ✅ (invoked, artifact path) or a one-line deferral reason.
 
 ## Outcome
 SA built, hardened, gated, committed on `build/em264-graph-zones`. Ships **OFF**
-(`GRAPH_LOTS_ENABLED=false`, byte-identical). ONE open gate: the **user visual
-sign-off** (flip the flag against a live pentagon/radial), the EM-247 pattern.
+(`GRAPH_LOTS_ENABLED=false`, byte-identical).
+
+### Visual sign-off — ✅ APPROVED 2026-06-30
+Flipped the flag on a temp basis, god-adopted a pentagon master plan on the live
+run (tick ~1343), and rendered an OFF-vs-ON top-down of the same pentagon graph
+from the real `computeCityPlan`: OFF = 192 lot pads on the frozen 5×5 grid
+(ignoring the roads); ON = 176 pads + 5 zones filling the pentagon wedge faces.
+User approved the placement.
+- **Flag decision:** stays **OFF** (ship dormant; flip at a later deploy). Flag
+  reverted to `false` (working tree matches HEAD — no code change from sign-off).
+- **Live run:** left as a pentagon (places/agents/economy untouched; ~50 ticks of
+  progress preserved). Restorable from the tick-1325 snapshot if ever wanted.
+
+**SA is DONE.** No open gates. SB (EM-265) is unblocked (stable `BuildZone`).
 
 ### Deferred / N-A (with reasons)
 - `nano-banana` — N/A: no new imagery; SA reuses existing GLBs (no new assets).
