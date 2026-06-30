@@ -56,6 +56,19 @@ export interface CityGraphEdge {
   car_policy: 'inherit' | 'cars' | 'pedestrian' | 'mixed';
 }
 
+// EM-265 (SB): an agent-authored, advisory zone rule. A ratified
+// `set_zone_rule` proposal attaches one rule to a bounded planar FACE (block)
+// of the road graph, keyed by its zone id (`"|".join(sorted(boundary_node_ids))`
+// — IDENTICAL formula both languages, law §0.2). ADVISORY ONLY in SB: a rule
+// renders (tint + label) but enforces nothing (SC acts on it). Wire shape is
+// snake_case to match the backend JSON byte-for-byte. One rule per zone (last
+// ratified wins). `density_cap` is an absolute max-buildings hint; null = no cap.
+export interface ZoneRule {
+  zone_id: string;
+  hint: 'residential' | 'market' | 'civic' | 'open';
+  density_cap: number | null;
+}
+
 export interface CityGraph {
   version: number;
   seed: number;
@@ -70,6 +83,10 @@ export interface CityGraph {
   template?: string;
   nodes: CityGraphNode[];
   edges: CityGraphEdge[];
+  // EM-265 (SB, additive): ratified zone rules. Serialized ONLY when non-empty
+  // (the backend omits the key when []), so a pre-SB snapshot lacks it and
+  // loads/renders byte-identical (law §0.1). Absent ⇒ no rules.
+  zone_rules?: ZoneRule[];
 }
 
 // Wave E (EM-113, contracts/wave-e.md shared vocabulary): the relationship

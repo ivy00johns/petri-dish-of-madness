@@ -962,7 +962,14 @@ export function computeCityPlan(
       const p = nearestPlace(x, z);
       return p ? zoneForPlace(p) : 'residential';
     };
-    zones = buildZonesFromFaces(planarFaces(world.city_graph), seed, zoneFor);
+    // EM-265 (SB): attach the graph's ratified zone_rules to their matching
+    // face by id (absent ⇒ [] ⇒ byte-identical to SA — the no-rules path).
+    zones = buildZonesFromFaces(
+      planarFaces(world.city_graph),
+      seed,
+      zoneFor,
+      world.city_graph?.zone_rules ?? [],
+    );
     blockLots = zones.map((zn) => ({
       cx: zn.face.centroid.x,
       cz: zn.face.centroid.z,

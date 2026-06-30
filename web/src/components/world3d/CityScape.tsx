@@ -59,6 +59,7 @@ import {
   type CityPlan,
   type CityWorld,
 } from './cityLayout';
+import type { BuildZone, ZoneRule } from './cityFaces';
 import { CITY_MODEL_REGISTRY } from './assets/cityModels';
 import type { ModelSpec } from './assets/models';
 import { useToonGLTF } from './assets/Model';
@@ -289,6 +290,7 @@ export function citySignature(
     nodes: readonly unknown[];
     edges: readonly { id?: string; car_policy?: string }[];
     car_policy?: string;
+    zone_rules?: readonly { zone_id?: string; hint?: string; density_cap?: number | null }[];
   } | null,
 ): string {
   const head = citySeed ?? 'default';
@@ -321,7 +323,19 @@ export function citySignature(
         .sort()
         .join(',')
     : '';
-  return `${head}|${body}|${tiers}|${graph}|${policy}`;
+  // EM-265 (SB): fold a RULES HASH so a ratified set_zone_rule re-renders LIVE
+  // (the thrice-shipped content-key bug — law §0.5). Read off the SAME 4th param
+  // (zone_rules ride ON the CityGraph), so the arity stays 4. Map each rule to
+  // `zone_id:hint:density_cap`, SORT (poll order never churns), join. No rules ⇒
+  // '' ⇒ a stable suffix ⇒ byte-identical no-churn (law §0.1).
+  const rules =
+    cityGraph && Array.isArray(cityGraph.zone_rules)
+      ? cityGraph.zone_rules
+          .map((r) => `${r.zone_id ?? ''}:${r.hint ?? ''}:${r.density_cap ?? ''}`)
+          .sort()
+          .join(',')
+      : '';
+  return `${head}|${body}|${tiers}|${graph}|${policy}|${rules}`;
 }
 
 /**
@@ -540,6 +554,96 @@ function PedestrianRoadPads({
   );
 }
 
+// ── EM-265 (SB): agent-authored zone-rule tint overlay (advisory) ────────────
+
+/**
+ * Hint → ground-zone tint. Maps the frozen SB hint vocabulary
+ * (`residential | market | civic | open`) onto the EXISTING district-tint
+ * vocabulary (townLayout.DISTRICT_TINTS: residential/market/civic grass tones;
+ * `open` reuses the farm/greenbelt tone). WebGL colors live OUTSIDE the CSS
+ * token system (the RoadMesh / EmptyLotPads precedent), so these hex literals
+ * are the established renderer pattern. A ratified rule tints its block by hint.
+ */
+export const ZONE_HINT_TINTS: Record<ZoneRule['hint'], string> = {
+  residential: '#95bf67', // DISTRICT_TINTS.residential
+  market: '#a6bd55', // DISTRICT_TINTS.market
+  civic: '#85b164', // DISTRICT_TINTS.civic
+  open: '#a9c352', // DISTRICT_TINTS.farm — open / greenbelt
+};
+
+/** A renderable tint for one ruled zone — derived from the zone's face. */
+export interface ZoneTintEntry {
+  id: string;
+  x: number;
+  z: number;
+  radius: number;
+  color: string;
+  hint: ZoneRule['hint'];
+}
+
+/**
+ * The tint overlays for the zones that carry a ratified rule. Pure +
+ * deterministic (canonical zone order, last-rule-wins per zone). A zone with
+ * NO rule contributes nothing — so the no-rules path yields [] ⇒ ZERO tint
+ * meshes ⇒ byte-identical to pre-SB (law §0.1). Absent/empty zones ⇒ [] (the
+ * graph-lots flag is OFF ⇒ plan.zones undefined on the default path).
+ */
+export function zoneRuleTints(zones: readonly BuildZone[] | undefined): ZoneTintEntry[] {
+  if (!Array.isArray(zones)) return [];
+  const out: ZoneTintEntry[] = [];
+  for (const zn of zones) {
+    // `rules` is always ZoneRule[] by the type; the length guard is defensive.
+    const rules: ZoneRule[] = zn?.rules ?? [];
+    if (rules.length === 0) continue;
+    const rule = rules[rules.length - 1]; // one rule per zone (last wins)
+    const color = Object.prototype.hasOwnProperty.call(ZONE_HINT_TINTS, rule.hint)
+      ? ZONE_HINT_TINTS[rule.hint]
+      : null;
+    if (!color) continue; // unknown hint ⇒ no tint (defensive, never a hole)
+    // Disc radius from the face footprint (√(area/π)); clamped so a sliver face
+    // still reads. Advisory tint — approximate is fine (mirrors Ground discs).
+    const radius = Math.max(1.0, Math.sqrt(Math.abs(zn.face.area) / Math.PI));
+    out.push({ id: zn.id, x: zn.face.centroid.x, z: zn.face.centroid.z, radius, color, hint: rule.hint });
+  }
+  return out;
+}
+
+/** Tint opacity for the zone-rule wash (subtle, like the Ground district discs). */
+const ZONE_TINT_OPACITY = 0.3;
+
+/**
+ * EM-265 (SB): the advisory zone-rule tints — one translucent toon disc per
+ * ruled block, hinted by color, sitting just above the grass (below the road
+ * tiles / lot pads). Reuses the Ground.tsx district-disc vocabulary so a
+ * ratified rule reads as a soft zone wash, never a paint-bucket. EMPTY when no
+ * rule is ratified ⇒ adds nothing to the baseline city (law §0.1). An OPTIONAL
+ * sparse label is deferred (EM-188 discipline) — the tint is the SB signal.
+ * Purely procedural ⇒ no ModelBoundary needed.
+ */
+export function ZoneRuleTints({ zones }: { zones: readonly BuildZone[] }) {
+  const tints = useMemo(() => zoneRuleTints(zones), [zones]);
+  return (
+    <>
+      {tints.map((t, i) => (
+        <mesh
+          key={`zone-tint:${t.id}`}
+          name={`city-zone-tint-${i}`}
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[t.x, 0.009, t.z]}
+          material={toonMaterial(t.color, {
+            transparent: true,
+            opacity: ZONE_TINT_OPACITY,
+            depthWrite: false,
+            polygonOffset: true,
+          })}
+        >
+          <circleGeometry args={[t.radius, 36]} />
+        </mesh>
+      ))}
+    </>
+  );
+}
+
 // ── EM-247 (S5a): procedural road-mesh flag (default OFF) ────────────────────
 
 /**
@@ -612,6 +716,13 @@ export function CityScape({ world }: { world: CityWorld }) {
       )}
       {plan.pedestrianTiles.length > 0 && (
         <PedestrianRoadPads instances={plan.pedestrianTiles} center={center} />
+      )}
+      {/* EM-265 (SB): advisory zone-rule tints. Gated on GRAPH_LOTS_ENABLED +
+          real zones (zones only exist on the graph-lots path) AND on a zone
+          actually carrying a rule (zoneRuleTints filters) — so the default
+          flag-OFF path renders NOTHING here ⇒ byte-identical (law §0.1). */}
+      {GRAPH_LOTS_ENABLED && plan.zones && plan.zones.length > 0 && (
+        <ZoneRuleTints zones={plan.zones} />
       )}
     </group>
   );

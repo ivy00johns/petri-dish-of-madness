@@ -51,17 +51,16 @@
  * worldSpace (no cycle); CityGraph is a type-only import from ../../types.
  */
 
-import type { CityGraph } from '../../types';
+import type { CityGraph, ZoneRule } from '../../types';
 import type { CityInstance, CityZone } from './cityLayout';
 import { hashUnit } from './worldSpace';
 
-/** SB will own the real rule vocabulary; SA defines a minimal forward stub and
- *  never populates it (every BuildZone.rules is []). */
-export interface ZoneRule {
-  zoneId: string;
-  hint: CityZone;
-  densityCap: number | null;
-}
+// EM-265 (SB): the SA forward stub (`{zoneId, hint: CityZone, densityCap}`) is
+// retired for the wire shape `ZoneRule` (snake_case: `{zone_id, hint, density_cap}`,
+// matching the backend JSON byte-for-byte — types/index.ts). SA never populated
+// `rules` (every BuildZone.rules was []), so there is no data migration; SB just
+// fills the same hook from `CityGraph.zone_rules` keyed by zone id.
+export type { ZoneRule };
 
 export interface CityFace {
   /** Boundary node ids in walk order (loose; may be slightly degenerate). */
@@ -554,13 +553,21 @@ function suggestLots(face: CityFace, seed: number, faceId: string): CityInstance
 /** Turn faces into buildable zones. `zoneForCentroid` is injected by the caller
  *  (computeCityPlan owns places + zoneForPlace) to avoid a cityLayout import
  *  cycle. suggestedLots are seeded via hashUnit (the EM-155 idiom), inset from
- *  the face boundary, clipped loosely to the interior. */
+ *  the face boundary, clipped loosely to the interior.
+ *
+ *  EM-265 (SB): `zoneRules` (the graph's `zone_rules`, default []) are attached
+ *  to each zone by id — `rule.zone_id === zone.id`. The cross-language zone id
+ *  formula is IDENTICAL both sides (law §0.2), so a backend-ratified rule's
+ *  `zone_id` lands on exactly the matching rendered block. Absent/empty ⇒ every
+ *  `rules: []` (byte-identical to SA — the no-rules path, law §0.1). */
 export function buildZonesFromFaces(
   faces: CityFace[],
   seed: number,
   zoneForCentroid: (x: number, z: number) => CityZone,
+  zoneRules: ZoneRule[] = [],
 ): BuildZone[] {
   if (!Array.isArray(faces)) return [];
+  const rules = Array.isArray(zoneRules) ? zoneRules : [];
   const out: BuildZone[] = [];
   for (const face of faces) {
     if (!face || !Array.isArray(face.boundary) || !Array.isArray(face.poly)) {
@@ -574,7 +581,9 @@ export function buildZonesFromFaces(
       face,
       suggestedLots: suggestLots(face, seed, id),
       zoneHint,
-      rules: [],
+      // EM-265 (SB): rules for THIS zone (matched by id). No rules ⇒ [] ⇒
+      // byte-identical to SA. One rule per zone (backend last-ratified-wins).
+      rules: rules.filter((r) => r.zone_id === id),
     });
   }
   return out;
