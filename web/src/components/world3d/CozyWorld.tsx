@@ -518,10 +518,27 @@ export function CozyWorld({
     places: places ?? [],
     city_seed: world?.city_seed,
     neighborhoods: world?.neighborhoods,  // EM-123: matured districts densify
+    // EM-266 (SC) F1 — thread the authoritative road graph. Without it,
+    // city_graph is undefined here, so computeCityPlan ALWAYS takes the grid
+    // path, plan.zones is never populated, and assignBuildingLots never sees a
+    // zone — so the SA graph-lots branch AND the SC zone-targeting branch never
+    // execute in the LIVE building render (only CityScape's own useCityPlan
+    // passed the graph, and it never calls assignBuildingLots). With
+    // GRAPH_LOTS_ENABLED OFF (default) the grid path is byte-identical whether
+    // or not the graph is passed — assignBuildingLots reads only the grid-
+    // derived realLots/landmarks/blockLots — so building spots are unchanged;
+    // flipping the flag on now makes buildings land in their road-enclosed
+    // blocks / targeted zones.
+    city_graph: world?.city_graph,
   });
   const buildingSpots = useMemo(() => {
     const list = buildings ?? [];
-    const spotById = assignBuildingLots(cityPlan, list, placeCenters);
+    // EM-266 (SC): thread each build's targeted zone_id through so a zone-
+    // targeted build lands in its chosen zone's lots (assignBuildingLots). On the
+    // default (no-zones) plan zone_id is inert ⇒ location auto-placement, byte-
+    // identical to pre-SC.
+    const lotInput = list.map((b) => ({ id: b.id, location: b.location, zone_id: b.zone_id }));
+    const spotById = assignBuildingLots(cityPlan, lotInput, placeCenters);
     return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? { x: 0, z: 0 }) }));
   }, [buildings, cityPlan, placeCenters]);
 

@@ -752,6 +752,13 @@ class Building:
     # unknown skin is ignored client-side. Serialized in to_dict + restored in
     # from_snapshot (pre-Wave-K snapshots lack the key → None).
     skin: str | None = None
+    # EM-266 (SC) — the zone (planar-face id, `zone_id_for`) an agent TARGETED for
+    # this build. Additive + advisory: SC records intent, NEVER enforces (the build
+    # always succeeds — honor/ignore/break all land). Set ONLY when the agent named
+    # a currently-resolvable zone AND GRAPH_ZONES_ENABLED is on; else None (an
+    # unresolvable/absent id falls back to auto-placement). Serialized in to_dict +
+    # restored in from_snapshot ONLY when set, so pre-SC snapshots are byte-identical.
+    zone_id: str | None = None
 
     @property
     def condition_label(self) -> str:
@@ -782,6 +789,10 @@ class Building:
         # set, so pre-Wave-K buildings serialize byte-identically (absent ⇒ None).
         if self.skin:
             d["skin"] = self.skin
+        # EM-266 (SC) — the targeted zone rides the shape ONLY when set, so a build
+        # with no zone target (or the flag off) serializes byte-identically to pre-SC.
+        if self.zone_id:
+            d["zone_id"] = self.zone_id
         return d
 
 
@@ -908,6 +919,42 @@ BUILD_TYPES: tuple[dict[str, str], ...] = (
 # semantics already exist. Off-list types stay cosmetic+labelled (no buff).
 _WORK_BUFF_KINDS = frozenset({"workshop", "smithy", "forge", "tavern", "market", "bakery", "dock"})
 _FORAGE_BUFF_KINDS = frozenset({"garden", "farm", "granary", "park"})
+
+
+# ── EM-266 (SC) — building-kind → ZoneRule.hint category (observation only) ─────
+# A SMALL, DETERMINISTIC, best-effort map used ONLY to record a `zone_violation`
+# when an agent builds a wrong-kind structure in a ruled zone. It NEVER blocks or
+# coerces a build (the build always succeeds — honor/ignore/break). The hint
+# vocabulary is citygraph.ZONE_HINTS = {residential, market (commerce/trade/
+# industry/social), civic, open (green/agricultural/public space)}. An UNMAPPED
+# kind — the dominant agent-authored `generic` bucket + any novel word — returns
+# None ⇒ treated as MATCHING ⇒ NO false violation (contract §3). Pure lookup.
+_KIND_HINT_MAP: dict[str, str] = {
+    # residential
+    "house": "residential", "home": "residential", "cottage": "residential",
+    "dwelling": "residential", "apartment": "residential", "residence": "residential",
+    "hut": "residential", "cabin": "residential", "manor": "residential",
+    # market — commerce / trade / industry / social gathering
+    "market": "market", "stall": "market", "shop": "market", "store": "market",
+    "tavern": "market", "inn": "market", "bakery": "market", "bank": "market",
+    "smithy": "market", "forge": "market", "workshop": "market", "mill": "market",
+    "warehouse": "market", "dock": "market", "bathhouse": "market",
+    # civic
+    "school": "civic", "temple": "civic", "clinic": "civic", "clocktower": "civic",
+    "library": "civic", "monument": "civic", "well": "civic", "theater": "civic",
+    "lighthouse": "civic", "townhall": "civic", "town_hall": "civic", "hall": "civic",
+    "church": "civic", "hospital": "civic", "courthouse": "civic", "tower": "civic",
+    # open — green / agricultural / public space
+    "park": "open", "garden": "open", "farm": "open", "granary": "open",
+    "orchard": "open", "field": "open", "plaza": "open", "green": "open",
+    "square": "open", "grove": "open", "fountain": "open", "pond": "open",
+}
+
+
+def _kind_to_hint(kind: str) -> str | None:
+    """Best-effort ZoneRule.hint category for a building `kind` (normalized). None
+    ⇒ UNMAPPED ⇒ treat as matching (no false zone_violation). Pure/deterministic."""
+    return _KIND_HINT_MAP.get(str(kind).strip().lower())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -4681,6 +4728,7 @@ class World:
         funds_required: int,
         function: str | None = None,
         place: str | None = None,
+        zone_id: str | None = None,
     ) -> dict:
         """Create a Building status=planned at owner=public.
         Emits structure_state_changed{to:planned} + project_proposed.
@@ -4690,6 +4738,17 @@ class World:
         valid place id the new Building's location is that place; otherwise (absent
         / unknown) it falls back to the agent's current location (the pre-K
         behavior) — so a bad place never wastes the turn.
+
+        EM-266 (SC): an OPTIONAL `zone_id` (a planar-face id, `zone_id_for`) lets the
+        agent TARGET a city block. Advisory-only + gated on GRAPH_ZONES_ENABLED:
+        flag OFF ⇒ `zone_id` ignored entirely (byte-identical). Flag ON ⇒ if the id
+        resolves to a CURRENT face it's stored on the Building; else it's dropped
+        (auto-placement fallback, like an unknown `place`). The build ALWAYS
+        succeeds regardless of any ZoneRule — no cap enforcement, no kind coercion,
+        no block. When a stored-zone build defies the zone's rule (wrong kind, or
+        over the density cap) a `zone_violation` observation is parked in the
+        pending_spawn_events outbox (same pattern as zone_rule_set) — a finding,
+        never a penalty. An honored build (kind matches, under cap) emits nothing.
 
         W11b / EM-103: a project whose name fuzzy-matches an active/proposed
         rule's text is a COMMEMORATIVE monument to that rule (tagged
@@ -4729,6 +4788,20 @@ class World:
         chosen = str(place or "").strip()
         if chosen and chosen in self.places:
             build_location = chosen
+        # EM-266 (SC) — resolve an OPTIONAL targeted zone. Gated on GRAPH_ZONES_ENABLED
+        # (imported lazily to avoid the engine→agents import cycle): flag OFF ⇒ ignore
+        # zone_id entirely (byte-identical). Flag ON ⇒ store it ONLY when it resolves to
+        # a CURRENT planar face; an unresolvable/absent id drops to auto-placement (like
+        # an unknown `place`). This NEVER gates the build — a bad zone never wastes a turn.
+        from ..agents.runtime import GRAPH_ZONES_ENABLED
+        stored_zone_id: str | None = None
+        if GRAPH_ZONES_ENABLED:
+            zid = str(zone_id or "").strip()
+            if zid:
+                current_zones = {zone_id_for(f.boundary)
+                                 for f in planar_faces(self.city_graph)}
+                if zid in current_zones:
+                    stored_zone_id = zid
         building = Building(
             id=f"bld_{str(uuid.uuid4())[:8]}",
             name=display_name,
@@ -4742,8 +4815,48 @@ class World:
             created_tick=self.tick,
             updated_tick=self.tick,
             commemorates=rule.id if rule is not None else None,
+            zone_id=stored_zone_id,
         )
         self.buildings[building.id] = building
+        # EM-266 (SC) — record defiance (observation ONLY; NO penalty, NO block). Only
+        # under a stored zone with a ZoneRule: a build defies its zone when it is OVER
+        # the density cap (count of LIVE buildings whose zone_id == this zone, THIS one
+        # included, exceeds the cap — the precise, load-bearing signal) OR its kind
+        # maps to a hint that mismatches the rule's hint (UNMAPPED kind ⇒ matching ⇒ no
+        # false violation). An honored build (kind matches, under cap) parks nothing.
+        # F1 (EM-266 SC): count LIVE occupancy only — a demolished build stays in
+        # self.buildings as status "destroyed" (never popped) with its zone_id tag
+        # intact; including it would inflate a false over_cap when the zone is
+        # actually under the cap. The perceived built-count (runtime.py nearby_zones)
+        # uses this SAME basis so what the agent reads matches what SC records.
+        if stored_zone_id is not None:
+            zrule = next((r for r in self.city_graph.zone_rules
+                          if r.zone_id == stored_zone_id), None)
+            if zrule is not None:
+                zone_count = sum(1 for b in self.buildings.values()
+                                 if b.zone_id == stored_zone_id
+                                 and b.status != "destroyed")
+                over_cap = (zrule.density_cap is not None
+                            and zone_count > zrule.density_cap)
+                kind_cat = _kind_to_hint(building.kind)
+                kind_mismatch = kind_cat is not None and kind_cat != zrule.hint
+                if over_cap or kind_mismatch:
+                    self.pending_spawn_events.append({
+                        "kind": "zone_violation", "actor_id": agent.id,
+                        "actor_type": "system",
+                        "text": (f"🗺 {building.name} rises in a {zrule.hint} zone"
+                                 + (" past its density cap" if over_cap else
+                                    f" as a {building.kind}")
+                                 + " — the plan defied, the build stands."),
+                        "payload": {
+                            "zone_id": stored_zone_id,
+                            "building_id": building.id,
+                            "kind": building.kind,
+                            "rule_hint": zrule.hint,
+                            "over_cap": bool(over_cap),
+                            "tick": self.tick,
+                        },
+                    })
         commemorative_note = (
             f" — commemorating the law \"{_truncate(rule.text)}\""
             if rule is not None else ""
@@ -8044,6 +8157,10 @@ class World:
                 # Wave K / EM-220 — restore the owner-set skin (pre-Wave-K
                 # snapshots lack the key ⇒ None, byte-identical default).
                 skin=(str(d["skin"]) if d.get("skin") else None),
+                # EM-266 (SC) — restore the targeted zone (pre-SC snapshots lack
+                # the key ⇒ None, byte-identical default). Loose: a stale id (its
+                # face may be gone) round-trips as-is; it's an advisory record.
+                zone_id=(str(d["zone_id"]) if d.get("zone_id") else None),
             )
             world.buildings[b.id] = b
 

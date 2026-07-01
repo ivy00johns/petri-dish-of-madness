@@ -247,6 +247,10 @@ ACTION_SCHEMA = {
              "function": {"type": "string", "maxLength": 40},
              # Wave K / EM-182 — OPTIONAL chosen build place (a district id).
              "place": {"type": "string"},
+             # EM-266 (SC) — OPTIONAL targeted zone (a planar-face id). Loose: an
+             # absent/unresolvable id is fine (falls back to auto-placement) — never
+             # a rejection, the build is always free.
+             "zone_id": {"type": "string"},
          }}}}},
         {"if": {"required": ["action"], "properties": {"action": {"const": "contribute_funds"}}},
          "then": {"properties": {"args": {"required": ["building_id", "amount"], "properties": {
@@ -1045,17 +1049,29 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
                 f"({hint}, ~{lots} lots"
             )
             if rule is not None and rule.density_cap is not None:
+                # F2 (EM-266 SC): count LIVE buildings whose zone_id == this zone —
+                # the SAME basis SC's over_cap check uses (world.py action_propose_
+                # project). A zone_id is a pure tag SC never moves the building's
+                # `location` to, so a point-in-poly over `location` decoupled the
+                # density an agent READS ("N built") from the density SC OBSERVES
+                # (and fires over_cap on): an agent piling zone_id-tagged builds into
+                # a capped zone perceived "0 built" while violations fired. Counting
+                # by zone_id makes the perceived density match the violation trigger,
+                # so an agent gets real feedback to honor/defy the cap.
                 built = sum(
                     1 for b in world.buildings.values()
-                    if getattr(b, "status", "") != "destroyed"
-                    and (p := world.places.get(getattr(b, "location", None))) is not None
-                    and _point_in_poly(float(p.x), float(p.y), f.poly)
+                    if getattr(b, "zone_id", None) == zid
+                    and getattr(b, "status", "") != "destroyed"
                 )
                 clause += f", cap {rule.density_cap} — {built} built"
             clause += ")"
             clauses.append(clause)
         if clauses:
             line += " Nearby zones: " + " ".join(clauses) + "."
+            # EM-266 (SC) — one framing clause (no new per-zone lines; prompt-diet):
+            # an agent MAY target a zone when it builds. The build always succeeds —
+            # a wrong kind or an over-cap block still stands (defiance is allowed).
+            line += " To build in one, pass zone=<id> on propose_project."
     return line
 
 
@@ -6117,8 +6133,11 @@ class AgentRuntime:
             function = args.get("function")
             # Wave K / EM-182 — optional chosen build place (a district id).
             place = args.get("place")
+            # EM-266 (SC) — optional targeted zone (a planar-face id). Loose: the
+            # world resolves/ignores it (flag-gated) — an absent/bad id never blocks.
+            zone_id = args.get("zone_id")
             result = self.world.action_propose_project(
-                agent, name, kind, funds_required, function, place
+                agent, name, kind, funds_required, function, place, zone_id
             )
             return _emit_world_result(result, base, thought)
 
