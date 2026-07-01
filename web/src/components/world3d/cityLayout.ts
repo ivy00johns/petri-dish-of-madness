@@ -1132,18 +1132,76 @@ export function computeCityPlan(
  *   3. SLOT-RING LAST RESORT: the EM-131 slotLayout ring around the anchor /
  *      place center, only when every platted lot in the city is claimed.
  *
+ * EM-266 (SC): a building may carry a `zone_id` — the agent-TARGETED build zone
+ * (a `plan.zones[].id`). When the plan carries zones (the graph-lots path) and
+ * the id resolves, the build is placed into THAT zone's suggestedLots (claiming
+ * lots in sorted-id order), OVERFLOWING past them via the slotLayout ring around
+ * the zone centroid when the zone is over-cap — a violated cap you can SEE, never
+ * a refused or dropped build (law §0.1). A build with NO zone_id, an unresolvable
+ * id, or a plan with NO zones (flag off / no graph) falls through to the location
+ * path below UNCHANGED ⇒ byte-identical to pre-SC (law §0.3).
+ *
  * Pure function of (plan, buildings, centers) — same world ⇒ same spots
  * every frame, reload and input order. A building on a platted lot stands
  * ON its pavement pad (the pad reads as the building's foundation).
  */
 export function assignBuildingLots(
-  plan: Pick<CityPlan, 'realLots' | 'landmarks' | 'blockLots'>,
-  buildings: ReadonlyArray<{ id: string; location: string }>,
+  plan: Pick<CityPlan, 'realLots' | 'landmarks' | 'blockLots' | 'zones'>,
+  buildings: ReadonlyArray<{ id: string; location: string; zone_id?: string | null }>,
   placeCenters: ReadonlyMap<string, { x: number; z: number }>,
 ): Map<string, { x: number; z: number }> {
   const out = new Map<string, { x: number; z: number }>();
-  const byPlace = new Map<string, string[]>();
+
+  // EM-266 (SC): zone-targeted placement. ONLY when plan.zones exists (the
+  // graph-lots path). A build whose zone_id matches a zone.id lands in THAT
+  // zone; every other build (no zone_id, unresolvable id, or no zones at all)
+  // routes to the EXISTING location path below UNCHANGED — so the no-zone_id /
+  // no-zones case is byte-identical to pre-SC (law §0.3).
+  const zonesById =
+    plan.zones && plan.zones.length > 0
+      ? new Map(plan.zones.map((z) => [z.id, z]))
+      : null;
+
+  const placeBuildings: { id: string; location: string }[] = [];
+  const byZone = new Map<string, string[]>();
   for (const b of buildings) {
+    const zid = b.zone_id;
+    if (zonesById && zid != null && zonesById.has(zid)) {
+      const ids = byZone.get(zid) ?? [];
+      ids.push(b.id);
+      byZone.set(zid, ids);
+    } else {
+      placeBuildings.push({ id: b.id, location: b.location });
+    }
+  }
+
+  // Per targeted zone (sorted zone-id order): claim suggestedLots in sorted
+  // building-id order; builds PAST the lots ring the zone centroid (slotLayout —
+  // the SA-sanctioned overflow). Each zone owns its OWN pads, so there is no
+  // cross-zone contention. Sorted iteration both levels ⇒ input-order independent.
+  if (zonesById) {
+    for (const zid of [...byZone.keys()].sort()) {
+      const zone = zonesById.get(zid)!;
+      const ids = [...(byZone.get(zid) ?? [])].sort();
+      const lots = zone.suggestedLots;
+      const n = Math.min(ids.length, lots.length);
+      for (let i = 0; i < n; i++) {
+        out.set(ids[i], { x: lots[i].x, z: lots[i].z });
+      }
+      const overflow = ids.slice(n);
+      if (overflow.length > 0) {
+        // slotLayout sorts internally; the ring hugs the face centroid so an
+        // over-cap zone reads as a choked, dense pile — never a vanished build.
+        for (const [id, pt] of slotLayout(zone.face.centroid, overflow)) {
+          out.set(id, pt);
+        }
+      }
+    }
+  }
+
+  // ── EXISTING location path — byte-identical when no build targets a zone ─────
+  const byPlace = new Map<string, string[]>();
+  for (const b of placeBuildings) {
     const ids = byPlace.get(b.location) ?? [];
     ids.push(b.id);
     byPlace.set(b.location, ids);

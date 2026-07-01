@@ -185,6 +185,14 @@ export interface Building {
   // override LAYERED OVER (not replacing) the health-soot tint. Optional/null so
   // pre-Wave-K backends and snapshots stay valid; an unknown skin name is ignored.
   skin?: string | null;
+  // EM-266 (SC, additive): the zone the agent TARGETED this build at — a
+  // BuildZone's SA/SB id (`"|".join(sorted(boundary_node_ids))`). Serialized ONLY
+  // when set (absent ⇒ null ⇒ pre-SC snapshots byte-identical, law §0.3). On the
+  // graph-lots path the 3D city places the building into THAT zone's suggested
+  // lots (assignBuildingLots), overflowing the cap visibly rather than refusing
+  // it; an unresolvable id, or the flag-off / no-graph path, falls back to
+  // location-based auto-placement — never a wasted turn, never a crash.
+  zone_id?: string | null;
 }
 
 // ============================================================

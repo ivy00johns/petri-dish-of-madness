@@ -1517,3 +1517,167 @@ describe('EM-265 (SB) — computeCityPlan attaches zone_rules to BuildZone.rules
     expect(JSON.stringify(grid)).toBe(JSON.stringify(gridNoRules));
   });
 });
+
+// ── EM-266 (SC) — zone-targeted building placement (place into the zone) ──────
+//
+// SC threads an optional Building.zone_id through assignBuildingLots. When the
+// plan carries zones (the graph-lots path) a build naming a zone lands in THAT
+// zone's suggestedLots, claiming lots in sorted-id order and OVERFLOWING past
+// them via the slotLayout ring around the zone centroid when over-cap — a
+// violated cap you can SEE, never a refused/dropped build (law §0.1). A build
+// with no zone_id, an unresolvable id, or a plan with NO zones (flag off / no
+// graph) falls back to the location path UNCHANGED (byte-identical, law §0.3).
+
+describe('EM-266 (SC) — zone-targeted building placement', () => {
+  const seed = DEFAULT_CITY_SEED;
+  const centers = new Map(TOWN.map((p) => [p.id, placeToWorld(p)]));
+
+  /** A plan WITH zones (the graph-lots path over the pentagon master plan). */
+  const zonedPlan = (): CityPlan =>
+    computeCityPlan(
+      { places: TOWN, city_seed: seed, city_graph: pentagonGraph(seed) },
+      { graphLots: true },
+    );
+
+  /** The plan's zone carrying the most suggested lots (guaranteed non-empty:
+   *  the SA golden pins total emptyLots > 0). */
+  const fattestZone = (plan: CityPlan) =>
+    plan.zones!.reduce((a, b) => (a.suggestedLots.length >= b.suggestedLots.length ? a : b));
+
+  /** Zone-targeted synthetic builds (id / location / kind / zone_id matter). */
+  const mkZoneBuildings = (
+    n: number,
+    zone_id: string,
+    kind = 'house',
+    location = 'plaza',
+  ): Building[] => mkBuildings(n, 'operational', location).map((b) => ({ ...b, kind, zone_id }));
+
+  it("a build with a zone_id lands in that zone's suggested lots", () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    const b: Building = { ...mkBuildings(1)[0], zone_id: zone.id };
+    const spots = assignBuildingLots(plan, [b], centers);
+    expect(spots.get(b.id)).toEqual({ x: zone.suggestedLots[0].x, z: zone.suggestedLots[0].z });
+  });
+
+  it("multiple builds claim the zone's lots in sorted-id order (deterministic)", () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    const k = Math.min(4, zone.suggestedLots.length);
+    expect(k).toBeGreaterThanOrEqual(1);
+    const builds = mkZoneBuildings(k, zone.id);
+    const spots = assignBuildingLots(plan, builds, centers);
+    const ids = builds.map((b) => b.id).sort();
+    ids.forEach((id, i) => {
+      expect(spots.get(id)).toEqual({ x: zone.suggestedLots[i].x, z: zone.suggestedLots[i].z });
+    });
+  });
+
+  it('an over-cap zone OVERFLOWS onto the slotLayout ring (never drops a build)', () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    const cap = zone.suggestedLots.length;
+    const builds = mkZoneBuildings(cap + 5, zone.id);
+    const spots = assignBuildingLots(plan, builds, centers);
+    // EVERY build got a spot — nothing refused or dropped (law §0.1).
+    expect(spots.size).toBe(builds.length);
+    for (const b of builds) expect(spots.get(b.id)).toBeTruthy();
+    const ids = builds.map((b) => b.id).sort();
+    // the first `cap` sit on the suggested lots in order…
+    for (let i = 0; i < cap; i++) {
+      expect(spots.get(ids[i])).toEqual({ x: zone.suggestedLots[i].x, z: zone.suggestedLots[i].z });
+    }
+    // …the overflow rings the zone centroid (EM-131 slotLayout around the face).
+    const overflow = ids.slice(cap);
+    expect(overflow.length).toBe(5);
+    const ring = slotLayout(zone.face.centroid, overflow);
+    for (const id of overflow) expect(spots.get(id)).toEqual(ring.get(id));
+  });
+
+  it('a wrong-KIND build still lands in the zone (no coercion, no drop)', () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    // Build an industrial-kind structure in a zone whatever its hint — placement
+    // is kind-agnostic: it lands on the zone lot regardless of the mismatch…
+    const b: Building = { ...mkBuildings(1)[0], kind: 'foundry', zone_id: zone.id };
+    const spots = assignBuildingLots(plan, [b], centers);
+    expect(spots.get(b.id)).toEqual({ x: zone.suggestedLots[0].x, z: zone.suggestedLots[0].z });
+    // …and assignBuildingLots NEVER rewrites the kind (the renderer draws the
+    // building's own kind — the wrong-kind pile is a finding you can see).
+    expect(b.kind).toBe('foundry');
+  });
+
+  it('an empty zone renders empty — a zone nobody targets gets no assignments', () => {
+    const plan = zonedPlan();
+    const targeted = fattestZone(plan);
+    const untargeted = plan.zones!.find((z) => z.id !== targeted.id)!;
+    const b: Building = { ...mkBuildings(1)[0], zone_id: targeted.id };
+    const spots = assignBuildingLots(plan, [b], centers);
+    // nothing landed in the untargeted zone's lots
+    const untargetedKeys = new Set(untargeted.suggestedLots.map((l) => `${l.x},${l.z}`));
+    for (const [, pt] of spots) expect(untargetedKeys.has(`${pt.x},${pt.z}`)).toBe(false);
+    // and "build nothing" is valid: no builds ⇒ no spots, no throw
+    expect(() => assignBuildingLots(plan, [], centers)).not.toThrow();
+    expect(assignBuildingLots(plan, [], centers).size).toBe(0);
+  });
+
+  it('an unresolvable zone_id falls back to the location path (never a wasted turn)', () => {
+    const plan = zonedPlan();
+    const b: Building = { ...mkBuildings(1)[0], location: 'market', zone_id: 'no|such|zone' };
+    const withBad = assignBuildingLots(plan, [b], centers);
+    const asPlace = assignBuildingLots(plan, [{ ...b, zone_id: null }], centers);
+    // an id matching no zone ⇒ identical to no zone_id at all (auto-placement)
+    expect(withBad.get(b.id)).toEqual(asPlace.get(b.id));
+    expect(withBad.get(b.id)).toBeTruthy();
+  });
+
+  it('determinism: zone placement is input-order independent', () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    const builds = mkZoneBuildings(zone.suggestedLots.length + 3, zone.id);
+    const a = assignBuildingLots(plan, builds, centers);
+    const b = assignBuildingLots(plan, [...builds].reverse(), centers);
+    const c = assignBuildingLots(plan, builds, centers);
+    for (const bl of builds) {
+      expect(b.get(bl.id)).toEqual(a.get(bl.id));
+      expect(c.get(bl.id)).toEqual(a.get(bl.id));
+    }
+  });
+
+  it('mixed zone + location builds: each routed independently, deterministically', () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    const k = Math.min(2, zone.suggestedLots.length);
+    const zoneBuilds = mkZoneBuildings(k, zone.id).map((b) => ({ ...b, id: `z_${b.id}` }));
+    const placeBuilds = mkBuildings(3, 'operational', 'market').map((b) => ({ ...b, id: `p_${b.id}` }));
+    const all = [...zoneBuilds, ...placeBuilds];
+    const spots = assignBuildingLots(plan, all, centers);
+    // zone builds sit on the zone's lots in order…
+    const zids = zoneBuilds.map((b) => b.id).sort();
+    zids.forEach((id, i) =>
+      expect(spots.get(id)).toEqual({ x: zone.suggestedLots[i].x, z: zone.suggestedLots[i].z }),
+    );
+    // …the location builds follow the location path exactly as if zone-free.
+    const placeOnly = assignBuildingLots(
+      plan,
+      placeBuilds.map((b) => ({ ...b, zone_id: null })),
+      centers,
+    );
+    for (const b of placeBuilds) expect(spots.get(b.id)).toEqual(placeOnly.get(b.id));
+    // input order must not matter for either lane
+    const shuffled = assignBuildingLots(plan, [...all].reverse(), centers);
+    for (const b of all) expect(shuffled.get(b.id)).toEqual(spots.get(b.id));
+  });
+
+  it('LAW: with NO zones on the plan, zone_id is inert (byte-identical to the location path)', () => {
+    // The grid plat carries no zones; a zone_id must be ignored ⇒ identical spots
+    // to the pre-SC location path (the no-zones byte-identical guarantee).
+    const gridPlan = computeCityPlan({ places: TOWN, city_seed: seed });
+    expect(gridPlan.zones).toBeUndefined();
+    const builds = mkBuildings(REAL_LOTS_PER_LANDMARK + 3, 'operational', 'plaza');
+    const withZone = builds.map((b) => ({ ...b, zone_id: 'anything|at|all' }));
+    const a = assignBuildingLots(gridPlan, builds, centers);
+    const b = assignBuildingLots(gridPlan, withZone, centers);
+    for (const bl of builds) expect(b.get(bl.id)).toEqual(a.get(bl.id));
+  });
+});

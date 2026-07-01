@@ -521,7 +521,12 @@ export function CozyWorld({
   });
   const buildingSpots = useMemo(() => {
     const list = buildings ?? [];
-    const spotById = assignBuildingLots(cityPlan, list, placeCenters);
+    // EM-266 (SC): thread each build's targeted zone_id through so a zone-
+    // targeted build lands in its chosen zone's lots (assignBuildingLots). On the
+    // default (no-zones) plan zone_id is inert ⇒ location auto-placement, byte-
+    // identical to pre-SC.
+    const lotInput = list.map((b) => ({ id: b.id, location: b.location, zone_id: b.zone_id }));
+    const spotById = assignBuildingLots(cityPlan, lotInput, placeCenters);
     return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? { x: 0, z: 0 }) }));
   }, [buildings, cityPlan, placeCenters]);
 
