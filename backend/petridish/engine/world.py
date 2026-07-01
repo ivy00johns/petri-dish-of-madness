@@ -4820,16 +4820,22 @@ class World:
         self.buildings[building.id] = building
         # EM-266 (SC) — record defiance (observation ONLY; NO penalty, NO block). Only
         # under a stored zone with a ZoneRule: a build defies its zone when it is OVER
-        # the density cap (count of buildings whose zone_id == this zone, THIS one
+        # the density cap (count of LIVE buildings whose zone_id == this zone, THIS one
         # included, exceeds the cap — the precise, load-bearing signal) OR its kind
         # maps to a hint that mismatches the rule's hint (UNMAPPED kind ⇒ matching ⇒ no
         # false violation). An honored build (kind matches, under cap) parks nothing.
+        # F1 (EM-266 SC): count LIVE occupancy only — a demolished build stays in
+        # self.buildings as status "destroyed" (never popped) with its zone_id tag
+        # intact; including it would inflate a false over_cap when the zone is
+        # actually under the cap. The perceived built-count (runtime.py nearby_zones)
+        # uses this SAME basis so what the agent reads matches what SC records.
         if stored_zone_id is not None:
             zrule = next((r for r in self.city_graph.zone_rules
                           if r.zone_id == stored_zone_id), None)
             if zrule is not None:
                 zone_count = sum(1 for b in self.buildings.values()
-                                 if b.zone_id == stored_zone_id)
+                                 if b.zone_id == stored_zone_id
+                                 and b.status != "destroyed")
                 over_cap = (zrule.density_cap is not None
                             and zone_count > zrule.density_cap)
                 kind_cat = _kind_to_hint(building.kind)

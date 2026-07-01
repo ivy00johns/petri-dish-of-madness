@@ -1175,6 +1175,20 @@ export function assignBuildingLots(
     }
   }
 
+  // One global claim ledger over the platted-lot pool (overflow lots are shared
+  // city-wide); sorted-location order makes contention deterministic. Declared
+  // HERE — BEFORE the zone loop — and SHARED with it: EM-266 (SC) F2. On the
+  // graph-lots path a zone's `suggestedLots` ARE a blockLots entry (same array
+  // reference — computeCityPlan sets `blockLots = zones.map(z => ({..., lots:
+  // z.suggestedLots}))`), so the location-overflow pool below IS the zones' pads.
+  // A pad a zone-targeted build claims must therefore be flagged in THIS ledger,
+  // or a later location-overflow build could reuse the identical (x,z) and stack
+  // a second mesh on the same pad. `blockIndexByLots` maps each blockLots entry's
+  // lots array back to its index so a zone claim can flag the shared pad.
+  const claimed = plan.blockLots.map((b) => b.lots.map(() => false));
+  const blockIndexByLots = new Map<CityInstance[], number>();
+  plan.blockLots.forEach((b, bi) => blockIndexByLots.set(b.lots, bi));
+
   // Per targeted zone (sorted zone-id order): claim suggestedLots in sorted
   // building-id order; builds PAST the lots ring the zone centroid (slotLayout —
   // the SA-sanctioned overflow). Each zone owns its OWN pads, so there is no
@@ -1184,9 +1198,15 @@ export function assignBuildingLots(
       const zone = zonesById.get(zid)!;
       const ids = [...(byZone.get(zid) ?? [])].sort();
       const lots = zone.suggestedLots;
+      const bi = blockIndexByLots.get(lots); // the shared blockLots entry (graph-lots path)
       const n = Math.min(ids.length, lots.length);
       for (let i = 0; i < n; i++) {
         out.set(ids[i], { x: lots[i].x, z: lots[i].z });
+        // F2: flag the pad in the SHARED ledger so a location-overflow build
+        // never reuses it. `bi === undefined` ⇒ the zone's lots aren't a
+        // blockLots pool entry ⇒ nothing shared (defensive; on the graph-lots
+        // path they always are — determinism + the overflow ring are untouched).
+        if (bi !== undefined) claimed[bi][i] = true;
       }
       const overflow = ids.slice(n);
       if (overflow.length > 0) {
@@ -1206,9 +1226,6 @@ export function assignBuildingLots(
     ids.push(b.id);
     byPlace.set(b.location, ids);
   }
-  // One global claim ledger over the platted-lot pool (overflow lots are
-  // shared city-wide); sorted-location order makes contention deterministic.
-  const claimed = plan.blockLots.map((b) => b.lots.map(() => false));
   for (const loc of [...byPlace.keys()].sort()) {
     const ids = [...(byPlace.get(loc) ?? [])].sort();
     // Locations are data-driven strings — own-property guard the lookups.

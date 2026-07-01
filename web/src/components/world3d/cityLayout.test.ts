@@ -1680,4 +1680,84 @@ describe('EM-266 (SC) — zone-targeted building placement', () => {
     const b = assignBuildingLots(gridPlan, withZone, centers);
     for (const bl of builds) expect(b.get(bl.id)).toEqual(a.get(bl.id));
   });
+
+  // ── F1 (adversarial-review MEDIUM): the whole zone-placement feature never
+  // rendered because CozyWorld's useCityPlan OMITTED city_graph (so plan.zones
+  // was always undefined in the live building path). CozyWorld now threads
+  // world.city_graph. These pin BOTH halves: the graph-lots path is reachable,
+  // AND the flag-off grid path is byte-identical whether or not the graph rides. ─
+
+  it('F1 (reachable): the graph-lots path populates zones AND a zone_id build lands in-zone', () => {
+    const plan = zonedPlan();
+    expect(plan.zones).toBeDefined();
+    expect(plan.zones!.length).toBeGreaterThan(0);
+    const zone = fattestZone(plan);
+    const b: Building = { ...mkBuildings(1)[0], zone_id: zone.id };
+    const spots = assignBuildingLots(plan, [b], centers);
+    // the zone-targeting branch actually fired: the build sits on the zone's lot
+    expect(spots.get(b.id)).toEqual({ x: zone.suggestedLots[0].x, z: zone.suggestedLots[0].z });
+  });
+
+  it('F1 (byte-identical): with the flag OFF, threading city_graph leaves building spots UNCHANGED', () => {
+    // GRAPH_LOTS_ENABLED OFF (default → { graphLots: false }) ⇒ computeCityPlan
+    // stays on the grid path REGARDLESS of the graph, and assignBuildingLots reads
+    // only grid-derived realLots/landmarks/blockLots — so the building spots are
+    // identical with vs without the (now-threaded) graph. This is the F1 wiring's
+    // safety proof: passing city_graph is inert until the flag flips on.
+    const withoutGraph = computeCityPlan({ places: TOWN, city_seed: seed });
+    const withGraph = computeCityPlan(
+      { places: TOWN, city_seed: seed, city_graph: pentagonGraph(seed) },
+      { graphLots: false },
+    );
+    expect(withGraph.zones).toBeUndefined(); // grid path ⇒ no zones even with a graph
+    const builds = mkBuildings(REAL_LOTS_PER_LANDMARK + 6, 'operational', 'plaza');
+    const a = assignBuildingLots(withoutGraph, builds, centers);
+    const b = assignBuildingLots(withGraph, builds, centers);
+    for (const bl of builds) expect(b.get(bl.id)).toEqual(a.get(bl.id));
+    const norm = (m: Map<string, { x: number; z: number }>) =>
+      JSON.stringify([...m.entries()].sort((p, q) => (p[0] < q[0] ? -1 : 1)));
+    expect(norm(b)).toBe(norm(a));
+  });
+
+  // ── F2 (adversarial-review LOW): on the graph-lots path the location-overflow
+  // pool IS the zones' pads (blockLots = zones' suggestedLots). Pre-fix, a zone-
+  // targeted claim wasn't recorded in the location path's `claimed` ledger, so a
+  // zone build and a location-overflow build could stack on the SAME pad. The
+  // shared ledger (F2) prevents the overlap while still placing every build. ────
+
+  it('F2 (shared ledger): zone-targeted + location-overflow builds NEVER share a pad, none dropped', () => {
+    const plan = zonedPlan();
+    const zone = fattestZone(plan);
+    // precondition: the pad pool itself carries no duplicate coordinates, so any
+    // duplicate the assignment produces is a genuine cross-path collision.
+    const padKeys = plan.blockLots.flatMap((blk) => blk.lots.map((l) => `${l.x},${l.z}`));
+    expect(new Set(padKeys).size).toBe(padKeys.length);
+
+    const totalPads = plan.blockLots.reduce((s, blk) => s + blk.lots.length, 0);
+    const z = Math.min(2, zone.suggestedLots.length);
+    expect(z).toBeGreaterThanOrEqual(1);
+    // zone-targeted builds claim the zone's first `z` pads…
+    const zoneBuilds = mkZoneBuildings(z, zone.id).map((b) => ({ ...b, id: `z_${b.id}` }));
+    // …location builds at a NON-landmark location (empty realLots) so each one
+    // overflows straight into blockLots = the zones' shared pad pool. Sized to
+    // fill exactly the pads the zone did NOT take (no slotLayout ring), so a
+    // reused pad is the ONLY way a duplicate could appear — the fix skips claimed.
+    const locBuilds = mkBuildings(totalPads - z, 'operational', 'nowhere_district').map(
+      (b, i) => ({ ...b, id: `p_${String(i).padStart(3, '0')}`, zone_id: null }),
+    );
+    const all = [...zoneBuilds, ...locBuilds];
+    const spots = assignBuildingLots(plan, all, centers);
+    // none dropped — every build got a spot (law §0.1)
+    expect(spots.size).toBe(all.length);
+    // NO two buildings share an (x,z)
+    const seen = new Set<string>();
+    for (const [, pt] of spots) {
+      const key = `${pt.x},${pt.z}`;
+      expect(seen.has(key)).toBe(false);
+      seen.add(key);
+    }
+    // determinism: input order does not matter for either lane
+    const shuffled = assignBuildingLots(plan, [...all].reverse(), centers);
+    for (const bl of all) expect(shuffled.get(bl.id)).toEqual(spots.get(bl.id));
+  });
 });

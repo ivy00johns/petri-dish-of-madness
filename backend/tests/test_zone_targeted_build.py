@@ -331,6 +331,88 @@ def _det_uuid():
     return _f
 
 
+# ── F1 (LOW): over_cap counts LIVE occupancy — DESTROYED builds are excluded ──
+# A demolished building stays in self.buildings with status "destroyed" (never
+# popped), so its zone_id tag persists. It must NOT inflate the over_cap count.
+
+def test_over_cap_excludes_destroyed_buildings(monkeypatch):
+    _enable(monkeypatch)
+    w = _world()
+    zone_a, _ = _install_two_zones(w)
+    apply_zone_rule(w.city_graph, ZoneRule(zone_id=zone_a, hint="residential",
+                                           density_cap=2))
+    agent = _agent(w)
+    # builds 1 + 2 fill the zone to its cap ⇒ no violation.
+    r1 = w.action_propose_project(agent, "H1", "house", 10, zone_id=zone_a)
+    r2 = w.action_propose_project(agent, "H2", "house", 10, zone_id=zone_a)
+    assert _violations(w) == []
+    # demolish BOTH — they remain in self.buildings as status "destroyed", still
+    # tagged with zone_a (the tag persists through demolition).
+    w._demolish_building(_building(w, r1), agent.id, "owner")
+    w._demolish_building(_building(w, r2), agent.id, "owner")
+    assert _building(w, r1).status == "destroyed"
+    assert _building(w, r2).status == "destroyed"
+    # build 3: LIVE occupancy is now 1 (< cap 2). The two DESTROYED builds must
+    # NOT inflate the count into a false over_cap violation.
+    r3 = w.action_propose_project(agent, "H3", "house", 10, zone_id=zone_a)
+    b3 = _building(w, r3)
+    assert b3.zone_id == zone_a
+    assert b3.status == "planned"            # the build always stands
+    over = [v for v in _violations(w) if v["payload"]["over_cap"] is True]
+    assert over == []                        # live count 1 < cap 2 ⇒ no over_cap
+
+
+# ── F2 (LOW, coherence): the nearby_zones "N built" count an agent PERCEIVES must
+# use the SAME zone_id basis SC OBSERVES (the over_cap trigger) — not a decoupled
+# point-in-polygon over the build's `location` place (which SC's zone_id never
+# moves). Otherwise an agent piling into a capped zone reads "0 built" while
+# over_cap violations fire, and gets no perceivable feedback to honor/defy the cap.
+
+def _canonical_block(i0: int, j0: int) -> CityGraph:
+    """One BLOCK_PITCH square from CANONICAL grid nodes (n:i:j), so
+    `build_nearby_layout`'s road block parses the ids and reaches the zones line
+    (synthetic za:*/zb:* ids don't parse ⇒ that helper early-returns None)."""
+    from petridish.engine.citygraph import tile_center
+    idx = [(i0, j0), (i0 + 5, j0), (i0 + 5, j0 + 5), (i0, j0 + 5)]
+    nodes = [CityNode(id=f"n:{i}:{j}", x=tile_center(i), z=tile_center(j))
+             for i, j in idx]
+    ids = [n.id for n in nodes]
+    pairs = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    edges = [CityEdge(id=f"e:{ids[a]}->{ids[b]}", a=ids[a], b=ids[b])
+             for a, b in pairs]
+    return CityGraph(seed=1, nodes=nodes, edges=edges)
+
+
+def test_nearby_zones_built_count_uses_zone_id_basis(monkeypatch):
+    from petridish.agents.runtime import build_nearby_layout, _point_in_poly
+    _enable(monkeypatch)
+    w = _world()
+    w.city_graph = _canonical_block(2, 2)
+    faces = planar_faces(w.city_graph)
+    assert len(faces) == 1
+    face = faces[0]
+    zone_a = zone_id_for(face.boundary)
+    apply_zone_rule(w.city_graph, ZoneRule(zone_id=zone_a, hint="residential",
+                                           density_cap=2))
+    agent = _agent(w)
+    place = w.places[agent.location]
+    # the agent's location place sits OUTSIDE the zone polygon, so the OLD
+    # point-in-poly basis (over the builds' `location`) would count these as 0.
+    assert not _point_in_poly(float(place.x), float(place.y), face.poly)
+    # pile 4 zone_id-tagged builds into zone_a — the SAME basis over_cap uses.
+    for i in range(4):
+        w.action_propose_project(agent, f"H{i}", "house", 10, zone_id=zone_a)
+    # SC RECORDS 4 in the zone (over cap 2 ⇒ over_cap violations fired)...
+    assert sum(1 for b in w.buildings.values() if b.zone_id == zone_a) == 4
+    assert any(v["payload"]["over_cap"] for v in _violations(w))
+    # ...and the agent now PERCEIVES the same 4 (was "0 built" under point-in-poly).
+    line = build_nearby_layout(w, place)
+    assert line is not None
+    assert "cap 2" in line
+    assert "4 built" in line
+    assert "0 built" not in line
+
+
 def test_determinism_fixed_sequence_byte_identical(monkeypatch):
     _enable(monkeypatch)
 

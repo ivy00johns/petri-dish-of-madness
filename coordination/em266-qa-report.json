@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "All six law items (contract section 0) verified against the on-disk committed code (e92d8ad), not the crash-recovered commit message. (0.1 build ALWAYS succeeds -- honor/ignore/break + choke-core + over-cap) action_propose_project constructs and stores the Building BEFORE any zone check (world.py ~4801-4813), then appends a zone_violation ONLY as an outbox event -- there is NO cap enforcement, NO kind coercion, NO block/return path; tests test_kind_mismatch_emits_violation_but_build_succeeds, test_over_cap_emits_violation_and_build_succeeds, test_choke_the_core_all_succeed (30 builds into a cap-1 zone -> 30 land, 29 over-cap violations, no crash) all assert status=='planned' + the building persists. (0.2 build-nothing valid) test_no_zone_target_is_valid + the frontend empty-zone test (untargeted zone gets zero assignments, [] builds -> size 0, no throw). (0.3 byte-identical/additive) Building.zone_id defaults None, to_dict emits 'zone_id' ONLY when truthy (world.py ~792-795, same idiom as skin), from_snapshot uses d.get('zone_id') (~8154); flag OFF ignores zone_id entirely (the GRAPH_ZONES_ENABLED guard at world.py ~4795 leaves stored_zone_id=None); tests test_zone_id_serialized_only_when_set, test_flag_off_ignores_zone_id_byte_identical (flag-off build with a would-be-valid id serializes identical to a no-arg build), test_pre_sc_snapshot_loads_unchanged, test_snapshot_round_trip_preserves_zone_id (fork re-serializes buildings block identically). (0.4 deterministic) placement + the violation stream are pure over (build, buildings, zones) -- no clock/random; test_determinism_fixed_sequence_byte_identical runs a honor/break/over-cap/other-zone/no-zone/unresolvable mix twice under a deterministic uuid stream and asserts byte-identical buildings+violations; frontend determinism test proves input-order independence (sorted zone-id + sorted building-id iteration in assignBuildingLots). zone_violation emitted ONLY on kind-mismatch OR over-cap, ONLY when a stored zone has a ZoneRule, never on an honored build (test_honored_build_emits_no_violation, test_unmapped_kind_is_not_a_violation -- the dominant 'generic' bucket is UNMAPPED -> treated as matching -> no false violation). Wire shape matches section 2 exactly (backend zone_id: str|None; TS zone_id?: string|null). File ownership respected: backend touched only world.py + runtime.py + the new test; frontend only cityLayout.ts + CozyWorld.tsx + types/index.ts + cityLayout.test.ts. nearby_zones framing clause is correctly nested under `if faces:` (GRAPH_ZONES_ENABLED-gated) -> `if clauses:`, so it is dormant + prompt byte-identical when the flag is off."
+    },
+    "coverage": {
+      "score": 5,
+      "notes": "13 dedicated SC backend tests (test_zone_targeted_build.py, all green) cover the full law surface: valid id stored on the Building, honor emits nothing, kind-mismatch emits zone_violation{over_cap:false} with the full payload (zone_id/building_id/kind/rule_hint/over_cap/tick) while the build stands with its own kind, unmapped 'generic' kind -> no false violation, over-cap emits {over_cap:true} + the build lands, choke-the-core (30 into cap-1) all succeed with 29 over-cap records, unresolvable id -> zone_id None fallback + build succeeds + no observation, build-nothing valid, flag-off byte-identical, serialize-only-when-set, snapshot/replay/fork round-trip, pre-SC snapshot loads unchanged, and fixed-sequence determinism. 9 dedicated SC frontend tests (cityLayout.test.ts EM-266 block, all green) cover: a zone_id build lands on suggestedLots[0], multi-build sorted-id claim order, over-cap OVERFLOW onto the slotLayout ring (every build gets a spot, nothing dropped), wrong-KIND still lands + kind never rewritten, empty/untargeted zone stays empty + build-nothing, unresolvable id falls back to the location path identical to zone_id:null, input-order-independent determinism, mixed zone+location routed independently, and the no-zones-on-plan byte-identical guarantee. Both lanes exercise the honor/ignore/break + choke-core + flag-off matrix end to end. Minor untested wiring (not blockers, trivial + low-risk): the one-line nearby_zones framing string in runtime.py and the CozyWorld.tsx lotInput map ({id,location,zone_id}) are thin adapters over the thoroughly-tested assignBuildingLots + a GRAPH_ZONES_ENABLED-gated prompt block."
+    },
+    "security": {
+      "score": 5,
+      "notes": "Additive, advisory-only, flag-gated -- no new attack surface. zone_id is a loose string compared ONLY as set membership against the CURRENT planar-face ids ({zone_id_for(f.boundary) for f in planar_faces(self.city_graph)}); an unresolvable/absent/stale id is silently dropped to auto-placement (world.py ~4795-4808) -- no crash, no injection sink, no wasted turn (mirrors the existing unknown-place fallback). The whole path is behind GRAPH_ZONES_ENABLED=False (default off) on the backend and GRAPH_LOTS_ENABLED + plan.zones on the frontend, so it ships dormant. The zone_violation event text interpolates the agent-authored building.name/building.kind, but this is the SAME event-outbox pattern as project_proposed/zone_rule_set (pending_spawn_events carries them as data, never a code/HTML sink introduced here) -- SC adds no new sink or rendering path. No I/O, network, eval, secrets, or auth surface touched; _kind_to_hint is a pure frozen-dict lookup; frontend placement is a pure function with sorted iteration and cannot throw on a bad id (falls through to the location path). No enforcement/penalty means the field cannot be weaponized to corrupt state or block an agent."
+    },
+    "regression": {
+      "score": 5,
+      "notes": "0 net-new SC failures. Full backend: .venv/bin/python -m pytest backend/tests/ -q -> 1798 passed, 1 skipped, 0 failed (the SC file contributes 13). Frontend: cd web && /usr/local/bin/npx vitest run src/components/world3d/ -> 651 passed / 3 failed of 654; cd web && /usr/local/bin/npx tsc -b --force exits 0 (clean). The 3 failures are ALL in CityScape.test.tsx and ALL driven by ROAD_MESH_ENABLED===true (EM-247, commit fa79ab4 -- the deliberately-flipped mesh-road default that predates SC): the flag-default-false guard and the road-tiles-vs-mesh render-path assertions. None touch GRAPH_ZONES_ENABLED, Building.zone_id, assignBuildingLots, or any SC wiring, and CityScape.tsx is outside SC's file ownership. These are exactly the known pre-existing failures called out in the gate brief. EM-155 byte-identical re-proven at code + test level: zone_id omitted from to_dict when unset, pre-SC snapshots load+replay+fork identically, flag-off emits no zone_violation stream, and the no-zones frontend path is spot-for-spot identical to pre-SC."
+    }
+  },
+  "test_results": {
+    "backend": {
+      "command": ".venv/bin/python -m pytest backend/tests/ -q",
+      "total": 1799,
+      "pass": 1798,
+      "fail": 0,
+      "skip": 1,
+      "sc_file": {
+        "test_zone_targeted_build.py": "13 passed / 0 failed (stored-id, honor, kind-mismatch, unmapped-kind, over-cap, choke-core, unresolvable fallback, build-nothing, flag-off byte-identical, serialize-when-set, snapshot/fork round-trip, pre-SC load, determinism)"
+      },
+      "net_new_sc_failures": 0
+    },
+    "frontend": {
+      "command": "cd web && /usr/local/bin/npx vitest run src/components/world3d/",
+      "total": 654,
+      "pass": 651,
+      "fail": 3,
+      "skip": 0,
+      "typecheck": "cd web && /usr/local/bin/npx tsc -b --force -> exit 0 (clean)",
+      "sc_file": {
+        "cityLayout.test.ts (EM-266 zone-targeted building placement block)": "9 passed / 0 failed (lands-in-zone-lots, sorted-id claim order, over-cap ring overflow, wrong-kind no-coercion, empty zone, unresolvable fallback, input-order determinism, mixed zone+location, no-zones byte-identical)"
+      },
+      "failures_all_preexisting_road_mesh": [
+        "CityScape.test.tsx > ROAD_MESH_ENABLED flag > defaults to false (asserts false; flag is true since EM-247 commit fa79ab4)",
+        "CityScape.test.tsx > ROAD_MESH_ENABLED flag > flag off => road TILES render unchanged (mesh path active: 0 vs expected 4)",
+        "CityScape.test.tsx > render smoke (ROAD_MESH_ENABLED=true changes the road render path)"
+      ],
+      "net_new_sc_failures": 0
+    }
+  },
+  "blockers": [],
+  "issues": [
+    "INFO: the 3 pre-existing failures in web/src/components/world3d/CityScape.test.tsx are caused by ROAD_MESH_ENABLED===true (EM-247 temp flag, commit fa79ab4), NOT by EM-266. They are unrelated to GRAPH_ZONES_ENABLED / GRAPH_LOTS_ENABLED / Building.zone_id / assignBuildingLots and out of SC's file ownership. No action for EM-266; they clear when the EM-247 visual sign-off is finalized.",
+    "INFO (by design): SC ships dormant behind GRAPH_ZONES_ENABLED=False (backend) + GRAPH_LOTS_ENABLED + plan.zones (frontend). Flag-off is byte-identical (zone_id ignored, not serialized, no zone_violation stream, no nearby_zones framing). The live 3D over-cap 'choked pile' visual is exercised in unit tests but its on-screen sign-off rides the same deferred USER gate as SA/SB (GRAPH_LOTS_ENABLED) -- not gateable here.",
+    "LOW: _KIND_HINT_MAP in world.py is a hand-maintained best-effort kind->hint vocabulary. Unmapped kinds (the dominant agent-authored 'generic' bucket + any novel word) return None and are treated as MATCHING, so they never emit a false zone_violation -- this is the correct, conservative default per contract section 3, and the observation stream is advisory-only, so drift only affects how many kind-mismatch findings surface, never the build or any enforcement. No functional impact."
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "PASS. contract_conformance 5 (>=3) and security 5 (>=3) clear the gate thresholds; no CRITICAL blocker. Backend 1798/1798 green (0 failed, 1 unrelated skip); frontend 651 passed with only the 3 known pre-existing ROAD_MESH_ENABLED (EM-247) failures, 0 net-new SC failures; tsc -b --force exits 0. All six law items verified against the committed code (re-verified fresh after the mid-run crash): (0.1) the build ALWAYS succeeds -- honor/ignore/break, choke-the-core (30 into cap-1), and over-cap all land with the Building persisted; SC records a zone_violation observation but NEVER enforces, coerces, penalizes, or blocks; (0.2) build-nothing valid; (0.3) byte-identical/additive -- zone_id serialized only when set, from_snapshot d.get fallback, pre-SC snapshots + replay/fork unchanged, flag-off ignores zone_id with no violation events; (0.4) deterministic placement + violation stream (fixed-sequence byte-identical, input-order independent); zone_violation fires only on kind-mismatch OR over-cap, never on an honored build. Ships dormant behind the SA+SB flags -- no new user gate."
+  }
+}

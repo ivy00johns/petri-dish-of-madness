@@ -1049,11 +1049,19 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
                 f"({hint}, ~{lots} lots"
             )
             if rule is not None and rule.density_cap is not None:
+                # F2 (EM-266 SC): count LIVE buildings whose zone_id == this zone —
+                # the SAME basis SC's over_cap check uses (world.py action_propose_
+                # project). A zone_id is a pure tag SC never moves the building's
+                # `location` to, so a point-in-poly over `location` decoupled the
+                # density an agent READS ("N built") from the density SC OBSERVES
+                # (and fires over_cap on): an agent piling zone_id-tagged builds into
+                # a capped zone perceived "0 built" while violations fired. Counting
+                # by zone_id makes the perceived density match the violation trigger,
+                # so an agent gets real feedback to honor/defy the cap.
                 built = sum(
                     1 for b in world.buildings.values()
-                    if getattr(b, "status", "") != "destroyed"
-                    and (p := world.places.get(getattr(b, "location", None))) is not None
-                    and _point_in_poly(float(p.x), float(p.y), f.poly)
+                    if getattr(b, "zone_id", None) == zid
+                    and getattr(b, "status", "") != "destroyed"
                 )
                 clause += f", cap {rule.density_cap} — {built} built"
             clause += ")"
