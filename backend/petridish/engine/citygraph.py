@@ -58,6 +58,34 @@ class CityEdge:
                    car_policy=str(d.get("car_policy", "inherit")))
 
 
+# ── EM-265 (SB): agent-authored zone rules (advisory metadata) ────────────────
+# A ratified ZoneRule tags a planar face (city block) of the road graph with a
+# land-use hint + an optional density cap. Advisory ONLY in SB — nothing enforces
+# it (that's SC). The zone's identity is its face id (see `zone_id_for`), so a
+# rule stays bound to its block across snapshot/replay/fork; a master-plan morph
+# that destroys the block re-points or drops the rule (Lane 2's morph-survival).
+ZONE_HINTS: frozenset[str] = frozenset({"residential", "market", "civic", "open"})
+
+
+@dataclass
+class ZoneRule:
+    """One advisory rule per zone. `zone_id` is the face id (`zone_id_for`);
+    `hint` ∈ ZONE_HINTS; `density_cap` is None (no cap) or an int >= 0."""
+    zone_id: str
+    hint: str
+    density_cap: int | None = None
+
+    def to_dict(self) -> dict:
+        return {"zone_id": self.zone_id, "hint": self.hint,
+                "density_cap": self.density_cap}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ZoneRule":
+        dc = d.get("density_cap", None)
+        return cls(zone_id=str(d["zone_id"]), hint=str(d["hint"]),
+                   density_cap=None if dc is None else int(dc))
+
+
 @dataclass
 class CityGraph:
     seed: int
@@ -66,9 +94,11 @@ class CityGraph:
     template: str = "grid"  # EM-246 (S4) — the run-start profile kind (records intent)
     nodes: list[CityNode] = field(default_factory=list)
     edges: list[CityEdge] = field(default_factory=list)
+    # EM-265 (SB) — additive: serialized ONLY when non-empty (law §0.1, byte-identical).
+    zone_rules: list[ZoneRule] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "version": self.version,
             "seed": self.seed,
             "car_policy": self.car_policy,
@@ -76,6 +106,10 @@ class CityGraph:
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
         }
+        # Omit the key entirely when empty so pre-SB snapshots stay byte-identical.
+        if self.zone_rules:
+            d["zone_rules"] = [z.to_dict() for z in self.zone_rules]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "CityGraph":
@@ -86,6 +120,7 @@ class CityGraph:
             template=str(d.get("template", "grid")),
             nodes=[CityNode.from_dict(n) for n in d.get("nodes", [])],
             edges=[CityEdge.from_dict(e) for e in d.get("edges", [])],
+            zone_rules=[ZoneRule.from_dict(z) for z in d.get("zone_rules", [])],
         )
 
 
@@ -440,3 +475,349 @@ def diff_graphs(current: CityGraph, target: CityGraph) -> dict:
         "remove_node_ids": [n.id for n in current.nodes if n.id not in tgt_node_ids],
         "remove_edge_ids": [e.id for e in current.edges if e.id not in tgt_edge_ids],
     }
+
+
+# ── EM-265 (SB): planar faces (city blocks) — Python port of cityFaces.ts ──────
+# A FAITHFUL port of the HARDENED web/src/components/world3d/cityFaces.ts so the
+# zone id a face yields here equals the one the frontend's planarFaces yields for
+# the same graph (law §0.2, pinned by contracts/em265-zone-id-fixture.json).
+#
+# The law (mirrors cityFaces.ts §0):
+#   • DETERMINISTIC — pure fn of the graph. Node/edge INPUT ORDER must not affect
+#     output: sort nodes/edges by id, sort each vertex's half-edges by angle, walk
+#     from a globally-sorted half-edge order.
+#   • NEVER THROWS, NEVER SILENTLY DROPS A REGION — a corrupt / stub / disconnected
+#     / degenerate graph returns []. We drop ONLY the unbounded outer face(s),
+#     identified PER-CYCLE by winding (signed area <= 0); every enclosed region
+#     survives (the forbidden failure is dropping an enclosed face). Worst case is
+#     a clean WHOLE-graph [] (caller falls back to the grid) — never a partial drop.
+#   • Sanitize a working copy first: (1) merge coincident nodes onto a 1e-6
+#     lattice, (2) split collinear-overlapping edges at interior nodes, (3) tie-break
+#     residual equal angles by distance, (4) whole-graph [] backstop on a residual
+#     exact-direction tie.
+
+# Coincident-node merge quantum (world units): two nodes rounding to the same
+# integer lattice cell are treated as one (a 0.001 nudge lands in a different cell).
+_MERGE_QUANT: float = 1e-6
+# A node within this perpendicular distance of an edge (strictly between its
+# endpoints) is treated as lying ON it ⇒ the edge is split there.
+_ON_SEG_EPS: float = 1e-6
+# Exclude the endpoints themselves from the point-on-segment test.
+_ON_SEG_T_EPS: float = 1e-9
+# Two outgoing half-edges whose normalized cross is below this (and dot > 0) point
+# in the SAME direction — an unresolved angular tie ⇒ whole-graph [].
+_DIR_TIE_EPS: float = 1e-9
+# Below this |area| a polygon centroid degenerates; fall back to the vertex mean.
+_AREA_EPS: float = 1e-12
+
+
+@dataclass
+class _HalfEdge:
+    frm: str
+    to: str
+    dx: float
+    dz: float
+    length: float
+    angle: float
+
+
+@dataclass
+class Face:
+    """A bounded planar face (city block). `boundary` are node ids in walk order
+    (loose; may be slightly degenerate); `poly` are world-space {x,z} vertices in
+    the same order; `area` is the signed area (CCW positive, always > 0 here)."""
+    boundary: list[str]
+    poly: list[dict]
+    centroid: dict
+    area: float
+
+
+def _signed_area(poly: list[dict]) -> float:
+    a = 0.0
+    n = len(poly)
+    for i in range(n):
+        p = poly[i]
+        q = poly[(i + 1) % n]
+        a += p["x"] * q["z"] - q["x"] * p["z"]
+    return a / 2.0
+
+
+def _polygon_centroid(poly: list[dict], area: float) -> dict:
+    if not poly:
+        return {"x": 0.0, "z": 0.0}
+    if len(poly) < 3 or abs(area) < _AREA_EPS:
+        # Degenerate (sliver / collinear): area-weighted centroid is unstable, so
+        # fall back to the vertex mean — still inside the loose polygon's hull.
+        sx = sum(p["x"] for p in poly)
+        sz = sum(p["z"] for p in poly)
+        return {"x": sx / len(poly), "z": sz / len(poly)}
+    cx = 0.0
+    cz = 0.0
+    n = len(poly)
+    for i in range(n):
+        p = poly[i]
+        q = poly[(i + 1) % n]
+        cross = p["x"] * q["z"] - q["x"] * p["z"]
+        cx += (p["x"] + q["x"]) * cross
+        cz += (p["z"] + q["z"]) * cross
+    f = 1.0 / (6.0 * area)
+    return {"x": cx * f, "z": cz * f}
+
+
+def _point_on_segment(px: float, pz: float, ax: float, az: float,
+                      bx: float, bz: float) -> float | None:
+    """If p lies strictly between a→b and within _ON_SEG_EPS of the line, return
+    its parameter t∈(0,1); else None. Used to planarize collinear overlaps."""
+    dx = bx - ax
+    dz = bz - az
+    len2 = dx * dx + dz * dz
+    if len2 == 0:
+        return None  # degenerate segment encloses nothing to split
+    t = ((px - ax) * dx + (pz - az) * dz) / len2
+    if t <= _ON_SEG_T_EPS or t >= 1 - _ON_SEG_T_EPS:
+        return None  # endpoint / outside
+    d = math.hypot(px - (ax + t * dx), pz - (az + t * dz))
+    return t if d <= _ON_SEG_EPS else None
+
+
+def _same_direction(p: _HalfEdge, q: _HalfEdge) -> bool:
+    """Two outgoing half-edges point the same way (an unresolved angular tie) when
+    their normalized cross ≈ 0 AND they face the same way (dot > 0). Vector-based,
+    so it catches the ±π wrap an angle compare would miss."""
+    if p.length == 0 or q.length == 0:
+        return False
+    cross = (p.dx * q.dz - p.dz * q.dx) / (p.length * q.length)
+    dot = p.dx * q.dx + p.dz * q.dz
+    return abs(cross) < _DIR_TIE_EPS and dot > 0
+
+
+def _is_valid_node(n) -> bool:
+    return (
+        isinstance(getattr(n, "id", None), str)
+        and isinstance(getattr(n, "x", None), (int, float))
+        and not isinstance(n.x, bool)
+        and math.isfinite(n.x)
+        and isinstance(getattr(n, "z", None), (int, float))
+        and not isinstance(n.z, bool)
+        and math.isfinite(n.z)
+    )
+
+
+def _add_undirected(m: dict, a: str, b: str) -> None:
+    """Insert an undirected edge, canonically keyed, first-wins (dedupes exact
+    duplicates + the duplicates node-merge / edge-split create). Self-loops drop."""
+    if a == b:
+        return
+    key = (a, b) if a < b else (b, a)
+    if key not in m:
+        m[key] = (a, b)
+
+
+def planar_faces(graph) -> list[Face]:
+    """Trace the bounded planar faces (city blocks) of the road graph. Pure +
+    deterministic (sort nodes/edges by id first). Defensive: stubs, disconnected
+    components, and degenerate faces are tolerated; coincident nodes and collinear
+    edge overlaps are sanitized first so an angular tie never silently drops a
+    region; a graph with no real nodes/edges returns []. NEVER throws; NEVER drops
+    an enclosed region (worst case: clean whole-graph [])."""
+    # ModelBoundary guard — not a graph, nodes/edges aren't lists, or no edges ⇒ [].
+    if (
+        graph is None
+        or not isinstance(getattr(graph, "nodes", None), list)
+        or not isinstance(getattr(graph, "edges", None), list)
+        or len(graph.edges) == 0
+    ):
+        return []
+
+    # Sort nodes by id ⇒ input order never matters.
+    sorted_nodes = sorted(
+        (n for n in graph.nodes if _is_valid_node(n)), key=lambda n: n.id
+    )
+    if not sorted_nodes:
+        return []
+
+    # ── Sanitize step 1: MERGE coincident nodes ────────────────────────────────
+    # Two node ids at the SAME coord give the walk two outgoing half-edges at an
+    # IDENTICAL angle, tangling a bounded face into the outer face (silent drop).
+    # Group nodes onto a fine lattice and collapse each cell to one canonical id
+    # (lex-smallest, for determinism). first-wins on duplicate ids, too.
+    canon_of: dict[str, str] = {}       # origId → canonical id
+    canon_nodes: dict[str, dict] = {}   # canonical id → {"id","x","z"}
+    cell_to_canon: dict[str, str] = {}  # quant cell → canonical id
+    for n in sorted_nodes:
+        if n.id in canon_of:
+            continue  # duplicate id: first (lex-smallest) wins
+        # HALF-UP rounding (math.floor(v + 0.5)) to match JS Math.round on the TS
+        # side (cityFaces.ts). Python's built-in round() is half-to-EVEN, so at an
+        # exact-half lattice value (e.g. x/1e-6 == 1000002.5) it would pick a
+        # DIFFERENT cell than Math.round → a different merge → a different zone_id
+        # SET → a rule tints the wrong block (law §0.2). floor(v+0.5) matches
+        # Math.round on both signs: floor(1000002.5+0.5)=1000003 == Math.round;
+        # floor(-2.5+0.5)=-2 == Math.round(-2.5). (Pinned by the tie fixture case.)
+        cell = (
+            f"{math.floor(n.x / _MERGE_QUANT + 0.5)}"
+            f"|{math.floor(n.z / _MERGE_QUANT + 0.5)}"
+        )
+        existing = cell_to_canon.get(cell)
+        if existing is not None:
+            canon_of[n.id] = existing  # coincident with an earlier node → merge
+        else:
+            cell_to_canon[cell] = n.id
+            canon_of[n.id] = n.id
+            canon_nodes[n.id] = {"id": n.id, "x": float(n.x), "z": float(n.z)}
+    if not canon_nodes:
+        return []
+
+    # Sort edges by id (then endpoints), rewrite endpoints to canonical ids, drop
+    # self-loops + dangling endpoints + exact duplicates.
+    def _edge_key(e):
+        eid = getattr(e, "id", None)
+        return eid if isinstance(eid, str) else (str(getattr(e, "a", "")), str(getattr(e, "b", "")))
+
+    sorted_edges = sorted((e for e in graph.edges if e is not None), key=_edge_key)
+    undirected: dict = {}
+    for e in sorted_edges:
+        ea = getattr(e, "a", None)
+        eb = getattr(e, "b", None)
+        if not isinstance(ea, str) or not isinstance(eb, str):
+            continue
+        a = canon_of.get(ea)
+        b = canon_of.get(eb)
+        if a is None or b is None:
+            continue  # dangling endpoint
+        _add_undirected(undirected, a, b)  # a==b (self-loop / merged) dropped inside
+    if not undirected:
+        return []
+
+    # ── Sanitize step 2: SPLIT collinear overlaps ──────────────────────────────
+    # When a node lies ON another edge (e.g. radial's center→outer spoke passing
+    # through the inner-ring node), the long edge overlaps the short one — two
+    # outgoing half-edges at the SAME angle ⇒ tie ⇒ silent drop. Split the long
+    # edge at every interior node. Split ONLY at EXISTING nodes; one pass suffices.
+    canon_list = sorted(canon_nodes.values(), key=lambda c: c["id"])
+    planar_edges: dict = {}
+    for k in sorted(undirected.keys()):
+        a, b = undirected[k]
+        na = canon_nodes[a]
+        nb = canon_nodes[b]
+        interior: list[tuple[float, str]] = []
+        for c in canon_list:
+            if c["id"] == a or c["id"] == b:
+                continue
+            t = _point_on_segment(c["x"], c["z"], na["x"], na["z"], nb["x"], nb["z"])
+            if t is not None:
+                interior.append((t, c["id"]))
+        if not interior:
+            _add_undirected(planar_edges, a, b)
+            continue
+        interior.sort(key=lambda it: (it[0], it[1]))
+        prev = a
+        for _t, cid in interior:
+            _add_undirected(planar_edges, prev, cid)
+            prev = cid
+        _add_undirected(planar_edges, prev, b)
+    if not planar_edges:
+        return []
+
+    # Build directed half-edges + per-vertex outgoing lists.
+    outgoing: dict[str, list[_HalfEdge]] = {}
+
+    def _add_half_edge(frm: str, to: str) -> None:
+        fn = canon_nodes[frm]
+        tn = canon_nodes[to]
+        dx = tn["x"] - fn["x"]
+        dz = tn["z"] - fn["z"]
+        he = _HalfEdge(frm=frm, to=to, dx=dx, dz=dz,
+                       length=math.hypot(dx, dz), angle=math.atan2(dz, dx))
+        outgoing.setdefault(frm, []).append(he)
+
+    for a, b in planar_edges.values():
+        _add_half_edge(a, b)
+        _add_half_edge(b, a)
+
+    # Sort each vertex's outgoing half-edges CCW by angle. Residual safety
+    # (sanitize step 3): tie-break EQUAL angles by distance (nearer first), then
+    # dest id, so any leftover exact tie still hugs the nearer geometry.
+    idx_in_list: dict[tuple[str, str], int] = {}
+    for _v, lst in outgoing.items():
+        lst.sort(key=lambda h: (h.angle, h.length, h.to))
+        m = len(lst)
+        for i in range(m):
+            idx_in_list[(lst[i].frm, lst[i].to)] = i
+            # Backstop (sanitize step 4): if two outgoing half-edges STILL point
+            # the exact same direction after merge + split, the next-by-angle walk
+            # cannot order them and would silently drop a region. Bail the WHOLE
+            # graph to [] (caller falls back to the grid). A clean whole-graph []
+            # is sanctioned; a silent PARTIAL drop is not.
+            if m > 1 and _same_direction(lst[i], lst[(i + 1) % m]):
+                return []
+
+    # next(u→v): at v, the most-clockwise turn = the entry immediately CW of the
+    # reverse edge v→u (the PREVIOUS entry in v's CCW-sorted outgoing list).
+    def _next_of(he: _HalfEdge):
+        lst = outgoing.get(he.to)
+        if not lst:
+            return None
+        ti = idx_in_list.get((he.to, he.frm))
+        if ti is None:
+            return None
+        ni = (ti - 1 + len(lst)) % len(lst)
+        return lst[ni]
+
+    # Deterministic walk order: all half-edges sorted by (frm, to). Each cycle is
+    # started from its globally-smallest half-edge, so the boundary sequence is
+    # identical regardless of input order.
+    all_half_edges: list[_HalfEdge] = [he for lst in outgoing.values() for he in lst]
+    all_half_edges.sort(key=lambda h: (h.frm, h.to))
+
+    visited: set[tuple[str, str]] = set()
+    faces: list[Face] = []
+    max_steps = len(all_half_edges) + 1  # paranoia bound — next is a permutation
+
+    for start in all_half_edges:
+        if (start.frm, start.to) in visited:
+            continue
+        boundary: list[str] = []
+        poly: list[dict] = []
+        cur = start
+        steps = 0
+        while cur is not None:
+            ck = (cur.frm, cur.to)
+            if ck in visited:
+                break  # closed the cycle (back at start)
+            visited.add(ck)
+            boundary.append(cur.frm)
+            fn = canon_nodes[cur.frm]
+            poly.append({"x": fn["x"], "z": fn["z"]})
+            cur = _next_of(cur)
+            steps += 1
+            if steps > max_steps:
+                break  # never spin (defensive; shouldn't trigger)
+        if len(poly) < 3:
+            continue  # a degenerate out-and-back encloses nothing
+        area = _signed_area(poly)
+        # Keep ONLY positive-area (CCW) bounded faces. Outer faces of every
+        # connected component come out CW (area <= 0) and are dropped — the
+        # sign/winding test, NOT a "largest |area|" test, so disconnected graphs
+        # drop each component's outer ring without discarding a real region.
+        if area > 0:
+            faces.append(Face(boundary=boundary, poly=poly,
+                              centroid=_polygon_centroid(poly, area), area=area))
+    return faces
+
+
+def zone_id_for(boundary_node_ids) -> str:
+    """A zone's stable id: sorted boundary node ids joined. IDENTICAL formula to
+    the TS side (`[...face.boundary].sort().join('|')`) so backend + frontend
+    agree on which block a rule tints (law §0.2)."""
+    return "|".join(sorted(boundary_node_ids))
+
+
+def apply_zone_rule(graph: CityGraph, rule: ZoneRule) -> None:
+    """Replace the existing ZoneRule for `rule.zone_id` (one rule per zone, last
+    wins) else append. Pure mutation of `graph.zone_rules`."""
+    for i, existing in enumerate(graph.zone_rules):
+        if existing.zone_id == rule.zone_id:
+            graph.zone_rules[i] = rule
+            return
+    graph.zone_rules.append(rule)

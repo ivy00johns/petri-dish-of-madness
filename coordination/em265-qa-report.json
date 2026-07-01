@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0.0",
+  "status": "PASS",
+  "scores": {
+    "contract_conformance": {
+      "score": 5,
+      "notes": "Every law surface (contract section 0) verified against real code. (0.1 byte-identical/additive) CityGraph.to_dict omits zone_rules when [] and emits it only when non-empty (citygraph.py:110-111); from_dict reads d.get('zone_rules', []) (123); pre-SB snapshots load+round-trip unchanged (test_pre_sb_snapshot_*, test_zone_rules_serialized_only_when_non_empty green); the prompt golden test_wave_d2_prompt_diet passes with GRAPH_ZONES_ENABLED default off (runtime.py:948 -> faces=[] at 1020 -> no nearby_zones block -> byte-identical prompt). (0.2 cross-language zone-id) zone_id_for = '|'.join(sorted(ids)) (citygraph.py:799-803) == TS [...boundary].sort().join('|'); both the backend test_fixture_matches_live_generators AND the TS cross-language suite read contracts/em265-zone-id-fixture.json and assert the SAME id set for classic_grid(25)/pentagon(5)/radial(16) (cityFaces.test.ts:698-724), and buildZonesFromFaces ids equal them too. (0.3 determinism/replay/fork) planar_faces sorts nodes/edges first, pure walk, no clock/random; test_replaying_same_zone_proposals_yields_identical_graph + fork round-trip green. (0.4 advisory only) test_ratified_zone_rule_does_not_mutate_graph_topology green; _on_rule_activated only appends a ZoneRule + parks an event (world.py:4355-4373). (0.5 content-key reactivity) citySignature folds a sorted zone_id:hint:density_cap rules hash on the SAME 4th param, arity stays 4 (CityScape.tsx:326-338; CityScape.test.tsx:519-540 reactivity + arity tests green). Governance matches section 3 exactly: 0.7 supermajority tuple includes set_zone_rule (world.py:4522); both no-renewal exclusion lists include it (4001, 4073); per-zone duplicate-open guard (3978-3982); unknown-zone reject against current planar_faces ids (3923-3927) + hint-in-ZONE_HINTS + density_cap None|int>=0 (3910-3922). Morph-survival _reconcile_zone_rules_after_morph keeps/repoints-by-centroid/drops with a zone_rule_dropped event (world.py:1409-1470). runtime gate agrees with action_propose_rule and is flag-gated (runtime.py:1997, 2084-2100)."
+    },
+    "coverage": {
+      "score": 5,
+      "notes": "70 dedicated SB backend tests all green: test_citygraph_zones.py (36) covers ZoneRule to/from_dict + type coercion + default cap, zone_rules-omitted-when-empty, pre-SB load, round-trip, apply_zone_rule append/replace-last-wins/distinct-accumulate, zone_id_for rotation+direction independence, the planar_faces matrix (grid->25, pentagon->5, radial->16 via collinear split, disconnected drops only outer rings, concave=1 face, coincident-merge no-region-dropped), the full defensive set (None/no-edges/empty/corrupt-node/corrupt-edge/non-finite/stub/dangling/no-mutate), determinism under shuffle for all 3 templates, and the fixture (exists+covers, round-trips, matches live generators). test_zone_rules.py (34) covers propose->0.7 ratify->apply+zone_rule_set, null cap, supermajority-not-simple-majority, below-threshold no-rule, unknown-zone/bad-hint/negative-cap reject, requires-governance-place, per-zone dup guard, never-renews-last-wins, runtime gate accept/reject, dispatch threading, morph-survival keep/repoint/drop + end-to-end pentagon-drops-grid-rule no-crash, rule-free-morph byte-identical, snapshot+fork round-trip, replay determinism, pre-SB no-key, serialized-only-non-empty, no-topology-mutation, nearby_zones present/size-bounded/district-scoped/omitted-when-empty/hint+cap/omitted-no-faces/deterministic-names, flag-defaults-off, gate+dispatch reject when flag off, bootstrap lists unzoned faces when flag on at zero rules, and the agent-path propose->vote->activate. Frontend: cityFaces.test.ts (30, incl. 4 cross-language fixture cases) + cityLayout.test.ts (79) + the EM-265 CityScape reactivity/tint block all green. Only untested layer is the live visual tint, an explicit deferred USER sign-off (mirrors ROAD_MESH/GRAPH_LOTS), not a coverage gap."
+    },
+    "security": {
+      "score": 5,
+      "notes": "Fail-closed and advisory-only -- minimal attack surface. set_zone_rule is rejected before a vote opens unless hint is in the frozen ZONE_HINTS vocab, density_cap is None or an int>=0, and zone_id is a face of the CURRENT graph (world.py:3907-3928); the runtime action gate enforces the identical contract (runtime.py:2084-2100), so the agent surface cannot diverge from governance. Ratification needs the 0.7 demolish-grade supermajority + a governance place, so no single agent can self-zone. The whole agent surface is gated behind GRAPH_ZONES_ENABLED=False (default off): flag off -> set_zone_rule not in valid_effects -> rejected, and nearby_zones is never computed. planar_faces is hardened against hostile/corrupt graphs (ModelBoundary guard, finite-coord filter, self-loop/dangling drop, paranoia step bound, whole-graph [] backstop on a residual angular tie) and NEVER throws -- a throw would crash the 3D world. The zone_rule_set event text interpolates only the validated closed-vocab hint and an int cap; the wire ZoneRule carries no free-form strings into a sink. No I/O, network, eval, secrets, or auth surface touched. Advisory in SB -- nothing enforces a rule (no build/placement/outcome changes), so the act cannot be weaponized for state corruption (SC owns enforcement)."
+    },
+    "regression": {
+      "score": 5,
+      "notes": "0 net-new SB failures. Full backend: .venv/bin/python -m pytest backend/tests/ -q -> 1777 passed, 0 failed. Frontend: cd web && /usr/local/bin/npx vitest run src/components/world3d/ -> 641 passed / 3 failed of 644; tsc -b --force exits 0 (clean). The 3 failures are ALL in CityScape.test.tsx and ALL driven by ROAD_MESH_ENABLED===true (EM-247 temp flag, commit fa79ab4, predates EM-265): the flag-default-false assertion and the road-tiles-vs-mesh render-path assertions -- none touch GRAPH_ZONES_ENABLED, zone_rules, planar_faces, or the zone wiring. These are the known pre-existing failures called out in the gate brief, not an EM-265 regression. EM-155 byte-identical re-proven: zone_rules omitted off-path, pre-SB snapshots load+replay+fork byte-identically, the rule-free morph emits no zone events, and the prompt golden is unchanged with the flag default off."
+    }
+  },
+  "test_results": {
+    "backend": {
+      "command": ".venv/bin/python -m pytest backend/tests/ -q",
+      "total": 1777,
+      "pass": 1777,
+      "fail": 0,
+      "skip": 0,
+      "sb_files": {
+        "test_citygraph_zones.py": "36 passed / 0 failed (Lane 1: ZoneRule, planar_faces matrix+defensive, zone_id_for, apply_zone_rule, cross-language fixture)",
+        "test_zone_rules.py": "34 passed / 0 failed (Lane 2: governance vote/threshold, dup guard, no-renewal, morph-survival, replay/fork, nearby_zones, flag gating, bootstrap)"
+      },
+      "golden_flag_off": "test_wave_d2_prompt_diet passes with GRAPH_ZONES_ENABLED default off (prompt byte-identical)",
+      "net_new_sb_failures": 0
+    },
+    "frontend": {
+      "command": "cd web && /usr/local/bin/npx vitest run src/components/world3d/",
+      "total": 644,
+      "pass": 641,
+      "fail": 3,
+      "skip": 0,
+      "typecheck": "cd web && /usr/local/bin/npx tsc -b --force -> exit 0 (clean)",
+      "sb_files": {
+        "cityFaces.test.ts": "30 passed / 0 failed (incl. 4 cross-language zone-id fixture cases: classic_grid/pentagon/radial)",
+        "cityLayout.test.ts": "79 passed / 0 failed",
+        "CityScape.test.tsx (EM-265 zone-rule reactivity/tint block)": "passed (arity-stays-4 + content-key reactivity + no-rules byte-identical)"
+      },
+      "failures_all_preexisting_road_mesh": [
+        "CityScape.test.tsx > ROAD_MESH_ENABLED flag > defaults to false (asserts false, flag is true since EM-247 commit fa79ab4)",
+        "CityScape.test.tsx > ROAD_MESH_ENABLED flag > flag off => road TILES render unchanged (mesh path active: 0 vs expected 4)",
+        "CityScape.test.tsx > render smoke > instancedMesh-per-(key x chunk x part) (ROAD_MESH_ENABLED=true changes the road render path)"
+      ],
+      "net_new_sb_failures": 0
+    }
+  },
+  "blockers": [],
+  "issues": [
+    "INFO: 3 pre-existing failures in web/src/components/world3d/CityScape.test.tsx are caused by ROAD_MESH_ENABLED===true (EM-247 temp flag, commit fa79ab4), NOT by EM-265. They are unrelated to GRAPH_ZONES_ENABLED / zone_rules and out of this lane's file ownership. No action for EM-265; they clear when the EM-247 visual sign-off is finalized (flag reverted or its tests updated).",
+    "INFO (deferred, by design): the SB agent surface ships behind GRAPH_ZONES_ENABLED=False (runtime.py:948). Flag off is byte-identical (no nearby_zones, set_zone_rule rejected); flag on at zero rules lists unzoned faces so an agent can perceive a zone_id to propose the FIRST rule (test_bootstrap_nearby_zones_lists_unzoned_faces_when_flag_on_zero_rules green). The live visual tint sign-off is the deferred USER gate, mirroring ROAD_MESH/GRAPH_LOTS -- not gateable here.",
+    "LOW: planar_faces in citygraph.py is a hand-maintained Python port of the hardened TS cityFaces.ts walk. The cross-language fixture (contracts/em265-zone-id-fixture.json, asserted from BOTH sides) pins them today, but the two algorithms must be kept in lockstep on any future face-tracing change -- the fixture is the guardrail. No functional impact now."
+  ],
+  "gate_decision": {
+    "proceed": true,
+    "reason": "PASS. contract_conformance 5 (>=3) and security 5 (>=3) clear the gate thresholds; no CRITICAL/HIGH blocker. Backend 1777/1777 green (0 failed); frontend 641 passed with only the 3 known pre-existing ROAD_MESH_ENABLED (EM-247) failures, 0 net-new SB failures; tsc -b --force exits 0. All six law items verified: (1) byte-identical/additive (zone_rules omitted when empty, pre-SB load+replay unchanged, prompt golden green flag-off), (2) cross-language zone-id consistency (TS fixture test + backend fixture-drift test both green for grid/pentagon/radial), (3) governance (0.7 supermajority, no-renewal x2 lists, per-zone dup guard, unknown-zone/hint/cap reject), (4) morph-survival keep/repoint/drop with zone_rule_dropped, (5) content-key reactivity (citySignature folds the rules hash, arity 4), (6) bootstrap (flag off byte-identical, flag on lists unzoned faces at zero rules). Ships advisory-only behind GRAPH_ZONES_ENABLED=false pending the deferred USER visual sign-off."
+  }
+}

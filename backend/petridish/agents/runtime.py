@@ -922,11 +922,69 @@ def _diet_visible_districts(world: World, agent: AgentState) -> set[str] | None:
     return {district, _DIET_CORE_DISTRICT}
 
 
+# EM-265 (SB) — district-scoped zone perception (prompt-diet: hard line cap,
+# omitted when empty). A deterministic, seeded flavor name per face id so the same
+# block always reads the same in the prompt + across replay/fork.
+_ZONE_NAME_POOL: tuple[str, ...] = (
+    "Market Quarter", "Riverside", "Old Town", "The Commons", "Hillcrest",
+    "Garden Row", "Northgate", "Southgate", "Kiln Ward", "Lantern Square",
+    "Mill District", "Harbor End", "Stonecross", "Elmgrove", "Highbank",
+    "Founders' Block",
+)
+_NEARBY_ZONES_MAX: int = 4  # hard line cap (prompt-diet — never the whole graph)
+
+# EM-265 (SB) — the BACKEND pair of the frontend `GRAPH_LOTS_ENABLED` /
+# `ROAD_MESH_ENABLED` flags (web/src/components/world3d/CityScape.tsx). Gates the
+# SB zone-rule system on the AGENT SURFACE only: the `nearby_zones` perception
+# block in build_nearby_layout AND the agent-facing `set_zone_rule` propose_rule
+# effect (its place in the proposable-effects set + its action-gate validation).
+# Default OFF ⇒ SB ships DORMANT: the protagonist prompt is byte-identical (no
+# nearby_zones block) and agent behavior is byte-identical (set_zone_rule is not
+# offered/accepted from an agent), exactly like SA ships dormant. Flip ON (together
+# with the frontend `GRAPH_LOTS_ENABLED`) to activate agent-controlled zoning.
+# NOTE: this is a COMPILE-TIME const (no clock/random — pure); it gates ONLY the
+# runtime agent surface. `world.action_propose_rule` itself stays directly callable
+# (tests + any future god path) regardless of this flag.
+GRAPH_ZONES_ENABLED = False
+
+
+def _zone_display_name(world: "World", zone_id: str) -> str:
+    """A deterministic, seeded flavor name for a zone (city block), stable across
+    replay/fork: an index into _ZONE_NAME_POOL keyed by (city_seed, zone_id)."""
+    seed = getattr(world, "city_seed", 0)
+    return _ZONE_NAME_POOL[_seed_int(seed, "zone", zone_id) % len(_ZONE_NAME_POOL)]
+
+
+def _point_in_poly(px: float, pz: float, poly: list[dict]) -> bool:
+    """Even-odd ray cast: is world point (px, pz) inside the face polygon (a list
+    of {x, z})? Pure; tolerant of a degenerate (<3 vertex) polygon (→ False)."""
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, zi = poly[i]["x"], poly[i]["z"]
+        xj, zj = poly[j]["x"], poly[j]["z"]
+        if ((zi > pz) != (zj > pz)) and (
+            px < (xj - xi) * (pz - zi) / (zj - zi) + xi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
+
 def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = None) -> str | None:
     """EM-243 (S2) — a compact, diet-safe perception line for road-building:
     extendable directions from the node nearest `place`, plus the car policy.
-    Returns None when nothing is extendable (diet: omit empty blocks)."""
-    from ..engine.citygraph import nearest_node, extendable_directions
+    Returns None when nothing is extendable (diet: omit empty blocks).
+
+    EM-265 (SB) — extended with a district-scoped `Nearby zones` block (the
+    nearest few city blocks, their land-use hint + optional density cap), so an
+    agent can (in SC) target a zone to rule. Counts + hint + cap only — never a
+    polygon dump. Omitted when there are no nearby zones."""
+    from ..engine.citygraph import (nearest_node, extendable_directions,
+                                     planar_faces, zone_id_for, BLOCK_PITCH, TILE)
     node = (next((n for n in world.city_graph.nodes if n.id == force_node_id), None)
             if force_node_id else nearest_node(world.city_graph, float(place.x), float(place.y)))
     if node is None:
@@ -947,6 +1005,57 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
                         and getattr(r, "effect", "") in ("demolish_road", "set_car_policy")), None)
     if open_layout is not None:
         line += f" Open vote: {open_layout.effect} (vote yes/no)."
+
+    # EM-265 (SB) — district-scoped zone block: the _NEARBY_ZONES_MAX faces nearest
+    # the agent's place (the local district horizon — prompt-diet, never the whole
+    # graph), each with its hint + optional cap. GATED on the GRAPH_ZONES_ENABLED
+    # feature flag (NOT on zone_rules being non-empty):
+    #   - flag OFF (default) ⇒ render NOTHING ⇒ the prompt is byte-identical to
+    #     pre-SB (law §0.1), so SB ships dormant.
+    #   - flag ON ⇒ render the district's nearby faces INCLUDING UNZONED ones, so
+    #     an agent can perceive a real zone_id to propose the FIRST set_zone_rule
+    #     even when ZERO rules exist (fixes the chicken-and-egg bootstrap: gating on
+    #     zone_rules-nonempty meant no rule ⇒ no perceivable zone ⇒ no first rule).
+    # The scaffold SC's "target a zone" reads from this block.
+    faces = planar_faces(world.city_graph) if GRAPH_ZONES_ENABLED else []
+    if faces:
+        px, pz = float(place.x), float(place.y)
+        nearest = sorted(
+            faces,
+            key=lambda f: ((f.centroid["x"] - px) ** 2 + (f.centroid["z"] - pz) ** 2,
+                           zone_id_for(f.boundary)),
+        )[:_NEARBY_ZONES_MAX]
+        rules_by_zone = {r.zone_id: r for r in world.city_graph.zone_rules}
+        lot_area = BLOCK_PITCH * TILE  # ~one lot's footprint along a block edge
+        clauses: list[str] = []
+        for f in nearest:
+            zid = zone_id_for(f.boundary)
+            lots = max(1, round(abs(f.area) / lot_area)) if lot_area else 1
+            rule = rules_by_zone.get(zid)
+            hint = rule.hint if rule is not None else "unzoned"
+            # EM-265 (SB) bootstrap fix: surface the CANONICAL zone_id (the raw
+            # "|"-joined node-id string) the action gate + action_propose_rule
+            # demand, not just the friendly name. Display names are seeded from a
+            # ~16-name pool and COLLIDE, so a name can't be resolved back to one
+            # zone_id — without the raw id an agent perceives a block it can never
+            # target, so with the flag ON and ZERO rules it could never propose the
+            # FIRST rule. The id is bounded (~36 chars × ≤4 zones) so the diet holds.
+            clause = (
+                f"{_zone_display_name(world, zid)} [zone {zid}] "
+                f"({hint}, ~{lots} lots"
+            )
+            if rule is not None and rule.density_cap is not None:
+                built = sum(
+                    1 for b in world.buildings.values()
+                    if getattr(b, "status", "") != "destroyed"
+                    and (p := world.places.get(getattr(b, "location", None))) is not None
+                    and _point_in_poly(float(p.x), float(p.y), f.poly)
+                )
+                clause += f", cap {rule.density_cap} — {built} built"
+            clause += ")"
+            clauses.append(clause)
+        if clauses:
+            line += " Nearby zones: " + " ".join(clauses) + "."
     return line
 
 
@@ -1891,6 +2000,12 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                          "trial", "amend_constitution", "relocate_center",
                          "demolish_road", "set_car_policy",  # EM-244 (S3a)
                          "adopt_master_plan"}  # EM-245 (S3b)
+        # EM-265 (SB) — set_zone_rule is offered to agents ONLY behind the
+        # GRAPH_ZONES_ENABLED flag (default OFF ⇒ not in the set ⇒ rejected here as
+        # an invalid effect ⇒ agent behavior byte-identical when dormant). The world
+        # method world.action_propose_rule is NOT flag-gated (stays directly callable).
+        if GRAPH_ZONES_ENABLED:
+            valid_effects.add("set_zone_rule")  # EM-265 (SB)
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -1971,6 +2086,29 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             if getattr(world, "master_plan", None) is not None:
                 return ("a master plan is already in progress — only one at a time "
                         "(wait for it to finish before adopting another)")
+        # EM-265 (SB) — set_zone_rule needs a REAL current zone (a planar face of
+        # the live graph), a known hint, and a None/int>=0 density_cap. Mirror the
+        # world's checks so the front-gate AGREES with action_propose_rule (EM-108
+        # menu/resolution rule): an effect the gate would let through but the world
+        # would reject is a dead end for the agent.
+        if GRAPH_ZONES_ENABLED and effect == "set_zone_rule":
+            from ..engine.citygraph import ZONE_HINTS, planar_faces, zone_id_for
+            zone_id = str(args.get("zone_id") or args.get("target") or "").strip()
+            hint = str(args.get("hint") or "").strip()
+            if hint not in ZONE_HINTS:
+                return f"set_zone_rule requires args.hint in {sorted(ZONE_HINTS)}"
+            density_cap = args.get("density_cap")
+            if density_cap is not None and str(density_cap).strip() != "":
+                try:
+                    if int(density_cap) < 0:
+                        return "set_zone_rule density_cap must be >= 0 (or null)"
+                except (TypeError, ValueError):
+                    return "set_zone_rule density_cap must be a non-negative integer (or null)"
+            current_zones = {zone_id_for(f.boundary)
+                             for f in planar_faces(world.city_graph)}
+            if zone_id not in current_zones:
+                return ("set_zone_rule requires args.zone_id = the id of a real "
+                        "current zone (a city block)")
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -5893,9 +6031,16 @@ class AgentRuntime:
             # the generic target arg (the world handler reads them off the kwargs).
             scope = args.get("scope")
             policy = args.get("policy")
+            # EM-265 (SB) — set_zone_rule carries {zone_id, hint, density_cap};
+            # the zone id may arrive on the generic `target` arg (the world handler
+            # maps either key, like demolish's target/building_id).
+            zone_id = args.get("zone_id")
+            hint = args.get("hint")
+            density_cap = args.get("density_cap")
             ok, reason, rule = self.world.action_propose_rule(
                 agent, effect, text, name, target, image_id, op, article_id,
-                scope=scope, policy=policy)
+                scope=scope, policy=policy,
+                zone_id=zone_id, hint=hint, density_cap=density_cap)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)

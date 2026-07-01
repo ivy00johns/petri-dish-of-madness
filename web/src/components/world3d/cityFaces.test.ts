@@ -22,9 +22,18 @@
  */
 
 import { describe, it, expect } from 'vitest';
+// @ts-ignore -- node builtin without @types/node
+import { readFileSync } from 'node:fs';
+// @ts-ignore -- node builtin without @types/node
+import { resolve } from 'node:path';
 import type { CityGraph, CityGraphNode, CityGraphEdge } from '../../types';
 import type { CityZone } from './cityLayout';
-import { planarFaces, buildZonesFromFaces, type CityFace } from './cityFaces';
+import { planarFaces, buildZonesFromFaces, type CityFace, type ZoneRule } from './cityFaces';
+
+// The app tsconfig ships no @types/node; node builtins are real under vitest.
+// vitest runs from web/ (the toolchain `cd web && npx vitest`), so cwd()/.. is
+// the repo root — the sanctioned pattern from cityModels.test.ts.
+declare const process: { cwd(): string };
 
 // ── graph builders ──────────────────────────────────────────────────────────
 
@@ -619,3 +628,114 @@ function pointInPoly(
   }
   return inside;
 }
+
+// ── EM-265 (SB) — zone-rule attach by id ──────────────────────────────────────
+// buildZonesFromFaces gains an optional `zoneRules` param; each zone gets the
+// rules whose `zone_id` equals its `id`. Absent/empty ⇒ every `rules: []`
+// (byte-identical to SA — the no-rules path, law §0.1). The cross-language zone
+// id formula is IDENTICAL both sides (sorted boundary node ids joined, law §0.2),
+// so a backend-ratified rule lands on exactly the matching rendered block.
+
+describe('EM-265 (SB) — buildZonesFromFaces attaches zone_rules by id', () => {
+  it('a rule whose zone_id matches a zone lands on that zone (and no other)', () => {
+    const faces = planarFaces(gridGraph(5, 10));
+    const ids = buildZonesFromFaces(faces, 7, zoneAlways).map((z) => z.id);
+    const targetId = ids[3];
+    const rule: ZoneRule = { zone_id: targetId, hint: 'market', density_cap: 4 };
+    const zones = buildZonesFromFaces(faces, 7, zoneAlways, [rule]);
+    for (const z of zones) {
+      if (z.id === targetId) expect(z.rules).toEqual([rule]);
+      else expect(z.rules).toEqual([]);
+    }
+    // exactly one zone carries the rule
+    expect(zones.filter((z) => z.rules.length > 0)).toHaveLength(1);
+  });
+
+  it('absent / empty / non-matching rules ⇒ byte-identical to SA (rules: [])', () => {
+    const faces = planarFaces(gridGraph(5, 10));
+    const sa = buildZonesFromFaces(faces, 7, zoneAlways); // SA default (no param)
+    const emptyParam = buildZonesFromFaces(faces, 7, zoneAlways, []);
+    const ghost = buildZonesFromFaces(faces, 7, zoneAlways, [
+      { zone_id: 'no-such-zone', hint: 'civic', density_cap: null },
+    ]);
+    // [] param == SA default == an unmatched rule ⇒ all three are byte-identical
+    expect(JSON.stringify(emptyParam)).toBe(JSON.stringify(sa));
+    expect(JSON.stringify(ghost)).toBe(JSON.stringify(sa));
+    for (const z of sa) expect(z.rules).toEqual([]);
+  });
+
+  it('density_cap (number AND null) round-trips onto the attached rule', () => {
+    const faces = planarFaces(gridGraph(5, 10));
+    const ids = buildZonesFromFaces(faces, 7, zoneAlways).map((z) => z.id);
+    const rules: ZoneRule[] = [
+      { zone_id: ids[0], hint: 'open', density_cap: null },
+      { zone_id: ids[1], hint: 'residential', density_cap: 0 },
+    ];
+    const zones = buildZonesFromFaces(faces, 7, zoneAlways, rules);
+    const z0 = zones.find((z) => z.id === ids[0])!;
+    const z1 = zones.find((z) => z.id === ids[1])!;
+    expect(z0.rules[0]).toEqual({ zone_id: ids[0], hint: 'open', density_cap: null });
+    expect(z1.rules[0].density_cap).toBe(0);
+  });
+
+  it('attach is deterministic under a shuffle (same rule lands on the same id)', () => {
+    const g = gridGraph(5, 10);
+    const sh = graph(shuffled(g.nodes), shuffled(g.edges));
+    const id = buildZonesFromFaces(planarFaces(g), 7, zoneAlways)[2].id;
+    const rules: ZoneRule[] = [{ zone_id: id, hint: 'civic', density_cap: 2 }];
+    const za = buildZonesFromFaces(planarFaces(g), 7, zoneAlways, rules);
+    const zb = buildZonesFromFaces(planarFaces(sh), 7, zoneAlways, rules);
+    expect(JSON.stringify(zb)).toBe(JSON.stringify(za));
+  });
+});
+
+// ── EM-265 (SB) — cross-language zone-id consistency (law §0.2) ────────────────
+// Lane 1 emits contracts/em265-zone-id-fixture.json: canonical graphs + the
+// zone-id SET the BACKEND planar_faces computes. The TS planarFaces here MUST
+// compute the SAME set on the SAME nodes/edges, or a ratified rule's zone_id
+// won't tint the right block. This pins the two ports together (the keystone).
+
+describe('EM-265 (SB) — cross-language zone-id consistency (law §0.2)', () => {
+  const fixturePath = resolve(process.cwd(), '..', 'contracts/em265-zone-id-fixture.json');
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+    cases: { name: string; graph: CityGraph; zone_ids: string[] }[];
+    // EM-265 fix: rounding-tie cases (Python half-up must match JS Math.round on
+    // the 1e-6 merge lattice) live under their own key so the generator-case
+    // assertion above stays exact.
+    tie_cases?: { name: string; graph: CityGraph; zone_ids: string[] }[];
+  };
+
+  it('the fixture carries the 3 generator cases', () => {
+    expect(fixture.cases.map((c) => c.name).sort()).toEqual(
+      ['classic_grid', 'pentagon', 'radial'],
+    );
+  });
+
+  for (const c of fixture.cases) {
+    it(`TS planarFaces zone-id set equals the backend fixture — ${c.name}`, () => {
+      const faces = planarFaces(c.graph);
+      // zone id = sorted boundary node ids joined (the SAME formula both sides)
+      const tsIds = faces.map((f) => [...f.boundary].sort().join('|')).sort();
+      const want = [...c.zone_ids].sort();
+      expect(tsIds).toEqual(want);
+      // and the SAME ids flow out of buildZonesFromFaces (the rendered BuildZone.id)
+      const zoneIds = buildZonesFromFaces(faces, 7, zoneAlways)
+        .map((z) => z.id)
+        .sort();
+      expect(zoneIds).toEqual(want);
+    });
+  }
+
+  // EM-265 fix #1 (keystone §0.2): the merge-lattice rounding-tie cases — JS
+  // Math.round (half-up) must agree with the fixed Python floor(v+0.5). A buggy
+  // half-to-even Python port would merge a node the TS port keeps distinct,
+  // producing a different zone-id set; this pins that they don't.
+  for (const c of fixture.tie_cases ?? []) {
+    it(`TS planarFaces zone-id set equals the backend fixture (rounding tie) — ${c.name}`, () => {
+      const tsIds = planarFaces(c.graph)
+        .map((f) => [...f.boundary].sort().join('|'))
+        .sort();
+      expect(tsIds).toEqual([...c.zone_ids].sort());
+    });
+  }
+});

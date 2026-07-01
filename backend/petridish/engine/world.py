@@ -15,13 +15,22 @@ from typing import Any
 
 from .citygraph import (CityGraph, classic_grid, template, apply_build_road,
                         nearest_node, apply_demolish_road, apply_car_policy,
-                        master_plan, diff_graphs, MASTER_PLAN_KINDS)
+                        master_plan, diff_graphs, MASTER_PLAN_KINDS,
+                        ZoneRule, ZONE_HINTS, planar_faces, zone_id_for,
+                        apply_zone_rule)
 
 logger = logging.getLogger(__name__)
 
 # EM-245 (S3b) — the morph budget: up to this many edge ops per tick when an
 # active master plan is morphing the city toward its target (tune vs a live run).
 MORPH_EDGES_PER_TICK: int = 4
+
+# EM-265 (SB) — morph-survival re-point tolerance (world units). After a master
+# plan reshapes the graph, an advisory ZoneRule whose face id changed re-binds to
+# a current face whose centroid sits within this distance of the rule's ORIGINAL
+# face centroid (else it drops). Tight by design: re-point is for a block that
+# stayed in place under renamed nodes, NOT a spurious cross-block reattach.
+_MORPH_REPOINT_TOL: float = 1e-4
 
 
 def _block_get(block: Any, key: str, default: Any) -> Any:
@@ -1357,6 +1366,15 @@ class World:
                      "payload": {"kind": plan["kind"]}}]
         events: list[dict] = []
         budget = MORPH_EDGES_PER_TICK
+        # EM-265 (SB) — morph-survival: snapshot each current zone's ORIGINAL face
+        # centroid BEFORE the mutation, keyed by face id, so a rule whose block is
+        # reshaped (renamed nodes ⇒ new face id, same geometry) can re-bind by
+        # centroid afterwards. Skipped (empty) when there are no advisory rules, so
+        # a rule-free morph is byte-identical to pre-SB.
+        pre_centroids: dict[str, dict] = {}
+        if self.city_graph.zone_rules:
+            for f in planar_faces(self.city_graph):
+                pre_centroids[zone_id_for(f.boundary)] = f.centroid
         # ADDS first (never shrink below target mid-morph). Seeded-stable order.
         tgt_node = {n.id: n for n in target.nodes}
         for e in sorted(d["add_edges"], key=lambda e: _seeded_unit(int(plan["seed"]), f"morph:add:{e.id}")):
@@ -1385,6 +1403,93 @@ class World:
                 events.append({"kind": "road_demolished", "actor_id": "system", "actor_type": "system",
                                "text": "🚧 A road is cleared (master plan).",
                                "payload": {"edge_id": eid, "morph": plan["kind"]}})
+        # EM-265 (SB) — morph-survival: re-bind / drop advisory zone rules whose
+        # blocks the morph reshaped this tick (pure fn of the now-mutated graph +
+        # the pre-mutation centroids).
+        events.extend(self._reconcile_zone_rules_after_morph(pre_centroids))
+        return events
+
+    def _reconcile_zone_rules_after_morph(
+        self, pre_centroids: dict[str, dict],
+    ) -> list[dict]:
+        """EM-265 (SB) — morph-survival (spec §4). After a master-plan morph mutates
+        self.city_graph, rebind each advisory ZoneRule to a CURRENT planar face:
+          (a) its zone_id is still a current face id            → KEEP;
+          (b) else a current face's centroid sits within
+              _MORPH_REPOINT_TOL of the rule's ORIGINAL face
+              centroid (from `pre_centroids`)                    → RE-POINT;
+          (c) else                                               → DROP (emit
+              `zone_rule_dropped`).
+        Deterministic + pure (no clock/random): candidate faces are matched by
+        nearest centroid, tie-broken by zone id, and each face is claimed at most
+        once (one rule per zone — never a mis-attach). A rule losing its zone to a
+        morph is acceptable + logged — NOT the forbidden silent region drop.
+
+        TWO PASSES so KEEP globally outranks RE-POINT (EM-265 SB defect — priority
+        inversion): a single mixed pass let an earlier rule's RE-POINT steal a face
+        that a LATER rule still literally KEEPS, silently dropping the keeper. Pass A
+        claims every face that is still some rule's literal zone_id; Pass B re-points
+        the remainder only onto faces NOT claimed by a keeper, else drops."""
+        if not self.city_graph.zone_rules:
+            return []
+        post_faces = planar_faces(self.city_graph)
+        post_ids = {zone_id_for(f.boundary) for f in post_faces}
+        rules = self.city_graph.zone_rules
+        claimed: set[str] = set()
+        # ── Pass A: KEEP every rule whose block id still exists (claims first). ──
+        # zone_ids are unique across rules (apply_zone_rule), so KEEPs never collide
+        # with each other — only with a would-be RE-POINT, which Pass B must yield.
+        keep: dict[int, bool] = {}
+        for i, rule in enumerate(rules):
+            if rule.zone_id in post_ids:
+                keep[i] = True
+                claimed.add(rule.zone_id)
+        # ── Pass B: RE-POINT or DROP every non-kept rule (original order). ──
+        decision: dict[int, str | None] = {}  # i → new_zone_id (RE-POINT) | None (DROP)
+        for i, rule in enumerate(rules):
+            if keep.get(i):
+                continue
+            orig = pre_centroids.get(rule.zone_id)
+            new_zid: str | None = None
+            if orig is not None:
+                cands = sorted(
+                    (
+                        (
+                            math.hypot(f.centroid["x"] - orig["x"],
+                                       f.centroid["z"] - orig["z"]),
+                            zone_id_for(f.boundary),
+                        )
+                        for f in post_faces
+                        if zone_id_for(f.boundary) not in claimed
+                    ),
+                    key=lambda dz: (dz[0], dz[1]),
+                )
+                if cands and cands[0][0] <= _MORPH_REPOINT_TOL:
+                    new_zid = cands[0][1]
+                    claimed.add(new_zid)
+            decision[i] = new_zid
+        # ── Rebuild surviving rules in ORIGINAL order; emit drops in that order. ──
+        events: list[dict] = []
+        surviving: list[ZoneRule] = []
+        for i, rule in enumerate(rules):
+            if keep.get(i):
+                surviving.append(rule)
+                continue
+            new_zid = decision.get(i)
+            if new_zid is not None:
+                rule.zone_id = new_zid
+                surviving.append(rule)
+                continue
+            # DROP — the rule's block no longer exists; log it.
+            events.append({
+                "kind": "zone_rule_dropped", "actor_id": "system",
+                "actor_type": "system",
+                "text": ("🗺 A zone rule was dropped — its block no longer exists "
+                         "after the master plan."),
+                "payload": {"zone_id": rule.zone_id, "hint": rule.hint,
+                            "density_cap": rule.density_cap},
+            })
+        self.city_graph.zone_rules = surviving
         return events
 
     def apply_procgen(self) -> None:
@@ -3631,6 +3736,8 @@ class World:
         image_id: str | None = None,
         op: str | None = None, article_id: str | None = None,
         scope: str | None = None, policy: str | None = None,
+        zone_id: str | None = None, hint: str | None = None,
+        density_cap: Any = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -3663,7 +3770,8 @@ class World:
                          "name_town", "demolish", "promote_image", "trial",
                          "amend_constitution", "relocate_center",
                          "demolish_road", "set_car_policy",  # EM-244 (S3a)
-                         "adopt_master_plan"}  # EM-245 (S3b)
+                         "adopt_master_plan",  # EM-245 (S3b)
+                         "set_zone_rule"}  # EM-265 (SB)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -3811,6 +3919,35 @@ class World:
                 return False, ("a master plan is already in progress — only one at "
                                "a time (wait for it to finish before adopting another)"), None
             payload = {"kind": kind, "params": {}}
+        # EM-265 (SB) — set_zone_rule tags a CURRENT city block (planar face) with a
+        # land-use hint + optional density cap. Advisory ONLY (nothing enforces it in
+        # SB). The zone id may arrive on the generic `target` arg or the explicit
+        # `zone_id` kwarg (the runtime maps either, like demolish's target/building_id).
+        # Validate like a demolish of an absent building: the hint must be a known
+        # hint, the density_cap None or an int >= 0, and the zone_id must be a face
+        # of the CURRENT graph — reject an unknown zone before a vote opens.
+        if effect == "set_zone_rule":
+            zone_id = str(zone_id or target or "").strip()
+            hint = str(hint or "").strip()
+            if hint not in ZONE_HINTS:
+                return False, (f"set_zone_rule hint must be one of "
+                               f"{sorted(ZONE_HINTS)} (got {hint!r})"), None
+            cap: int | None = None
+            if density_cap is not None and str(density_cap).strip() != "":
+                try:
+                    cap = int(density_cap)
+                except (TypeError, ValueError):
+                    return False, (f"set_zone_rule density_cap must be a non-negative "
+                                   f"integer or null (got {density_cap!r})"), None
+                if cap < 0:
+                    return False, (f"set_zone_rule density_cap must be >= 0 "
+                                   f"(got {cap})"), None
+            current_zones = {zone_id_for(f.boundary)
+                             for f in planar_faces(self.city_graph)}
+            if zone_id not in current_zones:
+                return False, (f"set_zone_rule requires a real current zone id "
+                               f"(got {zone_id!r})"), None
+            payload = {"zone_id": zone_id, "hint": hint, "density_cap": cap}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -3857,6 +3994,14 @@ class World:
                     return False, (f"a {op_here} vote for article "
                                    f"{payload.get('article_id')!r} is already open"), None
                 continue
+            # EM-265 (SB) — set_zone_rule is scoped per ZONE_ID (two distinct zones
+            # may have open rule votes at once; the SAME zone may not be double-
+            # proposed) — mirrors demolish-per-target.
+            if effect == "set_zone_rule":
+                if (rule.payload or {}).get("zone_id") == payload.get("zone_id"):
+                    return False, (f"a zone-rule vote for {payload.get('zone_id')!r} "
+                                   f"is already open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -3874,7 +4019,8 @@ class World:
             if effect not in ("name_town", "demolish", "promote_image", "trial",
                               "amend_constitution", "relocate_center",
                               "demolish_road", "set_car_policy",  # EM-244 (S3a) — one-shot acts
-                              "adopt_master_plan") else None  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
+                              "adopt_master_plan",  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
+                              "set_zone_rule") else None  # EM-265 (SB) — one-shot per-zone act
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
         # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
@@ -3945,7 +4091,8 @@ class World:
                                            # excluding it from renewal is correct.
                                            "demolish",
                                            "demolish_road", "set_car_policy",  # EM-244 (S3a)
-                                           "adopt_master_plan") else None  # EM-245 (S3b)
+                                           "adopt_master_plan",  # EM-245 (S3b)
+                                           "set_zone_rule") else None  # EM-265 (SB)
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -4222,6 +4369,51 @@ class World:
                 "payload": {"proposal_id": rule.id, "kind": kind},
             })
             return
+        # EM-265 (SB) — set_zone_rule: a passing vote tags a city block (planar face)
+        # with an advisory land-use hint + optional density cap. apply_zone_rule
+        # replaces any prior rule on that zone (one rule per zone, last wins).
+        # ADVISORY ONLY in SB — nothing enforces it (that's SC). zone_rule_set is
+        # parked in the same outbox name_town/demolish use (drained by the loop).
+        if rule.effect == "set_zone_rule":
+            rule.applied = True
+            p = rule.payload or {}
+            zone_id = p.get("zone_id")
+            hint = p.get("hint")
+            density_cap = p.get("density_cap")
+            # TOCTOU re-validation (EM-265 SB defect): action_propose_rule checks the
+            # zone_id is a CURRENT face when the vote OPENS, but a master-plan morph
+            # can COMPLETE between propose and the threshold-crossing vote, destroying
+            # that block. Applying unconditionally here would graft an ORPHAN rule
+            # onto a non-existent zone, and _reconcile_zone_rules_after_morph never
+            # fires again (it runs only while a morph is in progress) ⇒ a permanent
+            # orphan in every snapshot/fork. Re-check at activation time: if the zone
+            # vanished, silent no-op (the vote still "passed") — exactly demolish's
+            # vanished-target / promote_image's vanished-image pattern. No orphan added.
+            current_zones = {zone_id_for(f.boundary)
+                             for f in planar_faces(self.city_graph)}
+            if str(zone_id) not in current_zones:
+                self.pending_spawn_events.append({
+                    "kind": "zone_rule_dropped", "actor_id": "system",
+                    "actor_type": "system",
+                    "text": ("🗺 A ratified zone rule found its block already gone "
+                             "(reshaped before the vote landed)."),
+                    "payload": {"zone_id": zone_id, "hint": hint,
+                                "density_cap": density_cap, "proposal_id": rule.id},
+                })
+                return
+            apply_zone_rule(self.city_graph,
+                            ZoneRule(zone_id=str(zone_id), hint=str(hint),
+                                     density_cap=density_cap))
+            self.pending_spawn_events.append({
+                "kind": "zone_rule_set", "actor_id": "system", "actor_type": "system",
+                "text": (f"🗺 By vote, a city block is zoned {hint}"
+                         + (f" (cap {density_cap})" if density_cap is not None else "")
+                         + "."),
+                "payload": {"zone_id": zone_id, "hint": hint,
+                            "density_cap": density_cap, "tick": self.tick,
+                            "proposal_id": rule.id},
+            })
+            return
         if rule.effect != "admit_agent":
             return
         spec = rule.payload or {}
@@ -4369,7 +4561,8 @@ class World:
         # 0.7 supermajority bar (the fixed `else` branch below — no config block).
         if rule.effect in ("demolish", "amend_constitution", "relocate_center",
                            "demolish_road", "set_car_policy",  # EM-244 (S3a) — irreversible/structural → 0.7
-                           "adopt_master_plan"):  # EM-245 (S3b) — structural city morph → 0.7
+                           "adopt_master_plan",  # EM-245 (S3b) — structural city morph → 0.7
+                           "set_zone_rule"):  # EM-265 (SB) — structural city policy → 0.7
             if rule.effect == "amend_constitution":
                 try:
                     frac = float(self._constitution_param("ratify_threshold", 0.7))

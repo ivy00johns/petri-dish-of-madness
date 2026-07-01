@@ -1,0 +1,1193 @@
+{
+  "_meta": {
+    "issue": "EM-265 SB",
+    "purpose": "Cross-language zone-id consistency (law 0.2). Python planar_faces + the TS planarFaces in web/src/components/world3d/cityFaces.ts MUST compute the SAME sorted zone_id set on the SAME nodes/edges. Generated from backend/petridish/engine/citygraph.py \u2014 do not hand-edit.",
+    "zone_id_formula": "sorted(boundary_node_ids) joined by \"|\"",
+    "generator": "classic_grid(1337), master_plan(\"pentagon\", None, 1337), master_plan(\"radial\", None, 1337)",
+    "tie_cases_note": "tie_cases[] holds adversarial coincident-node-merge rounding cases that pin the HALF-UP rounding contract (Python math.floor(v+0.5) == JS Math.round). They are kept SEPARATE from cases[] because the frontend cityFaces.test.ts hardcodes a 'carries the 3 generator cases' assertion on fixture.cases."
+  },
+  "cases": [
+    {
+      "name": "classic_grid",
+      "template": "grid",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n:-13:-13",
+            "x": -32.5,
+            "z": -32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-8:-13",
+            "x": -19.5,
+            "z": -32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-3:-13",
+            "x": -6.5,
+            "z": -32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:2:-13",
+            "x": 6.5,
+            "z": -32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:7:-13",
+            "x": 19.5,
+            "z": -32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:12:-13",
+            "x": 32.5,
+            "z": -32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-13:-8",
+            "x": -32.5,
+            "z": -19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-8:-8",
+            "x": -19.5,
+            "z": -19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-3:-8",
+            "x": -6.5,
+            "z": -19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:2:-8",
+            "x": 6.5,
+            "z": -19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:7:-8",
+            "x": 19.5,
+            "z": -19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:12:-8",
+            "x": 32.5,
+            "z": -19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-13:-3",
+            "x": -32.5,
+            "z": -6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-8:-3",
+            "x": -19.5,
+            "z": -6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-3:-3",
+            "x": -6.5,
+            "z": -6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:2:-3",
+            "x": 6.5,
+            "z": -6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:7:-3",
+            "x": 19.5,
+            "z": -6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:12:-3",
+            "x": 32.5,
+            "z": -6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-13:2",
+            "x": -32.5,
+            "z": 6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-8:2",
+            "x": -19.5,
+            "z": 6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-3:2",
+            "x": -6.5,
+            "z": 6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:2:2",
+            "x": 6.5,
+            "z": 6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:7:2",
+            "x": 19.5,
+            "z": 6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:12:2",
+            "x": 32.5,
+            "z": 6.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-13:7",
+            "x": -32.5,
+            "z": 19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-8:7",
+            "x": -19.5,
+            "z": 19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-3:7",
+            "x": -6.5,
+            "z": 19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:2:7",
+            "x": 6.5,
+            "z": 19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:7:7",
+            "x": 19.5,
+            "z": 19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:12:7",
+            "x": 32.5,
+            "z": 19.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-13:12",
+            "x": -32.5,
+            "z": 32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-8:12",
+            "x": -19.5,
+            "z": 32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:-3:12",
+            "x": -6.5,
+            "z": 32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:2:12",
+            "x": 6.5,
+            "z": 32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:7:12",
+            "x": 19.5,
+            "z": 32.5,
+            "kind": "junction"
+          },
+          {
+            "id": "n:12:12",
+            "x": 32.5,
+            "z": 32.5,
+            "kind": "junction"
+          }
+        ],
+        "edges": [
+          {
+            "id": "e:n:-13:-13->n:-8:-13",
+            "a": "n:-13:-13",
+            "b": "n:-8:-13",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:-13->n:-3:-13",
+            "a": "n:-8:-13",
+            "b": "n:-3:-13",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:-13->n:2:-13",
+            "a": "n:-3:-13",
+            "b": "n:2:-13",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:-13->n:7:-13",
+            "a": "n:2:-13",
+            "b": "n:7:-13",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:-13->n:12:-13",
+            "a": "n:7:-13",
+            "b": "n:12:-13",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:-8->n:-8:-8",
+            "a": "n:-13:-8",
+            "b": "n:-8:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:-8->n:-3:-8",
+            "a": "n:-8:-8",
+            "b": "n:-3:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:-8->n:2:-8",
+            "a": "n:-3:-8",
+            "b": "n:2:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:-8->n:7:-8",
+            "a": "n:2:-8",
+            "b": "n:7:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:-8->n:12:-8",
+            "a": "n:7:-8",
+            "b": "n:12:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:-3->n:-8:-3",
+            "a": "n:-13:-3",
+            "b": "n:-8:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:-3->n:-3:-3",
+            "a": "n:-8:-3",
+            "b": "n:-3:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:-3->n:2:-3",
+            "a": "n:-3:-3",
+            "b": "n:2:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:-3->n:7:-3",
+            "a": "n:2:-3",
+            "b": "n:7:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:-3->n:12:-3",
+            "a": "n:7:-3",
+            "b": "n:12:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:2->n:-8:2",
+            "a": "n:-13:2",
+            "b": "n:-8:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:2->n:-3:2",
+            "a": "n:-8:2",
+            "b": "n:-3:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:2->n:2:2",
+            "a": "n:-3:2",
+            "b": "n:2:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:2->n:7:2",
+            "a": "n:2:2",
+            "b": "n:7:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:2->n:12:2",
+            "a": "n:7:2",
+            "b": "n:12:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:7->n:-8:7",
+            "a": "n:-13:7",
+            "b": "n:-8:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:7->n:-3:7",
+            "a": "n:-8:7",
+            "b": "n:-3:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:7->n:2:7",
+            "a": "n:-3:7",
+            "b": "n:2:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:7->n:7:7",
+            "a": "n:2:7",
+            "b": "n:7:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:7->n:12:7",
+            "a": "n:7:7",
+            "b": "n:12:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:12->n:-8:12",
+            "a": "n:-13:12",
+            "b": "n:-8:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:12->n:-3:12",
+            "a": "n:-8:12",
+            "b": "n:-3:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:12->n:2:12",
+            "a": "n:-3:12",
+            "b": "n:2:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:12->n:7:12",
+            "a": "n:2:12",
+            "b": "n:7:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:12->n:12:12",
+            "a": "n:7:12",
+            "b": "n:12:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:-13->n:-13:-8",
+            "a": "n:-13:-13",
+            "b": "n:-13:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:-8->n:-13:-3",
+            "a": "n:-13:-8",
+            "b": "n:-13:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:-3->n:-13:2",
+            "a": "n:-13:-3",
+            "b": "n:-13:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:2->n:-13:7",
+            "a": "n:-13:2",
+            "b": "n:-13:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-13:7->n:-13:12",
+            "a": "n:-13:7",
+            "b": "n:-13:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:-13->n:-8:-8",
+            "a": "n:-8:-13",
+            "b": "n:-8:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:-8->n:-8:-3",
+            "a": "n:-8:-8",
+            "b": "n:-8:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:-3->n:-8:2",
+            "a": "n:-8:-3",
+            "b": "n:-8:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:2->n:-8:7",
+            "a": "n:-8:2",
+            "b": "n:-8:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-8:7->n:-8:12",
+            "a": "n:-8:7",
+            "b": "n:-8:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:-13->n:-3:-8",
+            "a": "n:-3:-13",
+            "b": "n:-3:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:-8->n:-3:-3",
+            "a": "n:-3:-8",
+            "b": "n:-3:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:-3->n:-3:2",
+            "a": "n:-3:-3",
+            "b": "n:-3:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:2->n:-3:7",
+            "a": "n:-3:2",
+            "b": "n:-3:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:-3:7->n:-3:12",
+            "a": "n:-3:7",
+            "b": "n:-3:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:-13->n:2:-8",
+            "a": "n:2:-13",
+            "b": "n:2:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:-8->n:2:-3",
+            "a": "n:2:-8",
+            "b": "n:2:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:-3->n:2:2",
+            "a": "n:2:-3",
+            "b": "n:2:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:2->n:2:7",
+            "a": "n:2:2",
+            "b": "n:2:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:2:7->n:2:12",
+            "a": "n:2:7",
+            "b": "n:2:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:-13->n:7:-8",
+            "a": "n:7:-13",
+            "b": "n:7:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:-8->n:7:-3",
+            "a": "n:7:-8",
+            "b": "n:7:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:-3->n:7:2",
+            "a": "n:7:-3",
+            "b": "n:7:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:2->n:7:7",
+            "a": "n:7:2",
+            "b": "n:7:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:7:7->n:7:12",
+            "a": "n:7:7",
+            "b": "n:7:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:12:-13->n:12:-8",
+            "a": "n:12:-13",
+            "b": "n:12:-8",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:12:-8->n:12:-3",
+            "a": "n:12:-8",
+            "b": "n:12:-3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:12:-3->n:12:2",
+            "a": "n:12:-3",
+            "b": "n:12:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:12:2->n:12:7",
+            "a": "n:12:2",
+            "b": "n:12:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:12:7->n:12:12",
+            "a": "n:12:7",
+            "b": "n:12:12",
+            "road_class": "street",
+            "car_policy": "inherit"
+          }
+        ]
+      },
+      "zone_ids": [
+        "n:-13:-13|n:-13:-8|n:-8:-13|n:-8:-8",
+        "n:-13:-3|n:-13:-8|n:-8:-3|n:-8:-8",
+        "n:-13:-3|n:-13:2|n:-8:-3|n:-8:2",
+        "n:-13:12|n:-13:7|n:-8:12|n:-8:7",
+        "n:-13:2|n:-13:7|n:-8:2|n:-8:7",
+        "n:-3:-13|n:-3:-8|n:-8:-13|n:-8:-8",
+        "n:-3:-13|n:-3:-8|n:2:-13|n:2:-8",
+        "n:-3:-3|n:-3:-8|n:-8:-3|n:-8:-8",
+        "n:-3:-3|n:-3:-8|n:2:-3|n:2:-8",
+        "n:-3:-3|n:-3:2|n:-8:-3|n:-8:2",
+        "n:-3:-3|n:-3:2|n:2:-3|n:2:2",
+        "n:-3:12|n:-3:7|n:-8:12|n:-8:7",
+        "n:-3:12|n:-3:7|n:2:12|n:2:7",
+        "n:-3:2|n:-3:7|n:-8:2|n:-8:7",
+        "n:-3:2|n:-3:7|n:2:2|n:2:7",
+        "n:12:-13|n:12:-8|n:7:-13|n:7:-8",
+        "n:12:-3|n:12:-8|n:7:-3|n:7:-8",
+        "n:12:-3|n:12:2|n:7:-3|n:7:2",
+        "n:12:12|n:12:7|n:7:12|n:7:7",
+        "n:12:2|n:12:7|n:7:2|n:7:7",
+        "n:2:-13|n:2:-8|n:7:-13|n:7:-8",
+        "n:2:-3|n:2:-8|n:7:-3|n:7:-8",
+        "n:2:-3|n:2:2|n:7:-3|n:7:2",
+        "n:2:12|n:2:7|n:7:12|n:7:7",
+        "n:2:2|n:2:7|n:7:2|n:7:7"
+      ]
+    },
+    {
+      "name": "pentagon",
+      "template": "pentagon",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n:pent:0",
+            "x": 26.0,
+            "z": 0.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:pent:1",
+            "x": 8.034441853748634,
+            "z": 24.72746942367399,
+            "kind": "junction"
+          },
+          {
+            "id": "n:pent:2",
+            "x": -21.034441853748632,
+            "z": 15.282416559604304,
+            "kind": "junction"
+          },
+          {
+            "id": "n:pent:3",
+            "x": -21.034441853748632,
+            "z": -15.282416559604298,
+            "kind": "junction"
+          },
+          {
+            "id": "n:pent:4",
+            "x": 8.034441853748628,
+            "z": -24.727469423673995,
+            "kind": "junction"
+          },
+          {
+            "id": "n:pent:c",
+            "x": 0.0,
+            "z": 0.0,
+            "kind": "roundabout"
+          }
+        ],
+        "edges": [
+          {
+            "id": "e:n:pent:0->n:pent:1",
+            "a": "n:pent:0",
+            "b": "n:pent:1",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:1->n:pent:2",
+            "a": "n:pent:1",
+            "b": "n:pent:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:2->n:pent:3",
+            "a": "n:pent:2",
+            "b": "n:pent:3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:3->n:pent:4",
+            "a": "n:pent:3",
+            "b": "n:pent:4",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:0->n:pent:4",
+            "a": "n:pent:0",
+            "b": "n:pent:4",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:0->n:pent:c",
+            "a": "n:pent:0",
+            "b": "n:pent:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:1->n:pent:c",
+            "a": "n:pent:1",
+            "b": "n:pent:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:2->n:pent:c",
+            "a": "n:pent:2",
+            "b": "n:pent:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:3->n:pent:c",
+            "a": "n:pent:3",
+            "b": "n:pent:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:pent:4->n:pent:c",
+            "a": "n:pent:4",
+            "b": "n:pent:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          }
+        ]
+      },
+      "zone_ids": [
+        "n:pent:0|n:pent:1|n:pent:c",
+        "n:pent:0|n:pent:4|n:pent:c",
+        "n:pent:1|n:pent:2|n:pent:c",
+        "n:pent:2|n:pent:3|n:pent:c",
+        "n:pent:3|n:pent:4|n:pent:c"
+      ]
+    },
+    {
+      "name": "radial",
+      "template": "radial",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n:radO:0",
+            "x": 26.0,
+            "z": 0.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:1",
+            "x": 18.38477631085024,
+            "z": 18.384776310850235,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:2",
+            "x": 1.592040838891559e-15,
+            "z": 26.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:3",
+            "x": -18.384776310850235,
+            "z": 18.38477631085024,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:4",
+            "x": -26.0,
+            "z": 3.184081677783118e-15,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:5",
+            "x": -18.38477631085024,
+            "z": -18.384776310850235,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:6",
+            "x": -4.776122516674677e-15,
+            "z": -26.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:7",
+            "x": 18.38477631085023,
+            "z": -18.38477631085024,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radO:c",
+            "x": 0.0,
+            "z": 0.0,
+            "kind": "roundabout"
+          },
+          {
+            "id": "n:radI:0",
+            "x": 13.0,
+            "z": 0.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:1",
+            "x": 9.19238815542512,
+            "z": 9.192388155425117,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:2",
+            "x": 7.960204194457795e-16,
+            "z": 13.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:3",
+            "x": -9.192388155425117,
+            "z": 9.19238815542512,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:4",
+            "x": -13.0,
+            "z": 1.592040838891559e-15,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:5",
+            "x": -9.19238815542512,
+            "z": -9.192388155425117,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:6",
+            "x": -2.3880612583373385e-15,
+            "z": -13.0,
+            "kind": "junction"
+          },
+          {
+            "id": "n:radI:7",
+            "x": 9.192388155425116,
+            "z": -9.19238815542512,
+            "kind": "junction"
+          }
+        ],
+        "edges": [
+          {
+            "id": "e:n:radO:0->n:radO:1",
+            "a": "n:radO:0",
+            "b": "n:radO:1",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:1->n:radO:2",
+            "a": "n:radO:1",
+            "b": "n:radO:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:2->n:radO:3",
+            "a": "n:radO:2",
+            "b": "n:radO:3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:3->n:radO:4",
+            "a": "n:radO:3",
+            "b": "n:radO:4",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:4->n:radO:5",
+            "a": "n:radO:4",
+            "b": "n:radO:5",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:5->n:radO:6",
+            "a": "n:radO:5",
+            "b": "n:radO:6",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:6->n:radO:7",
+            "a": "n:radO:6",
+            "b": "n:radO:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:0->n:radO:7",
+            "a": "n:radO:0",
+            "b": "n:radO:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:0->n:radO:c",
+            "a": "n:radO:0",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:1->n:radO:c",
+            "a": "n:radO:1",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:2->n:radO:c",
+            "a": "n:radO:2",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:3->n:radO:c",
+            "a": "n:radO:3",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:4->n:radO:c",
+            "a": "n:radO:4",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:5->n:radO:c",
+            "a": "n:radO:5",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:6->n:radO:c",
+            "a": "n:radO:6",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radO:7->n:radO:c",
+            "a": "n:radO:7",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:0->n:radI:1",
+            "a": "n:radI:0",
+            "b": "n:radI:1",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:1->n:radI:2",
+            "a": "n:radI:1",
+            "b": "n:radI:2",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:2->n:radI:3",
+            "a": "n:radI:2",
+            "b": "n:radI:3",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:3->n:radI:4",
+            "a": "n:radI:3",
+            "b": "n:radI:4",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:4->n:radI:5",
+            "a": "n:radI:4",
+            "b": "n:radI:5",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:5->n:radI:6",
+            "a": "n:radI:5",
+            "b": "n:radI:6",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:6->n:radI:7",
+            "a": "n:radI:6",
+            "b": "n:radI:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:0->n:radI:7",
+            "a": "n:radI:0",
+            "b": "n:radI:7",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:0->n:radO:c",
+            "a": "n:radI:0",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:1->n:radO:c",
+            "a": "n:radI:1",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:2->n:radO:c",
+            "a": "n:radI:2",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:3->n:radO:c",
+            "a": "n:radI:3",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:4->n:radO:c",
+            "a": "n:radI:4",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:5->n:radO:c",
+            "a": "n:radI:5",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:6->n:radO:c",
+            "a": "n:radI:6",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          },
+          {
+            "id": "e:n:radI:7->n:radO:c",
+            "a": "n:radI:7",
+            "b": "n:radO:c",
+            "road_class": "street",
+            "car_policy": "inherit"
+          }
+        ]
+      },
+      "zone_ids": [
+        "n:radI:0|n:radI:1|n:radO:0|n:radO:1",
+        "n:radI:0|n:radI:1|n:radO:c",
+        "n:radI:0|n:radI:7|n:radO:0|n:radO:7",
+        "n:radI:0|n:radI:7|n:radO:c",
+        "n:radI:1|n:radI:2|n:radO:1|n:radO:2",
+        "n:radI:1|n:radI:2|n:radO:c",
+        "n:radI:2|n:radI:3|n:radO:2|n:radO:3",
+        "n:radI:2|n:radI:3|n:radO:c",
+        "n:radI:3|n:radI:4|n:radO:3|n:radO:4",
+        "n:radI:3|n:radI:4|n:radO:c",
+        "n:radI:4|n:radI:5|n:radO:4|n:radO:5",
+        "n:radI:4|n:radI:5|n:radO:c",
+        "n:radI:5|n:radI:6|n:radO:5|n:radO:6",
+        "n:radI:5|n:radI:6|n:radO:c",
+        "n:radI:6|n:radI:7|n:radO:6|n:radO:7",
+        "n:radI:6|n:radI:7|n:radO:c"
+      ]
+    }
+  ],
+  "tie_cases": [
+    {
+      "name": "rounding_tie",
+      "note": "Coincident-node merge rounding (law 0.2): a near-coincident node pair (e at (6,6) / e2 at (6.0000005,6.0000005)) straddling a 1e-6 half-cell. e2.coord/1e-6 == 6000000.5 is an EXACT half on an EVEN integer, so Python round() (half-to-EVEN) and JS Math.round (half-UP) DIVERGE. Python planar_faces MUST round HALF-UP (math.floor(v+0.5)) to match Math.round: under half-up the two squares stay distinct -> these zone_ids; under the buggy half-even merge e2 would collapse onto e and the second face would become e|p|q|r -> a different SET across languages. Kept in tie_cases (not cases) because the frontend cityFaces.test.ts hardcodes a 'carries the 3 generator cases' assertion on fixture.cases; an orchestrator may add a TS assertion that iterates tie_cases.",
+      "graph": {
+        "nodes": [
+          { "id": "a", "x": 0, "z": 0, "kind": "junction" },
+          { "id": "b", "x": 6, "z": 0, "kind": "junction" },
+          { "id": "e", "x": 6, "z": 6, "kind": "junction" },
+          { "id": "h", "x": 0, "z": 6, "kind": "junction" },
+          { "id": "e2", "x": 6.0000005, "z": 6.0000005, "kind": "junction" },
+          { "id": "p", "x": 12, "z": 6.0000005, "kind": "junction" },
+          { "id": "q", "x": 12, "z": 12, "kind": "junction" },
+          { "id": "r", "x": 6.0000005, "z": 12, "kind": "junction" }
+        ],
+        "edges": [
+          { "id": "s1_1", "a": "a", "b": "b", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s1_2", "a": "b", "b": "e", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s1_3", "a": "e", "b": "h", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s1_4", "a": "h", "b": "a", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_1", "a": "e2", "b": "p", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_2", "a": "p", "b": "q", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_3", "a": "q", "b": "r", "road_class": "street", "car_policy": "inherit" },
+          { "id": "s2_4", "a": "r", "b": "e2", "road_class": "street", "car_policy": "inherit" }
+        ]
+      },
+      "zone_ids": [
+        "a|b|e|h",
+        "e2|p|q|r"
+      ]
+    }
+  ]
+}

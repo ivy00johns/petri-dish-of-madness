@@ -1458,3 +1458,62 @@ describe('EM-264 (SA) — citySignature reactivity (graph mutation re-derives, i
     expect(citySignature(TOWN, seed, undefined, grown)).not.toBe(citySignature(TOWN, seed, undefined, g0));
   });
 });
+
+// ── EM-265 (SB) — zone_rules attach through computeCityPlan's graph-lots branch ──
+// The graph-lots branch passes graph.zone_rules into buildZonesFromFaces, which
+// filters them onto each BuildZone by id. Absent ⇒ every zone rules: [] (the
+// no-rules byte-identical path, law §0.1). A ratified rule lands on its block.
+
+describe('EM-265 (SB) — computeCityPlan attaches zone_rules to BuildZone.rules', () => {
+  const seed = DEFAULT_CITY_SEED;
+
+  it('a graph WITHOUT zone_rules ⇒ every zone rules: [] (byte-identical, law §0.1)', () => {
+    const g = pentagonGraph(seed);
+    const plan = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g }, { graphLots: true });
+    expect(plan.zones).toBeDefined();
+    for (const z of plan.zones!) expect(z.rules).toEqual([]);
+    // and the plan is byte-identical to passing an explicit empty zone_rules list
+    const gEmpty = { ...g, zone_rules: [] };
+    const planEmpty = computeCityPlan(
+      { places: TOWN, city_seed: seed, city_graph: gEmpty },
+      { graphLots: true },
+    );
+    expect(JSON.stringify(planEmpty)).toBe(JSON.stringify(plan));
+  });
+
+  it('a ratified rule lands on its matching zone (and no other) by id', () => {
+    const g = pentagonGraph(seed);
+    // discover a real zone id from the no-rules plan, then re-zone it
+    const ids = computeCityPlan(
+      { places: TOWN, city_seed: seed, city_graph: g },
+      { graphLots: true },
+    ).zones!.map((z) => z.id);
+    const targetId = ids[0];
+    const ruled = {
+      ...g,
+      zone_rules: [{ zone_id: targetId, hint: 'market' as const, density_cap: 5 }],
+    };
+    const plan = computeCityPlan(
+      { places: TOWN, city_seed: seed, city_graph: ruled },
+      { graphLots: true },
+    );
+    for (const z of plan.zones!) {
+      if (z.id === targetId) {
+        expect(z.rules).toEqual([{ zone_id: targetId, hint: 'market', density_cap: 5 }]);
+      } else {
+        expect(z.rules).toEqual([]);
+      }
+    }
+    expect(plan.zones!.filter((z) => z.rules.length > 0)).toHaveLength(1);
+  });
+
+  it('zone_rules are inert on the OFF path (grid plat carries no zones)', () => {
+    const g = { ...pentagonGraph(seed), zone_rules: [{ zone_id: 'x', hint: 'civic' as const, density_cap: 1 }] };
+    // graphLots OFF (default) ⇒ the grid plat, zones undefined, rule ignored
+    const grid = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: g });
+    expect(grid.zones).toBeUndefined();
+    // and it's byte-identical to the same grid plan from a rule-less graph
+    const gridNoRules = computeCityPlan({ places: TOWN, city_seed: seed, city_graph: pentagonGraph(seed) });
+    expect(JSON.stringify(grid)).toBe(JSON.stringify(gridNoRules));
+  });
+});

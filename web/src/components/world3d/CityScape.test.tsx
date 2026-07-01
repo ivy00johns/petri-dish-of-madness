@@ -27,8 +27,10 @@ import {
   TILE,
   type CityInstance,
   type CityPlan,
+  type CityZone,
 } from './cityLayout';
 import type { CityGraph } from '../../types';
+import type { BuildZone, ZoneRule } from './cityFaces';
 import { CITY_MODEL_REGISTRY } from './assets/cityModels';
 import type { ModelSpec } from './assets/models';
 
@@ -54,9 +56,12 @@ import {
   CityScape,
   CHUNK_SPLIT_4,
   CHUNK_SPLIT_8,
+  GRAPH_LOTS_ENABLED,
   GRID_CENTER,
   PEDESTRIAN_ROAD_COLOR,
   ROAD_MESH_ENABLED,
+  ZONE_HINT_TINTS,
+  ZoneRuleTints,
   chunkCount,
   chunkIndexOf,
   chunkInstances,
@@ -66,6 +71,7 @@ import {
   noopRaycast,
   renderableEntries,
   setupCityMesh,
+  zoneRuleTints,
 } from './CityScape';
 
 afterEach(cleanup);
@@ -479,6 +485,185 @@ describe('ROAD_MESH_ENABLED flag (EM-247 S5a — tile path is the byte-identical
       expect(container.querySelectorAll('[name="roadmesh"]').length).toBe(0);
       expect(container.querySelectorAll('[name^="road-ribbons"]').length).toBe(0);
       expect(container.querySelectorAll('[name^="road-intersections"]').length).toBe(0);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ── EM-265 (SB) — agent-authored zone rules: wire + render ────────────────────
+
+/** A synthetic BuildZone (a unit-ish block) carrying the given rules — enough
+ *  for the tint helper/component, independent of the planar-face algorithm. */
+function zoneFixture(id: string, rules: ZoneRule[]): BuildZone {
+  return {
+    id,
+    face: {
+      boundary: id.split('|'),
+      poly: [
+        { x: 0, z: 0 },
+        { x: 4, z: 0 },
+        { x: 4, z: 4 },
+        { x: 0, z: 4 },
+      ],
+      centroid: { x: 2, z: 2 },
+      area: 16,
+    },
+    suggestedLots: [],
+    zoneHint: 'residential' as CityZone,
+    rules,
+  };
+}
+
+describe('citySignature — EM-265 (SB) zone-rule reactivity (content-key, law §0.5)', () => {
+  // rules ride ON the 4th param (the CityGraph), so the arity stays 4 — no new
+  // argument, the EM-243 arity guard above still reads 4.
+  const base = {
+    nodes: [{}, {}],
+    edges: [{ id: 'e1', car_policy: 'inherit' }],
+    car_policy: 'cars',
+  };
+
+  it('arity stays 4 (zone_rules ride on the cityGraph param, not a 5th arg)', () => {
+    expect(citySignature.length).toBe(4);
+  });
+
+  it('a ratified rule changes the signature; an idle poll (same rules) does not', () => {
+    const ruled = { ...base, zone_rules: [{ zone_id: 'z1', hint: 'market', density_cap: 2 }] };
+    const ruledPoll = { ...base, zone_rules: [{ zone_id: 'z1', hint: 'market', density_cap: 2 }] };
+    // a rule appears ⇒ the sig changes ⇒ the tint re-renders LIVE (no reload)
+    expect(citySignature(TOWN, 1337, undefined, ruled)).not.toBe(
+      citySignature(TOWN, 1337, undefined, base),
+    );
+    // idle re-poll of the SAME rule state (fresh object) ⇒ stable ⇒ no churn
+    expect(citySignature(TOWN, 1337, undefined, ruledPoll)).toBe(
+      citySignature(TOWN, 1337, undefined, ruled),
+    );
+  });
+
+  it('no rules ⇒ stable (absent === empty array), the no-churn baseline (law §0.1)', () => {
+    const emptyRules = { ...base, zone_rules: [] };
+    expect(citySignature(TOWN, 1337, undefined, emptyRules)).toBe(
+      citySignature(TOWN, 1337, undefined, base),
+    );
+  });
+
+  it('rule ORDER never churns the memo (the hash is sorted)', () => {
+    const a = {
+      ...base,
+      zone_rules: [
+        { zone_id: 'a', hint: 'civic', density_cap: 1 },
+        { zone_id: 'b', hint: 'open', density_cap: null },
+      ],
+    };
+    const b = {
+      ...base,
+      zone_rules: [
+        { zone_id: 'b', hint: 'open', density_cap: null },
+        { zone_id: 'a', hint: 'civic', density_cap: 1 },
+      ],
+    };
+    expect(citySignature(TOWN, 1337, undefined, b)).toBe(citySignature(TOWN, 1337, undefined, a));
+  });
+
+  it('hint AND density_cap both participate (a re-zone or a cap change re-renders)', () => {
+    const capA = { ...base, zone_rules: [{ zone_id: 'a', hint: 'market', density_cap: 2 }] };
+    const capB = { ...base, zone_rules: [{ zone_id: 'a', hint: 'market', density_cap: 5 }] };
+    const capNull = { ...base, zone_rules: [{ zone_id: 'a', hint: 'market', density_cap: null }] };
+    const hintB = { ...base, zone_rules: [{ zone_id: 'a', hint: 'civic', density_cap: 2 }] };
+    expect(citySignature(TOWN, 1337, undefined, capB)).not.toBe(
+      citySignature(TOWN, 1337, undefined, capA),
+    );
+    expect(citySignature(TOWN, 1337, undefined, capNull)).not.toBe(
+      citySignature(TOWN, 1337, undefined, capA),
+    );
+    expect(citySignature(TOWN, 1337, undefined, hintB)).not.toBe(
+      citySignature(TOWN, 1337, undefined, capA),
+    );
+  });
+});
+
+describe('zoneRuleTints + ZONE_HINT_TINTS (pure)', () => {
+  it('every SB hint maps to a real hex tint', () => {
+    for (const h of ['residential', 'market', 'civic', 'open'] as const) {
+      expect(ZONE_HINT_TINTS[h]).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+  });
+
+  it('returns [] for undefined / empty / unruled zones (no-rules ⇒ no tint, law §0.1)', () => {
+    expect(zoneRuleTints(undefined)).toEqual([]);
+    expect(zoneRuleTints([])).toEqual([]);
+    expect(zoneRuleTints([zoneFixture('z', [])])).toEqual([]);
+  });
+
+  it('emits one tint per ruled zone, colored by the rule hint, at the face centroid', () => {
+    const tints = zoneRuleTints([
+      zoneFixture('z1', [{ zone_id: 'z1', hint: 'market', density_cap: 3 }]),
+      zoneFixture('z2', []), // unruled ⇒ contributes nothing
+      zoneFixture('z3', [{ zone_id: 'z3', hint: 'open', density_cap: null }]),
+    ]);
+    expect(tints.map((t) => t.id)).toEqual(['z1', 'z3']);
+    expect(tints[0].color).toBe(ZONE_HINT_TINTS.market);
+    expect(tints[1].color).toBe(ZONE_HINT_TINTS.open);
+    expect(tints[0].x).toBe(2);
+    expect(tints[0].z).toBe(2);
+    expect(tints[0].radius).toBeGreaterThan(0);
+  });
+});
+
+describe('ZoneRuleTints (render) — a ratified rule paints its block; none ⇒ nothing', () => {
+  function renderTints(zones: BuildZone[]) {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      return render(<ZoneRuleTints zones={zones} />);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  }
+
+  it('a ruled zone renders exactly one zone-tint mesh; an unruled zone renders none', () => {
+    const ruled = renderTints([
+      zoneFixture('z1', [{ zone_id: 'z1', hint: 'market', density_cap: 3 }]),
+    ]);
+    expect(ruled.container.querySelectorAll('[name^="city-zone-tint-"]').length).toBe(1);
+    cleanup();
+    const none = renderTints([zoneFixture('z2', [])]);
+    expect(none.container.querySelectorAll('[name^="city-zone-tint-"]').length).toBe(0);
+  });
+});
+
+describe('CityScape — EM-265 (SB) gate: zone tints only on the graph-lots path', () => {
+  const tc = (i: number) => (i + 0.5) * TILE;
+  // A minimal real graph (passes hasRealGraph) that ALSO carries a ratified rule.
+  function graphWithRules(zone_rules: ZoneRule[]): CityGraph {
+    return {
+      version: 1,
+      seed: 1337,
+      car_policy: 'cars',
+      nodes: [
+        { id: 'a', x: tc(-3), z: tc(-3), kind: 'junction' },
+        { id: 'b', x: tc(2), z: tc(-3), kind: 'junction' },
+      ],
+      edges: [{ id: 'e', a: 'a', b: 'b', road_class: 'street', car_policy: 'inherit' }],
+      zone_rules,
+    };
+  }
+
+  it('GRAPH_LOTS_ENABLED defaults false ⇒ a graph carrying zone_rules paints NO zone tints (byte-identical)', () => {
+    // The flag-gated default: zones only exist on the graph-lots path, so with
+    // the flag OFF a ratified rule renders nothing here — law §0.1.
+    expect(GRAPH_LOTS_ENABLED).toBe(false);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const g = graphWithRules([{ zone_id: 'a|b', hint: 'market', density_cap: 2 }]);
+      const { container } = render(
+        <CityScape world={{ places: TOWN, city_seed: null, city_graph: g }} />,
+      );
+      expect(container.querySelectorAll('[name^="city-zone-tint-"]').length).toBe(0);
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
