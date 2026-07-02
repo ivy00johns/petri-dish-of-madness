@@ -1,11 +1,12 @@
-"""EM-247 — image provider chain (FreeLLMAPI → Gemini → Pollinations).
+"""EM-247 — image provider chain (FreeLLMAPI → Pollinations → Cloudflare → Gemini).
 
 The Atelier's bytes source gains a FreeLLMAPI primary (the proxy's /images/
-generations, routed across its whole image-model pool) with Gemini as the paid
-backup and Pollinations as the keyless final fallback. Pinned here:
+generations, routed across its whole image-model pool) with keyless Pollinations
+next and paid Gemini as the LAST backstop (free-first billing law — cost is cut
+via ordering). Pinned here:
 
   * build_provider() precedence + chain composition by env (Mock wins; the chain
-    is FreeLLMAPI? → Gemini? → Cloudflare? → Pollinations, keyless always last).
+    is FreeLLMAPI? → Pollinations (always) → Cloudflare? → Gemini?, paid last).
   * FreellmapiImageProvider parses BOTH response shapes (b64_json AND url), and
     returns None (never raises) on a non-200 / malformed / empty response.
   * ChainImageProvider returns the FIRST non-None member and skips a member that
@@ -101,7 +102,22 @@ def test_no_keys_is_bare_pollinations(monkeypatch):
     assert isinstance(build_provider(), PollinationsProvider)
 
 
-def test_chain_is_freellmapi_then_gemini_then_pollinations(monkeypatch):
+def test_chain_all_keys_orders_paid_gemini_last(monkeypatch):
+    # Free-first billing law: with EVERY lane configured, the paid Gemini
+    # backstop is the LAST chain member — free lanes always go first.
+    monkeypatch.delenv("EM_IMAGEGEN_MOCK", raising=False)
+    monkeypatch.setenv("FREELLMAPI_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CF_API_TOKEN", "tok")
+    provider = build_provider()
+    assert isinstance(provider, ChainImageProvider)
+    kinds = [type(p).__name__ for p in provider._providers]
+    assert kinds == ["FreellmapiImageProvider", "PollinationsProvider",
+                     "CloudflareProvider", "GeminiImageProvider"]
+
+
+def test_chain_is_freellmapi_then_pollinations_then_gemini(monkeypatch):
     for k in ("EM_IMAGEGEN_MOCK", "CF_ACCOUNT_ID", "CF_API_TOKEN"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("FREELLMAPI_KEY", "k")
@@ -109,8 +125,8 @@ def test_chain_is_freellmapi_then_gemini_then_pollinations(monkeypatch):
     provider = build_provider()
     assert isinstance(provider, ChainImageProvider)
     kinds = [type(p).__name__ for p in provider._providers]
-    assert kinds == ["FreellmapiImageProvider", "GeminiImageProvider",
-                     "PollinationsProvider"]
+    assert kinds == ["FreellmapiImageProvider", "PollinationsProvider",
+                     "GeminiImageProvider"]
 
 
 def test_chain_freellmapi_then_pollinations_without_gemini(monkeypatch):

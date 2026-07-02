@@ -528,8 +528,11 @@ def test_nearby_zones_reports_hint_and_cap_for_ruled_zone(monkeypatch):
     monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     w = _gov_world()
     place = _corner_place()
-    # zone the face NEAREST the place so it appears in the (nearest-first) block
-    px, pz = float(place.x), float(place.y)
+    # zone the face NEAREST the place so it appears in the (nearest-first) block.
+    # fix-wave A1: rank in the WORLD frame (map the place's logical coords) so this
+    # mirrors build_nearby_layout's own nearest-face selection.
+    from petridish.engine.citygraph import logical_to_world
+    px, pz = logical_to_world(float(place.x), float(place.y))
     nearest = min(planar_faces(w.city_graph),
                   key=lambda f: (f.centroid["x"] - px) ** 2 + (f.centroid["z"] - pz) ** 2)
     zid = zone_id_for(nearest.boundary)
@@ -843,3 +846,224 @@ def test_bootstrap_perception_shows_zone_id_for_every_listed_zone(monkeypatch):
     current = set(_zone_ids(w))
     for zid in handles:
         assert zid in current  # every surfaced handle is a real current zone
+
+
+# ── fix-wave A2 — zone perception DECOUPLED from road-buildability ─────────────
+# build_nearby_layout used to early-return None the instant no direction was `open`,
+# killing the (flag-gated) zones block below it — so a geometric city (n:pent:* ids
+# never `open`) or a fully-interior lattice node showed NO zones, and set_zone_rule
+# was un-bootstrappable there. The zones block is now computed INDEPENDENTLY of the
+# road sentence; the helper returns None only when BOTH are absent.
+
+def test_zones_present_on_pentagon_city_with_no_road_sentence(monkeypatch):
+    from petridish.agents.runtime import build_nearby_layout
+    from petridish.engine.citygraph import master_plan
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    # a geometric master-plan city: every node id is n:pent:* → extendable_directions
+    # returns {} (no lattice to parse) → NO road sentence can ever appear.
+    w.city_graph = master_plan("pentagon", {"radius": 26.0}, 1)
+    assert planar_faces(w.city_graph)  # the pentagon encloses real faces
+    place = PlaceState(id="p", name="Anywhere", x=500, y=500, kind="social")
+    line = build_nearby_layout(w, place)
+    assert line is not None
+    assert "nearby zones:" in line.lower()          # zones block IS present
+    assert "n:pent" in line                          # with REAL geometric face ids
+    assert "can build a road" not in line            # but NO road sentence
+    assert not line.startswith("Nearby layout:")
+
+
+def test_zones_present_on_interior_lattice_node_with_no_road_sentence(monkeypatch):
+    # A fully-interior classic-grid node (all four dirs already road) → no `open`
+    # direction → no road sentence, yet the zones block must still render (flag ON).
+    from petridish.agents.runtime import build_nearby_layout
+    from petridish.engine.citygraph import (extendable_directions, logical_to_world,
+                                            nearest_node)
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    place = PlaceState(id="p", name="Center", x=500, y=500, kind="social")  # → town center
+    node = nearest_node(w.city_graph, *logical_to_world(500.0, 500.0))
+    assert all(s == "road" for s in extendable_directions(w.city_graph, node.id).values())
+    line = build_nearby_layout(w, place)
+    assert line is not None
+    assert "nearby zones:" in line.lower()
+    assert "can build a road" not in line
+    assert not line.startswith("Nearby layout:")
+
+
+def test_zones_flag_off_byte_identical_road_line_only():
+    # §0.1 guarantee: with the flag OFF (default) the output is EXACTLY the pre-fix
+    # road line — no zones block, no drift.
+    from petridish.agents.runtime import build_nearby_layout, GRAPH_ZONES_ENABLED
+    assert GRAPH_ZONES_ENABLED is False
+    w = _gov_world()
+    line = build_nearby_layout(w, _corner_place())   # SW corner: west/south open
+    assert line == ("Nearby layout: can build a road west, south. "
+                    "Blocked: east (road), north (road). Cars: cars.")
+
+
+def test_returns_none_only_when_both_road_and_zones_absent(monkeypatch):
+    # Interior node + flag OFF → neither a road sentence nor a zones block → None.
+    from petridish.agents.runtime import build_nearby_layout
+    w = _gov_world()
+    place = PlaceState(id="p", name="Center", x=500, y=500, kind="social")
+    assert build_nearby_layout(w, place) is None      # flag off default
+    # Flip the flag ON and the SAME interior place now yields a zones-only block.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    line = build_nearby_layout(w, place)
+    assert line is not None and "nearby zones:" in line.lower()
+
+
+def test_energy_gate_suppresses_road_sentence_keeps_zones(monkeypatch):
+    # fix-wave A2: include_road=False (the caller's too-tired energy gate) drops the
+    # ROAD sentence but NOT zone perception — set_zone_rule stays bootstrappable even
+    # when the agent can't afford a road.
+    from petridish.agents.runtime import build_nearby_layout
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
+    w = _gov_world()
+    place = _corner_place()  # SW corner: has open dirs, so a road sentence COULD show
+    with_road = build_nearby_layout(w, place, include_road=True)
+    assert with_road.startswith("Nearby layout:")     # road sentence present
+    assert "nearby zones:" in with_road.lower()
+    without_road = build_nearby_layout(w, place, include_road=False)
+    assert without_road is not None
+    assert "can build a road" not in without_road      # road sentence gone
+    assert "nearby zones:" in without_road.lower()      # zones survive the gate
+
+
+# ── fix-wave A4 — zone rules reconciled after NON-MORPH graph mutations ─────────
+# Reconcile used to run ONLY inside step_master_plan_morph, so a passed demolish_road
+# vote or a face-splitting action_build_road silently orphaned a ratified rule (no
+# zone_rule_dropped event; the orphan persisted in every snapshot/fork). The keep/
+# re-point/drop logic is now the general _reconcile_zone_rules(pre_centroids, reason),
+# called after BOTH non-morph mutation sites, with HONEST event attribution.
+
+def _two_adjacent_squares():
+    """Two unit squares sharing edge Q–R ⇒ two planar faces. Returns
+    (graph, edges_by_name, zone_left, zone_right). Node ids are non-lattice (fine for
+    faces + demolish; build_road is exercised separately on a lattice graph)."""
+    coords = {"P": (0, 0), "Q": (10, 0), "R": (10, 10),
+              "S": (0, 10), "T": (20, 0), "V": (20, 10)}
+    nodes = [CityNode(id=f"n:{k}", x=x, z=z) for k, (x, z) in coords.items()]
+
+    def _e(a, b):
+        return CityEdge(id=f"e:n:{a}->n:{b}", a=f"n:{a}", b=f"n:{b}")
+
+    pairs = {"PQ": ("P", "Q"), "QR": ("Q", "R"), "RS": ("R", "S"), "SP": ("S", "P"),
+             "QT": ("Q", "T"), "TV": ("T", "V"), "VR": ("V", "R")}
+    edges = {name: _e(a, b) for name, (a, b) in pairs.items()}
+    g = CityGraph(seed=1, nodes=nodes, edges=list(edges.values()))
+    faces = planar_faces(g)
+    assert len(faces) == 2, faces
+    z_left = z_right = None
+    for f in faces:
+        b = set(f.boundary)
+        if "n:P" in b:
+            z_left = zone_id_for(f.boundary)
+        elif "n:T" in b:
+            z_right = zone_id_for(f.boundary)
+    assert z_left and z_right and z_left != z_right
+    return g, {k: e.id for k, e in edges.items()}, z_left, z_right
+
+
+def _grid_rectangle_face() -> CityGraph:
+    """A 2×1 LATTICE rectangle (one face); building the chord n:7:2→n:7:7 splits it
+    into two squares (n:7:2 / n:7:7 sit on the boundary)."""
+    from petridish.engine.citygraph import _ordered_edge
+    idx = [(2, 2), (7, 2), (12, 2), (2, 7), (7, 7), (12, 7)]
+    nodes = [CityNode(id=f"n:{i}:{j}", x=tile_center(i), z=tile_center(j)) for i, j in idx]
+    boundary = [("n:2:2", "n:7:2"), ("n:7:2", "n:12:2"), ("n:12:2", "n:12:7"),
+                ("n:12:7", "n:7:7"), ("n:7:7", "n:2:7"), ("n:2:7", "n:2:2")]
+    edges = []
+    for a, b in boundary:
+        eid, ea, eb = _ordered_edge(a, b)
+        edges.append(CityEdge(id=eid, a=ea, b=eb))
+    return CityGraph(seed=1, nodes=nodes, edges=edges)
+
+
+def test_demolish_road_vote_drops_orphaned_zone_rule_with_honest_text():
+    w = _gov_world()
+    g, edge_ids, zid_left, _zid_right = _two_adjacent_squares()
+    w.city_graph = g
+    apply_zone_rule(w.city_graph, ZoneRule(zone_id=zid_left, hint="market", density_cap=2))
+    agent = next(iter(w.agents.values()))
+    # tear down the SHARED edge → the two squares merge into one face → the left
+    # square's block id no longer exists.
+    ok, reason, rule = w.action_propose_rule(
+        agent, "demolish_road", "tear it down", target=edge_ids["QR"])
+    assert ok, reason
+    _ratify(w, rule)
+    current = {zone_id_for(f.boundary) for f in planar_faces(w.city_graph)}
+    assert zid_left not in current                 # block genuinely gone
+    assert not any(r.zone_id == zid_left for r in w.city_graph.zone_rules)  # reconciled away
+    drop = next(e for e in w.pending_spawn_events if e.get("kind") == "zone_rule_dropped")
+    assert drop["payload"]["zone_id"] == zid_left
+    # HONEST attribution — a road change, NOT the master plan.
+    assert "after a road change" in drop["text"]
+    assert "master plan" not in drop["text"].lower()
+
+
+def test_demolish_road_vote_keeps_rule_on_unaffected_face():
+    w = _gov_world()
+    g, edge_ids, _zid_left, zid_right = _two_adjacent_squares()
+    w.city_graph = g
+    apply_zone_rule(w.city_graph, ZoneRule(zone_id=zid_right, hint="civic"))
+    agent = next(iter(w.agents.values()))
+    # demolish an OUTER edge of the LEFT square — destroys face A, never touches B.
+    ok, reason, rule = w.action_propose_rule(
+        agent, "demolish_road", "x", target=edge_ids["SP"])
+    assert ok, reason
+    _ratify(w, rule)
+    current = {zone_id_for(f.boundary) for f in planar_faces(w.city_graph)}
+    assert zid_right in current
+    assert any(r.zone_id == zid_right for r in w.city_graph.zone_rules)  # kept
+    assert not any(e.get("kind") == "zone_rule_dropped" for e in w.pending_spawn_events)
+
+
+def test_build_road_split_reconciles_ruled_face():
+    from petridish.engine.citygraph import (logical_to_world, nearest_node,
+                                            extendable_directions)
+    w = _gov_world()
+    w.city_graph = _grid_rectangle_face()
+    faces = planar_faces(w.city_graph)
+    assert len(faces) == 1
+    zid = zone_id_for(faces[0].boundary)
+    apply_zone_rule(w.city_graph, ZoneRule(zone_id=zid, hint="civic", density_cap=1))
+    agent = next(iter(w.agents.values()))
+    # stand the agent so its anchor is n:7:2, whose NORTH chord to n:7:7 splits the
+    # rectangle (logical 795,599 → world ~19.4,6.5 → nearest node n:7:2).
+    w.places["spot"] = PlaceState(id="spot", name="Spot", x=795, y=599, kind="social")
+    agent.location = "spot"
+    agent.energy = 100.0
+    anchor = nearest_node(w.city_graph, *logical_to_world(795.0, 599.0))
+    assert anchor.id == "n:7:2"
+    assert extendable_directions(w.city_graph, "n:7:2").get("north") == "open"
+    evt = w.action_build_road(agent, {"direction": "north"})
+    assert evt["kind"] == "road_built"
+    current = {zone_id_for(f.boundary) for f in planar_faces(w.city_graph)}
+    assert zid not in current                       # the ruled rectangle is gone (split)
+    assert not any(r.zone_id == zid for r in w.city_graph.zone_rules)  # reconciled away
+    drop = next(e for e in w.pending_spawn_events if e.get("kind") == "zone_rule_dropped")
+    assert drop["payload"]["zone_id"] == zid
+    assert "after a road change" in drop["text"]
+
+
+def test_rule_free_road_change_pays_no_reconcile_cost(monkeypatch):
+    # perf gate: pre-mutation centroids are captured ONLY when zone_rules is non-empty.
+    # With no rules, _zone_pre_centroids must not even call planar_faces.
+    import petridish.engine.world as world_mod
+    w = _gov_world()
+    g, edge_ids, _zl, _zr = _two_adjacent_squares()
+    w.city_graph = g
+    assert not w.city_graph.zone_rules
+    calls = {"n": 0}
+    real = world_mod.planar_faces
+
+    def _counting(graph):
+        calls["n"] += 1
+        return real(graph)
+
+    monkeypatch.setattr(world_mod, "planar_faces", _counting)
+    pre = w._zone_pre_centroids()
+    assert pre == {}
+    assert calls["n"] == 0  # rule-free: no planar_faces work at all

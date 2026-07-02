@@ -7,6 +7,14 @@ Frozen geometry (must match web/src/components/world3d/cityLayout.ts; the
 byte-identical test enforces agreement):
   TILE = 2.6, BLOCK_PITCH = 13.0, road-line indices = ((i-2) % 5 == 0) within
   [-13, 12] = (-13, -8, -3, 2, 7, 12); tile center = (i + 0.5) * TILE.
+
+EM-243 ↔ EM-245/246 exclusivity: individual `apply_build_road` growth (EM-243) is
+LATTICE-ONLY — it parses `n:i:j` ids and steps in BLOCK_PITCH units. A geometric
+master-plan city (EM-245/246: pentagon/radial/ring, whose nodes are `n:pent:*`,
+`n:rad*:*`, `n:ring:*` off the tile lattice) has no axis-aligned grid to extend, so
+build_road on such a node fails with a plain "no lattice grid to extend" (A5) and
+its nodes yield no extendable directions (the build_road menu is suppressed there).
+The two road systems are mutually exclusive; a city is grown one way or the other.
 """
 from __future__ import annotations
 
@@ -21,6 +29,20 @@ ROAD_TILE_INDICES: tuple[int, ...] = (-13, -8, -3, 2, 7, 12)
 
 def tile_center(i: int) -> float:
     return (i + 0.5) * TILE
+
+
+# ── fix-wave A1: logical (place) coords → world (graph) frame ──────────────────
+# A place's (x, y) are LOGICAL 0..1000 coords; the CityGraph lives in the ±32.5
+# world frame (tile-center units). Callers MUST map through here before nearest_node
+# / face-centroid distance, else every place snaps to the n:12:12 corner. Mirrors
+# web/src/components/world3d/worldSpace.ts (SIZE / toWorldX / toWorldZ) EXACTLY so
+# backend + frontend place the same building on the same block.
+WORLD_SIZE: float = 66.0   # MUST equal web worldSpace.ts SIZE
+
+
+def logical_to_world(x: float, y: float) -> tuple[float, float]:
+    """Place logical coords (0..1000) → world (x, z). Mirrors web/worldSpace.ts."""
+    return ((x / 1000.0 - 0.5) * WORLD_SIZE, (y / 1000.0 - 0.5) * WORLD_SIZE)
 
 
 @dataclass
@@ -232,7 +254,12 @@ def apply_build_road(
     try:
         fi, fj = _parse_node(from_node_id)
     except ValueError:
-        return False, "the anchor node id is malformed", None
+        # fix-wave A5: the node EXISTS (checked just above) but its id is not a
+        # lattice n:i:j id — a geometric master-plan city (EM-245/246: n:pent:*,
+        # n:rad*:*, n:ring:*) has no axis-aligned grid to grow. Say so honestly
+        # instead of "malformed" (which reads like corrupt input, not the real
+        # cause). EM-243 individual growth is grid-only; the two are exclusive.
+        return False, "this city's road plan has no lattice grid to extend", None
     di, dj = DIR_DELTA[direction]
     ni, nj = fi + di, fj + dj
     if not _in_bounds(ni, nj):

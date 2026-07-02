@@ -978,42 +978,62 @@ def _point_in_poly(px: float, pz: float, poly: list[dict]) -> bool:
     return inside
 
 
-def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = None) -> str | None:
+def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = None,
+                        *, include_road: bool = True) -> str | None:
     """EM-243 (S2) — a compact, diet-safe perception line for road-building:
     extendable directions from the node nearest `place`, plus the car policy.
-    Returns None when nothing is extendable (diet: omit empty blocks).
 
     EM-265 (SB) — extended with a district-scoped `Nearby zones` block (the
     nearest few city blocks, their land-use hint + optional density cap), so an
     agent can (in SC) target a zone to rule. Counts + hint + cap only — never a
-    polygon dump. Omitted when there are no nearby zones."""
+    polygon dump.
+
+    fix-wave A2 — the road sentence and the (flag-gated) zones block are INDEPENDENT:
+    the road sentence appears only when a direction is actually `open` AND the caller
+    permits it (`include_road`, the energy gate); the zones block appears whenever the
+    GRAPH_ZONES_ENABLED flag is on and faces exist. This returns None ONLY when BOTH
+    are absent — so a geometric city (n:pent:* ids never `open`) or a fully-interior
+    lattice node still surfaces zones, keeping set_zone_rule bootstrappable there. The
+    `include_road=False` path (a too-tired agent) drops the road sentence but keeps
+    zone perception."""
     from ..engine.citygraph import (nearest_node, extendable_directions,
-                                     planar_faces, zone_id_for, BLOCK_PITCH, TILE)
+                                     planar_faces, zone_id_for, BLOCK_PITCH, TILE,
+                                     logical_to_world)
+    # place.x/place.y are LOGICAL 0..1000 coords; map to the graph's world (x, z)
+    # frame BEFORE nearest_node (fix-wave A1), else every place snaps to n:12:12.
     node = (next((n for n in world.city_graph.nodes if n.id == force_node_id), None)
-            if force_node_id else nearest_node(world.city_graph, float(place.x), float(place.y)))
+            if force_node_id
+            else nearest_node(world.city_graph,
+                              *logical_to_world(float(place.x), float(place.y))))
     if node is None:
         return None
+    parts: list[str] = []
+
+    # ── road-extension sentence — only when a direction is actually `open` AND the
+    #    caller permits it (the energy gate lives at the call site, passed here as
+    #    include_road). A geometric (n:pent:*) node yields {} ⇒ never `open`. ──
     dirs = extendable_directions(world.city_graph, node.id)
     openable = [d for d, s in dirs.items() if s == "open"]
-    if not openable:
-        return None
-    blocked = [f"{d} ({s})" for d, s in dirs.items() if s != "open"]
-    cars = world.city_graph.car_policy
-    line = f"Nearby layout: can build a road {', '.join(openable)}."
-    if blocked:
-        line += f" Blocked: {', '.join(blocked)}."
-    line += f" Cars: {cars}."
-    # EM-244 (S3a): surface an open layout vote so agents can vote (one clause, diet-safe).
-    open_layout = next((r for r in world.rules.values()
-                        if getattr(r, "status", "") == "proposed"
-                        and getattr(r, "effect", "") in ("demolish_road", "set_car_policy")), None)
-    if open_layout is not None:
-        line += f" Open vote: {open_layout.effect} (vote yes/no)."
+    if openable and include_road:
+        blocked = [f"{d} ({s})" for d, s in dirs.items() if s != "open"]
+        cars = world.city_graph.car_policy
+        road = f"Nearby layout: can build a road {', '.join(openable)}."
+        if blocked:
+            road += f" Blocked: {', '.join(blocked)}."
+        road += f" Cars: {cars}."
+        # EM-244 (S3a): surface an open layout vote so agents can vote (one clause).
+        open_layout = next((r for r in world.rules.values()
+                            if getattr(r, "status", "") == "proposed"
+                            and getattr(r, "effect", "") in ("demolish_road", "set_car_policy")), None)
+        if open_layout is not None:
+            road += f" Open vote: {open_layout.effect} (vote yes/no)."
+        parts.append(road)
 
     # EM-265 (SB) — district-scoped zone block: the _NEARBY_ZONES_MAX faces nearest
     # the agent's place (the local district horizon — prompt-diet, never the whole
     # graph), each with its hint + optional cap. GATED on the GRAPH_ZONES_ENABLED
-    # feature flag (NOT on zone_rules being non-empty):
+    # feature flag (NOT on zone_rules being non-empty, and — fix-wave A2 — NOT on the
+    # road sentence / openable / energy):
     #   - flag OFF (default) ⇒ render NOTHING ⇒ the prompt is byte-identical to
     #     pre-SB (law §0.1), so SB ships dormant.
     #   - flag ON ⇒ render the district's nearby faces INCLUDING UNZONED ones, so
@@ -1023,7 +1043,9 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
     # The scaffold SC's "target a zone" reads from this block.
     faces = planar_faces(world.city_graph) if GRAPH_ZONES_ENABLED else []
     if faces:
-        px, pz = float(place.x), float(place.y)
+        # world-frame centroid distance: convert the place's logical coords too
+        # (fix-wave A1), else the "nearest" faces are ranked in the wrong frame.
+        px, pz = logical_to_world(float(place.x), float(place.y))
         nearest = sorted(
             faces,
             key=lambda f: ((f.centroid["x"] - px) ** 2 + (f.centroid["z"] - pz) ** 2,
@@ -1067,12 +1089,16 @@ def build_nearby_layout(world: "World", place: Any, force_node_id: str | None = 
             clause += ")"
             clauses.append(clause)
         if clauses:
-            line += " Nearby zones: " + " ".join(clauses) + "."
+            zones = "Nearby zones: " + " ".join(clauses) + "."
             # EM-266 (SC) — one framing clause (no new per-zone lines; prompt-diet):
             # an agent MAY target a zone when it builds. The build always succeeds —
             # a wrong kind or an over-cap block still stands (defiance is allowed).
-            line += " To build in one, pass zone=<id> on propose_project."
-    return line
+            zones += " To build in one, pass zone_id=<id> on propose_project."
+            parts.append(zones)
+
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 IDLE_ACTION = {"action": "idle", "args": {}}
@@ -2866,17 +2892,24 @@ def _assemble_context(
             f"feed_pet (animal_id) - feed a co-located animal to restore its "
             f"energy (a hungry pet declines): {feed_list}")
 
-    # ── EM-243 (S2) — road-building perception + menu (only when affordable AND a
-    # direction is extendable). build_nearby_layout returns None when nothing is
-    # open, so a fully-enclosed node adds NO line (diet: omit empties) and the
-    # menu entry stays in lock-step with the perception (EM-108 menu/resolution
-    # agreement). The perception is ONE line, injected into the prompt below.
+    # ── EM-243 (S2) — road-building perception + menu. fix-wave A2: the energy gate
+    # gates ONLY the road sentence (via include_road), never zone perception — a
+    # too-tired agent near a zoned/geometric block still sees its zones so
+    # set_zone_rule stays bootstrappable. The build_road MENU entry rides with the
+    # road sentence (affordable AND a direction actually open), staying in lock-step
+    # with the perception (EM-108 menu/resolution agreement). build_nearby_layout
+    # returns None only when NEITHER a road sentence nor a zones block is present.
     _here = world.places.get(agent.location)
-    _layout = build_nearby_layout(world, _here) if _here is not None else None
-    if _layout is not None and agent.energy >= world.params.road_build_energy_cost:
-        valid_actions.append(
-            "build_road (direction: north|south|east|west) - extend a street one block")
-        nearby_layout_block = f"\n=== 🛣 NEARBY LAYOUT ===\n  {_layout}\n"
+    if _here is not None:
+        _road_affordable = agent.energy >= world.params.road_build_energy_cost
+        _layout = build_nearby_layout(world, _here, include_road=_road_affordable)
+        if _layout is not None:
+            nearby_layout_block = f"\n=== 🛣 NEARBY LAYOUT ===\n  {_layout}\n"
+        # the road sentence is always FIRST when present (parts=[road, zones]); its
+        # prefix is the exact signal the build_road menu entry keys on.
+        if _road_affordable and _layout is not None and _layout.startswith("Nearby layout:"):
+            valid_actions.append(
+                "build_road (direction: north|south|east|west) - extend a street one block")
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
     # Offered to EVERY agent (no location gate) whenever a decree is live, so the
@@ -6136,6 +6169,11 @@ class AgentRuntime:
             # EM-266 (SC) — optional targeted zone (a planar-face id). Loose: the
             # world resolves/ignores it (flag-gated) — an absent/bad id never blocks.
             zone_id = args.get("zone_id")
+            # fix-wave A3 — alias a stray `zone` arg onto `zone_id` (only when zone_id
+            # is absent) so an old-styled / replayed `zone=` emission still targets the
+            # zone. The schema + world read ONLY zone_id; an explicit zone_id wins.
+            if zone_id is None:
+                zone_id = args.get("zone")
             result = self.world.action_propose_project(
                 agent, name, kind, funds_required, function, place, zone_id
             )

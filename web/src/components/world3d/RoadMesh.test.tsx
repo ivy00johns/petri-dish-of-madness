@@ -9,7 +9,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import type { CityGraph } from '../../types';
 import { buildRoadMesh } from './roadMeshData';
-import { RoadMesh, roadMeshBuckets } from './RoadMesh';
+import { RoadMesh, roadMeshBuckets, roadGraphSig } from './RoadMesh';
 
 afterEach(cleanup);
 
@@ -69,5 +69,45 @@ describe('RoadMesh (R3F smoke)', () => {
     const { container } = renderRoads(null);
     expect(container.querySelectorAll('instancedMesh').length).toBe(0);
     expect(roadMeshBuckets(null, 1337)).toEqual([]);
+  });
+});
+
+describe('roadGraphSig (content-keyed rebuild dep — the 4th recurrence of the content-key class)', () => {
+  it('equal-count graphs with DIFFERENT edges produce different signatures', () => {
+    // demolish+build inside one snapshot poll: node/edge COUNTS are identical
+    // but the edge SET changed — a count-only fold renders the mutation stale.
+    const before = graphOf(
+      [['a', 0, 0], ['b', 10, 0], ['c', 5, 9]],
+      [['e:a->b', 'a', 'b'], ['e:b->c', 'b', 'c']],
+    );
+    const after = graphOf(
+      [['a', 0, 0], ['b', 10, 0], ['c', 5, 9]],
+      [['e:a->b', 'a', 'b'], ['e:c->a', 'c', 'a']],
+    );
+    expect(roadGraphSig(after)).not.toBe(roadGraphSig(before));
+  });
+
+  it('edge ORDER never churns the sig; identical content (fresh objects) is stable', () => {
+    const a = graphOf(
+      [['a', 0, 0], ['b', 10, 0]],
+      [['e1', 'a', 'b'], ['e2', 'b', 'a']],
+    );
+    const reordered = graphOf(
+      [['a', 0, 0], ['b', 10, 0]],
+      [['e2', 'b', 'a'], ['e1', 'a', 'b']],
+    );
+    expect(roadGraphSig(reordered)).toBe(roadGraphSig(a));
+    expect(roadGraphSig(graphOf(
+      [['a', 0, 0], ['b', 10, 0]],
+      [['e1', 'a', 'b'], ['e2', 'b', 'a']],
+    ))).toBe(roadGraphSig(a));
+  });
+
+  it('car_policy still participates; an absent graph is the stable empty sig', () => {
+    const cars = { ...TRI, car_policy: 'cars' as const };
+    const ped = { ...TRI, car_policy: 'pedestrian' as const };
+    expect(roadGraphSig(ped)).not.toBe(roadGraphSig(cars));
+    expect(roadGraphSig(null)).toBe('');
+    expect(roadGraphSig(undefined)).toBe('');
   });
 });

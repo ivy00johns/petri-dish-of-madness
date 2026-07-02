@@ -6,15 +6,18 @@ Contract (contracts/wave-i-atelier.md §1):
   - Primary = FreeLLMAPI image lane (FREELLMAPI_KEY) — the proxy's `/images/
     generations` routes across its whole image-model pool; the image queues are
     short relative to chat, so it rarely rate-limits.
-  - Backup = Gemini (GEMINI_API_KEY) — gemini-2.5-flash-image (PAID; an unbilled
-    key 429s and the chain falls through). Override via EM_IMAGEGEN_GEMINI_MODEL.
-  - Final fallback = Pollinations (keyless, zero-config) so art never fully stops.
+  - Next = Pollinations (keyless, zero-config, always present) so art never fully
+    stops before any paid lane is tried.
   - Cloudflare Workers AI (CF_ACCOUNT_ID + CF_API_TOKEN) stays an optional env lane.
+  - LAST backstop = Gemini (GEMINI_API_KEY) — gemini-2.5-flash-image (PAID; an
+    unbilled key 429s and the chain ends with None). Free-first billing law: the
+    paid lane only fires after every free lane misses. Override via
+    EM_IMAGEGEN_GEMINI_MODEL.
   - Mock lane = EM_IMAGEGEN_MOCK: returns a fixed minimal valid PNG, no network.
   - Selection precedence (build_provider):
       EM_IMAGEGEN_MOCK
-        > chain[ FreeLLMAPI (if key) , Gemini (if key) , Cloudflare (if env) ,
-                 Pollinations (always, keyless) ]
+        > chain[ FreeLLMAPI (if key) , Pollinations (always, keyless) ,
+                 Cloudflare (if env) , Gemini (if key, PAID last) ]
     Each chain member returns None on failure; ChainImageProvider tries the next.
 
 The provider does NOT decide paths or ids — the loop hands it a prompt and writes
@@ -151,13 +154,14 @@ class FreellmapiImageProvider:
 
 
 class GeminiImageProvider:
-    """BACKUP (GEMINI_API_KEY) — POST to Gemini generateContent and decode the
-    inline base64 PNG from the first image part. Returns None on any failure (the
-    chain owns fallback); never raises.
+    """LAST backstop (GEMINI_API_KEY, PAID) — POST to Gemini generateContent and
+    decode the inline base64 PNG from the first image part. Returns None on any
+    failure (the chain owns fallback); never raises.
 
     Model defaults to gemini-2.5-flash-image (override via EM_IMAGEGEN_GEMINI_MODEL).
     Note: that model is PAID — its free-tier request quota is 0, so an unbilled key
-    returns HTTP 429 and the call falls through to the next chain member."""
+    returns HTTP 429. Free-first billing law: this member sits at the END of the
+    chain so it only fires after every free lane misses."""
 
     def __init__(self, api_key: str, model: str | None = None) -> None:
         self._api_key = api_key
@@ -239,9 +243,9 @@ class CloudflareProvider:
 
 class ChainImageProvider:
     """Tries each provider in order; returns the first non-None PNG. The composable
-    fallback that expresses FreeLLMAPI → Gemini → Pollinations. A member that
-    raises (it shouldn't) is caught and treated as a miss, so one bad lane never
-    breaks the chain."""
+    fallback that expresses FreeLLMAPI → Pollinations → Cloudflare → Gemini. A
+    member that raises (it shouldn't) is caught and treated as a miss, so one bad
+    lane never breaks the chain."""
 
     def __init__(self, providers: list[ImageProvider]) -> None:
         self._providers = [p for p in providers if p is not None]
@@ -261,10 +265,11 @@ class ChainImageProvider:
 
 def build_provider() -> ImageProvider:
     """Factory honoring the selection precedence (§1):
-    EM_IMAGEGEN_MOCK > chain[FreeLLMAPI?, Gemini?, Cloudflare?, Pollinations].
+    EM_IMAGEGEN_MOCK > chain[FreeLLMAPI?, Pollinations, Cloudflare?, Gemini?].
 
     The chain is built from whichever keys/env are present; Pollinations is always
-    the keyless final member, so a no-key deployment is exactly the prior default.
+    present (keyless), ahead of the paid backstops — free-first billing law puts
+    paid Gemini LAST, so a no-key deployment is exactly the prior default.
     A single-member chain returns that provider directly (no wrapper)."""
     if os.environ.get("EM_IMAGEGEN_MOCK"):
         return MockImageProvider()
@@ -280,15 +285,15 @@ def build_provider() -> ImageProvider:
         )
         chain.append(FreellmapiImageProvider(base, freellmapi_key))
 
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        chain.append(GeminiImageProvider(gemini_key))
+    chain.append(PollinationsProvider())  # keyless, free — always present
 
     account_id = os.environ.get("CF_ACCOUNT_ID")
     api_token = os.environ.get("CF_API_TOKEN")
     if account_id and api_token:
         chain.append(CloudflareProvider(account_id, api_token))
 
-    chain.append(PollinationsProvider())  # keyless final fallback — always present
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        chain.append(GeminiImageProvider(gemini_key))  # PAID — last backstop
 
     return chain[0] if len(chain) == 1 else ChainImageProvider(chain)

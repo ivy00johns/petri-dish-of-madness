@@ -307,9 +307,14 @@ export function citySignature(
     .map((n) => `${n.id}:${n.tier}`)
     .sort()
     .join(',');
-  // EM-243 (S2): fold the graph's node/edge COUNTS (not the object) so a built
-  // road re-renders live while idle polls (identical counts) never churn the memo.
-  const graph = cityGraph ? `${cityGraph.nodes.length}:${cityGraph.edges.length}` : '';
+  // EM-243 (S2), content-keyed (law §0.5, 4th recurrence): fold the SORTED edge
+  // ids + node count (not the object, not bare counts) so equal-count mutations
+  // (demolish+build within one poll, balanced morph ticks) re-render live while
+  // idle polls (identical content) never churn the memo. Cheap string join at
+  // ≤ a few hundred edges, computed per snapshot poll, never serialized.
+  const graph = cityGraph
+    ? `${cityGraph.nodes.length}:${cityGraph.edges.map((e) => e.id ?? '').sort().join(',')}`
+    : '';
   // EM-244 (S3a): car_policy mutates at CONSTANT node/edge counts (city default or a
   // single edge), so the counts above miss it — fold the city policy + every
   // non-'inherit' edge policy (sorted, so poll order never churns). All-default
@@ -649,14 +654,14 @@ export function ZoneRuleTints({ zones }: { zones: readonly BuildZone[] }) {
 /**
  * EM-247 (S5a): when true, the road network renders as procedural geometry
  * (<RoadMesh>, any-angle ribbons from the CityGraph) instead of the EM-239/243
- * road TILES. Default **false** — the tile path is the byte-identical default +
- * fallback, and flipping this on is a deliberate, reviewed change pending the
- * human visual sign-off (atlas / lane markings / crosswalks / LOD are the
- * spec's deferred "budget real iteration"). With the flag off the road render
- * is the existing tile path UNCHANGED, so every EM-239/243/244/246 golden +
+ * road TILES. Default **true** since the EM-247 visual sign-off (PR #65) — the
+ * procedural mesh is the default road renderer. The tile path is retained as the
+ * fallback and for byte-identical replay of the flag-off configuration: with the
+ * flag off, computeCityPlan still emits the road pieces and CityScape draws them
+ * through the unchanged CityPiece path, so every EM-239/243/244/246 golden +
  * byte-identical assertion still holds. Do NOT retire the tile path here.
  */
-export const ROAD_MESH_ENABLED = true; // EM-247 visual sign-off (TEMP — revert if not signed off)
+export const ROAD_MESH_ENABLED = true; // EM-247 visual sign-off (PR #65)
 
 // ── EM-264 (SA): graph-derived buildable-zone lots (default OFF) ─────────────
 
@@ -690,7 +695,8 @@ function isRoadPieceKey(key: CityPieceKey): boolean {
 export function CityScape({ world }: { world: CityWorld }) {
   const { plan, center } = useCityPlan(world);
   const entries = useMemo(() => renderableEntries(plan, CITY_MODEL_REGISTRY), [plan]);
-  // EM-247 (S5a): branch ONLY the road rendering. With the flag OFF (default)
+  // EM-247 (S5a): branch ONLY the road rendering. With the flag OFF (the
+  // fallback configuration; default ON since PR #65)
   // drawEntries === entries, so the road TILES render through the same
   // CityPiece path as every other piece — byte-identical to pre-EM-247. With it
   // ON, the road-tile pieces drop out and <RoadMesh> renders the procedural

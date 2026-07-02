@@ -7,7 +7,8 @@
  *
  * Pure fn of (graph, seed): same graph ⇒ identical arrays (edge/node order). No
  * RNG/clock/mutable state. This is the data layer S5a's <RoadMesh> renders behind
- * the ROAD_MESH_ENABLED flag; the tile path stays the default until visual sign-off.
+ * the ROAD_MESH_ENABLED flag (default ON since the EM-247 sign-off, PR #65); the
+ * tile path remains the flag-off fallback.
  */
 import type { CityGraph, CityGraphNode } from '../../types';
 

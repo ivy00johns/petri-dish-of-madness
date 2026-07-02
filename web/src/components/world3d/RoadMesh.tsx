@@ -6,8 +6,9 @@
  * pattern. Geometry is procedural + flat (ground-flush in XZ); any-angle ribbons
  * come from the generator (rotY = atan2(dz, dx)), oriented here per instance.
  *
- * This is the OPT-IN path behind CityScape's ROAD_MESH_ENABLED flag (default
- * OFF). The visual quality (atlas UV packing, lane markings, crosswalks, LOD,
+ * This is the path behind CityScape's ROAD_MESH_ENABLED flag (default ON since
+ * the EM-247 sign-off, PR #65; the tile path remains the flag-off fallback).
+ * The visual quality (atlas UV packing, lane markings, crosswalks, LOD,
  * chunked culling, roundabout island fidelity) is the spec's explicitly-deferred
  * "budget real iteration" behind the human visual sign-off — this is a
  * functional first-cut render, not the final art.
@@ -162,6 +163,22 @@ function useRoundaboutBucket(rings: RingInstance[]): {
  * CityScape's ROAD_MESH_ENABLED flag. One InstancedMesh per non-empty bucket;
  * empty buckets render nothing.
  */
+/**
+ * EM-247 perf (S3b-readiness): key the build on a CONTENT signature, NOT the graph
+ * object. Snapshot polling swaps world.city_graph by reference every tick (the
+ * EM-243/244 lesson), so an identity dep would rebuild + re-instance the whole road
+ * mesh every poll. Content = SORTED edge ids + node count (law §0.5, 4th recurrence
+ * of the content-key class — bare counts missed equal-count mutations like
+ * demolish+build within one poll) + car_policy for a future surface change. Cheap
+ * string join at ≤ a few hundred edges, per snapshot poll, never serialized. (When
+ * S3b mutates node.kind at constant count, extend this sig with a kinds hash.)
+ */
+export function roadGraphSig(graph?: CityGraph | null): string {
+  return graph
+    ? `${graph.nodes.length}:${graph.edges.map((e) => e.id).sort().join(',')}:${graph.car_policy ?? ''}`
+    : '';
+}
+
 export function RoadMesh({
   graph,
   seed,
@@ -169,15 +186,7 @@ export function RoadMesh({
   graph?: CityGraph | null;
   seed: number;
 }) {
-  // EM-247 perf (S3b-readiness): key the build on a CONTENT signature, NOT the graph
-  // object. Snapshot polling swaps world.city_graph by reference every tick (the
-  // EM-243/244 lesson), so an identity dep would rebuild + re-instance the whole road
-  // mesh every poll once the flag is on. Node/edge counts change on build_road /
-  // demolish / S3b morph; car_policy rides for a future surface change. (When S3b
-  // mutates node.kind at constant count, extend this sig with a kinds hash.)
-  const graphSig = graph
-    ? `${graph.nodes.length}:${graph.edges.length}:${graph.car_policy ?? ''}`
-    : '';
+  const graphSig = roadGraphSig(graph);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: rebuild on
   // graph CONTENT (graphSig), not object identity, to avoid per-poll churn.
   const data = useMemo(() => buildRoadMesh(graph, seed), [graphSig, seed]);

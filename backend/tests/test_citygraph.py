@@ -170,6 +170,24 @@ def test_build_road_rejects_unknown_anchor_and_direction():
     assert not ok and "direction" in reason
 
 
+# ── fix-wave A5: honest failure on a geometric (non-lattice) city ──────────────
+
+def test_build_road_on_geometric_city_reports_no_lattice_grid():
+    from petridish.engine.citygraph import master_plan, extendable_directions
+    g = master_plan("pentagon", None, 1337)
+    node_id = next(n.id for n in g.nodes if n.id.startswith("n:pent:"))
+    ok, reason, info = apply_build_road(g, node_id, "east")
+    # the node EXISTS, but its id isn't a lattice n:i:j id — say so honestly, not
+    # "malformed" (EM-243 individual growth is grid-only; EM-245/246 geometric
+    # plans have no axis-aligned grid to extend — they are mutually exclusive).
+    assert not ok
+    assert reason == "this city's road plan has no lattice grid to extend"
+    assert info is None
+    # menu suppression (existing behavior) is untouched: a geometric node yields NO
+    # extendable directions, so build_road is never offered for it in the first place.
+    assert extendable_directions(g, node_id) == {}
+
+
 def test_build_road_is_pure_and_deterministic():
     a, b = classic_grid(1337), classic_grid(1337)
     for nid, d in [("n:12:2", "east"), ("n:17:2", "east"), ("n:2:12", "north")]:
