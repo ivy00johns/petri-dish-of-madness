@@ -247,7 +247,10 @@ def test_propose_rule_threads_demolish_road_target_through_dispatch():
 def test_nearby_layout_reports_car_policy():
     from petridish.agents.runtime import build_nearby_layout
     w = _gov_world()
-    place = next(iter(w.places.values()))
+    # fix-wave A1: a place at the NE extreme (logical 1000,1000 → world 33,33) maps
+    # to the n:12:12 corner, which has genuinely open (extendable) directions — the
+    # config plaza at (500,500) now correctly anchors to the fully-interior center.
+    place = PlaceState(id="corner", name="NE Corner", x=1000, y=1000, kind="social")
     line = build_nearby_layout(w, place)
     assert line is not None
     assert "cars" in line.lower()
@@ -261,8 +264,10 @@ def test_nearby_layout_surfaces_open_layout_vote():
     ok, reason, rule = w.action_propose_rule(agent, "set_car_policy", "ban cars",
                                              scope="city", policy="pedestrian")
     assert ok, reason
-    # a corner place whose nearest node has an open (extendable) direction
-    place = PlaceState(id="far", name="Far Corner", x=500, y=500, kind="social")
+    # a corner place whose nearest node has an open (extendable) direction (fix-wave
+    # A1: logical 1000,1000 → world 33,33 → the n:12:12 corner; (500,500) is the
+    # fully-interior center in the corrected frame and would have no open direction).
+    place = PlaceState(id="far", name="Far Corner", x=1000, y=1000, kind="social")
     line = build_nearby_layout(w, place)
     assert line is not None
     assert "open vote" in line.lower()

@@ -344,6 +344,23 @@ describe('citySignature (plan memo key)', () => {
     expect(citySignature(TOWN, 1337, undefined, grown)).not.toBe(citySignature(TOWN, 1337, undefined, g0));
   });
 
+  it('equal-count graphs with DIFFERENT edges churn the memo (content key, not counts)', () => {
+    // demolish+build inside one snapshot poll (or a balanced morph tick): node/edge
+    // COUNTS are identical but the edge SET changed — a count-only fold renders the
+    // mutation stale on the default (mesh) renderer. The 4th recurrence of the
+    // content-key class (EM-243/244/247 + this).
+    const before = { nodes: [{}, {}, {}], edges: [{ id: 'e:a->b' }, { id: 'e:b->c' }] };
+    const after = { nodes: [{}, {}, {}], edges: [{ id: 'e:a->b' }, { id: 'e:a->c' }] };
+    expect(citySignature(TOWN, 1337, undefined, after)).not.toBe(
+      citySignature(TOWN, 1337, undefined, before),
+    );
+    // edge ORDER (poll nondeterminism) never churns the memo — the key is sorted
+    const reordered = { nodes: [{}, {}, {}], edges: [{ id: 'e:b->c' }, { id: 'e:a->b' }] };
+    expect(citySignature(TOWN, 1337, undefined, reordered)).toBe(
+      citySignature(TOWN, 1337, undefined, before),
+    );
+  });
+
   it('EM-244: a car_policy flip at CONSTANT counts churns the memo (city + per-edge)', () => {
     // The S3a HIGH: set_car_policy mutates policy WITHOUT changing node/edge counts,
     // so a count-only signature would miss it and the tint/parked-car removal would
@@ -388,21 +405,25 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
     }
   }
 
-  it('mounts one instancedMesh per (key × chunk × part) + the platted-lot pads', () => {
+  it('mounts one instancedMesh per (key × chunk × part) for the non-road pieces + the platted-lot pads (roads render via <RoadMesh>)', () => {
     const { container } = renderCity();
     const meshes = container.querySelectorAll('instancedMesh');
-    // mocked GLBs are single-mesh ⇒ parts = 1, so expected = Σ chunks per key,
-    // plus the Wave D1.6 procedural pad chunks (the young city's empty lots)
+    // EM-247 (PR #65): the procedural mesh is the DEFAULT road renderer, so the
+    // road-tile pieces drop out of the instanced-piece path and <RoadMesh> draws
+    // the roads instead (empty here — the smoke city carries no graph). Mocked
+    // GLBs are single-mesh ⇒ parts = 1, so expected = Σ chunks per NON-ROAD key,
+    // plus the Wave D1.6 procedural pad chunks (the young city's empty lots).
     const entries = renderableEntries(PLAN, CITY_MODEL_REGISTRY);
+    const drawEntries = entries.filter((e) => !e.key.startsWith('road_'));
     const padChunks = chunkInstances(PLAN.emptyLots, CENTER).length;
     const expected =
-      entries.reduce((n, e) => n + chunkInstances(e.instances, CENTER).length, 0) + padChunks;
+      drawEntries.reduce((n, e) => n + chunkInstances(e.instances, CENTER).length, 0) + padChunks;
     expect(meshes.length).toBe(expected);
-    expect(meshes.length).toBeGreaterThan(entries.length - 1); // road_straight chunks
-    // the dominant key really did chunk
-    const straightChunks = container.querySelectorAll('[name^="city-road_straight-"]');
-    expect(straightChunks.length).toBe(chunkInstances(PLAN.pieces.road_straight, CENTER).length);
-    expect(straightChunks.length).toBeGreaterThan(1);
+    expect(meshes.length).toBeGreaterThan(padChunks); // non-road pieces mounted too
+    // the road tiles no longer render on the default path…
+    expect(container.querySelectorAll('[name^="city-road_straight-"]').length).toBe(0);
+    // …the procedural mesh group is mounted in their place (empty w/o a graph)
+    expect(container.querySelectorAll('[name="roadmesh"]').length).toBe(1);
     // EM-174: the platted city always shows its pads (no generated buildings)
     expect(PLAN.emptyLots.length).toBeGreaterThan(0);
     const padMeshes = container.querySelectorAll('[name^="city-pad-"]');
@@ -466,29 +487,36 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
   });
 });
 
-describe('ROAD_MESH_ENABLED flag (EM-247 S5a — tile path is the byte-identical default)', () => {
-  it('defaults to false (the byte-identical-default guard; a flip is a deliberate, reviewed change)', () => {
-    expect(ROAD_MESH_ENABLED).toBe(false);
+describe('ROAD_MESH_ENABLED flag (EM-247 — procedural mesh is the default; tile path is the fallback)', () => {
+  it('defaults to true (EM-247 visual sign-off, PR #65 — the procedural mesh is the default road renderer)', () => {
+    expect(ROAD_MESH_ENABLED).toBe(true);
   });
 
-  it('flag off ⇒ the EM-239/243 road TILES render unchanged and no <RoadMesh> is mounted', () => {
+  it('flag on (default) ⇒ <RoadMesh> renders in place of the road tiles; the tile path is retained as the byte-identical fallback', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const { container } = render(<CityScape world={{ places: TOWN, city_seed: null }} />);
-      // the road-tile pieces still render through the unchanged CityPiece path
-      // (the same byte-identical assertion idiom the render smoke uses)
-      const roadTiles = container.querySelectorAll('[name^="city-road_straight-"]');
-      expect(roadTiles.length).toBe(chunkInstances(PLAN.pieces.road_straight, CENTER).length);
-      expect(roadTiles.length).toBeGreaterThan(0);
-      // …and the procedural mesh path is wholly absent while the flag is off
-      expect(container.querySelectorAll('[name="roadmesh"]').length).toBe(0);
-      expect(container.querySelectorAll('[name^="road-ribbons"]').length).toBe(0);
-      expect(container.querySelectorAll('[name^="road-intersections"]').length).toBe(0);
+      // the road-tile pieces no longer render on the default path…
+      expect(container.querySelectorAll('[name^="city-road_straight-"]').length).toBe(0);
+      // …the procedural mesh group is mounted in their place (the EM-247 default)
+      expect(container.querySelectorAll('[name="roadmesh"]').length).toBe(1);
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
     }
+    // The tile path is retained as the fallback + for byte-identical replay of the
+    // flag-off configuration: with the flag off, computeCityPlan still emits the
+    // road pieces and CityScape draws them through the unchanged CityPiece path.
+    // So the fallback's render inputs must stay intact — the road_straight piece
+    // is still in the plan with its full instance population, chunked EXACTLY as
+    // the tile path draws it (the dominant key still splits into ≥ 2 chunks).
+    const entries = renderableEntries(PLAN, CITY_MODEL_REGISTRY);
+    const road = entries.find((e) => e.key === 'road_straight');
+    expect(road?.instances).toHaveLength(PLAN.pieces.road_straight.length);
+    const roadChunks = chunkInstances(PLAN.pieces.road_straight, CENTER);
+    expect(roadChunks.length).toBeGreaterThan(1);
+    expect(roadChunks.reduce((n, c) => n + c.length, 0)).toBe(PLAN.pieces.road_straight.length);
   });
 });
 

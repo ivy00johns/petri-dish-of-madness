@@ -17,7 +17,7 @@ from .citygraph import (CityGraph, classic_grid, template, apply_build_road,
                         nearest_node, apply_demolish_road, apply_car_policy,
                         master_plan, diff_graphs, MASTER_PLAN_KINDS,
                         ZoneRule, ZONE_HINTS, planar_faces, zone_id_for,
-                        apply_zone_rule)
+                        apply_zone_rule, logical_to_world)
 
 logger = logging.getLogger(__name__)
 
@@ -1418,10 +1418,7 @@ class World:
         # reshaped (renamed nodes ⇒ new face id, same geometry) can re-bind by
         # centroid afterwards. Skipped (empty) when there are no advisory rules, so
         # a rule-free morph is byte-identical to pre-SB.
-        pre_centroids: dict[str, dict] = {}
-        if self.city_graph.zone_rules:
-            for f in planar_faces(self.city_graph):
-                pre_centroids[zone_id_for(f.boundary)] = f.centroid
+        pre_centroids = self._zone_pre_centroids()
         # ADDS first (never shrink below target mid-morph). Seeded-stable order.
         tgt_node = {n.id: n for n in target.nodes}
         for e in sorted(d["add_edges"], key=lambda e: _seeded_unit(int(plan["seed"]), f"morph:add:{e.id}")):
@@ -1453,14 +1450,37 @@ class World:
         # EM-265 (SB) — morph-survival: re-bind / drop advisory zone rules whose
         # blocks the morph reshaped this tick (pure fn of the now-mutated graph +
         # the pre-mutation centroids).
-        events.extend(self._reconcile_zone_rules_after_morph(pre_centroids))
+        events.extend(self._reconcile_zone_rules(pre_centroids, "after the master plan"))
         return events
+
+    def _zone_pre_centroids(self) -> dict[str, dict]:
+        """fix-wave A4 — snapshot each current zone's face centroid keyed by face id,
+        BEFORE a graph mutation, so _reconcile_zone_rules can re-bind a reshaped block
+        by centroid afterwards. Returns {} (touching NOTHING — no planar_faces work)
+        when there are no advisory rules, so a rule-free city pays zero cost and stays
+        byte-identical to pre-SB."""
+        if not self.city_graph.zone_rules:
+            return {}
+        return {zone_id_for(f.boundary): f.centroid
+                for f in planar_faces(self.city_graph)}
 
     def _reconcile_zone_rules_after_morph(
         self, pre_centroids: dict[str, dict],
     ) -> list[dict]:
-        """EM-265 (SB) — morph-survival (spec §4). After a master-plan morph mutates
-        self.city_graph, rebind each advisory ZoneRule to a CURRENT planar face:
+        """Backward-compat shim (fix-wave A4): the morph path's reconcile is now the
+        general _reconcile_zone_rules; this keeps the morph-specific name + attribution
+        for existing callers/tests."""
+        return self._reconcile_zone_rules(pre_centroids, "after the master plan")
+
+    def _reconcile_zone_rules(
+        self, pre_centroids: dict[str, dict], reason: str,
+    ) -> list[dict]:
+        """EM-265 (SB) — zone-rule survival (spec §4). fix-wave A4: generalized from
+        the morph-only path so it also runs after non-morph graph mutations (a passed
+        demolish_road vote, a face-splitting build_road). `reason` is the HONEST
+        attribution woven into a zone_rule_dropped event ("after a road change" vs
+        "after the master plan"). After the graph mutates, rebind each advisory
+        ZoneRule to a CURRENT planar face:
           (a) its zone_id is still a current face id            → KEEP;
           (b) else a current face's centroid sits within
               _MORPH_REPOINT_TOL of the rule's ORIGINAL face
@@ -1527,12 +1547,12 @@ class World:
                 rule.zone_id = new_zid
                 surviving.append(rule)
                 continue
-            # DROP — the rule's block no longer exists; log it.
+            # DROP — the rule's block no longer exists; log it (honest attribution).
             events.append({
                 "kind": "zone_rule_dropped", "actor_id": "system",
                 "actor_type": "system",
-                "text": ("🗺 A zone rule was dropped — its block no longer exists "
-                         "after the master plan."),
+                "text": (f"🗺 A zone rule was dropped — its block no longer exists "
+                         f"{reason}."),
                 "payload": {"zone_id": rule.zone_id, "hint": rule.hint,
                             "density_cap": rule.density_cap},
             })
@@ -3485,18 +3505,29 @@ class World:
             return self._fail_event(
                 agent.id, "build_road", "too_tired",
                 f"{agent.name} is too tired to build a road (needs {cost:.0f} energy).")
-        # place.x/place.y are the world (x, z); the graph node uses (x, z).
-        from_node = nearest_node(self.city_graph, float(place.x), float(place.y))
+        # place.x/place.y are LOGICAL 0..1000 coords; map them into the graph's
+        # world (x, z) frame BEFORE nearest_node (fix-wave A1) — feeding raw 0..1000
+        # coords straight in snapped every place to the n:12:12 corner.
+        wx, wz = logical_to_world(float(place.x), float(place.y))
+        from_node = nearest_node(self.city_graph, wx, wz)
         if from_node is None:
             return self._fail_event(
                 agent.id, "build_road", "no_graph",
                 f"{agent.name} finds no road to build from.")
+        # fix-wave A4: snapshot zone centroids BEFORE the mutation (no-op when there
+        # are no advisory rules) so a chord that SPLITS a ruled block can reconcile.
+        pre_centroids = self._zone_pre_centroids()
         ok, reason, info = apply_build_road(self.city_graph, from_node.id, direction)
         if not ok:
             return self._fail_event(
                 agent.id, "build_road", reason,
                 f"{agent.name} tried to build a road but: {reason}.")
         agent.energy = max(0.0, agent.energy - cost)
+        # fix-wave A4: a build that reshapes a face can orphan a ratified zone rule —
+        # reconcile now (honest attribution), parking any drop/re-point events in the
+        # same outbox the demolish_road vote uses (drained by the loop).
+        self.pending_spawn_events.extend(
+            self._reconcile_zone_rules(pre_centroids, "after a road change"))
         return {
             "kind": "road_built",
             "actor_id": agent.id,
@@ -4378,6 +4409,9 @@ class World:
         if rule.effect == "demolish_road":
             rule.applied = True
             edge_id = (rule.payload or {}).get("target")
+            # fix-wave A4: snapshot zone centroids BEFORE the teardown (no-op with no
+            # advisory rules) so a demolish that MERGES two ruled blocks can reconcile.
+            pre_centroids = self._zone_pre_centroids()
             ok, _reason, info = apply_demolish_road(self.city_graph, edge_id)
             if ok:
                 self.pending_spawn_events.append({
@@ -4385,6 +4419,10 @@ class World:
                     "text": "🚧 By vote, a road is torn down.",
                     "payload": {"proposal_id": rule.id, **info},
                 })
+                # fix-wave A4: a torn-down edge can orphan a ratified zone rule whose
+                # block merged/vanished — reconcile now with honest attribution.
+                self.pending_spawn_events.extend(
+                    self._reconcile_zone_rules(pre_centroids, "after a road change"))
             return
         # EM-244 (S3a) — set_car_policy: a passing vote sets the city or a street's
         # car policy. car_policy_set parked in the same outbox.

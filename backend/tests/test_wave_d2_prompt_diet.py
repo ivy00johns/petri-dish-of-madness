@@ -39,6 +39,14 @@ size guard below is unaffected. The em161_protagonist_prompt_pre_diet.txt captur
 was regenerated for this intended change (protagonist ~6_862 chars); it still
 guards against UNINTENDED protagonist-prompt drift.
 
+Fix-wave A1 NOTE: the capture was regenerated once more (now ~6_989 chars) for the
+coordinate-frame fix. The hero stands at the MARKET (697,303); with place coords
+now mapped logical→world before nearest_node, the market anchors to a fully-INTERIOR
+graph node (all four dirs already road) instead of the n:12:12 corner every place
+used to snap to — so the NEARBY LAYOUT block and its build_road menu entry correctly
+drop out. This is the ONLY sanctioned regeneration in the fix wave; every other
+line is byte-identical (see contract Global constraints / EM-155).
+
 Deterministic and offline (scripted fakes, ':memory:' DBs, no network).
 House import idiom: engine.world before agents.runtime.
 """

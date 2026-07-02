@@ -447,3 +447,68 @@ def test_determinism_fixed_sequence_byte_identical(monkeypatch):
     # sanity: the mix really exercised the observation path
     assert any(v["over_cap"] for v in a["violations"])
     assert any(not v["over_cap"] for v in a["violations"])
+
+
+# ── fix-wave A3 — perception names `zone_id`; dispatch aliases `zone` → `zone_id` ─
+# The nearby-zones clause used to tell agents to "pass zone=<id>" but the schema
+# (:253) and dispatch (:6138) read ONLY `zone_id`, so SC targeting could never fire.
+# The perception now says `zone_id=<id>`, and the dispatch aliases a stray `zone`
+# arg onto `zone_id` (when zone_id is absent) for robustness against replayed/old
+# emissions.
+
+def test_nearby_zones_perception_uses_zone_id_arg_name(monkeypatch):
+    from petridish.agents.runtime import build_nearby_layout
+    _enable(monkeypatch)
+    w = _world()
+    w.city_graph = _canonical_block(2, 2)
+    place = w.places[_agent(w).location]
+    line = build_nearby_layout(w, place)
+    assert line is not None and "nearby zones:" in line.lower()
+    # the perception must name the SAME arg the schema/dispatch read.
+    assert "pass zone_id=<id>" in line
+    assert "pass zone=<id>" not in line
+
+
+def _runtime(w: World):
+    from petridish.agents.runtime import AgentRuntime
+    from petridish.providers.router import Router
+    from petridish.config.loader import ModelProfile
+    return AgentRuntime(w, Router(
+        [ModelProfile(name="mock", adapter="mock", model_id="mock", color="#2ecc71")],
+        cache_enabled=False))
+
+
+def test_dispatch_aliases_zone_arg_onto_zone_id(monkeypatch):
+    # A `zone` arg with NO `zone_id` (an old-styled / replayed emission) must still
+    # target the zone — the dispatch aliases it onto zone_id.
+    _enable(monkeypatch)
+    w = _world()
+    zone_a, _zb = _install_two_zones(w)
+    rt = _runtime(w)
+    agent = _agent(w)
+    rt._apply_action_inner(
+        agent,
+        {"action": "propose_project",
+         "args": {"name": "Aliased", "kind": "house", "funds_required": 10,
+                  "zone": zone_a}},
+        "P", "#fff")
+    b = next(b for b in w.buildings.values() if b.name == "Aliased")
+    assert b.zone_id == zone_a
+
+
+def test_dispatch_zone_id_wins_over_zone_when_both_present(monkeypatch):
+    # When both are present, the explicit `zone_id` is authoritative (the alias only
+    # fills in when zone_id is absent).
+    _enable(monkeypatch)
+    w = _world()
+    zone_a, zone_b = _install_two_zones(w)
+    rt = _runtime(w)
+    agent = _agent(w)
+    rt._apply_action_inner(
+        agent,
+        {"action": "propose_project",
+         "args": {"name": "Both", "kind": "house", "funds_required": 10,
+                  "zone_id": zone_a, "zone": zone_b}},
+        "P", "#fff")
+    b = next(b for b in w.buildings.values() if b.name == "Both")
+    assert b.zone_id == zone_a
