@@ -872,9 +872,13 @@ def _coherence_resolve(
     return resolved, drop_notes
 
 
-def _rule_label(text: str, limit: int = 60) -> str:
-    """EM-100 — the human-readable rule label for feed text (quoted by callers,
-    truncated to ~60 chars). Never the bare uuid."""
+def _rule_label(text: str, limit: int = 300) -> str:
+    """EM-100 — the human-readable rule label for feed text (quoted by callers).
+    Cap = 300 to match the amend_constitution creation cap (action_propose_rule
+    stores text[:300]), so a constitutional amendment / rule proposal reads in FULL
+    in the vote feed line — legible, not clipped to a 60-char blurb (the full text
+    already lives in rule.text; this is the one-line feed rendering). Never the bare
+    uuid."""
     text = str(text or "").strip() or "(untitled rule)"
     return text if len(text) <= limit else text[: limit - 1] + "…"
 

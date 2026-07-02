@@ -275,6 +275,25 @@ async def test_turn_chain_domain_events_inherit_turn_id():
     assert {"turn_start", "action_resolved"} <= kinds
 
 
+def test_rule_label_keeps_governance_text_legible():
+    """EM-100 feed labels must not butcher governance text: a constitutional
+    amendment (capped at 300 chars at creation, world.action_propose_rule) must
+    read in FULL in the proposal/vote feed line — not clipped to a 60-char blurb.
+    Regression: users could not read the law being voted on in the live feed."""
+    from petridish.agents.runtime import _rule_label
+    amendment = (
+        "No citizen shall be required to pay any fee, purchase a license, or "
+        "obtain permission from any authority in order to trade, gather, or dwell "
+        "within the commons."
+    )
+    assert len(amendment) > 60  # the old 60-char cap would have clipped this
+    out = _rule_label(amendment)
+    assert out == amendment  # shown in full — the law is legible, no ellipsis
+    assert "…" not in out
+    # still bounded: a pathological over-long text can't flood the feed line.
+    assert len(_rule_label("x" * 400)) == 300
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. STAMPING
 # ──────────────────────────────────────────────────────────────────────────────
