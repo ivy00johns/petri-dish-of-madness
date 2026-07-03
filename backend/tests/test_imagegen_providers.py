@@ -155,7 +155,12 @@ async def test_freellmapi_decodes_b64_json(fake_httpx):
 
 
 @pytest.mark.asyncio
-async def test_freellmapi_fetches_url_shape(fake_httpx):
+async def test_freellmapi_fetches_url_shape(fake_httpx, monkeypatch):
+    # EM-296: the url-fetch path now SSRF-guards the host (resolves it, rejects
+    # private/loopback ranges). Stub resolution so the fake CDN host counts as a
+    # public target — the url response shape is still exercised end to end.
+    import petridish.imagegen.provider as _prov
+    monkeypatch.setattr(_prov, "_resolve_ips", lambda host: ["93.184.216.34"])
     def handler(method, url, **kw):
         if method == "POST":
             return _FakeResp(200, payload={"data": [{"url": "https://cdn/img.png"}]})

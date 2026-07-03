@@ -27,10 +27,12 @@ an external side-artifact that never re-enters the sim).
 from __future__ import annotations
 
 import base64
+import ipaddress
 import logging
 import os
+import socket
 from typing import Protocol, runtime_checkable
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +44,19 @@ _MOCK_PNG: bytes = base64.b64decode(
 
 # Network knobs (the fetch is OFF the critical path; a generous-but-bounded timeout).
 _TIMEOUT_SECONDS = 12.0
+# Write-guard (EM-287): provider bytes are written to data/assets/images and served
+# to the browser as .png, so cap the size and require a real raster magic header
+# before any bytes escape a provider. PNG is canonical (we serve .png); JPEG/GIF/
+# WEBP are tolerated so a free lane that returns one of those isn't silently dropped
+# to the PAID backstop (free-first billing law).
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MiB — a few MB, generous but bounded
+_MAX_REDIRECTS = 3
+_IMAGE_MAGIC: tuple[bytes, ...] = (
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"\xff\xd8\xff",        # JPEG
+    b"GIF87a",
+    b"GIF89a",             # GIF
+)
 _POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{prompt}?width=512&height=512&nologo=true"
 _CLOUDFLARE_URL = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}"
@@ -65,15 +80,89 @@ class ImageProvider(Protocol):
         ...
 
 
-async def _get_url_bytes(client, url: str) -> bytes | None:
-    """GET a url and return its bytes on 200, else None. Follows redirects
-    (Pollinations + some proxy image lanes 302 to a CDN). Never raises."""
+def _valid_image(data: bytes | None) -> bytes | None:
+    """Return `data` iff it is a size-bounded, magic-byte-recognized raster image,
+    else None (EM-287 write-guard). Rejects oversized bodies and non-image payloads
+    (HTML/SVG/arbitrary text) that would otherwise be written and served as .png."""
+    if not data or len(data) > _MAX_IMAGE_BYTES:
+        return None
+    if any(data.startswith(sig) for sig in _IMAGE_MAGIC):
+        return data
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":  # WEBP is a two-part signature
+        return data
+    return None
+
+
+def _resolve_ips(host: str) -> list[str]:
+    """Resolve `host` → literal IP strings (all A/AAAA records). Split out so the
+    SSRF guard is unit-testable via monkeypatch. Raises on a resolution failure
+    (the caller treats that as unsafe — fail closed)."""
+    return [info[4][0] for info in socket.getaddrinfo(host, None)]
+
+
+def _host_is_public(host: str) -> bool:
+    """True iff `host` resolves and EVERY resolved IP is a public, routable address
+    (EM-296). Rejects loopback / private / link-local (169.254.169.254 cloud
+    metadata) / reserved / multicast / unspecified — checked on the RESOLVED ip so a
+    name that resolves inward can't slip past."""
+    if not host:
+        return False
     try:
-        resp = await client.get(url, follow_redirects=True)
-        if resp.status_code == 200 and resp.content:
-            return resp.content
-    except Exception as exc:  # pragma: no cover - network defensive
-        log.debug("image url fetch failed: %s", exc)
+        ips = _resolve_ips(host)
+    except Exception:
+        return False
+    if not ips:
+        return False
+    for ip_str in ips:
+        try:
+            ip = ipaddress.ip_address(ip_str.split("%", 1)[0])  # strip any zone id
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return False
+    return True
+
+
+def _url_is_public(url: str) -> bool:
+    """http/https scheme + a host that resolves entirely to public IPs (SSRF guard)."""
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    return _host_is_public(parts.hostname or "")
+
+
+async def _get_url_bytes(client, url: str) -> bytes | None:
+    """Fetch an image url and return a validated raster image on 200, else None.
+    Hardened (EM-296 SSRF + EM-287 write-guard): http/https only, the host must
+    resolve entirely to public IPs, redirects are followed MANUALLY with each hop
+    re-validated by the same guard (≤ _MAX_REDIRECTS), httpx auto-redirects are
+    disabled, and the body is size/magic validated before it can be returned.
+    Never raises."""
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not _url_is_public(url):
+            log.debug("image url rejected by SSRF guard: %s", url)
+            return None
+        try:
+            resp = await client.get(url, follow_redirects=False)
+        except Exception as exc:  # pragma: no cover - network defensive
+            log.debug("image url fetch failed: %s", exc)
+            return None
+        status = getattr(resp, "status_code", 0)
+        if status in (301, 302, 303, 307, 308):
+            headers = getattr(resp, "headers", None) or {}
+            location = headers.get("location")
+            if not location:
+                return None
+            url = urljoin(url, location)  # re-validated at the top of the loop
+            continue
+        if status == 200 and resp.content:
+            return _valid_image(resp.content)
+        return None
+    log.debug("image url exceeded redirect cap: %s", url)
     return None
 
 
@@ -100,7 +189,7 @@ class PollinationsProvider:
             ) as client:
                 resp = await client.get(url)
             if resp.status_code == 200 and resp.content:
-                return resp.content
+                return _valid_image(resp.content)
         except Exception as exc:  # pragma: no cover - network defensive
             log.debug("pollinations fetch failed: %s", exc)
         return None
@@ -142,7 +231,9 @@ class FreellmapiImageProvider:
                 for item in (data.get("data") or []):
                     b64 = item.get("b64_json")
                     if b64:
-                        return base64.b64decode(b64)
+                        png = _valid_image(base64.b64decode(b64))
+                        if png is not None:
+                            return png
                     img_url = item.get("url")
                     if img_url:
                         png = await _get_url_bytes(client, img_url)
@@ -202,7 +293,9 @@ class GeminiImageProvider:
             for part in parts:
                 inline = part.get("inlineData") or part.get("inline_data") or {}
                 if inline.get("data"):
-                    return base64.b64decode(inline["data"])
+                    png = _valid_image(base64.b64decode(inline["data"]))
+                    if png is not None:
+                        return png
         except Exception as exc:  # pragma: no cover - network defensive
             log.debug("gemini image fetch failed: %s", exc)
         return None
@@ -235,7 +328,7 @@ class CloudflareProvider:
                 # Workers AI returns {"result": {"image": "<base64>"}, ...}.
                 b64 = (data.get("result") or {}).get("image")
                 if b64:
-                    return base64.b64decode(b64)
+                    return _valid_image(base64.b64decode(b64))
         except Exception as exc:  # pragma: no cover - network defensive
             log.debug("cloudflare fetch failed: %s", exc)
         return None
