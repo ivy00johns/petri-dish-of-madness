@@ -156,3 +156,17 @@ Runtime: Workflow mode (ultracode). Design/contracts inline; implement + verify 
 - [~] `nano-banana` — DEFERRED: the empty-banner/NoticeBoard states use a procedural toon fallback (EM-148 invariant, now adversarially tested); seed art adds polish but no functional gap. Re-enter if a designed default banner is wanted.
 - [~] `render-sanity` / `ux-review` — DEFERRED (standing pattern since W11b/Wave-K): a meaningful Atelier walk needs a live run that has generated images (create_image is agent-driven over many ticks) + the full stack up. Substituted with component render tests (898 web), the production build, the token diff, and the adversarially-tested 404 fallback. Run on merged main once a live run has produced gallery art.
 - [ ] `/code-review` (external CLI) — handoff: user-triggered/billed; not auto-run.
+
+## W29 — offline-review remediation army (2026-07-03)
+Source: docs/REMAINING-WORK.md W29 rows EM-272–296 (PR #73) · contracts/w29-remediation-contract.md · branch build/w29-offline-review-fixes
+Runtime: parallel subagents via Agent tool (no ultracode signal this session — Fable 5 alone is not an opt-in per the skill). 5 fix lanes by exclusive file ownership (S sim-core · R runtime · L city-layout · U frontend-ui · P providers), then wave gate, then QE.
+
+- [x] `orchestrator` — ✅ driving this build.
+- [x] `contract-author` — folded into the lead's `contracts/w29-remediation-contract.md` (fix wave; no new API surface).
+- [ ] fix lanes S/R/L/U/P — dispatched as `general-purpose` subagents, AFK, no-commit rule.
+- [ ] wave gate (`fix-until-green`) — full `.venv/bin/python -m pytest backend/tests` + `tsc -b --force` + `vitest run`; failures routed by file ownership; 3-strike circuit breaker.
+- [ ] QE agent — mandatory; `coordination/qa-report.json` (wave-W29).
+- [~] `nano-banana` / `ui-brief` / `frontend-design` / `ui-ux-pro-max` — N/A: defect remediation on existing surfaces, no new UI.
+- [~] `render-sanity` / `ux-review` — DEFERRED (standing pattern): W29 frontend fixes are leak/perf/a11y/fallback with unit regression tests; live browser walk rides the next user-gated live session (same gate as the ROAD_MESH_ENABLED sign-off).
+- [~] `design-token-guard` — diff-scoped only if the wave touches styling (expected: EM-292 swaps a rAF cssVar read pattern; no new hexes).
+- [ ] `/code-review` (external CLI) — handoff: user-triggered/billed; run on the build PR.
