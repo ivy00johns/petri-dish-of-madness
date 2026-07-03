@@ -281,6 +281,39 @@ function sameDirection(p: HalfEdge, q: HalfEdge): boolean {
   return Math.abs(cross) < DIR_TIE_EPS && dot > 0;
 }
 
+/** 2× the signed area of triangle (a,b,c): >0 CCW, <0 CW, 0 collinear. */
+function orient(
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  cx: number,
+  cz: number,
+): number {
+  return (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+}
+
+/** True iff open segments a1→a2 and b1→b2 cross at a single point interior to
+ *  BOTH (a proper transversal crossing). A shared endpoint or a collinear
+ *  overlap is NOT a proper crossing (those are handled by node-merge / edge-
+ *  split): the strict opposite-orientation test is false whenever ANY of the
+ *  four orientations is zero. Symmetric ⇒ input-order independent. */
+function segmentsProperlyCross(
+  a1: FNode,
+  a2: FNode,
+  b1: FNode,
+  b2: FNode,
+): boolean {
+  const d1 = orient(b1.x, b1.z, b2.x, b2.z, a1.x, a1.z);
+  const d2 = orient(b1.x, b1.z, b2.x, b2.z, a2.x, a2.z);
+  const d3 = orient(a1.x, a1.z, a2.x, a2.z, b1.x, b1.z);
+  const d4 = orient(a1.x, a1.z, a2.x, a2.z, b2.x, b2.z);
+  return (
+    ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+    ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+  );
+}
+
 // ── planarFaces ───────────────────────────────────────────────────────────────
 
 /** Trace the bounded planar faces (city blocks) of the road graph.
@@ -392,6 +425,38 @@ export function planarFaces(graph: CityGraph | null | undefined): CityFace[] {
     addUndirected(planarEdges, prev, b);
   }
   if (planarEdges.size === 0) return [];
+
+  // ── Sanitize step 2.5 (EM-283): DETECT segment×segment crossings ────────────
+  // Steps 1–2 planarize coincident nodes + node-on-edge overlaps, but a morph
+  // that ADDS the new topology before REMOVING the old (guaranteed mid-morph,
+  // adds-before-removes) leaves two edges crossing at a NON-node point. The
+  // next-by-angle walk assumes a clean planar embedding, so a transversal
+  // crossing tangles a bounded face into the outer face — silently DROPPING an
+  // enclosed block, or emitting a self-intersecting face whose lots sit on a
+  // road (the FORBIDDEN failure). We split ONLY at existing nodes (never invent a
+  // vertex), so a crossing can't be planarized here; instead DETECT any proper
+  // crossing and bail the WHOLE graph to [] — the caller falls back to the grid
+  // plat (EM-282). A sanctioned whole-graph [] is fine; a silent partial drop /
+  // lots-on-roads is not. O(E²) over the small road-edge set; the predicate is
+  // symmetric ⇒ input-order independent.
+  const crossEdges = [...planarEdges.values()].map(({ a, b }) => ({
+    a: canonNodes.get(a)!,
+    b: canonNodes.get(b)!,
+  }));
+  for (let i = 0; i < crossEdges.length; i++) {
+    for (let j = i + 1; j < crossEdges.length; j++) {
+      if (
+        segmentsProperlyCross(
+          crossEdges[i].a,
+          crossEdges[i].b,
+          crossEdges[j].a,
+          crossEdges[j].b,
+        )
+      ) {
+        return [];
+      }
+    }
+  }
 
   // Build directed half-edges + per-vertex outgoing lists.
   const outgoing = new Map<string, HalfEdge[]>();
