@@ -2208,6 +2208,19 @@ class World:
         cap = int(self._memory_param("soul_cap", 3))
         agent.soul = _coerce_soul(list(anchors or []), cap)
 
+    def _belief_fifo_cap(self) -> int:
+        """EM-279 — the per-action FIFO bound applied by the belief WRITERS
+        (action_remember / action_deceive), held ONE above the `consolidate_at`
+        ceiling so the round-boundary "sleep" (consolidate_memory, which fires only
+        when beliefs EXCEED the ceiling) is actually reachable. A flat cap EQUAL to
+        the ceiling — the pre-EM-279 bug, a hardcoded 20 == the default
+        consolidate_at — pinned beliefs AT the ceiling, so `len > ceiling` was never
+        true and the digest/sleep-sweep path never ran. Config-derived, so it holds
+        above ANY configured ceiling (a hardcoded 20 also silently broke every
+        consolidate_at > 20 run). The round-boundary sweep then re-bounds beliefs to
+        `[digest] + consolidate_keep_recent`, so prompts stay tight (~ceiling+1)."""
+        return int(self._memory_param("consolidate_at", 20)) + 1
+
     def consolidate_memory(self, agent: AgentState) -> dict | None:
         """EM-233 — "sleep": deterministically roll an agent's OLDEST beliefs into
         ONE digest line when the beliefs count exceeds `memory.consolidate_at`,
@@ -2497,7 +2510,7 @@ class World:
         lie = f"{agent.name} told me: {claim}"
         if lie not in target.beliefs:
             target.beliefs.append(lie)
-            if len(target.beliefs) > 20:
+            if len(target.beliefs) > self._belief_fifo_cap():  # EM-279
                 target.beliefs.pop(0)
         # Trust craters when manipulated (the victim's view sours toward the liar).
         self._update_trust(target, agent, -12)
@@ -2546,7 +2559,12 @@ class World:
         amount = max(0, min(agent.credits, int(amount or 0)))
         if amount <= 0:
             return False, "no credits to launder", 0
-        fee = int(amount * float(self._crime_param("launder_cut", 0.3)))
+        # EM-277 — the cut MUST cost at least 1 credit. int() truncation floored the
+        # fee to 0 for any amount whose cut rounds below 1 (amount ≤3 at the default
+        # 0.3 cut), so a dirty agent could cool the full notoriety hit — and clear a
+        # `wanted` flag — for FREE, infinitely repeatably. A floor of 1 keeps launder
+        # a real credit sink (the exploit is now bounded by the agent's balance).
+        fee = max(1, int(amount * float(self._crime_param("launder_cut", 0.3))))
         agent.credits -= fee
         agent.notoriety = max(0, agent.notoriety -
                               int(self._crime_param("launder_notoriety_reduction", 8)))
@@ -2644,7 +2662,10 @@ class World:
         """EM-228 — a CO-LOCATED skill transfer. The teacher must hold `skill` at a
         STRICTLY higher level than the student; the student gains a BOUNDED step:
         +1 level toward the teacher, capped one below the teacher (a single lesson
-        never makes a student an equal). The lesson replenishes BOTH agents'
+        never makes a student an equal). A teacher only ONE level ahead therefore
+        has nothing to give — the student already sits at that cap — so the lesson
+        is REJECTED (EM-272: no fee, no `skill_taught` contribution on a no-op).
+        The lesson replenishes BOTH agents'
         EM-229 knowledge need (curiosity sated by teaching AND by learning) and
         raises MUTUAL trust (_update_trust both directions). A matching open
         request to this teacher (action_request_skill) is consumed.
@@ -2675,24 +2696,28 @@ class World:
         # only lift a student to lvl 1, never to 2.
         new_level = min(s_level + 1, t_level - 1)
         gained = new_level - s_level
-        if gained > 0:
-            # Route the level through grant_skill_xp so the EM-229 knowledge
-            # replenishment + the per-agent xp ledger stay consistent. Grant exactly
-            # `gained` levels' worth of xp from the student's current baseline.
-            per_level = max(1, int(self._skills_param("xp_per_level", 30)))
-            self.grant_skill_xp(student, skill, per_level * gained)
-        else:  # pragma: no cover - defensive (s_level == t_level-1 already)
-            # No level to give (student already one below the teacher) but the
-            # lesson still happened — sate both curiosities below.
-            pass
+        if gained <= 0:
+            # EM-272 — the student is ALREADY at the ceiling a teacher only one
+            # level ahead can lift them to (a +1 teacher caps them one level below,
+            # which is exactly where they sit). Nothing transfers, so FAIL HONESTLY:
+            # no curiosity top-up, no trust bump, no consumed request — and, via the
+            # (ok=False) return, the caller records NO `skill_taught` contribution.
+            # Reporting success here paid for a no-op lesson and let a +1 pair farm
+            # unbounded Victory-Arch credit (EM-232) on zero-progress teaching.
+            return False, (
+                f"the student already holds {skill} at the cap a lvl-{t_level} "
+                f"teacher can lift them to (them {s_level}) — teach needs a wider gap"
+            ), 0
+        # Route the level through grant_skill_xp so the EM-229 knowledge
+        # replenishment + the per-agent xp ledger stay consistent. Grant exactly
+        # `gained` levels' worth of xp from the student's current baseline.
+        per_level = max(1, int(self._skills_param("xp_per_level", 30)))
+        self.grant_skill_xp(student, skill, per_level * gained)
         # Teaching sates the TEACHER's knowledge need too (the EM-229 curiosity
         # drive: passing on craft is its own learning). The student's was already
         # topped up by grant_skill_xp; give the teacher a comparable bump.
         teach_replenish = float(self._skills_param("xp_per_use", 10)) / 2.0
         self.replenish_knowledge(teacher, teach_replenish)
-        if gained <= 0:
-            # grant_skill_xp didn't run, so the student got no top-up — give one.
-            self.replenish_knowledge(student, teach_replenish)
         # Mutual trust: a lesson is a cooperative bond (both directions warmed).
         bump = int(self._skills_param("teach_trust", 4))
         self._update_trust(teacher, student, bump)
@@ -3163,6 +3188,10 @@ class World:
             },
         })
         if building.progress >= 100:
+            # EM-289 — finishing a project is a judged contribution (EM-232 Victory
+            # Arch), exactly as the solo build_step path records it. The co-op
+            # finisher was silently under-scored: the payoff verb earned nothing.
+            self.record_contribution(agent, "project_built")
             events.extend(self._complete_construction(building, "completed", agent.id))
         return {"_multi": events}
 
@@ -3782,8 +3811,8 @@ class World:
     def action_remember(self, agent: AgentState, fact: str) -> tuple[bool, str]:
         if fact not in agent.beliefs:
             agent.beliefs.append(fact)
-            if len(agent.beliefs) > 20:
-                agent.beliefs.pop(0)  # FIFO cap
+            if len(agent.beliefs) > self._belief_fifo_cap():  # EM-279 FIFO cap
+                agent.beliefs.pop(0)
         return True, "ok"
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -4266,7 +4295,13 @@ class World:
         if rule.effect == "trial":
             rule.applied = True
             defendant = self.agents.get((rule.payload or {}).get("defendant_id"))
-            if defendant is None:
+            # EM-276 — the defendant can DIE between the trial opening and the vote
+            # crossing threshold (propose-time checks aliveness, activation did not).
+            # Jailing a corpse confiscated its credits and stamped a permanent
+            # `crime_status='jailed'` into every snapshot forever. A dead defendant
+            # is a silent no-op (the vote still "passed"), like demolish's vanished
+            # target / promote_image's vanished image.
+            if defendant is None or not defendant.alive:
                 return
             sentence = int(self._crime_param("trial_sentence", 20))
             fine = min(defendant.credits, int(self._crime_param("trial_fine", 25)))
@@ -4446,6 +4481,23 @@ class World:
             rule.applied = True
             p = rule.payload or {}
             kind = p.get("kind")
+            # EM-278 — the one-active invariant is enforced at PROPOSE time, but a
+            # god_adopt_master_plan (or another ratified vote) can start a morph
+            # between propose and this threshold-crossing vote. Overwriting
+            # self.master_plan here would silently ABANDON the in-progress morph
+            # (its target is re-derived from self.master_plan each tick). If a plan
+            # is already active, drop this ratified one (the vote still "passed") —
+            # the same vanished-target pattern set_zone_rule/demolish use.
+            if self.master_plan is not None:
+                self.pending_spawn_events.append({
+                    "kind": "master_plan_dropped", "actor_id": "system",
+                    "actor_type": "system",
+                    "text": ("🏙 A ratified master plan yielded — another morph was "
+                             "already in progress when the vote landed."),
+                    "payload": {"proposal_id": rule.id, "kind": kind,
+                                "active_kind": self.master_plan.get("kind")},
+                })
+                return
             self.master_plan = {"kind": kind, "params": p.get("params") or {},
                                 "seed": self.city_seed}
             self.pending_spawn_events.append({
@@ -7758,6 +7810,24 @@ class World:
                 }
                 for tid, r in self.pending_skill_requests.items()
             }
+        # EM-288 — the EM-227 partial-xp ledger {(agent_id, skill): total_xp}.
+        # Serialized ONLY when non-empty (the cap_demotions pattern) as a nested
+        # {agent_id: {skill: xp}} dict (tuple keys aren't JSON-safe), keys SORTED
+        # for a byte-stable round-trip. Without it, a fork/resume reset every
+        # agent's accrued-but-not-yet-leveled xp to 0, so the resumed run leveled
+        # skills LATER than the continuous run — an EM-155 fork/resume divergence.
+        # (The old "harmless rounding" note was wrong: learn-by-doing grants
+        # xp_per_use, NOT whole levels, so real partial xp accumulates.) Absent ⇒
+        # {} on restore (pre-EM-288 snapshots keep the exact prior key set).
+        ledger = getattr(self, "_skill_xp", None)
+        if isinstance(ledger, dict) and ledger:
+            nested: dict[str, dict[str, int]] = {}
+            for (aid, skill), xp in ledger.items():
+                nested.setdefault(str(aid), {})[str(skill)] = int(xp)
+            snap["skill_xp"] = {
+                aid: {sk: nested[aid][sk] for sk in sorted(nested[aid])}
+                for aid in sorted(nested)
+            }
         # EM-230 — open trade offers {offeree_id: {from_id, give, get, tick}}.
         # Serialized ONLY when non-empty (the cap_demotions pattern), so an
         # offer-free world — and every pre-EM-230 snapshot — keeps the exact prior
@@ -8353,6 +8423,24 @@ class World:
                     "tick": _int(r.get("tick")),
                 }
         world.pending_skill_requests = restored_requests
+        # EM-288 — restore the partial-xp ledger (nested {agent_id: {skill: xp}} →
+        # the flat {(agent_id, skill): xp} in-memory shape) so a fork/resume keeps
+        # accrued-but-not-yet-leveled xp and levels skills on the SAME tick as the
+        # continuous run (EM-155). Defensive: drop non-dict rows / non-int xp; keep
+        # entries even for a since-departed agent id (harmless — never read). Absent
+        # ⇒ {} (pre-EM-288 snapshots restart the partial-xp clock at 0, old behavior).
+        skill_xp: dict[tuple[str, str], int] = {}
+        raw_xp = state.get("skill_xp")
+        if isinstance(raw_xp, dict):
+            for aid, skills in raw_xp.items():
+                if not isinstance(skills, dict):
+                    continue
+                for sk, xp in skills.items():
+                    try:
+                        skill_xp[(str(aid), str(sk))] = int(xp)
+                    except (TypeError, ValueError):
+                        continue
+        world._skill_xp = skill_xp
         # EM-230 — restore open trade offers (snapshot-safe, EM-190). Defensive:
         # keep only well-formed entries whose offeree AND offerer both still exist,
         # are distinct, and that carry a non-empty deal (a non-dict entry, a missing

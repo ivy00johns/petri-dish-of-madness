@@ -147,7 +147,15 @@ class TickLoop:
         # W7 — last world.round we ran the per-round building lifecycle for, so we
         # advance building abandonment + drain governance spawns exactly once per
         # round (not once per turn).
-        self._last_building_round: int = 0
+        # EM-275 — DERIVE from the world's current round, not a flat 0. A resumed/
+        # forked loop is built around an already-advanced world (round R>0); a flat
+        # 0 made the first _advance_round_buildings see `R > 0` and fire an EXTRA
+        # per-round pass — including EM-240 advance_crime (notoriety decay / wanted
+        # clear) — that the continuous run had already run before the snapshot, an
+        # EM-155 fork/resume divergence. At snapshot time _advance_round_buildings
+        # always ran BEFORE the save, so `_last_building_round == world.round`;
+        # restoring that here reproduces it. A fresh world is round 0 ⇒ still 0.
+        self._last_building_round: int = int(getattr(self._world, "round", 0) or 0)
 
         # EM-067 cap-aware throttle: effective slowdown multiplier applied to the
         # continuous-run sleep. 1.0 = no slowdown. Recomputed each turn from
