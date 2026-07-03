@@ -136,8 +136,15 @@ export function DiaryView({ world, history }: DiaryViewProps) {
     [groups, agentsById],
   );
 
+  // EM-294: a selected diarist can later vanish from grouped history (an
+  // archived-run switch, or a history replace that no longer carries their
+  // reflections). A stale id then filters to zero groups → a silently blank
+  // reading room. Fall back deterministically to "all agents" when the selection
+  // is no longer present, and drive the <select> off the SAME resolved value so
+  // it never shows a phantom option.
+  const effectiveActor = groups.some((g) => g.actorId === selectedActor) ? selectedActor : '';
   const visibleGroups =
-    selectedActor === '' ? groups : groups.filter((g) => g.actorId === selectedActor);
+    effectiveActor === '' ? groups : groups.filter((g) => g.actorId === effectiveActor);
 
   const totalEntries = groups.reduce((n, g) => n + g.entries.length, 0);
 
@@ -154,7 +161,7 @@ export function DiaryView({ world, history }: DiaryViewProps) {
       <label className="font-mono text-[10px] uppercase text-lab-muted-bright flex items-center gap-1">
         Diary
         <select
-          value={selectedActor}
+          value={effectiveActor}
           onChange={(e) => setSelectedActor(e.target.value)}
           aria-label="Diary — filter to one agent"
           className="font-mono text-[10px] bg-lab-chrome border border-lab-border text-lab-text rounded-sm px-1 py-0.5"

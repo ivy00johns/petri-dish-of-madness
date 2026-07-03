@@ -425,14 +425,31 @@ function drawAnimal(
   ctx.restore();
 }
 
+// EM-292: token reads are cached module-wide. The token migration moved cssVar()
+// — a fresh getComputedStyle(document.documentElement) each call — INTO the
+// per-agent rAF draw path (drawAgent reads --lab-border/--lab-acid/--lab-bg per
+// agent, per frame), so a busy village at 60fps did hundreds-to-thousands of
+// computed-style reads/sec. The lab palette is a single STATIC :root theme
+// (inspector-tokens.css; no runtime theme switch), so each token can resolve
+// ONCE and every later read — including inside the loop — is a cheap Map hit.
+// Tokens stay the source of truth (no hardcoded hex). Only non-empty results are
+// cached, so a read before the stylesheet applies retries until it resolves.
+const tokenCache = new Map<string, string>();
+
 /**
  * Read a declared CSS custom property (a theme token from inspector-tokens.css)
- * for Canvas use, where a class can't apply. Returns '' if unresolved (only in
- * a non-DOM environment) — never a hardcoded hex literal.
+ * for Canvas use, where a class can't apply. Cached after first resolve (EM-292)
+ * so the rAF loop never re-reads getComputedStyle. Returns '' if unresolved
+ * (only in a non-DOM environment) — never a hardcoded hex literal. Exported for
+ * the regression test that pins the caching.
  */
-function cssVar(name: string): string {
+export function cssVar(name: string): string {
+  const hit = tokenCache.get(name);
+  if (hit !== undefined) return hit;
   if (typeof window === 'undefined') return '';
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (value) tokenCache.set(name, value);
+  return value;
 }
 
 function drawAgent(
