@@ -640,7 +640,7 @@ def _add_undirected(m: dict, a: str, b: str) -> None:
         m[key] = (a, b)
 
 
-def planar_faces(graph) -> list[Face]:
+def _planar_faces_uncached(graph) -> list[Face]:
     """Trace the bounded planar faces (city blocks) of the road graph. Pure +
     deterministic (sort nodes/edges by id first). Defensive: stubs, disconnected
     components, and degenerate faces are tolerated; coincident nodes and collinear
@@ -830,6 +830,57 @@ def planar_faces(graph) -> list[Face]:
         if area > 0:
             faces.append(Face(boundary=boundary, poly=poly,
                               centroid=_polygon_centroid(poly, area), area=area))
+    return faces
+
+
+# ── EM-295 (W29): per-graph memoization of planar_faces ────────────────────────
+# planar_faces is O(edges×nodes) (the collinear-overlap split) and is recomputed
+# from scratch up to 3× per agent-turn when GRAPH_ZONES_ENABLED (perception + the
+# propose_rule gate + action_propose_rule), on a graph that did not change between
+# those calls. Cache the result ON the graph, keyed by a STRUCTURAL SIGNATURE of
+# everything planar_faces reads (each valid node's id/x/z + every edge's id/a/b).
+#
+# Why a content signature and not an "epoch counter" bumped by mutators: the graph
+# is mutated in several places — including world.step_master_plan_morph, which
+# splices graph.nodes/graph.edges DIRECTLY — so an epoch would have to be bumped at
+# every such site or the cache would go stale (a correctness bug). A signature
+# self-invalidates on ANY change no matter who made it, and a MATCHING signature
+# means byte-identical input ⇒ identical faces (determinism, EM-155). The cache
+# lives in the instance __dict__: it is never a declared field, so to_dict never
+# serializes it and snapshot/replay/fork recompute fresh, identical results.
+def _faces_signature(graph) -> tuple:
+    nodes = tuple(sorted(
+        (n.id, float(n.x), float(n.z)) for n in graph.nodes if _is_valid_node(n)
+    ))
+    edges = tuple(sorted(
+        (str(getattr(e, "id", "")), str(getattr(e, "a", "")), str(getattr(e, "b", "")))
+        for e in graph.edges if e is not None
+    ))
+    return (nodes, edges)
+
+
+def planar_faces(graph) -> list[Face]:
+    """Bounded planar faces (city blocks) of the road graph — memoized per graph by
+    a structural signature (EM-295). Identical results to a fresh computation; the
+    cache self-invalidates on any node/edge change. See `_planar_faces_uncached`
+    for the algorithm + guarantees (pure, deterministic, never drops a region)."""
+    # Cheap guard first (also avoids attaching a cache to a non-graph / stub).
+    if (
+        graph is None
+        or not isinstance(getattr(graph, "nodes", None), list)
+        or not isinstance(getattr(graph, "edges", None), list)
+        or len(graph.edges) == 0
+    ):
+        return []
+    sig = _faces_signature(graph)
+    cached = getattr(graph, "_faces_cache", None)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    faces = _planar_faces_uncached(graph)
+    try:
+        graph._faces_cache = (sig, faces)
+    except (AttributeError, TypeError):  # a duck-typed graph that can't hold it
+        pass  # correctness is unaffected — just no caching
     return faces
 
 
