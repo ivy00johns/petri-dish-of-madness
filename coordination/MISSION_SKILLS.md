@@ -163,9 +163,9 @@ Runtime: parallel subagents via Agent tool (no ultracode signal this session —
 
 - [x] `orchestrator` — ✅ driving this build.
 - [x] `contract-author` — folded into the lead's `contracts/w29-remediation-contract.md` (fix wave; no new API surface).
-- [ ] fix lanes S/R/L/U/P — dispatched as `general-purpose` subagents, AFK, no-commit rule.
-- [ ] wave gate (`fix-until-green`) — full `.venv/bin/python -m pytest backend/tests` + `tsc -b --force` + `vitest run`; failures routed by file ownership; 3-strike circuit breaker.
-- [ ] QE agent — mandatory; `coordination/qa-report.json` (wave-W29).
+- [x] fix lanes S/R/L/U/P — ✅ all 5 landed (commits f88dea1/96e793b/fc8f42b/9b8449d/e7d352a); 25/25 findings fixed, EM-288 (PLAUSIBLE) confirmed real; one existing-test edit (sanctioned, providers) + one QE doc-drift routed back to Lane S.
+- [x] wave gate (`fix-until-green`) — ✅ first-pass green: backend 1912, `tsc -b --force` rc=0, vitest 1210, `vite build` ✓; circuit breaker never engaged.
+- [x] QE agent — ✅ `coordination/qa-report.json` (wave-W29) proceed=true, all scores 5, 0 blockers; 20 adversarial cross-lane probes ALL CONFIRMED-OK; 2 non-blocking issues (1 filed as follow-up candidate, 1 doc-drift fixed same-wave).
 - [~] `nano-banana` / `ui-brief` / `frontend-design` / `ui-ux-pro-max` — N/A: defect remediation on existing surfaces, no new UI.
 - [~] `render-sanity` / `ux-review` — DEFERRED (standing pattern): W29 frontend fixes are leak/perf/a11y/fallback with unit regression tests; live browser walk rides the next user-gated live session (same gate as the ROAD_MESH_ENABLED sign-off).
 - [~] `design-token-guard` — diff-scoped only if the wave touches styling (expected: EM-292 swaps a rAF cssVar read pattern; no new hexes).
