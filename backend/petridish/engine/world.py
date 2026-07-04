@@ -6533,9 +6533,15 @@ class World:
         capped at `max_level`. Returns True if a level was gained.
 
         DETERMINISTIC: pure threshold arithmetic — no random, no clock (EM-155).
-        xp accumulates in a private per-agent ledger (NOT snapshotted — only the
-        resulting LEVEL is durable state; a fork/restore keeps the level and
-        restarts the partial-xp clock at 0, a documented, harmless rounding).
+        xp accumulates in a private per-agent ledger (`_skill_xp`) that IS
+        snapshotted (EM-288): to_snapshot serializes it under the `skill_xp` key
+        as a nested {agent_id: {skill: xp}} dict, sorted and only-when-non-empty,
+        and from_snapshot restores it, so a fork/resume keeps accrued partial xp
+        and levels a skill on the SAME tick as the continuous run. (Pre-EM-288
+        snapshots have no `skill_xp` key and restore an empty ledger — the old
+        partial-xp-restarts-at-0 behavior. That reset was NOT harmless: learn-by-
+        doing grants xp_per_use, not whole levels, so real partial xp accrues and
+        losing it diverged the resumed run — the EM-288 fix.)
         Gaining xp ALWAYS replenishes the EM-229 knowledge need (curiosity sated
         by learning); a level-up replenishes more. A skill the library does not
         name still levels (teaching can introduce one), but only NAMED skills
