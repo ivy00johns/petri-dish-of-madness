@@ -538,6 +538,11 @@ TIER_GATED_ACTIONS = frozenset({
 _DIET_RELATIONSHIP_CAP = 8
 _DIET_BACKGROUND_MEMORY_WINDOW = 8
 _DIET_CORE_DISTRICT = "core"
+# EM-285 — the constitution block rides EVERY prompt; render at most the N most
+# recent unique articles so ratified-article growth can't bloat every turn
+# unboundedly (the header still reports the true total). Prompt-diet vs the
+# max-call-rate north star.
+_CONSTITUTION_RENDER_MAX = 12
 _ENERGY_DISPLAY_BUCKET = 10
 
 
@@ -2762,6 +2767,35 @@ def _assemble_context(
             propose_tail += (f"; relocate_center needs target=<a place's id, e.g. "
                              f"{_relocate_to}> to make it the new town center by "
                              f"70% vote")
+        # EM-280 — surface the layout-governance effects the propose_rule gate
+        # ALREADY accepts (demolish_road / set_car_policy / adopt_master_plan, and —
+        # behind GRAPH_ZONES_ENABLED — set_zone_rule) but which appeared on NO prompt
+        # surface, so agents could only discover them by burning a turn on a
+        # rejection. Compact: names on the effect list + the one concrete arg each
+        # needs, gated EXACTLY as the validator gates them so the menu never dangles
+        # an effect that would be rejected (EM-108 menu/resolution agreement).
+        _graph = getattr(world, "city_graph", None)
+        _edges = list(getattr(_graph, "edges", None) or []) if _graph is not None else []
+        if _edges:
+            propose_line += "|demolish_road|set_car_policy"
+            propose_tail += (
+                f"; demolish_road needs target=<a road id, e.g. {_edges[0].id}>; "
+                "set_car_policy needs scope=city|street + policy=cars|pedestrian|mixed "
+                "(street scope also needs target=<a road id>)")
+            # adopt_master_plan — only when no morph is already running (the gate's
+            # one-active guard), so the menu never offers a morph it would reject.
+            if getattr(world, "master_plan", None) is None:
+                propose_line += "|adopt_master_plan"
+                propose_tail += ("; adopt_master_plan needs target=<a plan kind: "
+                                 "pentagon|radial|ring|grid>")
+        # set_zone_rule rides only with zones enabled AND a real zone to target (its
+        # id is surfaced in the NEARBY ZONES block) — mirrors the flagged gate.
+        if GRAPH_ZONES_ENABLED and _graph is not None:
+            from ..engine.citygraph import planar_faces as _planar_faces
+            if _planar_faces(_graph):
+                propose_line += "|set_zone_rule"
+                propose_tail += ("; set_zone_rule needs zone_id=<from NEARBY ZONES> + "
+                                 "hint=residential|market|civic|open (optional density_cap)")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -2992,7 +3026,16 @@ def _assemble_context(
             f"at={_building_field(b, 'location')} funds={have}/{need} "
             f"progress={_building_field(b, 'progress', 0)}/100"
         )
-    project_text = "\n".join(project_lines) if project_lines else "  (none)"
+    # EM-290 — the block header promises "YOU COULD CONTRIBUTE TO", so gate its
+    # contents on there being a FUNDABLE project, mirroring the contribute_funds
+    # menu-line gate (EM-108 menu/resolution agreement). When every open project is
+    # fully-funded / under_construction, none can take funds and contribute_funds is
+    # NOT offered — yet the block used to keep listing them, inviting the rejected
+    # contribute_funds (residual PR-#57 gap). No fundable project ⇒ (none), which
+    # also trims the prompt in that case (prompt-diet). When a fundable one exists
+    # the full district-scoped list still shows (byte-identical to before).
+    project_text = ("\n".join(project_lines)
+                    if (project_lines and fundable_projects) else "  (none)")
 
     # ── W9 / EM-070 — survival pressure (the NEEDS block). Kept compact on
     # purpose: it rides EVERY turn prompt, so token cost matters. Escalates from
@@ -3456,13 +3499,30 @@ def _assemble_context(
     constitution_block = ""
     _articles = getattr(world, "constitution", None) or []
     if _articles:
-        _article_lines = "\n".join(
-            f"  • {str(a.get('text', '')).strip()}"
-            for a in _articles if str(a.get("text", "")).strip()
-        )
-        if _article_lines:
+        # EM-285 — dedupe by article text + cap to the most-recent N. The add-side
+        # has no duplicate guard, so a re-ratified article would otherwise print
+        # twice, and the article count is unbounded — either way the block (which
+        # rides every prompt) grows without limit. Walk newest→oldest, keep the
+        # first sighting of each unique text, stop at the cap, then render
+        # oldest→newest (natural reading order). The header keeps the TRUE total so
+        # nothing is silently hidden.
+        _seen: set[str] = set()
+        _kept: list[str] = []
+        for a in reversed(_articles):
+            _txt = str(a.get("text", "")).strip()
+            if not _txt or _txt in _seen:
+                continue
+            _seen.add(_txt)
+            _kept.append(_txt)
+            if len(_kept) >= _CONSTITUTION_RENDER_MAX:
+                break
+        _kept.reverse()  # oldest→newest of the retained slice
+        if _kept:
+            _article_lines = "\n".join(f"  • {t}" for t in _kept)
+            _total = len(_articles)
+            _more = f", showing {len(_kept)} newest" if len(_kept) < _total else ""
             constitution_block = f"""
-=== 📜 THE CONSTITUTION ({len(_articles)} article{"s" if len(_articles) != 1 else ""}) ===
+=== 📜 THE CONSTITUTION ({_total} article{"s" if _total != 1 else ""}{_more}) ===
 {_article_lines}
   These are the town's ratified foundational articles. Amend them only by vote
   (propose_rule effect=amend_constitution) — a 70% supermajority is required.
@@ -4680,8 +4740,14 @@ class AgentRuntime:
             # One retry with error fed back; a truncated first attempt retries
             # with a boosted token budget — whether the provider admitted it
             # (finish_reason='length') or lied (mistral 'stop' cuts, run 126).
+            # EM-281 — grow from the budget attempt 1 ACTUALLY used (attempt_tokens),
+            # not the base max_tokens: on an EM-135-boosted lane attempt 1 already
+            # ran at max(base*4, 2048), so _retry_max_tokens(base) returned that SAME
+            # cap the lane just truncated at — the retry could never exceed it. Basing
+            # the boost on attempt_tokens makes the retry strictly larger than the
+            # budget that failed (max(attempt_tokens*4, floor) > attempt_tokens).
             retry_tokens = _retry_max_tokens(
-                max_tokens, llm_meta.get("usage"),
+                attempt_tokens, llm_meta.get("usage"),
                 truncated=bool(llm_meta.get("truncated_json")),
             )
             retry_messages = messages + [

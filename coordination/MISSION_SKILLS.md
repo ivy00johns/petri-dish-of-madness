@@ -156,3 +156,17 @@ Runtime: Workflow mode (ultracode). Design/contracts inline; implement + verify 
 - [~] `nano-banana` — DEFERRED: the empty-banner/NoticeBoard states use a procedural toon fallback (EM-148 invariant, now adversarially tested); seed art adds polish but no functional gap. Re-enter if a designed default banner is wanted.
 - [~] `render-sanity` / `ux-review` — DEFERRED (standing pattern since W11b/Wave-K): a meaningful Atelier walk needs a live run that has generated images (create_image is agent-driven over many ticks) + the full stack up. Substituted with component render tests (898 web), the production build, the token diff, and the adversarially-tested 404 fallback. Run on merged main once a live run has produced gallery art.
 - [ ] `/code-review` (external CLI) — handoff: user-triggered/billed; not auto-run.
+
+## W29 — offline-review remediation army (2026-07-03)
+Source: docs/REMAINING-WORK.md W29 rows EM-272–296 (PR #73) · contracts/w29-remediation-contract.md · branch build/w29-offline-review-fixes
+Runtime: parallel subagents via Agent tool (no ultracode signal this session — Fable 5 alone is not an opt-in per the skill). 5 fix lanes by exclusive file ownership (S sim-core · R runtime · L city-layout · U frontend-ui · P providers), then wave gate, then QE.
+
+- [x] `orchestrator` — ✅ driving this build.
+- [x] `contract-author` — folded into the lead's `contracts/w29-remediation-contract.md` (fix wave; no new API surface).
+- [x] fix lanes S/R/L/U/P — ✅ all 5 landed (commits f88dea1/96e793b/fc8f42b/9b8449d/e7d352a); 25/25 findings fixed, EM-288 (PLAUSIBLE) confirmed real; one existing-test edit (sanctioned, providers) + one QE doc-drift routed back to Lane S.
+- [x] wave gate (`fix-until-green`) — ✅ first-pass green: backend 1912, `tsc -b --force` rc=0, vitest 1210, `vite build` ✓; circuit breaker never engaged.
+- [x] QE agent — ✅ `coordination/qa-report.json` (wave-W29) proceed=true, all scores 5, 0 blockers; 20 adversarial cross-lane probes ALL CONFIRMED-OK; 2 non-blocking issues (1 filed as follow-up candidate, 1 doc-drift fixed same-wave).
+- [~] `nano-banana` / `ui-brief` / `frontend-design` / `ui-ux-pro-max` — N/A: defect remediation on existing surfaces, no new UI.
+- [~] `render-sanity` / `ux-review` — DEFERRED (standing pattern): W29 frontend fixes are leak/perf/a11y/fallback with unit regression tests; live browser walk rides the next user-gated live session (same gate as the ROAD_MESH_ENABLED sign-off).
+- [~] `design-token-guard` — diff-scoped only if the wave touches styling (expected: EM-292 swaps a rAF cssVar read pattern; no new hexes).
+- [ ] `/code-review` (external CLI) — handoff: user-triggered/billed; run on the build PR.

@@ -98,7 +98,20 @@ function ascending(events: WorldEvent[]): WorldEvent[] {
 // (WeakMap — a dropped history frees its whole sub-cache), then on a string
 // `${projecting}:${tick}`. The cached slice is the EXACT same filter the layout
 // ran, so fold output is unchanged (golden-equal to the full scoped fold).
+//
+// EM-274: the per-array inner Map is a BOUNDED LRU. Without a cap it retained
+// one filtered slice (+ the sorted copy the ascendingCache derives from it) per
+// DISTINCT tick visited, for the whole lifetime of the (long-lived) events
+// array — scrubbing across thousands of ticks leaked thousands of arrays. The
+// LRU keeps the memoization win where it pays (a repeated tick and small
+// back-and-forth scrubbing stay hits) while capping retention; evicted slices
+// (and their WeakMap-keyed sorted copies) become collectable.
 const scopedSliceCache = new WeakMap<WorldEvent[], Map<string, WorldEvent[]>>();
+
+/** LRU cap on distinct scrub ticks cached per events array (EM-274). Small: the
+ *  win is consecutive identity-equal scrubs + tight back-and-forth, not a full
+ *  tick history. */
+const SCOPED_SLICE_CACHE_MAX = 8;
 
 /**
  * The scrub-scoped slice of `events` at `currentTick`, with STABLE identity
@@ -123,9 +136,20 @@ export function scopedSlice(
   }
   const key = `${projecting}:${currentTick}`;
   const cached = byKey.get(key);
-  if (cached) return cached;
+  if (cached) {
+    // LRU touch: re-insert so this key counts as most-recently used.
+    byKey.delete(key);
+    byKey.set(key, cached);
+    return cached;
+  }
   const sliced = events.filter((e) => e.tick <= currentTick);
   byKey.set(key, sliced);
+  // Evict the least-recently-used slice once over the cap (EM-274) so the inner
+  // cache can't grow unbounded across a long scrub.
+  if (byKey.size > SCOPED_SLICE_CACHE_MAX) {
+    const oldest = byKey.keys().next().value;
+    if (oldest !== undefined) byKey.delete(oldest);
+  }
   return sliced;
 }
 

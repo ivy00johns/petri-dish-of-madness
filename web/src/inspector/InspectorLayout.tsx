@@ -96,6 +96,13 @@ const INSPECTOR_TABS: readonly InspectorTabDef[] = [
   { id: 'runs', label: 'Runs', hint: 'Run browser + archive mode' },
 ];
 
+// EM-293: stable ids wiring the ARIA tabs pattern (tab ⇄ tabpanel). One reused
+// tabpanel element (only the active tab's panels mount), so every tab's
+// aria-controls points at it, and the panel's aria-labelledby names the active
+// tab.
+const INSPECTOR_TABPANEL_ID = 'inspector-tabpanel';
+const tabButtonId = (id: InspectorTab): string => `inspector-tab-${id}`;
+
 interface InspectorLayoutProps {
   /** Live world projection (run summary strip + agents/profiles/places). */
   world: WorldState | null;
@@ -410,8 +417,30 @@ export function InspectorLayout({
     [panelEvents, currentTick],
   );
 
-  // The active tab descriptor (for the tabpanel's accessible name).
-  const activeTab = INSPECTOR_TABS.find((t) => t.id === tab) ?? INSPECTOR_TABS[0];
+  // EM-293: roving-tabindex keyboard nav for the ARIA tablist. Left/Right cycle
+  // (wrapping), Home/End jump to the ends; selection follows focus (automatic
+  // activation — cheap here since each tab just swaps the mounted panel). The
+  // rendered [role="tab"] buttons share INSPECTOR_TABS' order, so the focused
+  // index maps straight back to the tab id.
+  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') {
+      return;
+    }
+    const buttons = Array.from(
+      e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    if (buttons.length === 0) return;
+    const focusedIndex = buttons.findIndex((b) => b === document.activeElement);
+    const from = focusedIndex === -1 ? INSPECTOR_TABS.findIndex((t) => t.id === tab) : focusedIndex;
+    let next = from;
+    if (e.key === 'ArrowRight') next = (from + 1) % buttons.length;
+    else if (e.key === 'ArrowLeft') next = (from - 1 + buttons.length) % buttons.length;
+    else if (e.key === 'Home') next = 0;
+    else next = buttons.length - 1;
+    e.preventDefault();
+    buttons[next].focus();
+    setTab(INSPECTOR_TABS[next].id);
+  };
 
   return (
     // EM-082 a11y: the annex is the route's main landmark (the live route's
@@ -574,6 +603,7 @@ export function InspectorLayout({
       <div
         role="tablist"
         aria-label="Inspector sections"
+        onKeyDown={handleTabKeyDown}
         className="flex items-stretch gap-1 px-2 pt-1 border-b border-lab-border bg-lab-surface shrink-0"
       >
         {INSPECTOR_TABS.map((t) => (
@@ -596,8 +626,10 @@ export function InspectorLayout({
           layout guards (EM-197) still pin the no-page-scroll law per tab. */}
       <div
         data-testid="inspector-grid"
+        id={INSPECTOR_TABPANEL_ID}
         role="tabpanel"
-        aria-label={`${activeTab.label} panels`}
+        aria-labelledby={tabButtonId(tab)}
+        tabIndex={0}
         className="flex-1 min-h-0 grid grid-cols-1 gap-2 p-2 overflow-y-auto lg:overflow-hidden"
       >
         {tab === 'forensics' && (
@@ -724,7 +756,12 @@ function InspectorTabButton({
     <button
       type="button"
       role="tab"
+      id={tabButtonId(tab.id)}
       aria-selected={active}
+      aria-controls={INSPECTOR_TABPANEL_ID}
+      // EM-293 roving tabindex: only the active tab is in the Tab order; arrow
+      // keys move focus among the rest (handled by the tablist).
+      tabIndex={active ? 0 : -1}
       title={tab.hint}
       onClick={() => onSelect(tab.id)}
       className={`flex items-center gap-1.5 px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-wider border-b-2 -mb-px transition-colors cursor-pointer ${

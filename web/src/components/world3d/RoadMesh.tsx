@@ -13,7 +13,7 @@
  * "budget real iteration" behind the human visual sign-off — this is a
  * functional first-cut render, not the final art.
  */
-import { useLayoutEffect, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import type { CityGraph } from '../../types';
 import {
@@ -142,7 +142,7 @@ function useRoundaboutBucket(rings: RingInstance[]): {
   geometry: THREE.BufferGeometry;
   matrices: THREE.Matrix4[];
 } | null {
-  return useMemo(() => {
+  const bucket = useMemo(() => {
     if (rings.length === 0) return null;
     const r0 = rings[0];
     const ratio = r0.outerR > 0 ? Math.min(0.99, r0.innerR / r0.outerR) : 0.5;
@@ -156,6 +156,18 @@ function useRoundaboutBucket(rings: RingInstance[]): {
     });
     return { geometry, matrices };
   }, [rings]);
+
+  // EM-291: this RingGeometry is created imperatively and passed to the mesh via
+  // `args`, so it sits OUTSIDE R3F's declarative auto-dispose (which only frees
+  // geometries mounted as JSX children). Dispose the PREVIOUS geometry whenever
+  // it is replaced (a new graph build ⇒ a new bucket) or on unmount — otherwise
+  // every graph rebuild leaks one ring geometry on the GPU.
+  useEffect(() => {
+    const geometry = bucket?.geometry;
+    return () => geometry?.dispose();
+  }, [bucket]);
+
+  return bucket;
 }
 
 /**

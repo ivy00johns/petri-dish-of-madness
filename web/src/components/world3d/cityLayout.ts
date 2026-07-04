@@ -385,23 +385,70 @@ export function hasRealGraph(graph: CityGraph | null | undefined): boolean {
   );
 }
 
-/** Road-line tile indices on one axis, derived from the graph (for street
- *  naming). Fallback = the hardcoded isRoadIndex lines. ns lines run along Z at
- *  constant x; ew lines run along X at constant z. */
-function roadLineIndicesFrom(
+/** One named-street candidate derived from the graph's EDGES: its cross-axis
+ *  tile index plus the along-axis WORLD span its road segments actually cover
+ *  (for label clipping). ns lines run along Z at constant x; ew lines run along
+ *  X at constant z. */
+interface RoadLine {
+  index: number;
+  /** Along-axis world-coordinate span this line's edges cover (min ≤ max). */
+  min: number;
+  max: number;
+}
+
+/** Road-line candidates on one axis, derived from the graph's EDGES (EM-273): a
+ *  street names ONLY a line that carries a real axis-aligned road SEGMENT, so a
+ *  demolished / thinned / morphed road drops its street + labels + cars instead
+ *  of leaving a phantom named street on roadless terrain (the pre-fix code
+ *  derived a line from every NODE coordinate — a lone junction or a diagonal
+ *  spoke minted a street with no road under it). Fallback (no real graph) = the
+ *  hardcoded isRoadIndex lines at full grid span, so the no-graph / classic_grid
+ *  plan stays byte-identical. Input-order independent (keyed by index, sorted). */
+function roadLinesFrom(
   graph: CityGraph | null | undefined,
   axis: 'ns' | 'ew',
-): number[] {
-  // Same ModelBoundary guard as roadTileSetFrom: a type-corrupt graph (nodes
-  // not a real array) degrades to the hardcoded road lines, never throws.
-  if (!graph || !Array.isArray(graph.nodes) || !graph.nodes.length) {
-    const out: number[] = [];
-    for (let i = TILE_MIN; i <= TILE_MAX; i++) if (isRoadIndex(i)) out.push(i);
+): RoadLine[] {
+  // ModelBoundary guard (mirror hasRealGraph / roadTileSetFrom): no real graph ⇒
+  // the hardcoded full-grid road lines spanning the whole grid, never a throw.
+  if (!hasRealGraph(graph)) {
+    const out: RoadLine[] = [];
+    const lo = tileCenter(TILE_MIN);
+    const hi = tileCenter(TILE_MAX);
+    for (let i = TILE_MIN; i <= TILE_MAX; i++)
+      if (isRoadIndex(i)) out.push({ index: i, min: lo, max: hi });
     return out;
   }
-  const s = new Set<number>();
-  for (const n of graph.nodes) s.add(tileIndexOf(axis === 'ns' ? n.x : n.z));
-  return [...s].sort((p, q) => p - q);
+  const nodeById = new Map(graph!.nodes.map((n) => [n.id, n]));
+  const span = new Map<number, { min: number; max: number }>();
+  for (const e of graph!.edges) {
+    const a = nodeById.get(e.a);
+    const b = nodeById.get(e.b);
+    if (!a || !b) continue;
+    const ai = tileIndexOf(a.x), aj = tileIndexOf(a.z);
+    const bi = tileIndexOf(b.x), bj = tileIndexOf(b.z);
+    let index: number, lo: number, hi: number;
+    if (axis === 'ns') {
+      if (ai !== bi || aj === bj) continue; // not a north-south road segment
+      index = ai;
+      lo = Math.min(a.z, b.z);
+      hi = Math.max(a.z, b.z);
+    } else {
+      if (aj !== bj || ai === bi) continue; // not an east-west road segment
+      index = aj;
+      lo = Math.min(a.x, b.x);
+      hi = Math.max(a.x, b.x);
+    }
+    const cur = span.get(index);
+    if (cur) {
+      if (lo < cur.min) cur.min = lo;
+      if (hi > cur.max) cur.max = hi;
+    } else {
+      span.set(index, { min: lo, max: hi });
+    }
+  }
+  return [...span.entries()]
+    .sort((p, q) => p[0] - q[0])
+    .map(([index, s]) => ({ index, min: s.min, max: s.max }));
 }
 
 // ── EM-244 (S3a): car policy — pedestrian roads lose cars + render tinted ─────
@@ -480,8 +527,15 @@ export function pedestrianStreetIds(graph: CityGraph | null | undefined): Set<st
     if (!a || !b) continue;
     const ai = tileIndexOf(a.x), aj = tileIndexOf(a.z);
     const bi = tileIndexOf(b.x), bj = tileIndexOf(b.z);
-    if (ai === bi) out.add(`ns:${ai}`);      // constant x ⇒ a north-south street line
-    else if (aj === bj) out.add(`ew:${aj}`); // constant z ⇒ an east-west street line
+    // EM-284: flag the street an edge actually runs along using the SAME axis
+    // test as roadLinesFrom (the street set), so a ratified 'pedestrian' policy
+    // bans EVERY street the fleet runs on regardless of the post-morph topology.
+    // Both branches are checked independently (the old `else if` chained off a
+    // bare `ai === bi`, mis-flagging a degenerate single-tile edge). A purely
+    // diagonal edge maps to no axis-aligned street — the fleet never runs there,
+    // so there is nothing to ban.
+    if (ai === bi && aj !== bj) out.add(`ns:${ai}`); // constant x ⇒ north-south line
+    if (aj === bj && ai !== bi) out.add(`ew:${aj}`); // constant z ⇒ east-west line
   }
   return out;
 }
@@ -635,7 +689,7 @@ export function computeStreets(seed: number, graph?: CityGraph | null): CityStre
   const used = new Set<number>();
   const out: CityStreet[] = [];
   for (const axis of ['ns', 'ew'] as const) {
-    for (const i of roadLineIndicesFrom(graph, axis)) {
+    for (const { index: i, min, max } of roadLinesFrom(graph, axis)) {
       const at = tileCenter(i);
       const main = i !== TILE_MIN && i !== TILE_MAX; // ring road ⇒ not main
       const start = Math.floor(h(seed, `street-name-${axis}`, i) * STREET_NAME_BANK_SIZE);
@@ -648,9 +702,15 @@ export function computeStreets(seed: number, graph?: CityGraph | null): CityStre
         axis,
         at,
         main,
+        // EM-273: a mid-block label anchor sits ON the paved span only — a cross
+        // position past this line's actual road extent would float over roadless
+        // terrain after a demolish / thin / morph. The full-grid fallback spans
+        // the whole grid, so every classic-grid label survives ⇒ byte-identical.
         labels: main
-          ? STREET_LABEL_CROSS.map((c) =>
-              axis === 'ns' ? { x: at, z: c } : { x: c, z: at },
+          ? STREET_LABEL_CROSS.flatMap((c) =>
+              c < min || c > max
+                ? []
+                : [axis === 'ns' ? { x: at, z: c } : { x: c, z: at }],
             )
           : [],
       });
@@ -944,32 +1004,41 @@ export function computeCityPlan(
 
   // Buildable blocks + their platted lots. DEFAULT = the frozen 5×5 plat (the
   // grid Pass 1 / Pass 2 below). EM-264 (SA), flag-gated OFF by default: derive
-  // them from the road graph's bounded planar FACES instead. roads, landmarks,
-  // realLots, streets, pedestrianTiles + extent are SHARED by both paths.
+  // them from the road graph's bounded planar FACES instead (ANY topology:
+  // pentagon / radial), so buildings land inside the road-enclosed blocks. roads,
+  // landmarks, realLots, streets, pedestrianTiles + extent are SHARED by both
+  // paths. zoneFor reuses the grid path's nearestPlace + zoneForPlace, INJECTED
+  // so cityFaces never imports cityLayout (contract §1 cycle rule). EM-265 (SB):
+  // the graph's ratified zone_rules attach to their matching face by id (absent
+  // ⇒ [] ⇒ byte-identical to SA — the no-rules path).
+  const graphZones =
+    (opts?.graphLots ?? false) && hasRealGraph(world.city_graph)
+      ? buildZonesFromFaces(
+          planarFaces(world.city_graph),
+          seed,
+          (x, z) => {
+            const p = nearestPlace(x, z);
+            return p ? zoneForPlace(p) : 'residential';
+          },
+          world.city_graph?.zone_rules ?? [],
+        )
+      : [];
+
+  // EM-282: the graph-lots path is authoritative ONLY when it actually produced
+  // bounded faces. planarFaces returns [] on its sanctioned backstops (an
+  // unresolved angular tie, a segment×segment crossing mid-morph — EM-283, or a
+  // graph with no enclosed block) and buildZonesFromFaces can filter a malformed
+  // face; an EMPTY zones list must NOT ship a plan with zero blocks/lots (a
+  // HOLE). Fall through to the fixed-grid plat instead — never a hole, never a
+  // crash. zones stays undefined on the grid path ⇒ the additive key is omitted.
+  const zones: BuildZone[] | undefined = graphZones.length > 0 ? graphZones : undefined;
+
   let blocks: CityBlock[];
   let realLots: Record<string, CityInstance[]>;
   let blockLots: CityBlockLots[];
   let emptyLots: CityInstance[];
-  let zones: BuildZone[] | undefined;
 
-  if ((opts?.graphLots ?? false) && hasRealGraph(world.city_graph)) {
-    // EM-264 (SA) — the ONLY behavioral change. Buildable blocks/lots come from
-    // the bounded planar FACES of the road graph (ANY topology: pentagon /
-    // radial), so buildings land inside the road-enclosed blocks instead of the
-    // fixed grid. zoneFor reuses the grid path's nearestPlace + zoneForPlace,
-    // INJECTED so cityFaces never imports cityLayout (contract §1 cycle rule).
-    const zoneFor = (x: number, z: number): CityZone => {
-      const p = nearestPlace(x, z);
-      return p ? zoneForPlace(p) : 'residential';
-    };
-    // EM-265 (SB): attach the graph's ratified zone_rules to their matching
-    // face by id (absent ⇒ [] ⇒ byte-identical to SA — the no-rules path).
-    zones = buildZonesFromFaces(
-      planarFaces(world.city_graph),
-      seed,
-      zoneFor,
-      world.city_graph?.zone_rules ?? [],
-    );
+  if (zones) {
     blockLots = zones.map((zn) => ({
       cx: zn.face.centroid.x,
       cz: zn.face.centroid.z,
