@@ -634,6 +634,11 @@ const CAR_KEYS: readonly CityPieceKey[] = ['car_a', 'car_b', 'car_c'];
  *  rather than static distraction. Flip to false for the pre-W17 look. */
 export const CARS_ENABLED = true;
 
+// EM-268 (F1) — the frontend half of backend FREE_PLACEMENT_ENABLED. Default
+// OFF ⇒ resolveBuildingPositions === assignBuildingLots (byte-identical). Flip ON
+// (with the backend flag) after the visual sign-off. Paired, like GRAPH_LOTS.
+export const FREE_PLACEMENT_ENABLED = false;
+
 // ── Seeded hash (the repo idiom, keyed on seed/gridX/gridZ/purpose) ──────────
 
 function h(seed: number, purpose: string, gridX = 0, gridZ = 0): number {
@@ -1348,6 +1353,29 @@ export function assignBuildingLots(
     if (cityFull.length > 0) {
       for (const [id, pt] of slotLayout(center, cityFull)) out.set(id, pt);
     }
+  }
+  return out;
+}
+
+/** EM-268 (F1) — render entry point. When free placement is active AND a building
+ *  carries a backend world-frame `position`, use it verbatim (no conversion — same
+ *  frame as assignBuildingLots output). Every other building — and the whole map
+ *  when the flag is off — routes through assignBuildingLots UNCHANGED, so the
+ *  flag-off path is byte-identical to pre-F1. `forceFlag` is a test seam. */
+export function resolveBuildingPositions(
+  plan: Pick<CityPlan, 'realLots' | 'landmarks' | 'blockLots' | 'zones'>,
+  buildings: ReadonlyArray<{ id: string; location: string; zone_id?: string | null; position?: [number, number] }>,
+  placeCenters: ReadonlyMap<string, { x: number; z: number }>,
+  forceFlag = false,
+): Map<string, { x: number; z: number }> {
+  const active = FREE_PLACEMENT_ENABLED || forceFlag;
+  const positioned = active
+    ? buildings.filter((b) => Array.isArray(b.position) && b.position.length === 2)
+    : [];
+  // Base path (byte-identical when nothing is positioned): the untouched lot claim.
+  const out = assignBuildingLots(plan, buildings, placeCenters);
+  for (const b of positioned) {
+    out.set(b.id, { x: b.position![0], z: b.position![1] });
   }
   return out;
 }
