@@ -960,6 +960,12 @@ _NEARBY_ZONES_MAX: int = 4  # hard line cap (prompt-diet — never the whole gra
 # (tests + any future god path) regardless of this flag.
 GRAPH_ZONES_ENABLED = False
 
+# EM-268 (F1) — agent-controlled FREE building placement. Default OFF ⇒ buildings
+# carry no position ⇒ frontend falls back to assignBuildingLots (byte-identical to
+# pre-F1). Flip ON (with the frontend FREE_PLACEMENT_ENABLED) after the visual
+# sign-off to activate deterministic cluster-accretion placement.
+FREE_PLACEMENT_ENABLED = False
+
 
 def _zone_display_name(world: "World", zone_id: str) -> str:
     """A deterministic, seeded flavor name for a zone (city block), stable across
