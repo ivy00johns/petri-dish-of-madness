@@ -41,7 +41,7 @@ _LANE_WINDOW = 6                  # outcomes remembered per profile
 # attempt 1 of the NEXT turn room to finish thinking and emit the object, cutting
 # the retry rather than the call rate (north-star-safe: fewer WASTED calls).
 _LANE_TRUNCATION_TRIGGER = 1      # truncations in window that flag the lane
-_LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_FLOOR
+_LANE_BOOST_FLOOR = 8192          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_FLOOR
 
 # ── Wave D3 / EM-177 — lane failover with recovery probes ─────────────────────
 # Defaults mirror config.loader.LaneFailoverParams (config `world.lane_failover`).
