@@ -180,6 +180,65 @@ def test_never_detours_to_mock_even_when_it_is_the_only_healthy_lane():
     assert r.effective_profile("agent_1", "alpha") == ("alpha", None)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# (B') Soft-pin detours to the universal `auto` lane (free-tier resilience fix)
+#      A rate-limited / daily-capped / context-too-small pinned free lane routes
+#      that call to FreeLLMAPI's `auto` (which picks whatever is actually free)
+#      instead of a pinned substitute that is often ALSO sick — so a pinned free
+#      tier degrades gracefully to real capacity instead of idle-falling-back,
+#      and probes home so it resumes its pinned model when the limit resets.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _router_with_auto() -> Router:
+    return _router([
+        _profile("alpha"), _profile("beta"), _profile("gamma"),
+        _profile("auto"), _profile("mock", adapter="mock"),
+    ])
+
+
+def test_sick_lane_detours_to_auto_not_a_substitute():
+    r = _router_with_auto()
+    _sicken(r, "alpha", 3)
+    _clean(r, "gamma", 2)          # a perfectly healthy substitute exists…
+    # …but the universal `auto` lane wins: FreeLLMAPI picks what's free.
+    assert r.effective_profile("agent_1", "alpha") == ("auto", "detour")
+
+
+def test_all_pinned_lanes_sick_still_detours_to_auto():
+    # THE fix: previously all-pinned-sick ⇒ home lane ⇒ the idle-fallback flood.
+    r = _router_with_auto()
+    for lane in ("alpha", "beta", "gamma"):
+        _sicken(r, lane, 3)
+    assert r.effective_profile("agent_1", "alpha") == ("auto", "detour")
+
+
+def test_agent_pinned_to_auto_never_self_detours():
+    r = _router_with_auto()
+    _sicken(r, "auto", 3)
+    # home IS auto → can't detour to itself; falls back to a healthy substitute.
+    target, reason = r.effective_profile("agent_1", "auto")
+    assert target != "auto"
+
+
+def test_probe_still_rechecks_the_pinned_lane_under_auto_detour():
+    # Recovery path intact: every probe_every-th turn goes HOME so a clean
+    # outcome ages the demerits out and the agent resumes its pinned model.
+    r = _router_with_auto()
+    _sicken(r, "alpha", 3)
+    n = r._probe_every()
+    reasons = [r.effective_profile("a", "alpha")[1] for _ in range(n)]
+    assert reasons[-1] == "probe"
+    assert reasons[:-1] == ["detour"] * (n - 1)
+
+
+def test_pinned_lane_resumes_after_its_limit_resets_under_auto_detour():
+    r = _router_with_auto()
+    _sicken(r, "alpha", 3)
+    assert r.effective_profile("a", "alpha") == ("auto", "detour")
+    _clean(r, "alpha", 4)          # the reset: clean outcomes age T's out of the 6-window
+    assert r.effective_profile("a", "alpha") == ("alpha", None)
+
+
 def test_unavailable_lanes_are_never_candidates():
     profiles = [
         _profile("alpha"),
@@ -580,19 +639,25 @@ def test_embedded_world_yaml_mirror_carries_the_block():
     )
 
 
-def test_shipped_world_yaml_ships_failover_off_per_em205():
-    """EM-205 — the shipped config deliberately turns the EM-177 pre-emptive
-    detours OFF: the proxy's `auto` lane is now the universal backup (handled in
-    router.chat() auto-backup, independent of this flag), so client-side detours
-    are redundant. The library DEFAULT stays ON (embedded mirror test above);
-    only the shipped deployment overrides it. Thresholds are preserved so
-    re-enabling is a one-line flip."""
+def test_shipped_configs_ship_soft_pin_on():
+    """Soft-pin ships ON: a pinned free lane that goes SICK (rate-limited /
+    daily-capped / context-too-small) detours per-call to the `auto` lane —
+    FreeLLMAPI picks whatever is actually free — instead of idle-falling-back,
+    and probes home so it resumes its pinned model when the limit resets.
+
+    Supersedes the earlier reactive-only bet (EM-205 shipped failover OFF and
+    leaned solely on the router.chat() auto-backup, which let rate-limit storms
+    flood the feed with idle fallbacks). enabled:false stays the opt-in HARD-pin
+    for forcing a specific model (e.g. someone with paid access testing it)."""
     path = Path(__file__).resolve().parents[2] / "config" / "world.yaml"
-    raw = yaml.safe_load(path.read_text())
-    params, _, _ = _parse_world(raw)
+    params, _, _ = _parse_world(yaml.safe_load(path.read_text()))
     assert params.lane_failover == LaneFailoverParams(
-        enabled=False, sick_threshold=3, probe_every=4,
+        enabled=True, sick_threshold=3, probe_every=4,
     )
+    # the live 25-agent deployment ships it on too (it had overridden it off).
+    c25 = Path(__file__).resolve().parents[2] / "config" / "world.city25.yaml"
+    p25, _, _ = _parse_world(yaml.safe_load(c25.read_text()))
+    assert p25.lane_failover.enabled is True
 
 
 # ──────────────────────────────────────────────────────────────────────────────

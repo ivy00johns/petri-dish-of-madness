@@ -69,11 +69,11 @@ world:
   # MUST stay in sync with the default-config mirror in
   # backend/petridish/config/loader.py.
   lane_failover:
-    enabled: false       # EM-205: OFF — the proxy's `auto` lane (profiles.yaml)
-                         # is now the universal backup, so client-side
-                         # pre-emptive detours are redundant. The auto-backup in
-                         # router.chat() is independent of this flag.
-    sick_threshold: 3    # timed_out entries in the 6-window that mark a lane sick
+    enabled: true        # soft-pin: a SICK pinned free lane detours per-call to
+                         # the `auto` lane (FreeLLMAPI picks what's actually free)
+                         # and probes home so it resumes when its limit resets.
+                         # enabled:false = HARD-pin (force the model, fail if down).
+    sick_threshold: 3    # timed_out/error entries in the 6-window that mark a lane sick
     probe_every: 4       # every Nth would-be-detour probes the home lane
 
   # EM-167 — Ollama overflow lane. Background/supporting cadence-tier turns
