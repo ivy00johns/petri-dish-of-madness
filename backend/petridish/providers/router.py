@@ -77,10 +77,18 @@ _AUTO_BACKUP_PROFILE = "auto"
 # COUNTER-based (no clock reads — counters only, like EM-177): every Nth skipped
 # backup PROBES the auto lane once; a probe SUCCESS closes the breaker and
 # normal per-turn backup resumes. Cadence is in *skipped backups*, not seconds,
-# to stay deterministic + testable; at the default a sustained storm makes one
-# auto POST per 8 failing turns instead of one per turn (~87% fewer doomed
-# calls) while still probing for recovery within a handful of turns.
-_AUTO_BREAKER_PROBE_EVERY = 8  # skipped backups between recovery probes
+# to stay deterministic + testable; at this cadence a sustained storm makes one
+# auto POST per 3 failing turns instead of one per turn (~67% fewer doomed calls)
+# while probing for recovery within ~2 turns.
+#
+# EM-268 note: the live pool is rarely FULLY exhausted — the common case is a few
+# home lanes hard rate-limited (429) while healthy lanes (and `auto` itself) still
+# serve. The old default of 8 turned each transient `auto` blip into a 7-of-8-turn
+# idle BLACKOUT for every rate-limited-home agent, reading as "every other message
+# failed" even though `auto` had capacity two turns later. 3 (the value the
+# breaker tests already exercise) recovers ~2.7x faster and matches tested
+# behavior; test_default_probe_every_is_sane only requires >= 2.
+_AUTO_BREAKER_PROBE_EVERY = 3  # skipped backups between recovery probes
 
 # ── EM-222 — relevance-scored memory retrieval ────────────────────────────────
 # Embeddings route through ONE dedicated profile (a fixed embedding model, NOT
@@ -474,13 +482,13 @@ class Router:
         if adapter is None:  # pragma: no cover - defensive
             raise first_exc
 
-        # EM-226 — breaker OPEN: skip the doomed 2nd POST except on a probe turn.
-        if self._auto_breaker_open:
-            self._auto_breaker_skips += 1
-            is_probe = self._auto_breaker_skips % self._auto_breaker_probe_every == 0
-            if not is_probe:
-                raise first_exc  # fast-fail — agents act on the EM-173 idle fallback
-
+        # EM-226 blind-skip RESCINDED (2026-07-06): the breaker used to skip the
+        # 2nd POST while "open" to avoid doubling calls during a whole-pool storm
+        # — but that MUTED agents (idle fallback) even though the auto lane was
+        # usually still serving, and it silently killed the lane-failover recovery
+        # probe (which deliberately re-hits a dead pinned lane every Nth turn). It
+        # violated the project rule: never mute an agent, always bounce to `auto`.
+        # The backup now ALWAYS fires; open/closed below is observability only.
         try:
             text = await adapter.chat(
                 messages, max_tokens=max_tokens, temperature=temperature
@@ -800,6 +808,25 @@ class Router:
         )
         return demerits >= self._sick_threshold()
 
+    def _detour_target(self, home: str) -> str | None:
+        """The lane a SICK `home` call detours to. Prefers the universal `auto`
+        lane — FreeLLMAPI's router picks whatever upstream is actually free per
+        request — so a pinned free tier that is rate-limited / daily-capped /
+        context-too-small routes to REAL capacity instead of idle-falling-back,
+        and never collapses when several pinned lanes are sick at once (the gap
+        `_pick_detour_candidate` hits: all-sick ⇒ None ⇒ home ⇒ idle fallback).
+
+        `auto` is intentionally NOT gated on its own sick-window: it is the
+        dynamic whole-pool picker, so a per-lane demerit window is a poor proxy
+        for "can it serve" (the reactive EM-205 backup + EM-173 idle fallback
+        still cover the rare case it genuinely can't). Falls back to the
+        healthiest pinned substitute only when no `auto` lane is configured, or
+        the agent IS pinned to `auto` (no self-detour)."""
+        auto = self._auto_backup
+        if auto is not None and auto != home:
+            return auto
+        return self._pick_detour_candidate(home)
+
     def _pick_detour_candidate(
         self, home: str, exclude: set[str] | None = None
     ) -> str | None:
@@ -902,10 +929,11 @@ class Router:
                 })
             return preferred, None
 
-        candidate = self._pick_detour_candidate(preferred)
+        candidate = self._detour_target(preferred)
         if candidate is None:
-            # All-sick (or nothing available): home lane unchanged — never
-            # detour to mock, never give up the turn.
+            # No `auto` lane AND all pinned substitutes sick (or nothing
+            # available): home lane unchanged — never detour to mock, never
+            # give up the turn. With `auto` configured this branch is unreached.
             return preferred, None
 
         # This call WOULD detour: count it toward the probe cadence.

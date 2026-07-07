@@ -55,10 +55,13 @@ world:
   agent_count: 25
   tick_interval_seconds: 3
   turns_per_day: 20
-  # EM-205 — client-side pre-emptive detours OFF; the proxy's `auto` lane
-  # (profiles.yaml) is the universal backup via router.chat() auto-backup.
+  # Soft-pin (free-tier resilience): a pinned free lane that goes SICK
+  # (rate-limited / daily-capped / context-too-small) detours per-call to the
+  # `auto` lane — FreeLLMAPI picks whatever is actually free — and probes home
+  # every Nth turn so the agent resumes its pinned model when the limit resets.
+  # enabled:false = HARD-pin (force the model; idle-fallback on failure).
   lane_failover:
-    enabled: false
+    enabled: true
   energy_decay_per_turn: 2     # 2026-06-12: eased from 4 (kept in sync with config/world.yaml)
   death_after_zero_turns: 5
   starting_energy: 100
