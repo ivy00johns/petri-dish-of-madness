@@ -1,25 +1,22 @@
 """
-EM-226 — auto-backup circuit breaker (storm fast-fail).
+EM-226 auto-backup breaker — BLIND-SKIP RESCINDED 2026-07-06.
 
-During a rate-limit STORM the proxy's own `auto` router returns "All models
-exhausted" (or times out): there is no healthy upstream left to bounce to.
-Re-issuing the EM-205 backup every turn then DOUBLES the doomed POST volume
-(home + auto, both failing) and keeps the upstream rate windows pinned, slowing
-their refill. The breaker trips on ANY `auto` failure (the auto lane IS the
-whole-pool health router — if IT can't serve, nothing can) and FAST-FAILS the
-next would-be-backups: the home error propagates straight to the runtime's
-EM-173 idle fallback with NO 2nd network call. Recovery is COUNTER-based (no
-clock reads, like EM-177): every Nth skipped backup PROBES the auto lane once;
-a probe success closes the breaker and normal per-turn backup resumes.
+Originally the breaker fast-failed the EM-205 auto-backup while "open" to avoid
+doubling POSTs during a whole-pool storm. In practice that MUTED agents to an
+idle fallback even though the `auto` lane was usually still serving, and it
+silently killed the EM-177 lane-failover recovery probe (which re-hits a dead
+pinned lane every Nth turn) — violating the project rule "never mute an agent,
+always bounce to `auto`". The blind-skip is gone: the backup now ALWAYS fires.
+The open/closed state is retained as observability only (auto_backup_health).
 
-  (A) Trip + fast-fail — after auto fails once the next would-be-backups skip
-                         the auto POST entirely (home still attempted each turn).
-  (B) Probe cadence    — every Nth skip probes auto once (the only auto POSTs
-                         during a sustained storm).
-  (C) Recovery         — a probe that SUCCEEDS closes the breaker; normal
-                         per-turn backup resumes immediately.
-  (D) Reset on world   — clear_cache() closes the breaker (no cross-run carry).
-  (E) Healthy/opt-out  — breaker never trips with a healthy pool or no auto lane.
+  (A) Storm          — auto also failing ⇒ the backup is STILL attempted every
+                       turn (the accepted doomed-2nd-POST tradeoff), state open.
+  (B) No cadence     — probe_every no longer throttles anything; auto is hit on
+                       every failing turn.
+  (C) State clears   — open flips to closed the instant auto serves again.
+  (D) Reset on world — clear_cache() clears the state (no cross-run carry).
+  (E) Healthy/opt-out— state never opens with a healthy pool or no auto lane.
+  (F) Never mutes    — a tripped breaker still serves the very next turn.
 """
 from __future__ import annotations
 
@@ -126,73 +123,59 @@ def _router(adapters: dict[str, object], *, auto: object | None = None,
 # (A) trip + fast-fail — the storm-amplifier (doomed 2nd call) is suppressed
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_breaker_trips_and_fast_fails_subsequent_backups():
+async def test_storm_still_attempts_the_backup_every_turn():
+    # Genuine whole-pool storm (auto ALSO failing). We now accept the doomed 2nd
+    # POST every turn rather than mute the agent — the breaker no longer skips.
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
     r = _router({"home": home}, auto=auto, probe_every=3)
 
-    # Turn 1 — discovers the pool is dry: home + auto both POST, then raise.
-    with pytest.raises(ProviderError):
-        await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-    assert home.calls == 1 and auto.calls == 1
-    assert r.auto_backup_health()["open"] is True
-
-    # Turns 2 & 3 — breaker OPEN, below the probe cadence: home still POSTs,
-    # auto does NOT (fast-fail — no doomed 2nd call feeding the storm).
-    for _ in range(2):
+    for _ in range(3):
         with pytest.raises(ProviderError):
             await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-    assert home.calls == 3   # home attempted every turn
-    assert auto.calls == 1   # auto NOT re-hit while fast-failing
+    assert home.calls == 3
+    assert auto.calls == 3   # auto attempted EVERY turn (was 1 under the blind-skip)
+    assert r.auto_backup_health()["open"] is True   # state still tracks the storm
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # (B) probe cadence — only every Nth skip POSTs to auto during a sustained storm
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_every_nth_skip_probes_the_auto_lane():
+async def test_no_skip_cadence_auto_is_hit_on_every_failing_turn():
+    # The probe cadence that used to gate the skip is gone: a small probe_every
+    # must NOT throttle the backup. All 7 failing turns POST to auto.
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
     r = _router({"home": home}, auto=auto, probe_every=3)
 
-    # cadence (probe when skips % 3 == 0): 1=trip(call), 2=skip, 3=skip,
-    # 4=probe(call), 5=skip, 6=skip, 7=probe(call).
     for _ in range(7):
         with pytest.raises(ProviderError):
             await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-    assert home.calls == 7   # home attempted every turn (idle fallback per turn)
-    assert auto.calls == 3   # trip + two recovery probes — not 7 doomed POSTs
+    assert home.calls == 7
+    assert auto.calls == 7   # every turn (was 3 under the probe cadence)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # (C) recovery — a successful probe closes the breaker; normal backup resumes
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_probe_success_closes_breaker_and_resumes_backup():
+async def test_open_state_clears_the_moment_auto_serves_again():
+    # Observability tracking still works: the breaker "opens" on an auto failure
+    # and "closes" the instant auto serves — but nothing is ever skipped between.
     home = _FailAdapter("home", 429)
-    auto = _FlakyAuto("auto", fail_first=1)  # call#1 fails (trip), call#2+ serves
+    auto = _FlakyAuto("auto", fail_first=1)  # call#1 fails (opens), call#2+ serves
     r = _router({"home": home}, auto=auto, probe_every=3)
 
-    # Turn 1 trips the breaker (auto call#1 fails).
-    with pytest.raises(ProviderError):
+    with pytest.raises(ProviderError):   # turn 1: auto#1 fails → opens
         await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
     assert r.auto_backup_health()["open"] is True
 
-    # Turns 2,3 skip; turn 4 PROBES — auto call#2 now SERVES → breaker closes.
-    text = None
-    for _ in range(3):
-        try:
-            text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-        except ProviderError:
-            text = None
-    assert text == "auto served"                    # the probe turn served
+    # turn 2: auto#2 serves immediately (no skip) → state closes.
+    text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert text == "auto served"
     assert r.auto_backup_health()["open"] is False
-    assert auto.calls == 2                           # trip + the successful probe
-
-    # Next failing turn: breaker CLOSED → auto is hit immediately (no skip).
-    text2 = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-    assert text2 == "auto served"
-    assert auto.calls == 3
+    assert auto.calls == 2
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -243,3 +226,27 @@ async def test_default_probe_every_is_sane():
     # the pool every turn (the whole point of the breaker). async only to inherit
     # the module's asyncio mark cleanly — no awaiting needed.
     assert _AUTO_BREAKER_PROBE_EVERY >= 2
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# (F) 2026-07-06 — the blind-skip is RESCINDED: never mute an agent to save a
+#     call. Even with the breaker "open" from a prior auto failure, the backup
+#     MUST still fire — a recovery probe hitting a dead pinned lane was being
+#     muted to an idle fallback while the auto lane was actually serving.
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_tripped_breaker_still_fires_the_backup_never_mutes():
+    home = _FailAdapter("home", 429)
+    auto = _FlakyAuto("auto", fail_first=1)  # call#1 fails (opens), call#2+ serves
+    r = _router({"home": home}, auto=auto, probe_every=3)
+
+    # Turn 1: home + auto both fail → the breaker "opens".
+    with pytest.raises(ProviderError):
+        await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert auto.calls == 1
+
+    # Turn 2: breaker OPEN — but the backup fires IMMEDIATELY (no skip), and auto
+    # now serves. Under the old blind-skip this turn was fast-failed to idle.
+    text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert text == "auto served"
+    assert auto.calls == 2   # hit on the very next turn, not skipped
