@@ -38,6 +38,7 @@ import { Structure } from './Structure';
 import { PlacedProps } from './PlacedProps';
 import { NoticeBoard, type NoticeBoardPost } from './NoticeBoard';
 import { PlazaBanner } from './PlazaBanner';
+import { SurfaceDecal } from './SurfaceDecal';
 import { Villager, type AnimPos } from './Villager';
 import { Critter, type CritterPos } from './Critter';
 import type { BubbleData } from './ChatBubble';
@@ -593,6 +594,23 @@ export function CozyWorld({
     return img?.url || null;
   }, [world]);
 
+  // EM-298: resolve world.surface_decals ({building_id -> image_id}) to a
+  // {building_id -> RELATIVE url} map by looking each image id up in the gallery
+  // (mirrors plazaBannerUrl). A decal whose image id isn't in the gallery is
+  // dropped (no url → nothing to texture). Absent surface_decals ⇒ empty map ⇒
+  // no facades render, byte-identical to a pre-EM-298 world.
+  const decalsBySurface = useMemo<Map<string, string>>(() => {
+    const map = new Map<string, string>();
+    const decals = world?.surface_decals;
+    if (!decals) return map;
+    const gallery = world?.gallery ?? [];
+    for (const [surfaceId, imageId] of Object.entries(decals)) {
+      const img = gallery.find((g) => g.image_id === imageId);
+      if (img?.url) map.set(surfaceId, img.url);
+    }
+    return map;
+  }, [world]);
+
   // EM-095: where is the focus target RIGHT NOW. Agents/animals read the live
   // animated positions (the same refs the renderer lerps), so a follow tracks
   // the walking villager, not its last place center. 'place' ids may be a
@@ -654,6 +672,7 @@ export function CozyWorld({
           newestPost={newestPost}
           newestImageUrl={newestImageUrl}
           plazaBannerUrl={plazaBannerUrl}
+          decalsBySurface={decalsBySurface}
           focus={focus}
           onPick={onPick}
         />
@@ -711,6 +730,7 @@ function Scene({
   newestPost,
   newestImageUrl,
   plazaBannerUrl,
+  decalsBySurface,
   focus,
   onPick,
 }: {
@@ -731,6 +751,8 @@ function Scene({
   newestImageUrl: string | null;
   /** Wave I (EM-213, I4): the promoted plaza-banner image url (null = none/unset). */
   plazaBannerUrl: string | null;
+  /** EM-298: {building_id -> facade decal url} for agent-painted murals/signs. */
+  decalsBySurface: Map<string, string>;
   focus: FocusTarget | null;
   onPick?: (target: FocusTarget) => void;
 }) {
@@ -884,6 +906,17 @@ function Scene({
           onPick={onPick ? (id) => onPick({ type: 'place', id }) : undefined}
         />
       ))}
+
+      {/* EM-298: agent-authored facade decals — the mural/sign/graffiti agents
+          painted onto a building (world.surface_decals). One textured plane per
+          building that has a decal, at that building's own lot spot; a missing/
+          streaming/404 texture renders nothing (clean facade). */}
+      {buildingSpots.map(({ building, x, z }) => {
+        const url = decalsBySurface.get(building.id);
+        return url ? (
+          <SurfaceDecal key={`decal-${building.id}`} x={x} z={z} url={url} />
+        ) : null;
+      })}
 
       {agents.map((a) => {
         const target = targets.get(a.id) ?? { x: 0, z: 0 };

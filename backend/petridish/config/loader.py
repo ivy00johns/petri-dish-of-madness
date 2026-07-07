@@ -585,10 +585,20 @@ class ImageGenParams:
                        (skip-under-load, never an unbounded queue). Default 2.
       max_gallery    — newest images retained in world.gallery (pop-oldest on
                        append, mirror the billboard cap). Default 30.
+      max_decals_per_district
+                     — EM-298: agent-painted facade decals retained PER DISTRICT
+                       (insertion-order LRU eviction, browser-perf bound). Default 6.
+      facades_enabled
+                     — EM-298: surface paint_surface on the agent action MENU
+                       (default False ⇒ the em161 protagonist prompt stays
+                       byte-identical; the world action + snapshot round-trip are
+                       always available regardless). Flip true to let agents paint.
     """
     enabled: bool = True
     max_concurrent: int = 2
     max_gallery: int = 30
+    max_decals_per_district: int = 6
+    facades_enabled: bool = False
 
 
 @dataclass
@@ -1838,10 +1848,19 @@ def _parse_image_gen(raw: dict | None) -> ImageGenParams:
         max_gallery = max(1, int(raw.get("max_gallery", d.max_gallery)))
     except (TypeError, ValueError):
         max_gallery = d.max_gallery
+    # EM-298 — floor the per-district decal cap at 1 (a 0 would evict every fresh
+    # decal), mirroring max_gallery's guard.
+    try:
+        max_decals_per_district = max(
+            1, int(raw.get("max_decals_per_district", d.max_decals_per_district)))
+    except (TypeError, ValueError):
+        max_decals_per_district = d.max_decals_per_district
     return ImageGenParams(
         enabled=bool(raw.get("enabled", d.enabled)),
         max_concurrent=max_concurrent,
         max_gallery=max_gallery,
+        max_decals_per_district=max_decals_per_district,
+        facades_enabled=bool(raw.get("facades_enabled", d.facades_enabled)),
     )
 
 

@@ -134,6 +134,9 @@ ACTION_SCHEMA = {
                 # Wave I / EM-210+211 — The Atelier reflex tools: generate art
                 # anywhere; share an existing gallery image on the billboard.
                 "create_image", "post_image",
+                # EM-298 — agent-authored facades: paint a mural/sign/graffiti onto
+                # a co-located building's facade (a decal; extends the image lane).
+                "paint_surface",
                 # Wave H4 / EM-209 — pets & bonds: adopt a co-located unowned
                 # animal, feed a co-located one (owner sustains a declining pet).
                 "adopt", "feed_pet",
@@ -211,6 +214,8 @@ ACTION_SCHEMA = {
                             "post_billboard", "read_billboard", "answer_proclamation",
                             # Wave I / EM-210+211 — The Atelier reflex tools.
                             "create_image", "post_image",
+                            # EM-298 — agent-authored facades.
+                            "paint_surface",
                             "adopt", "feed_pet",
                             # EM-228 — teach / request skills (cooperation lever).
                             "teach_skill", "request_skill",
@@ -285,6 +290,12 @@ ACTION_SCHEMA = {
         # post_image takes an OPTIONAL image_id (defaults to the agent's newest).
         {"if": {"required": ["action"], "properties": {"action": {"const": "create_image"}}},
          "then": {"properties": {"args": {"required": ["prompt"], "properties": {
+             "prompt": {"type": "string", "maxLength": 240},
+         }}}}},
+        # EM-298 — paint_surface REQUIRES a target building id + a prompt (≤240).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "paint_surface"}}},
+         "then": {"properties": {"args": {"required": ["target", "prompt"], "properties": {
+             "target": {"type": "string"},
              "prompt": {"type": "string", "maxLength": 240},
          }}}}},
         {"if": {"required": ["action"], "properties": {"action": {"const": "post_image"}}},
@@ -412,6 +423,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # existing turn; the PNG bytes come from a free endpoint OFF the critical path.
     "create_image":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "post_image":       {"tier": "reflex", "location_gate": "@billboard",    "agreement_gate": None},
+    # EM-298 — agent-authored facades 🟢: paint a decal onto a co-located building's
+    # facade. @building-gated (a building must be here, resolved per-turn like
+    # repair/arson); the world action also enforces the EM-210 image_gen kill switch.
+    # Reflex, zero extra LLM calls (the prompt rides the agent's existing turn; the
+    # PNG comes from the free image chain OFF the critical path).
+    "paint_surface":    {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
     # Wave H4 / EM-209 — pets & bonds reflex tools 🟢: no location_gate (the
     # CO-LOCATION gate is animal-specific and enforced in _validate_world), no
     # agreement_gate. adopt claims a co-located unowned animal; feed_pet restores
@@ -2261,6 +2278,20 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if not str(args.get("prompt") or "").strip():
             return "create_image requires a prompt describing the art to paint"
 
+    elif action == "paint_surface":
+        # EM-298 — @building co-location gate (mirror repair/arson): the target
+        # building must exist and stand at the agent's place; a non-empty prompt is
+        # required. Menu and validator AGREE (EM-108: no dead turns).
+        target = str(args.get("target") or "").strip()
+        building = _buildings(world).get(target)
+        if building is None:
+            return f"unknown building '{target}'"
+        b_loc = _building_field(building, "location")
+        if b_loc != agent.location:
+            return f"you must be at the building's place ('{b_loc}') to paint its facade"
+        if not str(args.get("prompt") or "").strip():
+            return "paint_surface requires a prompt describing the mural/sign to paint"
+
     elif action == "post_image":
         # @billboard-gated (mirror post_billboard). The image must exist + be the
         # agent's (or public/promoted); an absent id defaults to the agent's newest.
@@ -2857,6 +2888,19 @@ def _assemble_context(
             valid_actions.append(f"repair (building_id={bid}) - restore this {status} building")
         if status != "destroyed" and _gate_ok("arson"):
             valid_actions.append(f"arson (building_id={bid}) - burn this building (a crime; witnesses lose trust)")
+        # EM-298 — agent-authored facades: paint a mural/sign on this building's
+        # facade. Menu-surfaced ONLY when `image_gen.facades_enabled` is on (default
+        # OFF ⇒ the em161 protagonist prompt stays byte-identical; the world action +
+        # snapshot round-trip work regardless). Gated @building + non-destroyed +
+        # image_gen master switch (menu/resolution agree, EM-108).
+        if (status != "destroyed"
+                and _gate_ok("paint_surface")
+                and _world_block_get(params, "image_gen", "facades_enabled", False)
+                and _world_block_get(params, "image_gen", "enabled", True)
+                and _skill_ok("paint_surface")):
+            valid_actions.append(
+                f"paint_surface (target={bid}, prompt) - paint a mural/sign/graffiti "
+                f"on this building's facade from a short text prompt")
         if status == "operational" and _building_field(b, "owner_id") == agent.id and _gate_ok("take_offline"):
             valid_actions.append(f"take_offline (building_id={bid}) - you own this; take it offline")
         # Wave K / EM-219+220 — demolish / re-skin are OWNER-ONLY at resolution, so
@@ -6339,6 +6383,12 @@ class AgentRuntime:
         # ── Wave I / EM-210+211 — The Atelier reflex tools ──────────────────────
         elif action == "create_image":
             result = self.world.action_create_image(agent, args.get("prompt", ""))
+            return _emit_world_result(result, base, thought)
+
+        # ── EM-298 — agent-authored facades: paint a decal onto a building ──────
+        elif action == "paint_surface":
+            result = self.world.action_paint_surface(
+                agent, args.get("target", ""), args.get("prompt", ""))
             return _emit_world_result(result, base, thought)
 
         elif action == "post_image":

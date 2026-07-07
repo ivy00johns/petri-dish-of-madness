@@ -114,6 +114,9 @@ const GALLERY_CAP = 30;            // config image_gen.max_gallery default
 let gallery: GalleryImage[] = [];
 let imageCounter = 0;
 let plazaBannerRef = '';
+// EM-298: agent-authored facade decals, {building_id -> gallery image_id}. Mirrors
+// world.surface_decals; seeded so the 3D world shows painted facades offline.
+let surfaceDecals: Record<string, string> = {};
 
 // A small library of painterly prompts so the synthesized art reads in-world.
 const IMAGE_PROMPTS = [
@@ -1197,6 +1200,11 @@ function seedGallery() {
     url: `/assets/images/${secondId}.png`,
     promoted: false,
   });
+
+  // EM-298: two facade decals point at the seeded gallery images so buildings
+  // already wear agent-painted art offline (bld-1 the garden, bld-3 the cottage —
+  // seeded by seedBuildings, which runs before seedGallery).
+  surfaceDecals = { 'bld-1': firstId, 'bld-3': secondId };
 }
 
 // ── Generator ─────────────────────────────────────────────────────────────────
@@ -1227,6 +1235,7 @@ export function buildInitialWorldState(): WorldState {
     props: props.map(p => ({ ...p })),
     gallery: gallery.map(g => ({ ...g })),
     plaza_banner_ref: plazaBannerRef,
+    surface_decals: { ...surfaceDecals },
   };
 }
 
@@ -1348,6 +1357,7 @@ export function generateTick(): { state: WorldState; events: WorldEvent[] } {
     props: props.map(p => ({ ...p })),
     gallery: gallery.map(g => ({ ...g })),
     plaza_banner_ref: plazaBannerRef,
+    surface_decals: { ...surfaceDecals },
   };
 
   return { state, events };
@@ -1427,6 +1437,7 @@ function spawnAgentMock(spec: SpawnSpec): { state: WorldState; events: WorldEven
     props: props.map(p => ({ ...p })),
     gallery: gallery.map(g => ({ ...g })),
     plaza_banner_ref: plazaBannerRef,
+    surface_decals: { ...surfaceDecals },
   };
   return { state, events };
 }
@@ -1540,6 +1551,7 @@ function postBillboardMock(text: string, inReplyTo?: string): { state: WorldStat
     props: props.map(p => ({ ...p })),
     gallery: gallery.map(g => ({ ...g })),
     plaza_banner_ref: plazaBannerRef,
+    surface_decals: { ...surfaceDecals },
   };
   return { state, events: [evt] };
 }
@@ -1568,6 +1580,7 @@ function snapshotState(): WorldState {
     props: props.map(p => ({ ...p })),
     gallery: gallery.map(g => ({ ...g })),
     plaza_banner_ref: plazaBannerRef,
+    surface_decals: { ...surfaceDecals },
   };
 }
 
@@ -1783,6 +1796,7 @@ export const mockControls = {
     gallery = [];
     imageCounter = 0;
     plazaBannerRef = '';
+    surfaceDecals = {};
     openCommitments = [];
     commitmentCounter = 0;
     spawnCounter = 0;
