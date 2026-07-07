@@ -637,7 +637,7 @@ export const CARS_ENABLED = true;
 // EM-268 (F1) — the frontend half of backend FREE_PLACEMENT_ENABLED. Default
 // OFF ⇒ resolveBuildingPositions === assignBuildingLots (byte-identical). Flip ON
 // (with the backend flag) after the visual sign-off. Paired, like GRAPH_LOTS.
-export const FREE_PLACEMENT_ENABLED = false;
+export const FREE_PLACEMENT_ENABLED = true;
 
 // ── Seeded hash (the repo idiom, keyed on seed/gridX/gridZ/purpose) ──────────
 

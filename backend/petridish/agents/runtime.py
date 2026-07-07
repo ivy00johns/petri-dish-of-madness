@@ -964,7 +964,7 @@ GRAPH_ZONES_ENABLED = False
 # carry no position ⇒ frontend falls back to assignBuildingLots (byte-identical to
 # pre-F1). Flip ON (with the frontend FREE_PLACEMENT_ENABLED) after the visual
 # sign-off to activate deterministic cluster-accretion placement.
-FREE_PLACEMENT_ENABLED = False
+FREE_PLACEMENT_ENABLED = True
 
 
 def _zone_display_name(world: "World", zone_id: str) -> str:

@@ -48,10 +48,21 @@ export function Ground({ places }: GroundProps) {
         <planeGeometry args={[WORLD_REACH * 2, WORLD_REACH * 2, 1, 1]} />
       </mesh>
 
-      {/* A slightly darker grass "field" border ring for depth */}
+      {/* A slightly darker grass "field" border ring for depth. It underlies
+          the main plane almost entirely (radius 1.35·REACH vs the ±REACH
+          square), so it MUST sit far enough BELOW to clear depth-buffer
+          precision. At the camera's near=0.1 / far=420, a 24-bit depth buffer
+          only resolves ~0.01u at the map centre and ~0.02–0.025u out toward the
+          fog line — so the old −0.01 gap fell AT/BELOW precision across the
+          mid/far terrain and the two coplanar planes z-fought, shimmering as
+          the "grass flicker at zoom-out" (EM-179 masked it with fog; it never
+          fixed the depth conflict). −0.4u is ~20× that worst-case precision at
+          every visible distance ⇒ the opaque main plane always wins the
+          overlap (no z-fight), while the darker ring still reads beyond the
+          square edge. Do NOT shrink this back toward 0. */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, -0.01, 0]}
+        position={[0, -0.4, 0]}
         material={toonMaterial(GOLDEN_HOUR.terrainEdge)}
       >
         <circleGeometry args={[WORLD_REACH * 1.35, 48]} />

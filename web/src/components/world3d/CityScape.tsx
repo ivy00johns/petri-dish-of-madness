@@ -53,6 +53,7 @@ import {
   CITY_PIECE_KEYS,
   computeCityPlan,
   DEFAULT_CITY_SEED,
+  FREE_PLACEMENT_ENABLED,
   TILE,
   type CityInstance,
   type CityPieceKey,
@@ -717,7 +718,14 @@ export function CityScape({ world }: { world: CityWorld }) {
       {ROAD_MESH_ENABLED && (
         <RoadMesh graph={world.city_graph} seed={world.city_seed ?? DEFAULT_CITY_SEED} />
       )}
-      {plan.emptyLots.length > 0 && (
+      {/* EM-268 (F1): the platted-grid pads are the FIXED-GRID plat's building
+          foundations — a real building renders ON TOP of its pad. Under free
+          placement, buildings cluster at free world-frame positions and NEVER
+          claim these grid lots, so every pad would render as an orphaned tan
+          tile with no building on it (the scattered "yellow tiles"). Gate them
+          off when free placement is active. Flag OFF ⇒ byte-identical (pads
+          render exactly as before). */}
+      {!FREE_PLACEMENT_ENABLED && plan.emptyLots.length > 0 && (
         <EmptyLotPads instances={plan.emptyLots} center={center} />
       )}
       {plan.pedestrianTiles.length > 0 && (

@@ -24,6 +24,7 @@ import type { Place } from '../../types';
 import {
   computeCityPlan,
   CITY_PIECE_KEYS,
+  FREE_PLACEMENT_ENABLED,
   TILE,
   type CityInstance,
   type CityPlan,
@@ -415,20 +416,23 @@ describe('CityScape render smoke (jsdom harness, GLBs mocked)', () => {
     // plus the Wave D1.6 procedural pad chunks (the young city's empty lots).
     const entries = renderableEntries(PLAN, CITY_MODEL_REGISTRY);
     const drawEntries = entries.filter((e) => !e.key.startsWith('road_'));
-    const padChunks = chunkInstances(PLAN.emptyLots, CENTER).length;
+    // EM-268 (F1): pads render only on the FIXED-GRID path. Under free placement
+    // they are gated off (buildings no longer claim grid lots — the orphaned
+    // "yellow tile" fix), so they contribute zero instanced meshes.
+    const padChunks = FREE_PLACEMENT_ENABLED ? 0 : chunkInstances(PLAN.emptyLots, CENTER).length;
     const expected =
       drawEntries.reduce((n, e) => n + chunkInstances(e.instances, CENTER).length, 0) + padChunks;
     expect(meshes.length).toBe(expected);
-    expect(meshes.length).toBeGreaterThan(padChunks); // non-road pieces mounted too
+    expect(meshes.length).toBeGreaterThan(0); // non-road pieces mounted too
     // the road tiles no longer render on the default path…
     expect(container.querySelectorAll('[name^="city-road_straight-"]').length).toBe(0);
     // …the procedural mesh group is mounted in their place (empty w/o a graph)
     expect(container.querySelectorAll('[name="roadmesh"]').length).toBe(1);
-    // EM-174: the platted city always shows its pads (no generated buildings)
+    // EM-174: the platted city shows its pads on the fixed-grid path; EM-268
+    // gates them off under free placement (the plan still carries emptyLots).
     expect(PLAN.emptyLots.length).toBeGreaterThan(0);
     const padMeshes = container.querySelectorAll('[name^="city-pad-"]');
     expect(padMeshes.length).toBe(padChunks);
-    expect(padMeshes.length).toBeGreaterThan(0);
   });
 
   // EM-244 (S3a): a pedestrianized city paints its roads with the tint variant.
