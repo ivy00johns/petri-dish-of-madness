@@ -1,6 +1,7 @@
 """EM-268 F1 — Building.position rides the snapshot only when set (byte-identical)."""
 import copy
-from petridish.engine.world import Building, World, AgentState, PlaceState
+from petridish.engine.world import Building, World, AgentState, PlaceState  # import BEFORE runtime (circular-import order)
+import petridish.agents.runtime as rt
 from petridish.config.loader import WorldParams
 
 
@@ -29,7 +30,11 @@ def test_position_round_trips_through_snapshot():
     assert restored.buildings["bld_x"].position == (3.5, -2.0)
 
 
-def test_old_snapshot_without_position_restores_none():
+def test_old_snapshot_without_position_restores_none(monkeypatch):
+    # Flag OFF ⇒ restore stays byte-identical: no derive-on-load migration runs.
+    # The flag-ON path intentionally migrates pre-F1 buildings — covered by
+    # test_free_placement_migration.test_pre_f1_snapshot_derives_all_positions.
+    monkeypatch.setattr(rt, "FREE_PLACEMENT_ENABLED", False)
     w = World(params=_params(),
               places=[PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social")],
               agents=[AgentState(id="a", name="Ann", personality="", profile="mock",
