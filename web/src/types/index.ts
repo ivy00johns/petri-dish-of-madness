@@ -356,6 +356,12 @@ export interface WorldState {
   // `plaza_banner_ref` → its gallery url (procedural fallback when absent).
   gallery?: GalleryImage[];
   plaza_banner_ref?: string;
+  // EM-298 (additive): agent-authored facade decals, {building_id -> gallery
+  // image_id}. Optional so a pre-EM-298 backend (or a snapshot predating facades)
+  // stays valid; the 3D world resolves each id → its gallery url and paints a
+  // SurfaceDecal on that building (absent/unresolved ⇒ no facade rendered). Only
+  // this metadata mapping rides the snapshot — the PNG stays off the replay surface.
+  surface_decals?: Record<string, string>;
   // EM-123 (additive): zoned-district maturity. Present ONLY once a tier has
   // diverged from the tier-1 baseline (a fresh world omits it); when absent the
   // 3D city re-derives tier-1 neighborhoods from `places` and renders identically.

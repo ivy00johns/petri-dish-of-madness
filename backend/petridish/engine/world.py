@@ -1279,6 +1279,17 @@ class World:
         # frontend renders a procedural fallback). Serialized in to_snapshot() only
         # when non-empty so pre-Wave-I snapshots restore byte-identically.
         self.plaza_banner_ref: str = ""
+        # EM-298 — AGENT-AUTHORED FACADES: a stable {surface_id -> image_id} map
+        # (surface_id == a building id) recording the mural/sign/graffiti an agent
+        # painted onto that building's facade (action_paint_surface). Only the
+        # metadata mapping enters sim state — the PNG stays an external side-artifact
+        # off the replay surface, EXACTLY like plaza_banner_ref/the gallery. Python
+        # dict insertion order IS recency here (a re-paint moves the key to the end);
+        # the per-district cap evicts oldest-in-district first (insertion-order LRU).
+        # Serialized in to_snapshot() ONLY when non-empty (the plaza_banner_ref
+        # only-when-set pattern), so a facade-free town — and every pre-EM-298
+        # snapshot — round-trips BYTE-IDENTICALLY (absent ⇒ {} on restore).
+        self.surface_decals: dict[str, str] = {}
         # EM-183 — the CIVIC CENTER: the place id the town VOTED to be its heart
         # (a `relocate_center` proposal that ratifies on a 70% supermajority, like
         # demolish — see action_propose_rule / _evaluate_rule / _on_rule_activated).
@@ -5517,22 +5528,19 @@ class World:
                 return record
         return None
 
-    def action_create_image(self, agent: AgentState, prompt: str) -> dict:
-        """Wave I / EM-210 (I1) — reflex tool, UNGATED (create art anywhere). Records
-        a deterministic gallery entry + parks a transient fetch + emits image_posted,
-        ALL synchronously at turn time (no LLM, no network here). The async PNG fetch
-        is drained by the loop and emits NOTHING (off the replay surface)."""
-        # Wave I / EM-210 — credit-safe kill switch: when image_gen is disabled,
-        # reject BEFORE parking any fetch, so the loop never calls the image API.
+    def _mint_gallery_image(self, agent: AgentState, prompt: str) -> dict | None:
+        """EM-298 — the SHARED mint core of create_image + paint_surface. Enforces
+        the EM-210 image_gen kill switch + the prompt cap, then records a
+        deterministic (seeded-id, EM-155) gallery entry and parks the transient PNG
+        fetch — ALL synchronously at turn time (no LLM, no network here). Returns
+        {image_id,url,prompt,place} on success, or None when image_gen is disabled /
+        the prompt is empty (callers own their action-specific fail event). Extracted
+        verbatim from action_create_image so BOTH verbs mint identically."""
         if not self._image_gen_enabled():
-            return self._fail_event(
-                agent.id, "create_image", "image_gen_disabled",
-                f"{agent.name} reached for the brushes, but the atelier is closed today.")
+            return None
         prompt = str(prompt or "").strip()[: self.IMAGE_PROMPT_CAP]
         if not prompt:
-            return self._fail_event(
-                agent.id, "create_image", "prompt required",
-                f"{agent.name} faced a blank canvas but pictured nothing to paint.")
+            return None
         place = agent.location
         # ordinal = images already created this tick+place (breaks seeded ties so a
         # second image the same tick gets a distinct id; bump on the rare collision).
@@ -5550,15 +5558,133 @@ class World:
         self._append_gallery(image_id, prompt, agent.id, self.tick, url)
         self.pending_image_fetches.append(
             {"image_id": image_id, "prompt": prompt, "url": url})
+        return {"image_id": image_id, "url": url, "prompt": prompt, "place": place}
+
+    def action_create_image(self, agent: AgentState, prompt: str) -> dict:
+        """Wave I / EM-210 (I1) — reflex tool, UNGATED (create art anywhere). Records
+        a deterministic gallery entry + parks a transient fetch + emits image_posted,
+        ALL synchronously at turn time (no LLM, no network here). The async PNG fetch
+        is drained by the loop and emits NOTHING (off the replay surface)."""
+        # Wave I / EM-210 — credit-safe kill switch: when image_gen is disabled,
+        # reject BEFORE parking any fetch, so the loop never calls the image API.
+        if not self._image_gen_enabled():
+            return self._fail_event(
+                agent.id, "create_image", "image_gen_disabled",
+                f"{agent.name} reached for the brushes, but the atelier is closed today.")
+        if not str(prompt or "").strip():
+            return self._fail_event(
+                agent.id, "create_image", "prompt required",
+                f"{agent.name} faced a blank canvas but pictured nothing to paint.")
+        minted = self._mint_gallery_image(agent, prompt)
+        if minted is None:  # defensive — the checks above already guarantee non-None
+            return self._fail_event(
+                agent.id, "create_image", "image_gen_disabled",
+                f"{agent.name} reached for the brushes, but the atelier is closed today.")
         return {
             "kind": "image_posted",
             "actor_id": agent.id,
-            "text": f"🎨 {agent.name} paints \"{_truncate(prompt, 60)}\".",
+            "text": f"🎨 {agent.name} paints \"{_truncate(minted['prompt'], 60)}\".",
+            "payload": {
+                "image_id": minted["image_id"],
+                "prompt": minted["prompt"],
+                "url": minted["url"],
+                "place": minted["place"],
+            },
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-298 — AGENT-AUTHORED FACADES: agents paint a mural/sign/graffiti onto a
+    # co-located building's facade. Extends the Wave-I image lane (same seeded-id
+    # mint, same off-replay PNG side-artifact); only a stable {surface_id ->
+    # image_id} mapping enters sim state. A per-district cap + insertion-order LRU
+    # eviction bound the browser decal count.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    IMAGEGEN_DEFAULT_MAX_DECALS = 6   # decals retained per district (browser perf)
+
+    def _max_decals_per_district(self) -> int:
+        """The per-district facade-decal cap (config `world.image_gen.
+        max_decals_per_district`, default 6), floored at 1 — mirrors
+        _image_gen_max_gallery. A 0/negative cap would evict every fresh decal."""
+        cfg = getattr(self.params, "image_gen", None)
+        try:
+            return max(1, int(_block_get(
+                cfg, "max_decals_per_district", self.IMAGEGEN_DEFAULT_MAX_DECALS)))
+        except (TypeError, ValueError):
+            return self.IMAGEGEN_DEFAULT_MAX_DECALS
+
+    def _decal_district_of(self, surface_id: str) -> str:
+        """The per-district bucket key for a painted surface. Mirrors the EM-123
+        neighborhood grouping unit (place.neighborhood_id or place.district); a
+        building whose place is ungrouped/missing falls into a stable "" bucket so
+        the cap still bounds it. Deterministic (pure f(state)) — replay-safe."""
+        building = self.buildings.get(surface_id)
+        place = self.places.get(building.location) if building is not None else None
+        if place is None:
+            return ""
+        return str(getattr(place, "neighborhood_id", None)
+                   or getattr(place, "district", None) or "")
+
+    def _evict_decals_over_cap(self, surface_id: str) -> None:
+        """Enforce the per-district decal cap after inserting `surface_id`. Gathers
+        the same-district surfaces in insertion order (== recency) and deletes the
+        OLDEST until the district holds at most max_decals_per_district. The just-
+        painted surface is newest (tail), so it is never the one evicted. Fully
+        deterministic under single-threaded turn resolution."""
+        cap = self._max_decals_per_district()
+        district = self._decal_district_of(surface_id)
+        same = [sid for sid in self.surface_decals
+                if self._decal_district_of(sid) == district]
+        excess = len(same) - cap
+        for sid in same[:excess] if excess > 0 else []:
+            del self.surface_decals[sid]
+
+    def action_paint_surface(
+        self, agent: AgentState, target: str, prompt: str
+    ) -> dict:
+        """EM-298 (facades) — reflex tool, @building-gated (a co-located building,
+        like repair/arson). Mints a gallery image via the SHARED create_image core,
+        then records a stable {surface_id -> image_id} decal mapping (with the
+        per-district cap + insertion-order LRU eviction). Only the mapping enters
+        sim state; the PNG rides the same off-replay fetch queue as create_image."""
+        if not self._image_gen_enabled():
+            return self._fail_event(
+                agent.id, "paint_surface", "image_gen_disabled",
+                f"{agent.name} reached for the spray cans, but the atelier is closed today.")
+        target = str(target or "").strip()
+        building = self.buildings.get(target)
+        if building is None:
+            return self._fail_event(
+                agent.id, "paint_surface", "building_not_found",
+                f"{agent.name} looked for a wall to paint, but found no such structure ({target!r}).")
+        if not str(prompt or "").strip():
+            return self._fail_event(
+                agent.id, "paint_surface", "prompt required",
+                f"{agent.name} faced a blank wall but pictured nothing to paint.")
+        minted = self._mint_gallery_image(agent, prompt)
+        if minted is None:  # defensive — the checks above already guarantee non-None
+            return self._fail_event(
+                agent.id, "paint_surface", "image_gen_disabled",
+                f"{agent.name} reached for the spray cans, but the atelier is closed today.")
+        image_id = minted["image_id"]
+        # Record the mapping with insertion-order recency: pop-then-set moves a
+        # re-painted surface to the most-recent (tail) position before capping.
+        self.surface_decals.pop(target, None)
+        self.surface_decals[target] = image_id
+        self._evict_decals_over_cap(target)
+        return {
+            "kind": "image_posted",
+            "actor_id": agent.id,
+            "target_id": building.id,
+            "text": f"🖌 {agent.name} paints \"{_truncate(minted['prompt'], 60)}\" "
+                    f"onto {building.name}.",
             "payload": {
                 "image_id": image_id,
-                "prompt": prompt,
-                "url": url,
-                "place": place,
+                "prompt": minted["prompt"],
+                "url": minted["url"],
+                "place": minted["place"],
+                "surface_id": building.id,
+                "target": building.id,
             },
         }
 
@@ -7922,6 +8048,14 @@ class World:
             snap["gallery"] = [dict(g) for g in self.gallery]
         if self.plaza_banner_ref:
             snap["plaza_banner_ref"] = self.plaza_banner_ref
+        # EM-298 — the agent-authored facade decals ({surface_id -> image_id}).
+        # Serialized ONLY when non-empty (the plaza_banner_ref only-when-set
+        # pattern), so a facade-free town — and every pre-EM-298 snapshot — omits
+        # the key and round-trips BYTE-IDENTICALLY. dict() preserves insertion
+        # order (== recency), which JSON round-trips, so the LRU order survives a
+        # fork/replay. The PNG stays an external side-artifact (never serialized).
+        if self.surface_decals:
+            snap["surface_decals"] = dict(self.surface_decals)
         # EM-183 — the VOTED civic center. Serialized ONLY when set (the
         # plaza_banner_ref only-when-non-empty pattern), so a town that never
         # relocates — and every pre-EM-183 snapshot — keeps the exact prior key set
@@ -8377,6 +8511,15 @@ class World:
             if isinstance(g, dict) and g.get("image_id")
         ]
         world.plaza_banner_ref = str(state.get("plaza_banner_ref", "") or "")
+        # EM-298 — restore the facade decals (additive: pre-EM-298 snapshots lack
+        # the key and restore {}, so a fork/replay of a non-facade world is byte-
+        # identical). Preserves the serialized insertion order (== LRU recency);
+        # drops malformed rows defensively (both id + image_id required).
+        world.surface_decals = {
+            str(k): str(v)
+            for k, v in (state.get("surface_decals") or {}).items()
+            if k and v
+        }
         # EM-183 — restore the VOTED civic center (absent ⇒ "" ⇒ the conventional
         # plaza center, so pre-EM-183 snapshots restore byte-identically). A
         # serialized id with no matching place is tolerated and re-emitted verbatim
