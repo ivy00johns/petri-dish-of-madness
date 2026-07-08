@@ -1,0 +1,33 @@
+# config/lanes.yaml — Adaptive Lane Routing sorting list
+# Spec: docs/superpowers/specs/2026-07-07-adaptive-lane-routing.md (§3.3).
+#
+# The ONE place you curate lane PREFERENCE. When adaptive_routing.enabled is
+# true, a pinned lane's failure walks this list in priority order (top = tried
+# first), skipping health-sick lanes, lanes whose output ceiling can't fit the
+# request, and reasoning-tagged lanes on strict-JSON turns — up to max_attempts
+# healthy lanes, each bounded by per_attempt_timeout_s, before the runtime's
+# idle fallback. `auto` is just the LAST free entry, not special-cased.
+#
+# DEFAULT enabled: false ⇒ byte-identical to today (pin → EM-205 `auto` backup).
+# Flip enabled: true to adopt the ordered bounce loop. Config is captured in
+# runs.config_json, so a run's routing order is pinned for fork/replay.
+
+adaptive_routing:
+  enabled: false               # false = today's pin→auto backup (byte-identical)
+  max_attempts: 3              # curated healthy lanes tried before idle fallback
+  per_attempt_timeout_s: 12    # per-lane wall-clock cap (no 86s doomed cascades)
+  allow_paid: false            # $0-first: `free: false` lanes stay off unless true
+
+  # P1 is STATIC — lanes come from this file matched against configured
+  # profiles. Discovery/refresh (poll FreeLLMAPI /v1/models + detect direct
+  # provider keys) is P2 and NOT implemented here yet.
+  #
+  # priority order, best-headroom-first. matcher = source + model glob.
+  # a glob `model: "*"` sweeps every remaining lane of that source.
+  order:
+    - { source: freellmapi, model: "gpt-oss-120b*",   free: true }
+    - { source: freellmapi, model: "llama-3.3-70b*",  free: true }
+    - { source: freellmapi, model: "qwen3-next-80b*", free: true }
+    - { source: freellmapi, model: "*",               free: true }  # remaining free lanes
+    - { source: freellmapi, model: "auto" }                          # proxy picker — LAST free resort
+    - { source: anthropic,  model: "claude-sonnet-5", free: false }  # paid, opt-in, dead last

@@ -77,6 +77,10 @@ def build_world(cfg):
         # EM-167 — thread the `world.overflow_lane` block too (defensive getattr:
         # pre-EM-167 configs lack the field and get the OFF defaults).
         overflow_lane=getattr(cfg.world, "overflow_lane", None),
+        # Adaptive Lane Routing (spec 2026-07-07) — thread the config/lanes.yaml
+        # `adaptive_routing` block (defensive getattr: absent ⇒ OFF ⇒
+        # byte-identical pin→auto routing).
+        adaptive_routing=getattr(cfg.world, "adaptive_routing", None),
         cache_enabled=bool(getattr(cache_cfg, "enabled", True)),
         cache_max=int(getattr(cache_cfg, "max_entries", 512)),
     )

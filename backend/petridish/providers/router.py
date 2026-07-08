@@ -4,6 +4,7 @@ Manages per-agent profile assignment (hot-swappable at runtime).
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ from typing import Callable
 from ..config.loader import ModelProfile
 from .adapters import OpenAICompatibleAdapter, AnthropicAdapter, GeminiAdapter
 from .base import Provider, ProviderError
+from .lanes import Lane, LaneRegistry, SortingList
 from .mock import MockProvider
 from .usage import UsageAlertTracker
 
@@ -89,6 +91,25 @@ _AUTO_BACKUP_PROFILE = "auto"
 # breaker tests already exercise) recovers ~2.7x faster and matches tested
 # behavior; test_default_probe_every_is_sane only requires >= 2.
 _AUTO_BREAKER_PROBE_EVERY = 3  # skipped backups between recovery probes
+
+# ── Adaptive Lane Routing (spec 2026-07-07 §9 — Phase P1) ─────────────────────
+# When `adaptive_routing.enabled`, a pinned lane's failure walks the lane
+# registry in priority order (the user's config/lanes.yaml sorting list) instead
+# of the single EM-205 `auto` retry: up to _AR_MAX_ATTEMPTS healthy lanes, each
+# bounded by _AR_PER_ATTEMPT_TIMEOUT_S, skipping lanes that are health-sick, can't
+# fit this request's output ceiling (the #77 lesson), or are reasoning-tagged on
+# a strict-JSON turn. `auto` is just the last order entry, not special-cased. All
+# fail ⇒ re-raise so the runtime's EM-173 idle fallback stays the last resort.
+# Defaults MIRROR config.loader.AdaptiveRoutingParams so an absent lanes.yaml
+# (⇒ enabled False) is byte-identical to the pre-spec pin→auto path.
+_AR_MAX_ATTEMPTS_DEFAULT = 3
+_AR_PER_ATTEMPT_TIMEOUT_S_DEFAULT = 12.0
+
+# Adapter → lane source. The FreeLLMAPI proxy IS this project's OpenAI-compatible
+# endpoint, so an `openai`/`openai-compatible` profile is a `freellmapi` lane
+# (except the local `ollama` lane). Direct gemini/anthropic keep their source;
+# direct openai/gemini/anthropic lanes as first-class registry entries is P4.
+_MOCK_ADAPTER = "mock"
 
 # ── EM-222 — relevance-scored memory retrieval ────────────────────────────────
 # Embeddings route through ONE dedicated profile (a fixed embedding model, NOT
@@ -172,6 +193,7 @@ class Router:
         cache_max: int = _DEFAULT_CACHE_MAX,
         lane_failover: Any = None,
         overflow_lane: Any = None,
+        adaptive_routing: Any = None,
         auto_breaker_probe_every: int = _AUTO_BREAKER_PROBE_EVERY,
     ):
         self._profiles: dict[str, ModelProfile] = {p.name: p for p in profiles}
@@ -295,6 +317,23 @@ class Router:
         # configured: has_embeddings is False and embed() raises a clear error.
         self._embed_adapter: Provider | None = self._adapters.get(_EMBED_PROFILE)
 
+        # ── Adaptive Lane Routing (spec 2026-07-07 — P1) ───────────────────────
+        # `adaptive_routing` is the config `adaptive_routing` block (an
+        # AdaptiveRoutingParams dataclass, a plain dict, or None ⇒ OFF defaults ⇒
+        # byte-identical pre-spec routing). The registry is STATIC for P1: built
+        # ONCE from the configured profiles, ordered by the lanes.yaml sorting
+        # list. It is CONSTRUCTED unconditionally (pure in-memory data) but only
+        # CONSULTED by chat()'s except-branch when `enabled` — so a disabled
+        # router never touches it and stays byte-identical. Discovery/refresh
+        # (rebuilding this on the fly) is P2.
+        self._adaptive_routing = adaptive_routing
+        self._lane_registry: LaneRegistry = LaneRegistry(
+            SortingList(
+                self._ar_order(), allow_paid=self._ar_allow_paid(),
+            ).apply(self._build_lane_universe()),
+            health_fn=self.lane_sick,
+        )
+
     def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
         """Register the callback that receives `usage_alert` payloads
         ({provider, metric, pct, limit}) when a real adapter call crosses 70%
@@ -370,7 +409,12 @@ class Router:
         *,
         max_tokens: int,
         temperature: float,
+        require_json: bool = False,
     ) -> str:
+        # `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
+        # bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
+        # ONLY inside the adaptive-enabled except-branch below, so existing
+        # callers that omit it (default False) keep the exact pre-spec path.
         adapter = self._adapters.get(profile_name)
         if adapter is None:
             raise ProviderError(profile_name, None, "no adapter for profile")
@@ -402,14 +446,26 @@ class Router:
         try:
             text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
         except ProviderError as exc:
-            # EM-205 — retry the SAME call ONCE on the proxy's `auto` router
-            # instead of fanning out across pinned lanes. Re-raises when no
-            # `auto` lane is configured or it also fails (EM-173 idle = last
-            # resort).
-            text, served_by = await self._auto_backup_call(
-                profile_name, exc, messages,
-                max_tokens=max_tokens, temperature=temperature,
-            )
+            if self._adaptive_enabled():
+                # Adaptive Lane Routing (spec P1) — walk the sorting-list
+                # registry in priority order (ordered / health-aware /
+                # time-capped) instead of the single EM-205 `auto` retry. `auto`
+                # is just the last order entry, not special-cased. All lanes
+                # failing re-raises (EM-173 idle = last resort), same contract.
+                text, served_by = await self._bounce_call(
+                    profile_name, exc, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                    require_json=require_json,
+                )
+            else:
+                # EM-205 — retry the SAME call ONCE on the proxy's `auto` router
+                # instead of fanning out across pinned lanes. Re-raises when no
+                # `auto` lane is configured or it also fails (EM-173 idle = last
+                # resort). BYTE-IDENTICAL pre-spec path (default: adaptive OFF).
+                text, served_by = await self._auto_backup_call(
+                    profile_name, exc, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
 
         # W11b / EM-083 — one REAL provider call completed: feed the day-window
         # usage-alert tracker for the lane that ACTUALLY served (no-op unless
@@ -539,6 +595,198 @@ class Router:
             "skips": self._auto_breaker_skips,
             "probe_every": self._auto_breaker_probe_every,
         }
+
+    # ── Adaptive Lane Routing (spec 2026-07-07 — P1) ───────────────────────────
+
+    def _ar_value(self, key: str, default: Any) -> Any:
+        """Read one `adaptive_routing` knob defensively: the block may be an
+        AdaptiveRoutingParams dataclass, a plain dict, or absent (⇒ defaults)."""
+        cfg = self._adaptive_routing
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            value = cfg.get(key, default)
+        else:
+            value = getattr(cfg, key, default)
+        return default if value is None else value
+
+    def _adaptive_enabled(self) -> bool:
+        """The master gate. False (the default — no lanes.yaml / enabled:false)
+        ⇒ chat() takes the byte-identical pre-spec pin→`auto` path."""
+        return bool(self._ar_value("enabled", False))
+
+    def _ar_max_attempts(self) -> int:
+        try:
+            return max(1, int(self._ar_value(
+                "max_attempts", _AR_MAX_ATTEMPTS_DEFAULT)))
+        except (TypeError, ValueError):
+            return _AR_MAX_ATTEMPTS_DEFAULT
+
+    def _ar_per_attempt_timeout_s(self) -> float:
+        try:
+            return float(self._ar_value(
+                "per_attempt_timeout_s", _AR_PER_ATTEMPT_TIMEOUT_S_DEFAULT))
+        except (TypeError, ValueError):
+            return _AR_PER_ATTEMPT_TIMEOUT_S_DEFAULT
+
+    def _ar_allow_paid(self) -> bool:
+        return bool(self._ar_value("allow_paid", False))
+
+    def _ar_order(self) -> tuple:
+        order = self._ar_value("order", ())
+        if isinstance(order, (list, tuple)):
+            return tuple(order)
+        return ()
+
+    @staticmethod
+    def _lane_source(profile: ModelProfile) -> str | None:
+        """Map a profile to its lane `source`, or None when it is not a routable
+        chat lane (mock/embed). The FreeLLMAPI proxy is this project's
+        OpenAI-compatible endpoint, so `openai`/`openai-compatible` profiles are
+        `freellmapi` lanes — except a local Ollama lane. Direct
+        gemini/anthropic keep their source (their first-class registry wiring is
+        P4; for P1 they are only reachable if such a profile already exists)."""
+        adapter = profile.adapter
+        if adapter == _MOCK_ADAPTER:
+            return None
+        if adapter == "anthropic":
+            return "anthropic"
+        if adapter == "gemini":
+            return "gemini"
+        if adapter in ("openai", "openai-compatible"):
+            base = (profile.base_url or "").lower()
+            if profile.name == "ollama" or "11434" in base:
+                return "ollama"
+            return "freellmapi"
+        return None  # pragma: no cover - unknown adapter
+
+    def _build_lane_universe(self) -> list[Lane]:
+        """The candidate lanes the sorting list ranks (P1: STATIC, one per
+        configured chat profile). Each lane maps back to its profile's adapter
+        (lane.profile), so the bounce loop can call it. The embed lane is
+        excluded (it is not a chat substitute); mock is excluded (never a real
+        lane). `out_hint` is the profile's configured max output (the per-lane
+        ceiling the #77 skip compares against)."""
+        universe: list[Lane] = []
+        for name, profile in self._profiles.items():
+            if name == _EMBED_PROFILE:
+                continue
+            source = self._lane_source(profile)
+            if source is None:
+                continue
+            universe.append(Lane(
+                id=f"{source}:{name}",
+                source=source,
+                model_id=profile.model_id,
+                profile=name,
+                free=(source in ("freellmapi", "ollama")
+                      or bool(getattr(profile, "is_free_tier", False))),
+                out_hint=getattr(profile, "max_tokens", None),
+            ))
+        return universe
+
+    def lane_registry_snapshot(self) -> list[dict]:
+        """Observability projection of the static registry (priority order).
+        A thin P1 view; the full `/api/lanes` registry surface is P5."""
+        return [
+            {
+                "id": ln.id, "source": ln.source, "model_id": ln.model_id,
+                "profile": ln.profile, "priority": ln.priority, "free": ln.free,
+                "out_hint": ln.out_hint, "tags": list(ln.tags),
+                "sick": self.lane_sick(ln.profile),
+            }
+            for ln in self._lane_registry.ordered()
+        ]
+
+    async def _bounce_call(
+        self,
+        home: str,
+        first_exc: ProviderError,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        require_json: bool = False,
+    ) -> tuple[str, str]:
+        """Adaptive Lane Routing bounce loop (spec §6). The pinned `home` lane
+        already failed (its error is recorded as an EM-135 demerit, like the
+        EM-205 backup). Walk the registry in priority order; for each candidate
+        lane SKIP if it is the home lane / already tried this turn, health-sick
+        (EM-135 window), its output ceiling can't fit THIS request (out_hint <
+        max_tokens — the #77 lesson), or it is reasoning-tagged on a strict-JSON
+        turn. Try up to `max_attempts` HEALTHY lanes, each bounded by
+        `per_attempt_timeout_s`. Returns (text, served_by=lane.profile) on the
+        first success; if every candidate fails/times out, re-raises the last
+        provider error so the runtime's EM-173 idle fallback stays the last
+        resort. `auto` is just the last order entry — not special-cased."""
+        self.note_lane_error(home)
+        tried: set[str] = {home}
+        attempts = 0
+        max_attempts = self._ar_max_attempts()
+        timeout = self._ar_per_attempt_timeout_s()
+        last_exc: ProviderError = first_exc
+
+        for lane in self._lane_registry.ordered():
+            if attempts >= max_attempts:
+                break
+            prof = lane.profile
+            if prof in tried:
+                continue
+            adapter = self._adapters.get(prof)
+            if adapter is None:
+                continue  # P4: direct-provider lanes without a built adapter
+            if self.lane_sick(prof):
+                continue  # health-sick (EM-135 window) — the auto-blind skip
+            if not lane.fits(max_tokens):
+                continue  # #77 lesson: output ceiling can't fit THIS request
+            if require_json and "reasoning" in lane.tags:
+                continue  # reasoning lane deprioritized on a strict-JSON turn
+
+            tried.add(prof)
+            attempts += 1
+            try:
+                text = await self._call_lane(
+                    adapter, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                    timeout=timeout,
+                )
+            except ProviderError as exc:
+                self.note_lane_error(prof)
+                last_exc = exc
+                continue
+            except asyncio.TimeoutError:
+                # A stalled lane is a demerit in the SAME window a turn-budget
+                # timeout uses (EM-170) — chronic stallers surface + get skipped.
+                self.note_parse_outcome(
+                    prof, parsed=False, truncated=False, timed_out=True)
+                continue
+            log.info(
+                "adaptive-routing: %s failed (%s), lane %s served the call",
+                home, (first_exc.detail or "")[:120], prof,
+            )
+            return text, prof
+
+        # Every curated healthy lane failed / stalled ⇒ re-raise so the runtime's
+        # EM-173 idle fallback stays the true last resort (never mute the agent
+        # earlier: we tried up to max_attempts lanes first).
+        raise last_exc
+
+    async def _call_lane(
+        self,
+        adapter: Provider,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout: float,
+    ) -> str:
+        """One bounce attempt, bounded by `per_attempt_timeout_s` (asyncio.wait_for
+        cancels + awaits the inner task on timeout, so no orphaned HTTP task).
+        timeout <= 0 disables the per-attempt bound."""
+        coro = adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
+        if timeout and timeout > 0:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        return await coro
 
     # ── EM-222 — relevance-scored memory retrieval ─────────────────────────────
 
