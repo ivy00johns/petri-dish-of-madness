@@ -2,8 +2,8 @@
 the first attempt actually used.
 
 On an EM-135-boosted lane, attempt 1 runs at first_attempt_max_tokens (=
-max(base*4, 8192)) and truncates there. The old code computed the retry budget
-from the BASE (`_retry_max_tokens(base)` == max(base*4, 8192)), which equals the
+max(base*4, 2048)) and truncates there. The old code computed the retry budget
+from the BASE (`_retry_max_tokens(base)` == max(base*4, 2048)), which equals the
 boosted attempt-1 cap the lane just cut at — so the retry could never grow past
 the cap that failed, and the agent kept starving on idle fallbacks. The fix bases
 the retry on the ACTUAL attempt-1 budget, so it is always strictly larger.
@@ -85,19 +85,19 @@ async def test_retry_budget_strictly_exceeds_boosted_attempt1_budget():
 
     # Two calls: the boosted first attempt, then the retry.
     assert len(router.calls) == 2, router.calls
-    # Attempt 1 boosted: max(1024*4, 8192) = 4096.
-    assert router.calls[0] == 8192
+    # Attempt 1 boosted: max(1024*4, 2048) = 4096.
+    assert router.calls[0] == 4096
     # THE FIX: the retry must be strictly larger than the boosted cap that just
     # truncated — the old bug made these equal (both 4096).
     assert router.calls[1] > router.calls[0]
-    # Regression pin: grown from the ACTUAL attempt-1 budget → max(8192*4, 8192).
-    assert router.calls[1] == 32768
+    # Regression pin: grown from the ACTUAL attempt-1 budget → max(4096*4, 2048).
+    assert router.calls[1] == 16384
 
 
 @pytest.mark.asyncio
 async def test_healthy_lane_retry_still_grows_from_base():
     """On an un-boosted (healthy) lane attempt 1 runs at the base 1024 and the
-    retry still boosts to max(1024*4, 8192) = 4096 — the fix is a no-op here
+    retry still boosts to max(1024*4, 2048) = 4096 — the fix is a no-op here
     (attempt_tokens == base), so the historical behavior is preserved."""
     from petridish.agents.runtime import AgentRuntime
 
@@ -108,4 +108,4 @@ async def test_healthy_lane_retry_still_grows_from_base():
     await runtime.run_turn(agent)
 
     assert router.calls[0] == 1024      # base, not boosted
-    assert router.calls[1] == 8192      # max(1024*4, 8192)
+    assert router.calls[1] == 4096      # max(1024*4, 2048)

@@ -1326,7 +1326,7 @@ def _no_json_error(text: str, finish_reason: str | None) -> str:
     )
 
 
-_LENGTH_RETRY_TOKEN_FLOOR = 8192
+_LENGTH_RETRY_TOKEN_FLOOR = 2048
 
 
 def _retry_max_tokens(

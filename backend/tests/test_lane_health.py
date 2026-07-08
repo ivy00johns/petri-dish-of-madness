@@ -56,12 +56,12 @@ def test_boost_engages_after_one_truncation_in_window():
     # first truncation already costs a retry; boost the NEXT attempt immediately.
     r = _router()
     r.note_parse_outcome("lane", parsed=False, truncated=True)
-    # Same formula as the retry boost: max(base * 4, 8192).
-    assert r.first_attempt_max_tokens("lane", 512) == 8192
-    assert r.first_attempt_max_tokens("lane", 1024) == 8192
+    # Same formula as the retry boost: max(base * 4, 2048).
+    assert r.first_attempt_max_tokens("lane", 512) == 2048
+    assert r.first_attempt_max_tokens("lane", 1024) == 4096
     # A second (repaired) truncation keeps the lane flagged.
     r.note_parse_outcome("lane", parsed=True, truncated=True)
-    assert r.first_attempt_max_tokens("lane", 512) == 8192
+    assert r.first_attempt_max_tokens("lane", 512) == 2048
 
 
 def test_truncation_trigger_is_one_not_two():
@@ -76,7 +76,7 @@ def test_truncation_trigger_is_one_not_two():
     assert r.first_attempt_max_tokens("lane", 1024) == 1024   # base, not boosted
     r.note_parse_outcome("lane", parsed=False, truncated=True)
     assert r.lane_health()["lane"]["boosted"] is True         # one truncation flags
-    assert r.first_attempt_max_tokens("lane", 1024) == 8192   # and boosts attempt 1
+    assert r.first_attempt_max_tokens("lane", 1024) == 4096   # and boosts attempt 1
 
 
 def test_healthy_lane_base_unchanged():
@@ -104,7 +104,7 @@ def test_boost_disengages_after_clean_outcomes():
     # Four clean outcomes: both truncations still inside the 6-wide window.
     for _ in range(4):
         r.note_parse_outcome("lane", parsed=True, truncated=False)
-    assert r.first_attempt_max_tokens("lane", 512) == 8192
+    assert r.first_attempt_max_tokens("lane", 512) == 2048
     # Two more clean outcomes push the truncations out — deque(maxlen=6)
     # flushes the flag with no extra bookkeeping.
     r.note_parse_outcome("lane", parsed=True, truncated=False)
@@ -116,7 +116,7 @@ def test_clear_cache_flushes_lane_health():
     r = _router()
     r.note_parse_outcome("lane", parsed=False, truncated=True)
     r.note_parse_outcome("lane", parsed=False, truncated=True)
-    assert r.first_attempt_max_tokens("lane", 512) == 8192
+    assert r.first_attempt_max_tokens("lane", 512) == 2048
 
     r.clear_cache()  # world reset: prior-run evidence must not boost a new run
     assert r.first_attempt_max_tokens("lane", 512) == 512
@@ -247,8 +247,8 @@ async def test_agent_turns_record_repaired_truncations_and_bump_next_budget():
         event = await runtime.run_turn(agent)
         assert event["kind"] != "parse_failure"
     # Base is now 1024 (the no-profile fallback). Trigger 2→1: turn 1 collects the
-    # first truncation, so turn 2 ALREADY starts boosted (max(1024*4, 8192)=8192).
-    assert router.calls == [1024, 8192]
+    # first truncation, so turn 2 ALREADY starts boosted (max(1024*4, 2048)=4096).
+    assert router.calls == [1024, 4096]
     assert router.lane.lane_health()["test"]["window"] == [
         {"parsed": True, "truncated": True},
         {"parsed": True, "truncated": True},
@@ -257,7 +257,7 @@ async def test_agent_turns_record_repaired_truncations_and_bump_next_budget():
     # Third turn: the lane is still known-bad → attempt 1 stays at the boosted cap.
     router.response = _VALID_ACTION_JSON
     await runtime.run_turn(agent)
-    assert router.calls[2] == 8192
+    assert router.calls[2] == 4096
 
 
 @pytest.mark.asyncio
@@ -312,12 +312,12 @@ async def test_animal_decisions_record_outcomes_and_bump_next_budget():
         assert action_dict is not None  # repaired, not a dead turn
         assert action_dict["action"] == "nap"
     # Animal base stays 256 (separate fallback, unchanged). Trigger 2→1: turn 1's
-    # truncation already flags the lane, so turn 2 boosts to max(256*4, 8192)=8192.
-    assert router.calls == [256, 8192]
+    # truncation already flags the lane, so turn 2 boosts to max(256*4, 2048)=2048.
+    assert router.calls == [256, 2048]
 
     router.response = _VALID_ANIMAL_JSON
     await runtime._decide_via_llm(animal, world, "test")
-    assert router.calls[2] == 8192  # max(256 * 4, 8192)
+    assert router.calls[2] == 2048  # max(256 * 4, 2048)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
