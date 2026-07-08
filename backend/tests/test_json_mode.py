@@ -203,8 +203,8 @@ def test_no_json_error_widens_snippet_past_200():
 def test_retry_max_tokens_boosts_on_length():
     from petridish.agents.runtime import _retry_max_tokens
 
-    assert _retry_max_tokens(512, {"finish_reason": "length"}) == 8192
-    assert _retry_max_tokens(1024, {"finish_reason": "length"}) == 8192
+    assert _retry_max_tokens(512, {"finish_reason": "length"}) == 2048
+    assert _retry_max_tokens(1024, {"finish_reason": "length"}) == 4096
 
 
 def test_retry_max_tokens_unchanged_otherwise():
@@ -259,7 +259,7 @@ async def test_run_turn_retries_length_truncation_with_boosted_budget():
 
     event = await runtime.run_turn(agent)
 
-    assert router.calls == [1024, 8192]
+    assert router.calls == [1024, 4096]
     assert event["kind"] != "parse_failure"
 
 
@@ -329,8 +329,8 @@ def test_retry_max_tokens_boosts_on_structural_truncation():
     from petridish.agents.runtime import _retry_max_tokens
 
     # finish_reason lies ('stop') but the structure says truncated → boost.
-    assert _retry_max_tokens(512, {"finish_reason": "stop"}, truncated=True) == 8192
-    assert _retry_max_tokens(1024, None, truncated=True) == 8192
+    assert _retry_max_tokens(512, {"finish_reason": "stop"}, truncated=True) == 2048
+    assert _retry_max_tokens(1024, None, truncated=True) == 4096
     # No structural truncation, no length → unchanged (back-compat).
     assert _retry_max_tokens(512, {"finish_reason": "stop"}, truncated=False) == 512
 
@@ -385,7 +385,7 @@ async def test_run_turn_boosts_budget_on_stop_truncation_and_forgets_cache():
     event = await runtime.run_turn(agent)
 
     # The 'stop' lie must not suppress the boost — structure says truncated.
-    assert router.calls == [1024, 8192]
+    assert router.calls == [1024, 4096]
     assert event["kind"] != "parse_failure"
     # The unparseable attempt-1 response was evicted from the decision cache.
     assert router.forgotten == ["test"]
