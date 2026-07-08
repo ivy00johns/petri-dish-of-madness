@@ -920,7 +920,14 @@ def _textured_world(params: WorldParams) -> World:
     return world
 
 
-def test_from_snapshot_round_trips_to_snapshot():
+def test_from_snapshot_round_trips_to_snapshot(monkeypatch):
+    # Snapshot-machinery determinism for a hand-built pre-F1 building (bld_x has
+    # no position). Pin free-placement OFF so the derive-on-load migration —
+    # which intentionally upgrades pre-F1 buildings — doesn't confound the
+    # round-trip; flag-ON position determinism is owned by
+    # test_free_placement_determinism.
+    import petridish.agents.runtime as _rt
+    monkeypatch.setattr(_rt, "FREE_PLACEMENT_ENABLED", False)
     params = _params()
     world = _textured_world(params)
     snap = world.to_snapshot()

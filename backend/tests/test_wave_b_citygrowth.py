@@ -324,5 +324,5 @@ def test_building_to_dict_unchanged_by_em115():
         "id", "name", "kind", "location", "owner_id", "status", "health",
         "condition_label", "progress", "funds_committed", "funds_required",
         "contributors", "function", "last_progress_tick", "created_tick",
-        "updated_tick",
+        "updated_tick", "position",   # EM-268 F1 — free-placement 2-D position
     }

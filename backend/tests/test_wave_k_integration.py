@@ -371,7 +371,13 @@ def _arc_loop():
     return loop, world, repo, loop._run_id, foundry_id
 
 
-def test_full_snapshot_round_trip_is_byte_identical_after_protocol_mutations():
+def test_full_snapshot_round_trip_is_byte_identical_after_protocol_mutations(monkeypatch):
+    # Pin free-placement OFF: this asserts byte-identical snapshot machinery for a
+    # hand-built pre-F1 building (bld_ada has no position); the derive-on-load
+    # migration would legitimately add one on load. Flag-ON position round-trip is
+    # owned by test_free_placement_determinism.
+    import petridish.agents.runtime as _rt
+    monkeypatch.setattr(_rt, "FREE_PLACEMENT_ENABLED", False)
     loop, world, repo, run_id, foundry_id = _arc_loop()
 
     # Mix of owned + unowned props across two places + a skinned building exists.
