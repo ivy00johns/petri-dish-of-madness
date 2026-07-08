@@ -48,7 +48,7 @@ import { preloadHeroModels } from './assets/Model';
 import { allCityModelSpecs } from './assets/cityModels';
 import { allPropModelSpecs } from './assets/propModels';
 import { CityScape, useCityPlan } from './CityScape';
-import { assignBuildingLots, DEFAULT_CITY_SEED } from './cityLayout';
+import { resolveBuildingPositions, DEFAULT_CITY_SEED } from './cityLayout';
 import { Ambiance } from './Ambiance';
 import { Traffic } from './Traffic';
 import { StreetLabels } from './StreetLabels';
@@ -538,8 +538,11 @@ export function CozyWorld({
     // targeted build lands in its chosen zone's lots (assignBuildingLots). On the
     // default (no-zones) plan zone_id is inert ⇒ location auto-placement, byte-
     // identical to pre-SC.
-    const lotInput = list.map((b) => ({ id: b.id, location: b.location, zone_id: b.zone_id }));
-    const spotById = assignBuildingLots(cityPlan, lotInput, placeCenters);
+    const lotInput = list.map((b) => ({ id: b.id, location: b.location, zone_id: b.zone_id, position: b.position }));
+    // EM-268 (F1): route through resolveBuildingPositions — flag OFF (default) it
+    // is byte-identical to assignBuildingLots; flag ON it overrides positioned
+    // builds with their backend world-frame position (no conversion).
+    const spotById = resolveBuildingPositions(cityPlan, lotInput, placeCenters);
     return list.map((b) => ({ building: b, ...(spotById.get(b.id) ?? { x: 0, z: 0 }) }));
   }, [buildings, cityPlan, placeCenters]);
 

@@ -759,6 +759,11 @@ class Building:
     # unresolvable/absent id falls back to auto-placement). Serialized in to_dict +
     # restored in from_snapshot ONLY when set, so pre-SC snapshots are byte-identical.
     zone_id: str | None = None
+    # EM-268 (F1) — deterministic WORLD-frame placement (±32.5), set at build
+    # time by engine.placement (or derived on load for pre-F1 buildings).
+    # Serialized in to_dict + restored in from_snapshot ONLY when set, so pre-F1
+    # snapshots are byte-identical. None ⇒ frontend falls back to assignBuildingLots.
+    position: tuple[float, float] | None = None
 
     @property
     def condition_label(self) -> str:
@@ -793,6 +798,10 @@ class Building:
         # with no zone target (or the flag off) serializes byte-identically to pre-SC.
         if self.zone_id:
             d["zone_id"] = self.zone_id
+        # EM-268 (F1) — world-frame position rides the shape ONLY when set, so a
+        # pre-F1 build (or the flag off) serializes byte-identically.
+        if self.position:
+            d["position"] = [self.position[0], self.position[1]]
         return d
 
 
@@ -4919,6 +4928,15 @@ class World:
             zone_id=stored_zone_id,
         )
         self.buildings[building.id] = building
+        # EM-268 (F1) — deterministic world-frame placement, stored at build time
+        # (flag off ⇒ None ⇒ byte-identical). Lazy import mirrors the GRAPH_ZONES
+        # pattern (avoids the engine→agents cycle). Anchor = world origin (city
+        # center). Placed over the FULL set incl. this build (it sorts last).
+        from ..agents.runtime import FREE_PLACEMENT_ENABLED
+        if FREE_PLACEMENT_ENABLED:
+            from .placement import place_one
+            building.position = place_one(building, list(self.buildings.values()),
+                                          (0.0, 0.0), self.city_seed)
         # EM-266 (SC) — record defiance (observation ONLY; NO penalty, NO block). Only
         # under a stored zone with a ZoneRule: a build defies its zone when it is OVER
         # the density cap (count of LIVE buildings whose zone_id == this zone, THIS one
@@ -8409,8 +8427,27 @@ class World:
                 # the key ⇒ None, byte-identical default). Loose: a stale id (its
                 # face may be gone) round-trips as-is; it's an advisory record.
                 zone_id=(str(d["zone_id"]) if d.get("zone_id") else None),
+                # EM-268 (F1) — restore world-frame position (pre-F1 snapshots
+                # lack the key ⇒ None, byte-identical default; migration fills it).
+                position=((float(d["position"][0]), float(d["position"][1]))
+                          if isinstance(d.get("position"), (list, tuple))
+                          and len(d["position"]) == 2 else None),
             )
             world.buildings[b.id] = b
+
+        # EM-268 (F1) — derive-on-load migration: fill ONLY missing positions
+        # (pre-F1 buildings), treating already-positioned ones as fixed parents;
+        # NEVER overwrite. Destroyed buildings stay in the set as fixed parents
+        # (they're never popped). Canonical order == creation order ⇒ this batch
+        # equals what live-incremental produced (R3). Flag off ⇒ no-op (byte-id).
+        from ..agents.runtime import FREE_PLACEMENT_ENABLED
+        if FREE_PLACEMENT_ENABLED and any(
+                b.position is None for b in world.buildings.values()):
+            from .placement import place_all
+            derived = place_all(world.buildings.values(), (0.0, 0.0), world.city_seed)
+            for b in world.buildings.values():
+                if b.position is None:
+                    b.position = derived[b.id]
 
         for d in state.get("animals", []) or []:
             if not isinstance(d, dict) or not d.get("id"):

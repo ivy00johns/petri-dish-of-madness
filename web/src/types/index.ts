@@ -193,6 +193,10 @@ export interface Building {
   // it; an unresolvable id, or the flag-off / no-graph path, falls back to
   // location-based auto-placement — never a wasted turn, never a crash.
   zone_id?: string | null;
+  /** EM-268 (F1) — deterministic WORLD-frame placement (±32.5), set by the
+   *  backend. Present only when free placement is active; absent ⇒ the frontend
+   *  falls back to assignBuildingLots. Rendered directly (no logical conversion). */
+  position?: [number, number];
 }
 
 // ============================================================

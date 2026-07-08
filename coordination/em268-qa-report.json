@@ -1,0 +1,37 @@
+{
+  "wave": "em268-f1",
+  "feature": "EM-268 F1 — free-placement organic cluster-accretion",
+  "branch": "build/free-placement-f1",
+  "proceed": true,
+  "blockers": [],
+  "gates": {
+    "backend_pytest": { "passed": 1932, "failed": 0, "command": ".venv/bin/python -m pytest backend/tests -q" },
+    "frontend_vitest": { "passed": 1213, "failed": 0, "files": 104, "command": "npx vitest run" },
+    "typecheck": { "rc": 0, "command": "npx tsc -b --force" },
+    "production_build": { "ok": true, "command": "npx vite build" }
+  },
+  "determinism_em155": {
+    "flag_off_byte_identical": true,
+    "flag_off_evidence": "Full backend suite + frontend oracle (cityLayout.test.ts 91/91) pass UNCHANGED; no golden/snapshot/oracle regenerated. Per-file flag-off no-op tests in test_free_placement_{build_time,migration,position_field}.py + cityLayout.f1.test.ts.",
+    "flag_on_fork_replay_reproducible": true,
+    "flag_on_evidence": "test_free_placement_determinism.py: replay round-trip preserves stored positions verbatim; fork+resume == continuous under the same subsequent input (deterministic uuid stream).",
+    "teeth_tests_non_vacuous": true,
+    "teeth_evidence": "canonical (created_tick,id) order is load-bearing (reversed tick => different positions); positions are seed-sensitive (seed 1337 != 9999). A regression in either would be caught.",
+    "golden_regenerated": false
+  },
+  "adversarial_claims": [
+    { "claim": "A — flag-off byte-identical to pre-F1 main", "refuted": false, "evidence": "1932 backend + 1213 frontend pass, oracle unchanged; position serialize-when-set (bool((0.0,0.0)) is True so origin positions are not dropped), from_snapshot absent=>None, migration guarded by any(position is None) + flag." },
+    { "claim": "B — flag-on placement deterministic + append-stable, no hash/float/uuid non-determinism", "refuted": false, "evidence": "place_all sorts (created_tick,id) and iterates the id-ordered placed LIST only; every draw via _seeded_unit; append-only (new tick sorts last, never moves existing); stable across 50 repeated calls; empty/singleton/all-same-tick edges stable." },
+    { "claim": "C — derive-on-load == live-incremental (R3), never overwrites, destroyed stay parents", "refuted": false, "evidence": "test_free_placement_migration.py (4 tests): R3 equivalence, no-overwrite, destroyed-as-fixed-parents, flag-off no-op." }
+  ],
+  "code_review": {
+    "blocking_count": 0,
+    "notes": "Diff faithful to plan+contract. World-frame end-to-end (zero conversions). One deviation reviewed and sound: CozyWorld threads position:b.position into lotInput (additive, inert while flag off, required so the wrapper sees positions when flipped on). One QE self-inflicted defect found+fixed during verify: the new determinism test leaked a global uuid patch (direct assignment) and polluted test_menagerie; rerouted through monkeypatch."
+  },
+  "consumer_audit": {
+    "other_position_readers": 0,
+    "notes": "CozyWorld:541 was the sole assignBuildingLots caller (now resolveBuildingPositions). WorldMap.tsx draws one footprint per PLACE (place coords), never building.position. No further consumer wiring needed."
+  },
+  "verify_workflow_note": "The initial adversarial-verify workflow (wu8psas41) aborted mid-run on transient API/network errors (ECONNRESET / cert-verification) with all 5 agents dropped — NOT a code failure. This report was produced by the lead inline: authored+ran the determinism gate test, ran an adversarial edge-case probe, re-reviewed the diff, and ran the authoritative full suites.",
+  "standing_user_gate": "Visual sign-off: flip both FREE_PLACEMENT_ENABLED flags (backend agents/runtime.py + frontend cityLayout.ts) and watch a real accreted city render (the ROAD_MESH_ENABLED-style gate). Not part of this build."
+}
