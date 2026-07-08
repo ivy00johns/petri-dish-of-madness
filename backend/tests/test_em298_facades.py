@@ -222,7 +222,14 @@ def test_from_snapshot_absent_key_restores_empty():
 
 # ── (d) round-trips correctly when non-empty ─────────────────────────────────
 
-def test_non_empty_surface_decals_round_trips():
+def test_non_empty_surface_decals_round_trips(monkeypatch):
+    # Pin free-placement OFF: this asserts a byte-identical decal round-trip for
+    # hand-built (position-less) buildings; F1's derive-on-load migration would
+    # add positions on restore, breaking byte-identity. Decal round-trip is
+    # orthogonal to placement — flag-ON position determinism is owned by
+    # test_free_placement_determinism.
+    import petridish.agents.runtime as _rt
+    monkeypatch.setattr(_rt, "FREE_PLACEMENT_ENABLED", False)
     a = _agent(location="market")
     w = _world([a])
     for bid in ("b1", "b2", "b3"):

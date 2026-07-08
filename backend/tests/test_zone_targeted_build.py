@@ -260,9 +260,12 @@ def test_flag_off_ignores_zone_id_byte_identical():
     apply_zone_rule(w2.city_graph, ZoneRule(zone_id=zone_a, hint="civic", density_cap=1))
     r2 = w2.action_propose_project(_agent(w2), "Alpha", "market", 10)
     b2 = _building(w2, r2)
-    # equalize the only random field (uuid building id) before comparing shapes
+    # equalize the id-derived random fields before comparing shapes: the uuid
+    # building id AND its free-placement position (seed+id derived, EM-268 F1)
+    # both vary between the two builds and are orthogonal to the zone concern.
     d1, d2 = b1.to_dict(), b2.to_dict()
     d1.pop("id"); d2.pop("id")
+    d1.pop("position", None); d2.pop("position", None)
     assert d1 == d2
 
 
