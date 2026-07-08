@@ -800,6 +800,48 @@ class OverflowLaneParams:
     tiers: tuple[str, ...] = ("background", "supporting")
 
 
+@dataclass(frozen=True)
+class LaneOrderEntry:
+    """One entry in the adaptive-routing sorting list (spec §3.3
+    `config/lanes.yaml` `order:`). `source` + `model` glob select which lanes
+    the entry ranks; `model: "*"` sweeps every remaining lane of that source.
+    `free: false` marks a PAID entry (excluded unless allow_paid). `out_hint`/
+    `ctx_hint`/`tags` are optional lane-shaping hints (absent in the shipped
+    order; used by P1 tests + the P2 discovery merge)."""
+    source: str
+    model: str = "*"
+    free: bool = True
+    out_hint: int | None = None
+    ctx_hint: int | None = None
+    tags: tuple[str, ...] = ()
+
+
+@dataclass
+class AdaptiveRoutingParams:
+    """Adaptive Lane Routing — the custom sorting list + bounce loop (spec
+    2026-07-07, config `config/lanes.yaml` `adaptive_routing:` block). The
+    router (providers/router.py) reads this block via its defensive _ar_value
+    accessor with IDENTICAL defaults, so an ABSENT block (no lanes.yaml) behaves
+    exactly like these values — `enabled: false` ⇒ the byte-identical pre-spec
+    routing (pinned lane → EM-205 `auto` backup), the determinism contract.
+
+      enabled              — master toggle (default OFF ⇒ byte-identical). When
+                             ON, a pinned lane's failure walks the registry in
+                             priority order instead of the single `auto` retry.
+      max_attempts         — curated healthy lanes tried per turn before the
+                             runtime's EM-173 idle fallback. Clamped >= 1.
+      per_attempt_timeout_s— per-lane wall-clock bound (no 86s doomed cascades).
+      allow_paid           — opt-in for `free: false` lanes ($0-first default).
+      order                — the priority order (top-to-bottom = ascending),
+                             a tuple of LaneOrderEntry (spec §3.3).
+    """
+    enabled: bool = False
+    max_attempts: int = 3
+    per_attempt_timeout_s: float = 12.0
+    allow_paid: bool = False
+    order: tuple[LaneOrderEntry, ...] = ()
+
+
 @dataclass
 class CapGovernorParams:
     """Wave D3 / EM-168 — cap-pressure governor (config `world.cap_governor`).
@@ -1509,6 +1551,13 @@ class WorldParams:
     # (default OFF); an absent block / `enabled: false` keeps the byte-identical
     # pre-EM-167 routing (no overflow detours, no new spans).
     overflow_lane: OverflowLaneParams = field(default_factory=OverflowLaneParams)
+    # Adaptive Lane Routing (spec 2026-07-07) — the custom sorting list + bounce
+    # loop. Sourced from config/lanes.yaml (not world.yaml); additive with
+    # router-matching defaults (default OFF). `enabled: false` / no lanes.yaml ⇒
+    # byte-identical pre-spec routing (pinned lane → EM-205 `auto` backup). The
+    # parsed block rides config_json so a fork/replay pins the routing config.
+    adaptive_routing: AdaptiveRoutingParams = field(
+        default_factory=AdaptiveRoutingParams)
     # Wave D3 / EM-168 — cap-pressure governor. Additive with engine-matching
     # defaults (default ON); `enabled: false` keeps usage alerts alert-only
     # (byte-identical pre-D3 behavior).
@@ -2106,6 +2155,96 @@ def _parse_overflow_lane(raw: dict | None) -> OverflowLaneParams:
     )
 
 
+def _parse_lane_order(raw: Any) -> tuple[LaneOrderEntry, ...]:
+    """Parse an adaptive-routing `order:` list into LaneOrderEntry tuple.
+
+    Accepts BOTH the yaml shape ({source, model, free}) and the config_json
+    asdict shape (same keys + out_hint/ctx_hint/tags[list]) so the fork/replay
+    round-trip normalizes a serialized list of dicts back to entries. Malformed
+    entries (no `source`) are skipped rather than crashing the load."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[LaneOrderEntry] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        if not isinstance(source, str) or not source:
+            continue
+        model = item.get("model", "*")
+        model = model if isinstance(model, str) and model else "*"
+        tags_raw = item.get("tags") or ()
+        tags = tuple(str(t) for t in tags_raw) if isinstance(
+            tags_raw, (list, tuple)) else ()
+
+        def _opt_int(key: str) -> int | None:
+            v = item.get(key)
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        out.append(LaneOrderEntry(
+            source=source,
+            model=model,
+            free=bool(item.get("free", True)),
+            out_hint=_opt_int("out_hint"),
+            ctx_hint=_opt_int("ctx_hint"),
+            tags=tags,
+        ))
+    return tuple(out)
+
+
+def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
+    """Parse the optional `adaptive_routing` block (spec 2026-07-07 §3.3).
+    Absent/empty/malformed -> router-matching defaults (routing OFF ⇒
+    byte-identical). max_attempts clamped >= 1; per_attempt_timeout_s coerced to
+    a float (a 0/negative disables the per-attempt bound in the router)."""
+    if not isinstance(raw, dict):
+        return AdaptiveRoutingParams()
+    d = AdaptiveRoutingParams()
+
+    def _pos_int(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return AdaptiveRoutingParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_attempts=_pos_int("max_attempts", d.max_attempts),
+        per_attempt_timeout_s=_float("per_attempt_timeout_s", d.per_attempt_timeout_s),
+        allow_paid=bool(raw.get("allow_paid", d.allow_paid)),
+        order=_parse_lane_order(raw.get("order")),
+    )
+
+
+def _load_lanes_yaml_adaptive_routing(config_dir: Path | None) -> dict | None:
+    """Read the `adaptive_routing:` block from `config/lanes.yaml` (spec §3.3 —
+    the ONE place the user controls the sorting list). Returns the raw dict, or
+    None when there is no config dir / no lanes.yaml / it is unreadable (⇒ the
+    parser falls back to the OFF defaults, byte-identical)."""
+    if config_dir is None:
+        return None
+    path = config_dir / "lanes.yaml"
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception:  # pragma: no cover - defensive (malformed yaml)
+        return None
+    if isinstance(data, dict):
+        block = data.get("adaptive_routing")
+        return block if isinstance(block, dict) else None
+    return None
+
+
 def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
     """Parse the optional `world.cap_governor` block (Wave D3 / EM-168).
     Absent/empty/malformed -> engine-matching defaults (governor ON)."""
@@ -2639,6 +2778,15 @@ def _parse_world(
     raw: dict, config_dir: Path | None = None
 ) -> tuple[WorldParams, list[PlaceConfig], list[AgentConfig]]:
     w = raw.get("world", {})
+    # Adaptive Lane Routing (spec 2026-07-07): the sorting list lives in
+    # config/lanes.yaml, NOT world.yaml. On a FRESH load `w` has no
+    # `adaptive_routing` key, so we read lanes.yaml from the config dir. On a
+    # fork/replay REPARSE, app.py feeds the parent's config_json `world` block
+    # (which DID carry the serialized `adaptive_routing`) with config_dir=None —
+    # so the in-block value takes precedence and the routing config round-trips.
+    ar_raw = w.get("adaptive_routing")
+    if ar_raw is None:
+        ar_raw = _load_lanes_yaml_adaptive_routing(config_dir)
     params = WorldParams(
         agent_count=int(w.get("agent_count", 5)),
         tick_interval_seconds=float(w.get("tick_interval_seconds", 0.5)),
@@ -2686,6 +2834,7 @@ def _parse_world(
         memory_retrieval=_parse_memory_retrieval(w.get("memory_retrieval")),
         lane_failover=_parse_lane_failover(w.get("lane_failover")),
         overflow_lane=_parse_overflow_lane(w.get("overflow_lane")),
+        adaptive_routing=_parse_adaptive_routing(ar_raw),
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),
