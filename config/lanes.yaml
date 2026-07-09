@@ -6,7 +6,17 @@
 # first), skipping health-sick lanes, lanes whose output ceiling can't fit the
 # request, and reasoning-tagged lanes on strict-JSON turns — up to max_attempts
 # healthy lanes, each bounded by per_attempt_timeout_s, before the runtime's
-# idle fallback. `auto` is just the LAST free entry, not special-cased.
+# idle fallback.
+#
+# RESERVED BACKSTOP (W30): the terminal `auto` entry — the proxy's whole-pool
+# router — is GUARANTEED the final attempt slot: the curated lanes above it get
+# max_attempts-1 attempts and the last one is reserved for `auto`, unless it is
+# the pinned lane, was already tried, or is itself health-sick. Without the
+# reservation, an intermittent rate window that 429s the top curated lanes
+# (each still sub-threshold healthy) burned every attempt before `auto` was
+# ever consulted — the documented last resort was unreachable. Worst case is
+# max_attempts x per_attempt_timeout_s = 48s of wall clock, but 429s return
+# fast, so the realistic cascade stays far below the old 86s doom loops.
 #
 # DEFAULT enabled: false ⇒ byte-identical to today (pin → EM-205 `auto` backup).
 # Flip enabled: true to adopt the ordered bounce loop. Config is captured in
@@ -14,7 +24,7 @@
 
 adaptive_routing:
   enabled: true                # go-live 2026-07-08 — ordered health-aware bounce loop
-  max_attempts: 3              # curated healthy lanes tried before idle fallback
+  max_attempts: 4              # 3 curated healthy lanes + the RESERVED `auto` slot
   per_attempt_timeout_s: 12    # per-lane wall-clock cap (no 86s doomed cascades)
   allow_paid: false            # $0-first: `free: false` lanes stay off unless true
 

@@ -498,7 +498,8 @@ def test_shipped_lanes_yaml_loads_enabled_by_default():
     cfg = load_config()
     ar = cfg.world.adaptive_routing
     assert ar.enabled is True            # go-live 2026-07-08 — ordered bounce loop
-    assert ar.max_attempts == 3 and ar.allow_paid is False
+    # W30: 4 = 3 curated healthy lanes + the RESERVED final slot for `auto`.
+    assert ar.max_attempts == 4 and ar.allow_paid is False
     assert len(ar.order) >= 1
     # The last order entry is the paid anthropic opt-in (dead last).
     assert ar.order[-1].source == "anthropic" and ar.order[-1].free is False
