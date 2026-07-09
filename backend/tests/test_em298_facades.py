@@ -69,10 +69,11 @@ def _world(agents=None, params=None, places=None):
                  agents=agents if agents is not None else [_agent()])
 
 
-def _add_building(world, bid, location="market", status="operational"):
+def _add_building(world, bid, location="market", status="operational",
+                   owner_id="public", health=100):
     world.buildings[bid] = Building(
         id=bid, name=f"Structure {bid}", kind="workshop", location=location,
-        status=status)
+        status=status, owner_id=owner_id, health=health)
     return world.buildings[bid]
 
 
@@ -257,6 +258,162 @@ def test_from_snapshot_drops_malformed_decal_rows():
     snap["surface_decals"] = {"b1": "img_x", "": "img_y", "b2": ""}
     restored = World.from_snapshot(snap, params=_params())
     assert restored.surface_decals == {"b1": "img_x"}
+
+
+# ── (e) decal clearing on destroy (demolish / arson) ───────────────────────────
+# EM-298 follow-up (review finding): _demolish_building and the arson->destroy
+# branch of _damage_building set status='destroyed' but used to leave the
+# building's surface_decals entry in place, so a painted mural kept rendering
+# floating over the rubble (the frontend draws one SurfaceDecal per
+# buildingSpot regardless of status). Both paths now pop the entry.
+
+def test_demolish_clears_surface_decal():
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", owner_id=a.id)
+    w.action_paint_surface(a, "b1", "a mural of the harvest")
+    assert "b1" in w.surface_decals
+
+    evt = w.action_demolish(a, "b1")
+
+    assert evt["kind"] == "building_demolished"
+    assert w.buildings["b1"].status == "destroyed"
+    assert "b1" not in w.surface_decals
+
+
+def test_demolish_only_clears_its_own_decal():
+    """Demolishing one painted building clears ONLY its decal — a sibling's
+    survives untouched."""
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", owner_id=a.id)
+    _add_building(w, "b2", location="market", owner_id=a.id)
+    w.action_paint_surface(a, "b1", "one")
+    w.action_paint_surface(a, "b2", "two")
+
+    w.action_demolish(a, "b1")
+
+    assert "b1" not in w.surface_decals
+    assert "b2" in w.surface_decals
+
+
+def test_arson_destroy_clears_surface_decal():
+    a = _agent(location="market")
+    w = _world([a])
+    # Low starting health so a single arson hit (default arson_damage=50)
+    # drives it straight to destroyed.
+    _add_building(w, "b1", location="market", health=10)
+    w.action_paint_surface(a, "b1", "graffiti")
+    assert "b1" in w.surface_decals
+
+    result = w.action_arson(a, "b1")
+
+    assert w.buildings["b1"].status == "destroyed"
+    assert "b1" not in w.surface_decals
+    state_evt = result["_multi"][-1]
+    assert state_evt["payload"]["to"] == "destroyed"
+
+
+def test_arson_damage_without_destroy_preserves_decal():
+    """Sanity: only a DESTROY-ing hit clears the decal — mere damage (still
+    above 0 health) leaves the painted mural alone."""
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", health=100)
+    w.action_paint_surface(a, "b1", "a mural")
+
+    w.action_arson(a, "b1")  # default arson_damage=50 -> damaged, not destroyed
+
+    assert w.buildings["b1"].status == "damaged"
+    assert "b1" in w.surface_decals
+
+
+def test_animal_destroy_clears_surface_decal():
+    """The arson-destroy clear lives in the SHARED _damage_building path, so
+    animal-caused destruction clears a painted facade too."""
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", health=10)
+    w.action_paint_surface(a, "b1", "a mural")
+
+    w.animal_damage_building("b1", 50)
+
+    assert w.buildings["b1"].status == "destroyed"
+    assert "b1" not in w.surface_decals
+
+
+def test_snapshot_round_trip_stays_clean_after_decal_clear_via_demolish(monkeypatch):
+    """After the decal is cleared by demolish, the empty-decal invariant holds
+    again: the serializer only emits non-empty decals, so the snapshot omits
+    surface_decals entirely (byte-identical to a facade-free world) and
+    round-trips clean.
+
+    Pin free-placement OFF (see test_non_empty_surface_decals_round_trips):
+    decal round-trip is orthogonal to placement, and F1's derive-on-load
+    migration adds a `position` field on restore that would otherwise break
+    this byte-identity assertion for an unrelated reason."""
+    import petridish.agents.runtime as _rt
+    monkeypatch.setattr(_rt, "FREE_PLACEMENT_ENABLED", False)
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", owner_id=a.id)
+    w.action_paint_surface(a, "b1", "a mural")
+    assert "surface_decals" in w.to_snapshot()
+
+    w.action_demolish(a, "b1")
+    snap = w.to_snapshot()
+
+    assert "surface_decals" not in snap
+
+    restored = World.from_snapshot(copy.deepcopy(snap), params=_params())
+    assert restored.surface_decals == {}
+    assert json.dumps(restored.to_snapshot(), sort_keys=True) == \
+           json.dumps(snap, sort_keys=True)
+
+
+def test_snapshot_round_trip_stays_clean_after_decal_clear_via_arson(monkeypatch):
+    """Same invariant, via the arson-destroy path. Free-placement pinned OFF for
+    the same reason as the demolish variant above."""
+    import petridish.agents.runtime as _rt
+    monkeypatch.setattr(_rt, "FREE_PLACEMENT_ENABLED", False)
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", health=10)
+    w.action_paint_surface(a, "b1", "a mural")
+
+    w.action_arson(a, "b1")
+    snap = w.to_snapshot()
+
+    assert "surface_decals" not in snap
+
+    restored = World.from_snapshot(copy.deepcopy(snap), params=_params())
+    assert restored.surface_decals == {}
+    assert json.dumps(restored.to_snapshot(), sort_keys=True) == \
+           json.dumps(snap, sort_keys=True)
+
+
+def test_snapshot_keeps_surviving_decal_after_partial_clear(monkeypatch):
+    """Demolishing one painted building clears only its decal; the snapshot
+    still carries the survivor and round-trips it faithfully. Free-placement
+    pinned OFF for the same reason as the round-trip tests above."""
+    import petridish.agents.runtime as _rt
+    monkeypatch.setattr(_rt, "FREE_PLACEMENT_ENABLED", False)
+    a = _agent(location="market")
+    w = _world([a])
+    _add_building(w, "b1", location="market", owner_id=a.id)
+    _add_building(w, "b2", location="market", owner_id=a.id)
+    w.action_paint_surface(a, "b1", "one")
+    w.action_paint_surface(a, "b2", "two")
+
+    w.action_demolish(a, "b1")
+    snap = w.to_snapshot()
+
+    assert list(snap["surface_decals"].keys()) == ["b2"]
+
+    restored = World.from_snapshot(copy.deepcopy(snap), params=_params())
+    assert restored.surface_decals == w.surface_decals
+    assert json.dumps(restored.to_snapshot(), sort_keys=True) == \
+           json.dumps(snap, sort_keys=True)
 
 
 # ── the runtime seam — schema + co-location gate ─────────────────────────────
