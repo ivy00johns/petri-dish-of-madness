@@ -443,29 +443,47 @@ class Router:
         # surface unchanged for this profile.
         self._pending_cached.pop(profile_name, None)
         served_by = profile_name
-        try:
-            text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
-        except ProviderError as exc:
-            if self._adaptive_enabled():
-                # Adaptive Lane Routing (spec P1) — walk the sorting-list
-                # registry in priority order (ordered / health-aware /
-                # time-capped) instead of the single EM-205 `auto` retry. `auto`
-                # is just the last order entry, not special-cased. All lanes
-                # failing re-raises (EM-173 idle = last resort), same contract.
-                text, served_by = await self._bounce_call(
-                    profile_name, exc, messages,
-                    max_tokens=max_tokens, temperature=temperature,
-                    require_json=require_json,
-                )
-            else:
-                # EM-205 — retry the SAME call ONCE on the proxy's `auto` router
-                # instead of fanning out across pinned lanes. Re-raises when no
-                # `auto` lane is configured or it also fails (EM-173 idle = last
-                # resort). BYTE-IDENTICAL pre-spec path (default: adaptive OFF).
-                text, served_by = await self._auto_backup_call(
-                    profile_name, exc, messages,
-                    max_tokens=max_tokens, temperature=temperature,
-                )
+        if self._adaptive_enabled() and self.lane_sick(profile_name):
+            # Adaptive Lane Routing (spec §6 step 1) — the pinned lane is
+            # health-sick: PRE-EMPTIVELY skip it (ZERO adapter calls) and walk
+            # the registry in curated order. This is the sick-lane skip the #76
+            # soft-pin detour used to perform by jumping straight to `auto`; the
+            # registry walk now OWNS it, so the sorting list (gpt-oss → llama →
+            # qwen → * → auto-last) is honored and `auto` is a last resort, not
+            # the first stop. effective_profile() yields the detour to us when
+            # adaptive is on (it returns the pinned lane unchanged), so no
+            # pre-call redirect ever hides the pinned lane from this walk.
+            text, served_by = await self._bounce_call(
+                profile_name,
+                ProviderError(profile_name, None, "pinned lane pre-skipped (health-sick)"),
+                messages, max_tokens=max_tokens, temperature=temperature,
+                require_json=require_json, pre_skip=True,
+            )
+        else:
+            try:
+                text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
+            except ProviderError as exc:
+                if self._adaptive_enabled():
+                    # Adaptive Lane Routing (spec P1) — walk the sorting-list
+                    # registry in priority order (ordered / health-aware /
+                    # time-capped) instead of the single EM-205 `auto` retry.
+                    # `auto` is just the last order entry, not special-cased. All
+                    # lanes failing re-raises (EM-173 idle = last resort).
+                    text, served_by = await self._bounce_call(
+                        profile_name, exc, messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                        require_json=require_json,
+                    )
+                else:
+                    # EM-205 — retry the SAME call ONCE on the proxy's `auto`
+                    # router instead of fanning out across pinned lanes. Re-raises
+                    # when no `auto` lane is configured or it also fails (EM-173
+                    # idle = last resort). BYTE-IDENTICAL pre-spec path (adaptive
+                    # OFF default).
+                    text, served_by = await self._auto_backup_call(
+                        profile_name, exc, messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                    )
 
         # W11b / EM-083 — one REAL provider call completed: feed the day-window
         # usage-alert tracker for the lane that ACTUALLY served (no-op unless
@@ -526,10 +544,12 @@ class Router:
         backup also fails — the runtime's EM-173 idle fallback stays the true
         last resort. Never targets mock (the backup is `auto` or nothing).
 
-        EM-226 — while the storm breaker is OPEN the backup is FAST-FAILED (the
-        original error propagates with NO 2nd network call) except on every Nth
-        skip, which PROBES the auto lane to detect recovery. A probe success
-        closes the breaker; any auto failure (re-)opens it."""
+        EM-226 — the storm breaker's fast-fail/probe-cadence was RESCINDED
+        (2026-07-06): the backup now ALWAYS fires (muting an agent while `auto`
+        was usually still serving violated the never-mute rule). The breaker
+        state is OBSERVABILITY-ONLY: any `auto` failure marks it open, a served
+        backup marks it closed — it no longer skips or gates a single call. The
+        vestigial breaker fields are slated for removal in EM-304."""
         self.note_lane_error(home)
         backup = self._auto_backup
         if backup is None or backup == home:
@@ -551,7 +571,7 @@ class Router:
             )
         except ProviderError as exc:
             self.note_lane_error(backup)
-            self._trip_auto_breaker()  # open (or keep open); reset the probe counter
+            self._trip_auto_breaker()  # mark open (observability only — no gating)
             raise exc
         # Backup served ⇒ the pool has capacity again: close the breaker.
         self._reset_auto_breaker()
@@ -564,14 +584,15 @@ class Router:
     # ── EM-226 — auto-backup circuit breaker ───────────────────────────────────
 
     def _trip_auto_breaker(self) -> None:
-        """Open the breaker after an `auto` failure (the whole-pool storm signal)
-        and reset the probe counter so the next probe is a full cadence away.
-        Logs ONLY the open transition — never per skip."""
+        """Mark the breaker open after an `auto` failure (the whole-pool storm
+        signal). OBSERVABILITY-ONLY since the 2026-07-06 fast-fail rescind — it
+        no longer gates any call; the backup always fires. Logs ONLY the open
+        transition. `_auto_breaker_skips` is reset to keep the /api/lanes
+        snapshot tidy (a vestigial field, EM-304)."""
         if not self._auto_breaker_open:
             log.info(
-                "EM-226 auto-backup breaker OPEN — proxy pool exhausted; "
-                "fast-failing backups, probing every %d skips",
-                self._auto_breaker_probe_every,
+                "EM-226 auto-backup breaker OPEN — proxy `auto` last failed "
+                "(observability only; the backup still fires every turn)",
             )
         self._auto_breaker_open = True
         self._auto_breaker_skips = 0
@@ -586,10 +607,11 @@ class Router:
 
     def auto_backup_health(self) -> dict:
         """EM-226 — circuit-breaker snapshot for /api/lanes + tests:
-        {open, skips, probe_every}. `open` ⇒ the proxy `auto` pool was last seen
-        unable to serve and backups are being fast-failed (agents act on the
-        EM-173 idle fallback meanwhile); a probe every `probe_every` skips closes
-        it on recovery. Absent an `auto` lane the breaker never trips."""
+        {open, skips, probe_every}. OBSERVABILITY-ONLY since the 2026-07-06
+        fast-fail rescind: `open` ⇒ the proxy `auto` lane's LAST attempt failed
+        (it is no longer fast-failed — the backup still fires every turn); it
+        flips closed the next time `auto` serves. Absent an `auto` lane the
+        breaker never trips. `skips`/`probe_every` are vestigial (EM-304)."""
         return {
             "open": self._auto_breaker_open,
             "skips": self._auto_breaker_skips,
@@ -707,24 +729,52 @@ class Router:
         max_tokens: int,
         temperature: float,
         require_json: bool = False,
+        pre_skip: bool = False,
     ) -> tuple[str, str]:
-        """Adaptive Lane Routing bounce loop (spec §6). The pinned `home` lane
-        already failed (its error is recorded as an EM-135 demerit, like the
-        EM-205 backup). Walk the registry in priority order; for each candidate
-        lane SKIP if it is the home lane / already tried this turn, health-sick
-        (EM-135 window), its output ceiling can't fit THIS request (out_hint <
-        max_tokens — the #77 lesson), or it is reasoning-tagged on a strict-JSON
-        turn. Try up to `max_attempts` HEALTHY lanes, each bounded by
-        `per_attempt_timeout_s`. Returns (text, served_by=lane.profile) on the
-        first success; if every candidate fails/times out, re-raises the last
-        provider error so the runtime's EM-173 idle fallback stays the last
-        resort. `auto` is just the last order entry — not special-cased."""
-        self.note_lane_error(home)
+        """Adaptive Lane Routing bounce loop (spec §6). Reached two ways:
+        (a) the pinned `home` lane just FAILED (`pre_skip=False`) — its error is
+        recorded as an EM-135 demerit, like the EM-205 backup; or (b) the pinned
+        lane was health-sick and PRE-EMPTIVELY skipped by chat() with zero calls
+        (`pre_skip=True`, spec §6 step 1) — no fresh error is noted (the lane is
+        already sick). Either way `home` starts in `tried`, so the walk never
+        re-hits it.
+
+        Walk the registry in priority order; for each candidate lane SKIP if it
+        is the home lane / already tried this turn, health-sick (EM-135 window),
+        its output ceiling can't fit the request's genuine FLOOR (the #77
+        lesson), or it is reasoning-tagged on a strict-JSON turn. Try up to
+        `max_attempts` HEALTHY lanes, each bounded by `per_attempt_timeout_s`.
+        Returns (text, served_by=lane.profile) on the first success; if every
+        candidate fails/times out, re-raises the last provider error so the
+        runtime's EM-173 idle fallback stays the last resort. `auto` is just the
+        last order entry — not special-cased (a failing `auto`, e.g. "All models
+        exhausted", is an ordinary lane failure: note_lane_error + continue to
+        any remaining candidate, else re-raise — never a premature abort)."""
+        if not pre_skip:
+            self.note_lane_error(home)
         tried: set[str] = {home}
         attempts = 0
         max_attempts = self._ar_max_attempts()
         timeout = self._ar_per_attempt_timeout_s()
         last_exc: ProviderError = first_exc
+
+        # #77 token-clamp lesson (the churn fix): when the home lane is
+        # TRUNCATION-BOOSTED (its EM-135 window flagged, so the runtime handed us
+        # a boosted max_tokens like 4096), that boost is a mitigation HINT, not a
+        # hard requirement — a DIFFERENT model may not truncate at all. Its
+        # genuine floor is the home lane's own configured output ceiling. Skipping
+        # every healthy 1024-ceiling free lane because 4096 > 1024 collapsed the
+        # walk to auto-only and died as "All models exhausted" → idle churn. So we
+        # skip a lane only when it can't fit that genuine FLOOR, and CLAMP the
+        # boosted hint down to each attempted lane's ceiling (a truncation-retry
+        # beats an idle fallback). An UN-boosted request is genuine: its floor IS
+        # max_tokens (so a too-small lane is still skipped — the #77 regression
+        # test stays green).
+        base_need = max_tokens
+        if self._lane_boosted(home):
+            home_out = getattr(self._profiles.get(home), "max_tokens", None)
+            if home_out is not None:
+                base_need = min(max_tokens, int(home_out))
 
         for lane in self._lane_registry.ordered():
             if attempts >= max_attempts:
@@ -737,17 +787,25 @@ class Router:
                 continue  # P4: direct-provider lanes without a built adapter
             if self.lane_sick(prof):
                 continue  # health-sick (EM-135 window) — the auto-blind skip
-            if not lane.fits(max_tokens):
-                continue  # #77 lesson: output ceiling can't fit THIS request
+            if not lane.fits(base_need):
+                continue  # #77: ceiling can't fit even the genuine floor
             if require_json and "reasoning" in lane.tags:
                 continue  # reasoning lane deprioritized on a strict-JSON turn
 
             tried.add(prof)
             attempts += 1
+            # Clamp the (possibly boosted) hint down to this lane's ceiling so a
+            # healthy small-ceiling lane is ATTEMPTED (clamped), never skipped
+            # solely because the boost overshoots it. attempt_max >= base_need
+            # always (we skipped lanes that can't fit the floor).
+            attempt_max = (
+                min(max_tokens, lane.out_hint)
+                if lane.out_hint is not None else max_tokens
+            )
             try:
                 text = await self._call_lane(
                     adapter, messages,
-                    max_tokens=max_tokens, temperature=temperature,
+                    max_tokens=attempt_max, temperature=temperature,
                     timeout=timeout,
                 )
             except ProviderError as exc:
@@ -761,8 +819,11 @@ class Router:
                     prof, parsed=False, truncated=False, timed_out=True)
                 continue
             log.info(
-                "adaptive-routing: %s failed (%s), lane %s served the call",
-                home, (first_exc.detail or "")[:120], prof,
+                "adaptive-routing: %s %s, lane %s served the call",
+                home,
+                "pre-skipped (sick)" if pre_skip
+                else f"failed ({(first_exc.detail or '')[:120]})",
+                prof,
             )
             return text, prof
 
@@ -1160,6 +1221,18 @@ class Router:
         overflow = self._overflow_target(preferred, tier)
         if overflow is not None:
             return overflow, "overflow"
+
+        # Adaptive Lane Routing (spec §6, 2026-07-09 reconciliation) — when
+        # adaptive_routing is enabled the sick-lane skip + ordered bounce is
+        # OWNED by chat()'s registry walk, so the #76 soft-pin PRE-CALL detour to
+        # `auto` is DISABLED here: we return the pinned lane unchanged (identity
+        # preserved) and let chat() pre-emptively skip it if sick and walk the
+        # curated sorting list (gpt-oss → llama → qwen → * → auto-last). Without
+        # this yield the blind detour would send a known-sick pinned lane
+        # straight to `auto`, and the curated order would never be consulted.
+        # Overflow (above) still applies; adaptive OFF ⇒ byte-identical #76 path.
+        if self._adaptive_enabled():
+            return preferred, None
 
         if not self._failover_enabled():
             return preferred, None

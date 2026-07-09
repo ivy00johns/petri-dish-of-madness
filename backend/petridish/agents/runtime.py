@@ -4664,6 +4664,14 @@ class AgentRuntime:
         # The effective profile's max_tokens/temperature apply — a detoured
         # call runs at the substitute lane's budget. Guarded getattr:
         # duck-typed test routers without effective_profile() are unchanged.
+        #
+        # Adaptive Lane Routing reconciliation (spec §6, 2026-07-09): when
+        # adaptive_routing is enabled the router's effective_profile() YIELDS the
+        # #76 sick-lane detour — it returns the pinned lane unchanged (lane_reason
+        # None), so `call_profile` stays `profile_name` and the sick-lane skip +
+        # ordered bounce happen INSIDE router.chat()'s registry walk (below, via
+        # _call_and_parse), honoring the curated sorting list. Nothing to special-
+        # case here; overflow (EM-167) still resolves normally.
         call_profile = profile_name
         lane_reason: str | None = None
         effective = getattr(self.router, "effective_profile", None)
