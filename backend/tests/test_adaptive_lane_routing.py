@@ -23,6 +23,7 @@ import engine.world first defensively per the repo convention.
 """
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -493,10 +494,10 @@ def test_config_json_asdict_round_trip():
     assert reparsed.order[0].tags == ("reasoning",)
 
 
-def test_shipped_lanes_yaml_loads_disabled_by_default():
+def test_shipped_lanes_yaml_loads_enabled_by_default():
     cfg = load_config()
     ar = cfg.world.adaptive_routing
-    assert ar.enabled is False           # ships OFF ⇒ byte-identical
+    assert ar.enabled is True            # go-live 2026-07-08 — ordered bounce loop
     assert ar.max_attempts == 3 and ar.allow_paid is False
     assert len(ar.order) >= 1
     # The last order entry is the paid anthropic opt-in (dead last).
@@ -509,5 +510,74 @@ def test_shipped_lanes_yaml_matches_repo_file():
     lanes_path = repo_root / "config" / "lanes.yaml"
     assert lanes_path.exists()
     block = yaml.safe_load(lanes_path.read_text())["adaptive_routing"]
-    assert block["enabled"] is False
+    assert block["enabled"] is True
     assert block["allow_paid"] is False
+
+
+# ── Real-config wiring (review finding M3) ─────────────────────────────────
+#
+# The pre-2026-07-08 incident: config/lanes.yaml's `order:` glob matchers
+# (`gpt-oss-120b*`, bare `qwen3-next-80b*`) were authored against IMAGINED
+# profile model_ids that never matched the real config/profiles.yaml — ghost
+# matchers that silently collapsed the curated priority to config-order with
+# `auto` last. Unit tests on synthetic universes (see section A above) can't
+# catch this class of bug because they never touch the real, shipped config.
+# This test builds the SAME lane universe the live Router builds (from the
+# real profiles.yaml), applies the real SortingList (from the real
+# lanes.yaml), and asserts every glob that is supposed to hit something DOES.
+
+def test_real_config_glob_matchers_resolve_against_real_profiles():
+    """M3: every non-wildcard adaptive_routing.order matcher must resolve to
+    >= 1 real lane against the shipped config/profiles.yaml, built the exact
+    way the router builds it (Router._build_lane_universe → SortingList).
+    A future glob that resolves to zero lanes must fail loudly, naming the
+    offending glob, instead of silently degrading to config-order/auto-last."""
+    cfg = load_config()
+    ar = cfg.world.adaptive_routing
+    router = Router(cfg.profiles, cache_enabled=False, adaptive_routing=ar)
+    universe = router._build_lane_universe()
+
+    def _matches(source: str, model_glob: str) -> list[Lane]:
+        return [
+            ln for ln in universe
+            if ln.source == source and fnmatch.fnmatch(ln.model_id, model_glob)
+        ]
+
+    # (a) the three specific globs called out by the go-live diff must each
+    # resolve to a real, live profile.
+    named_globs = ["gpt-oss-120b*", "*llama-3.3-70b*", "*qwen3-next-80b*"]
+    for glob in named_globs:
+        matches = _matches("freellmapi", glob)
+        assert matches, (
+            f"adaptive_routing order glob {glob!r} (source=freellmapi) "
+            f"resolved to ZERO lanes against the real config/profiles.yaml "
+            f"— ghost matcher (M3)."
+        )
+
+    # Generic sweep: ANY non-wildcard FREE order entry that resolves to zero
+    # lanes fails loudly, naming the offending glob — not just the three
+    # above. The paid anthropic opt-in is checked separately in (b): it is
+    # EXPECTED to resolve to zero lanes (no anthropic-adapter profile is
+    # configured), so it is excluded from this "must match" sweep.
+    for entry in ar.order:
+        if entry.model == "*" or entry.source == "anthropic":
+            continue
+        matches = _matches(entry.source, entry.model)
+        assert matches, (
+            f"adaptive_routing order entry source={entry.source!r} "
+            f"model={entry.model!r} resolved to ZERO lanes against the real "
+            f"config/profiles.yaml — ghost matcher (M3)."
+        )
+
+    # (b) the paid anthropic/claude-sonnet-5 entry resolves to zero lanes
+    # (no anthropic-adapter profile is configured) while allow_paid is false
+    # — it is excluded from the sorting list either way.
+    anthropic_entries = [e for e in ar.order if e.source == "anthropic"]
+    assert anthropic_entries, "expected the paid anthropic opt-in entry in lanes.yaml"
+    anthropic_entry = anthropic_entries[0]
+    assert anthropic_entry.free is False
+    assert ar.allow_paid is False
+    assert _matches(anthropic_entry.source, anthropic_entry.model) == []
+
+    sorted_lanes = SortingList(ar.order, allow_paid=ar.allow_paid).apply(universe)
+    assert not any(ln.source == "anthropic" for ln in sorted_lanes)
