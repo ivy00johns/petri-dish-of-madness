@@ -1361,14 +1361,18 @@ export function assignBuildingLots(
  *  carries a backend world-frame `position`, use it verbatim (no conversion — same
  *  frame as assignBuildingLots output). Every other building — and the whole map
  *  when the flag is off — routes through assignBuildingLots UNCHANGED, so the
- *  flag-off path is byte-identical to pre-F1. `forceFlag` is a test seam. */
+ *  flag-off path is byte-identical to pre-F1. `forceFlag` is a test seam: omit it
+ *  (or pass undefined) to use the shipped module constant (production behavior,
+ *  unchanged); pass `true`/`false` explicitly to override it for a single call,
+ *  e.g. to exercise the flag-off parity path even while FREE_PLACEMENT_ENABLED
+ *  is shipped true. */
 export function resolveBuildingPositions(
   plan: Pick<CityPlan, 'realLots' | 'landmarks' | 'blockLots' | 'zones'>,
   buildings: ReadonlyArray<{ id: string; location: string; zone_id?: string | null; position?: [number, number] }>,
   placeCenters: ReadonlyMap<string, { x: number; z: number }>,
-  forceFlag = false,
+  forceFlag?: boolean,
 ): Map<string, { x: number; z: number }> {
-  const active = FREE_PLACEMENT_ENABLED || forceFlag;
+  const active = forceFlag === undefined ? FREE_PLACEMENT_ENABLED : forceFlag;
   const positioned = active
     ? buildings.filter((b) => Array.isArray(b.position) && b.position.length === 2)
     : [];
