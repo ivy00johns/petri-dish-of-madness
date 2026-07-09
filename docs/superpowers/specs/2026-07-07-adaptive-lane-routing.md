@@ -1,6 +1,6 @@
 # Spec — Adaptive Lane Routing (custom sorting list + dynamic discovery)
 
-> **Status:** design, ready to build. **Date:** 2026-07-07.
+> **Status:** P1 shipped (#83, 2026-07-07); go-live 2026-07-08; P2-P5 open. **Date:** 2026-07-07.
 > **Owner seam:** `backend/petridish/providers/router.py` + a new lane registry.
 > Supersedes the "delegate everything to `model: auto`" strategy (EM-205) as the
 > *primary* fallback; `auto` becomes one entry in the list, not the whole plan.
