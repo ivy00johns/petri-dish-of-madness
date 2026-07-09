@@ -22,9 +22,9 @@ Scanned: 2026-07-09 · Source: user directive (no MISSION.md)
       Haiku = mechanical docs; Sonnet = standard implementation; Opus = subtle tests + the
       routing fix; Fable = adversarial verify + synthesis. Recorded per-agent below.
 - [x] `git-commit` — conventional commits by the lead at wave boundaries (agents do NOT commit).
-- [ ] `code-review` — verify phase, on the branch diff.
-- [ ] `verify` / QE — wave gate (pytest + vitest + tsc in the isolated worktree) + QA agent.
-- [ ] `plan-intake` convention — A6/A7 file every review finding into the ledger fail-closed.
+- [x] `code-review` — verify workflow: opus code-review + spec-conformance lenses on the branch diff; every finding adversarially checked by fable verifiers (2 code findings confirmed → fixed same-build by a fable remediation agent; toy-universe blind spot closed with a production-shaped test).
+- [x] `verify` / QE — wave gate ran twice (post-implement and post-remediation, both fully green: backend 2005 passed/1 skipped, web 1215, tsc clean) + independent QE gate agent (proceed=true, anti-cheat pass confirmed coverage UP, no weakened assertions).
+- [x] `plan-intake` convention — EM-268/298 swept, EM-300–307 filed, closure log backfilled through W30 itself; verify round caught and fixed the A6/A7 reconciliation misses.
 - [ ] `render-sanity` / `ux-review` — DEFERRED: no UI behavior ships here except the decal-clear
       fix; visual F1 sign-off is a separate user-driven session against the live sim.
 - [ ] `nano-banana` — N/A: no new UI surface, no imagery need.

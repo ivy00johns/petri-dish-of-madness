@@ -42,12 +42,13 @@ grammar keystone), EM-300 (adaptive lane routing P2–P5), EM-301 (idle-fallback
 #84 open), plus the P1 backlog in Wave M/N/O/Q (see `docs/REMAINING-WORK.md`). EM-151
 (inspector blank on ~40k-event runs) shipped in Wave F.
 
-**Recently merged (2026-06-24):** a wide-ranging asset-library expansion toward the
-EW-grade dense city — building-pool variety + **26 new CC0 GLBs** (buildings #42 + props #43,
-consolidated #43), **ambient moving traffic + parked cars** (#44, EM-169/176), golden-hour
-**dust motes** (#46, EM-127 partial), and **auto-pause on a sustained provider outage** (#47,
-EM-226). All CC0-enforced + recorded in `ASSET_LICENSES.md`; the poly.pizza vendoring runbook
-is `docs/em216-kit-acquisition-plan.md`.
+**Recently merged (2026-07-07):** agent-authored **facades & murals** (#78, EM-298 —
+`paint_surface` + decal render, SHIPPED), the **EM-268 F1 free-placement go-live** (#81 —
+cluster-accretion placement, build-anywhere restored), a **post-merge green-up** (#82 —
+position goldens + EM-298 round-trip fix), a **revert of the 8192 length-retry floor** (#80 —
+PR #77's raise excluded free models, rolled back), and **adaptive lane routing P1** (#83 —
+registry + custom sorting list + bounce loop). **PR #84 is open** (idle-fallback timeout
+labeling + auto-resume, EM-301).
 
 **In flight (2026-07-09):** **F1 free-placement merged + ratified** (PR #81/#82; derive-on-load
 restore behavior locked in 2026-07-09 — closes the paused restore-contradiction gate). **Adaptive
