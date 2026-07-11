@@ -969,6 +969,45 @@ class CrimeParams:
 
 
 @dataclass
+class CommunicationParams:
+    """EM-250 — Communication & Culture tunables (config `world.comm`, Wave O
+    keystone). The engine reads this block via its defensive `_comm_param`
+    accessor with IDENTICAL defaults (the CrimeParams/_crime_param convention),
+    so a world.yaml WITHOUT the `comm` block behaves exactly like these values.
+    UNLIKE crime this block HAS an `enabled` flag, defaulting FALSE: the Wave-O
+    transmission verbs and the diffuse_culture round boundary (EM-251/EM-252)
+    gate on it, so a default world mints no memes, emits no new prompt line /
+    menu entry / event, and stays byte-identical (the em161 golden + EM-155).
+
+      enabled             — master gate for the Wave-O comm verbs + diffusion.
+      diffusion_chance    — per-carrier co-located passive-hop chance (seeded,
+                            EM-252; never random).
+      max_diffusions      — per-round ceiling on passive hops.
+      half_life_ticks     — ticks without a spread before virality halves.
+      decay_ticks         — ticks without a spread before a zero-carrier meme dies.
+      letter_cap          — undelivered letters parked per mailbox (FIFO, EM-251).
+      held_meme_cap       — memes an agent carries (FIFO, oldest dropped).
+      distortion_strength — _distort_text mutation passes per transmission hop.
+      meme_images         — create_image auto-registers an image meme (EM-253).
+      dominance_threshold — carriers needed for a meme_dominant event.
+      camp_min_shared     — shared memes that bind a culture-camp edge.
+      camp_min_size       — minimum members for a culture camp.
+    """
+    enabled: bool = False
+    diffusion_chance: float = 0.20
+    max_diffusions: int = 12
+    half_life_ticks: int = 30
+    decay_ticks: int = 80
+    letter_cap: int = 8
+    held_meme_cap: int = 12
+    distortion_strength: int = 1
+    meme_images: bool = True
+    dominance_threshold: int = 6
+    camp_min_shared: int = 2
+    camp_min_size: int = 3
+
+
+@dataclass
 class NeedsParams:
     """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
     — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
@@ -1570,6 +1609,12 @@ class WorldParams:
     # crime/justice verbs only fire on a deliberate agent turn, so a world.yaml
     # without the `crime` block restores pre-EM-240 snapshots byte-identical.
     crime: CrimeParams = field(default_factory=CrimeParams)
+    # EM-250 — Communication & Culture (Wave O keystone). Additive with a
+    # DEFAULT-OFF `enabled`, so a world.yaml without the `comm` block mints no
+    # memes, spreads nothing, and keeps the em161 golden + every pre-EM-250
+    # snapshot byte-identical. The caps (held_meme_cap / letter_cap) also bound
+    # the defensive snapshot-restore path, mirroring memory.soul_cap.
+    comm: CommunicationParams = field(default_factory=CommunicationParams)
     # EM-229 — three-needs psychology tunables. Additive with engine-matching
     # defaults; the decay is always-on but the prompt surfacing is salience-gated
     # so a world.yaml without the `needs` block keeps the em161 golden + restores
@@ -2392,6 +2437,44 @@ def _parse_crime(raw: dict | None) -> CrimeParams:
     )
 
 
+def _parse_comm(raw: dict | None) -> CommunicationParams:
+    """Parse the optional `world.comm` block (EM-250).
+    Absent/empty/malformed -> engine-matching defaults (enabled stays FALSE, the
+    inert Wave-O default). Each key falls back to its default individually (a
+    malformed value never breaks the block). Mirrors `_parse_crime`; int fields
+    parse as int, float fields as float, bool fields coerce with bool()."""
+    if not isinstance(raw, dict):
+        return CommunicationParams()
+    d = CommunicationParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return CommunicationParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        diffusion_chance=_float("diffusion_chance", d.diffusion_chance),
+        max_diffusions=_int("max_diffusions", d.max_diffusions),
+        half_life_ticks=_int("half_life_ticks", d.half_life_ticks),
+        decay_ticks=_int("decay_ticks", d.decay_ticks),
+        letter_cap=_int("letter_cap", d.letter_cap),
+        held_meme_cap=_int("held_meme_cap", d.held_meme_cap),
+        distortion_strength=_int("distortion_strength", d.distortion_strength),
+        meme_images=bool(raw.get("meme_images", d.meme_images)),
+        dominance_threshold=_int("dominance_threshold", d.dominance_threshold),
+        camp_min_shared=_int("camp_min_shared", d.camp_min_shared),
+        camp_min_size=_int("camp_min_size", d.camp_min_size),
+    )
+
+
 def _parse_needs(raw: dict | None) -> NeedsParams:
     """Parse the optional `world.needs` block (EM-229).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back to
@@ -2838,6 +2921,7 @@ def _parse_world(
         cap_governor=_parse_cap_governor(w.get("cap_governor")),
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),
+        comm=_parse_comm(w.get("comm")),
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),

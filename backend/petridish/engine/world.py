@@ -6237,6 +6237,22 @@ class World:
         the block, so keep these call-site defaults == CrimeParams defaults."""
         return _block_get(getattr(self.params, "crime", None), name, default)
 
+    def _comm_param(self, name: str, default: Any) -> Any:
+        """EM-250 — defensive accessor for the `world.comm` config block
+        (CommunicationParams dataclass OR dict OR absent — EM-155 conventions,
+        like _crime_param). An absent block ⇒ every default ⇒ pre-EM-250 worlds
+        run unchanged (enabled defaults FALSE). `default` is only a fallback for
+        a key missing from the block, so keep these call-site defaults ==
+        CommunicationParams defaults."""
+        return _block_get(getattr(self.params, "comm", None), name, default)
+
+    def _comm_enabled(self) -> bool:
+        """EM-250 — config gate `world.comm.enabled` (default OFF). Disabled ⇒
+        no transmission verbs, no passive diffusion, no meme prompt line / menu
+        entry / event (the EM-251/EM-252 surfaces gate on this) — byte-identical
+        pre-Wave-O behavior (the em161 golden)."""
+        return bool(self._comm_param("enabled", False))
+
     def _needs_param(self, name: str, default: Any) -> Any:
         """EM-229 — defensive accessor for the `world.needs` config block
         (NeedsParams dataclass OR dict OR absent — EM-155 conventions, like
