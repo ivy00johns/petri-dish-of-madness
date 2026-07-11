@@ -10,6 +10,13 @@
  * no host hardcoded). CozyWorld resolves the id→url and renders one SurfaceDecal
  * per building that has a decal, at the building's own lot spot.
  *
+ * EM-302b: the plane no longer sits at a FIXED z=1.06 (which buried it inside
+ * deep GLBs like the theater, z-fought shallow ones, and floated in front of
+ * the dock) — decalLayout.decalPlacement resolves the SAME GLB the Structure
+ * renderer picked (kind+id) and places the plane at that model's MEASURED
+ * front face + a surface-normal epsilon, shrinking/lowering the canvas on
+ * short models so the mural stays on the facade instead of hovering over it.
+ *
  * UNLIKE PlazaBanner there is NO procedural fallback: a facade with no decal
  * simply renders nothing (CozyWorld skips it), and a decal that is still
  * streaming OR 404s falls back to `null` (an invisible plane) so the facade stays
@@ -21,8 +28,11 @@
  * governs DOM/CSS only). This component sets none; the texture map IS the color.
  */
 
+import { useMemo } from 'react';
 import { useTexture } from '@react-three/drei';
+import type { Building } from '../../types';
 import { ModelBoundary } from './ModelBoundary';
+import { DECAL_SIZE, decalPlacement, type DecalPlacement } from './decalLayout';
 
 interface SurfaceDecalProps {
   /** World position of the building the decal is painted on (its lot spot). */
@@ -30,28 +40,29 @@ interface SurfaceDecalProps {
   z: number;
   /** The painted image's RELATIVE url (`/assets/images/<id>.png`). */
   url: string;
+  /** The painted building — drives the measured facade placement (EM-302b). */
+  building: Pick<Building, 'id' | 'kind' | 'status'>;
 }
 
-// Decal geometry — a modest canvas on the structure's front (+z) facade. The
-// Structure body footprint is ~2.0 wide with its face near z≈1.0; we sit the
-// plane just in front (z past the face) at torso height so it reads as painted
-// ON the wall without z-fighting the box behind it.
-const DECAL_SIZE: [number, number] = [1.5, 1.1];
-const DECAL_Y = 1.35;
-const DECAL_Z = 1.06;
-
 /** The painted artwork, textured onto the facade plane (suspends / may 404). */
-function TexturedDecal({ url }: { url: string }) {
+function TexturedDecal({ url, placement }: { url: string; placement: DecalPlacement }) {
   const map = useTexture(url);
   return (
-    <mesh position={[0, DECAL_Y, DECAL_Z]}>
+    <mesh
+      position={[0, placement.y, placement.z]}
+      scale={[placement.scale, placement.scale, 1]}
+    >
       <planeGeometry args={DECAL_SIZE} />
       <meshToonMaterial map={map} />
     </mesh>
   );
 }
 
-export function SurfaceDecal({ x, z, url }: SurfaceDecalProps) {
+export function SurfaceDecal({ x, z, url, building }: SurfaceDecalProps) {
+  const placement = useMemo(
+    () => decalPlacement(building),
+    [building.id, building.kind, building.status], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   return (
     <group position={[x, 0, z]}>
       {/* key={url}: the boundary latches `failed` forever once a texture 404s
@@ -61,7 +72,7 @@ export function SurfaceDecal({ x, z, url }: SurfaceDecalProps) {
           PlazaBanner keyed-remount idiom). A null fallback keeps the facade
           clean while streaming / on failure. */}
       <ModelBoundary key={url} fallback={null}>
-        <TexturedDecal url={url} />
+        <TexturedDecal url={url} placement={placement} />
       </ModelBoundary>
     </group>
   );

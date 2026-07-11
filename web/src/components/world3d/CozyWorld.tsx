@@ -913,11 +913,18 @@ function Scene({
       {/* EM-298: agent-authored facade decals — the mural/sign/graffiti agents
           painted onto a building (world.surface_decals). One textured plane per
           building that has a decal, at that building's own lot spot; a missing/
-          streaming/404 texture renders nothing (clean facade). */}
+          streaming/404 texture renders nothing (clean facade). EM-302b: the
+          building drives the measured facade placement (decalLayout). */}
       {buildingSpots.map(({ building, x, z }) => {
         const url = decalsBySurface.get(building.id);
         return url ? (
-          <SurfaceDecal key={`decal-${building.id}`} x={x} z={z} url={url} />
+          <SurfaceDecal
+            key={`decal-${building.id}`}
+            x={x}
+            z={z}
+            url={url}
+            building={building}
+          />
         ) : null;
       })}
 
