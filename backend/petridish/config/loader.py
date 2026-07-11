@@ -1008,6 +1008,41 @@ class CommunicationParams:
 
 
 @dataclass
+class WarParams:
+    """EM-256/EM-257 — Organized-violence tunables (config `world.war`, Wave O
+    War track). The engine reads this block via its defensive `_war_param`
+    accessor with IDENTICAL defaults (the CrimeParams/_crime_param convention),
+    so a world.yaml WITHOUT the `war` block behaves exactly like these values.
+    Like comm this block HAS an `enabled` flag defaulting FALSE: grievance
+    bookkeeping, the advance_war round boundary, and the declare_war /
+    peace_treaty governance lane all gate on it, so a default world accrues no
+    grievance, opens no war, emits no new prompt line / menu entry / event, and
+    stays byte-identical (the em161 golden + EM-155).
+
+      enabled               — master gate for the whole war layer.
+      casus_belli_threshold — directional faction grievance needed before a
+                              declare_war proposal may open (EM-257).
+      grievance_per_act     — base grievance a cross-faction crime feeds the
+                              victim's faction (the notoriety_base analog).
+      grievance_per_witness — extra grievance per co-located witness (word
+                              spreads — the notoriety_per_extra_witness analog).
+      grievance_decay       — per-round cool-off applied by advance_war
+                              (entries that reach 0 are dropped).
+      reparations_base      — default reparations a peace_treaty proposal
+                              carries when the proposer names no amount.
+      war_notoriety         — notoriety stamped on the EXILED loser leader
+                              when a peace treaty settles a war (EM-257).
+    """
+    enabled: bool = False
+    casus_belli_threshold: int = 50
+    grievance_per_act: int = 6
+    grievance_per_witness: int = 2
+    grievance_decay: int = 1
+    reparations_base: int = 25
+    war_notoriety: int = 10
+
+
+@dataclass
 class NeedsParams:
     """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
     — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
@@ -1615,6 +1650,11 @@ class WorldParams:
     # snapshot byte-identical. The caps (held_meme_cap / letter_cap) also bound
     # the defensive snapshot-restore path, mirroring memory.soul_cap.
     comm: CommunicationParams = field(default_factory=CommunicationParams)
+    # EM-256/EM-257 — Organized violence (Wave O War track). Additive with a
+    # DEFAULT-OFF `enabled`, so a world.yaml without the `war` block accrues no
+    # grievance, opens no war, surfaces no war governance, and keeps the em161
+    # golden + every pre-EM-256 snapshot byte-identical.
+    war: WarParams = field(default_factory=WarParams)
     # EM-229 — three-needs psychology tunables. Additive with engine-matching
     # defaults; the decay is always-on but the prompt surfacing is salience-gated
     # so a world.yaml without the `needs` block keeps the em161 golden + restores
@@ -2475,6 +2515,32 @@ def _parse_comm(raw: dict | None) -> CommunicationParams:
     )
 
 
+def _parse_war(raw: dict | None) -> WarParams:
+    """Parse the optional `world.war` block (EM-256/EM-257).
+    Absent/empty/malformed -> engine-matching defaults (enabled stays FALSE, the
+    inert Wave-O default). Each key falls back to its default individually (a
+    malformed value never breaks the block). Mirrors `_parse_comm`."""
+    if not isinstance(raw, dict):
+        return WarParams()
+    d = WarParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return WarParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        casus_belli_threshold=_int("casus_belli_threshold", d.casus_belli_threshold),
+        grievance_per_act=_int("grievance_per_act", d.grievance_per_act),
+        grievance_per_witness=_int("grievance_per_witness", d.grievance_per_witness),
+        grievance_decay=_int("grievance_decay", d.grievance_decay),
+        reparations_base=_int("reparations_base", d.reparations_base),
+        war_notoriety=_int("war_notoriety", d.war_notoriety),
+    )
+
+
 def _parse_needs(raw: dict | None) -> NeedsParams:
     """Parse the optional `world.needs` block (EM-229).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back to
@@ -2922,6 +2988,7 @@ def _parse_world(
         relationships=_parse_relationships(w.get("relationships")),
         crime=_parse_crime(w.get("crime")),
         comm=_parse_comm(w.get("comm")),
+        war=_parse_war(w.get("war")),
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),

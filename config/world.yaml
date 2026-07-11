@@ -185,6 +185,21 @@ world:
     camp_min_shared: 2        # shared memes that bind a culture-camp edge
     camp_min_size: 3          # minimum members for a culture camp
 
+  # EM-256/EM-257 — organized violence (Wave O War track). DEFAULT OFF: with
+  # enabled false the grievance ledger, the advance_war round boundary, and the
+  # declare_war/peace_treaty governance lane are fully inert — no prompt line,
+  # no menu entry, no event, byte-identical pre-Wave-O (EM-155 + the em161
+  # golden). Absent ⇒ engine defaults (these same values). MUST stay in sync
+  # with the WarParams mirror in backend/petridish/config/loader.py.
+  war:
+    enabled: false            # master gate for the whole war layer
+    casus_belli_threshold: 50 # faction grievance needed before declare_war opens
+    grievance_per_act: 6      # base grievance a cross-faction crime feeds the victim's faction
+    grievance_per_witness: 2  # extra grievance per co-located witness (word spreads)
+    grievance_decay: 1        # per-round cool-off (advance_war; 0 entries drop)
+    reparations_base: 25      # default peace_treaty reparations when unspecified
+    war_notoriety: 10         # notoriety stamped on the exiled loser leader
+
   # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
   # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
   # every agent (floats 0..100, default 100). They decay every turn at these
