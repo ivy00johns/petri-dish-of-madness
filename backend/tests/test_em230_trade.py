@@ -248,6 +248,25 @@ def test_accept_skill_trade_rejected_when_teacher_cannot_teach_and_nothing_moves
     assert b.skill_level("building") == 1         # no level moved
 
 
+def test_accept_skill_trade_rejected_when_gap_too_narrow_and_nothing_moves():
+    # ATOMICITY vs the EM-272 no-op gate: a teacher only ONE level ahead has
+    # nothing to give (the bounded step caps the student one below the teacher,
+    # exactly where they already sit), so action_teach_skill would reject the
+    # lesson. The accept pre-check must mirror that gate (t >= s+2) — otherwise
+    # the credit arms settle, the discarded teach failure is swallowed, and the
+    # buyer pays for nothing.
+    a = _agent(id="a", name="Ann", credits=20, skills={"building": 2})
+    b = _agent(id="b", name="Bea", credits=30, skills={"building": 1})
+    w = _world([a, b], params=_skilled_params())
+    w.action_offer_trade(a, b, {"skill": "building"}, {"credits": 10})
+    ok, reason, _ = w.action_accept_trade(b)
+    assert not ok
+    assert a.credits == 20 and b.credits == 30   # no credits moved
+    assert b.skill_level("building") == 1         # no level moved (was a no-op)
+    # The offer stays parked (a rejected accept never consumes it).
+    assert w.pending_trade_offers.get("b") is not None
+
+
 def test_accept_skill_trade_rejected_when_pair_drifted_apart_no_partial_swap():
     # A skill arm needs the pair co-located AT SETTLE TIME. If they drift apart
     # after the offer is parked, the credit arm must NOT settle alone — the whole
