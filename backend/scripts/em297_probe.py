@@ -99,10 +99,14 @@ SANITY_PROMPT = 'Reply with exactly this JSON object and nothing else: {"ok": tr
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CallBudget:
-    """Enforces the 40-call hard cap and the >=6 s inter-call gap."""
+    """Enforces the 40-call hard cap and the >=6 s inter-call gap.
+
+    The documented MAX_CALLS cap is a ceiling: a larger max_calls (e.g. via
+    --max-calls) is clamped down to it. Lowering is always allowed.
+    """
 
     def __init__(self, max_calls: int = MAX_CALLS, sleep_s: float = SLEEP_S):
-        self.max_calls = max_calls
+        self.max_calls = min(max_calls, MAX_CALLS)
         self.sleep_s = sleep_s
         self.used = 0
         self._last_call_at: float | None = None
@@ -215,6 +219,10 @@ def call_with_discipline(
             return {"http_status": None, "error": f"client timeout after {HTTP_TIMEOUT:.0f}s"}
         except httpx.ConnectError as exc:
             return {"http_status": None, "error": f"connect error: {exc}", "unreachable": True}
+        except httpx.TransportError as exc:
+            # ReadError, RemoteProtocolError, etc. — encode like the cases
+            # above so one flaky socket never crashes the whole grid.
+            return {"http_status": None, "error": f"transport error: {type(exc).__name__}: {exc}"}
 
     first = attempt(json_mode=True)
     ok = first.get("http_status") == 200 and first.get("content")
@@ -498,7 +506,8 @@ def main() -> int:
         "--max-calls",
         type=int,
         default=MAX_CALLS,
-        help="hard cap on HTTP calls for THIS run (keep run totals <= 40)",
+        help="hard cap on HTTP calls for THIS run (lowering-only; values above "
+        f"{MAX_CALLS} are clamped to {MAX_CALLS})",
     )
     args = ap.parse_args()
 
