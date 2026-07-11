@@ -4093,6 +4093,7 @@ class World:
         scope: str | None = None, policy: str | None = None,
         zone_id: str | None = None, hint: str | None = None,
         density_cap: Any = None,
+        war_id: str | None = None, reparations: Any = None,
     ) -> tuple[bool, str, RuleState | None]:
         # EM-108 — only AgentState actors are location-bound; god paths
         # (enqueue_admit_agent / post_*_as_god) never come through here.
@@ -4120,13 +4121,22 @@ class World:
         # payload and ratifies on a 70% supermajority (like demolish — see
         # _evaluate_rule). The passing vote re-anchors the town center in
         # _on_rule_activated; the 3-D world re-orbits on the agents' chosen heart.
+        # EM-257 — declare_war / peace_treaty: the war governance lane. Modelled
+        # on trial (one-shot payload-carrying acts reusing the vote tally with
+        # ZERO new tally code) but decided by a FACTION-SCOPED 70% electorate
+        # (the one invasive change — see _evaluate_rule). Both stay in this set
+        # unconditionally (the set_zone_rule convention: the world method is
+        # never flag-gated); their per-effect validation below rejects them
+        # while war is disabled, and the runtime gate/menu never offer them
+        # then, so a peacetime world is byte-identical.
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
                          "name_town", "demolish", "promote_image", "trial",
                          "amend_constitution", "relocate_center",
                          "demolish_road", "set_car_policy",  # EM-244 (S3a)
                          "adopt_master_plan",  # EM-245 (S3b)
-                         "set_zone_rule"}  # EM-265 (SB)
+                         "set_zone_rule",  # EM-265 (SB)
+                         "declare_war", "peace_treaty"}  # EM-257 (Wave O war)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -4303,6 +4313,89 @@ class World:
                 return False, (f"set_zone_rule requires a real current zone id "
                                f"(got {zone_id!r})"), None
             payload = {"zone_id": zone_id, "hint": hint, "density_cap": cap}
+        # EM-257 — declare_war carries {aggressor, target, aims,
+        # grievance_snapshot} on the payload. The aggressor is ALWAYS the
+        # proposer's own faction (a faction declares its own wars); the target
+        # arrives on the generic `target` arg as a faction id OR name (the
+        # trial defendant-resolution recipe — agents see names, not ids).
+        # Validate BEFORE a vote opens (the demolish convention): war must be
+        # enabled, the proposer factioned, the target a real OTHER faction the
+        # aggressor holds a casus belli against (grievance past the threshold
+        # — the EM-256 read seam), and the pair not already at war. aims = the
+        # proposal text (the WarState cap, 200 chars). grievance_snapshot
+        # freezes the heat AT PROPOSAL TIME for the record/feed — decay while
+        # the vote runs never rewrites the stated cause.
+        if effect == "declare_war":
+            if not self.war_enabled():
+                return False, "war is not waged in this town (war disabled)", None
+            aggressor_f = self.faction_of(agent.id)
+            if aggressor_f is None:
+                return False, ("declare_war requires you to belong to a "
+                               "faction — a war is declared BY a circle, "
+                               "not a lone agent"), None
+            target = str(target or "").strip()
+            target_id = target if target in self.factions else None
+            if target_id is None and target:
+                wanted = target.lower()
+                target_id = next(
+                    (fid for fid in sorted(self.factions)
+                     if str(self.factions[fid].get("name", "")).strip().lower()
+                     == wanted),
+                    None)
+            if target_id is None:
+                return False, (f"declare_war requires a real faction as "
+                               f"target (got {target!r})"), None
+            if target_id == aggressor_f["id"]:
+                return False, "a faction cannot declare war on itself", None
+            if self.active_war_between(aggressor_f["id"], target_id) is not None:
+                return False, (f"you are already at war with "
+                               f"{self.factions[target_id].get('name', target_id)}"), None
+            grievance = self.grievance_between(aggressor_f["id"], target_id)
+            threshold = int(self._war_param("casus_belli_threshold", 50))
+            if grievance < threshold:
+                return False, (f"no casus belli: your circle's grievance "
+                               f"against them is {grievance}, below the "
+                               f"threshold of {threshold}"), None
+            payload = {"aggressor": aggressor_f["id"], "target": target_id,
+                       "aims": str(text or "").strip()[:200],
+                       "grievance_snapshot": grievance}
+        # EM-257 — peace_treaty carries {war_id, reparations} on the payload,
+        # plus faction_id = the PROPOSER's faction pinned at proposal time (it
+        # scopes the electorate AND names the conceding side, robust against
+        # the proposer drifting out of the faction mid-vote). The war id may
+        # arrive on the explicit `war_id` kwarg or the generic `target` (the
+        # demolish target/building_id convention). Suing for peace CONCEDES:
+        # the proposing faction is the treaty's loser — it pays the
+        # reparations and its leader is exiled (see _on_rule_activated).
+        # reparations: blank/absent ⇒ war.reparations_base; else an int >= 0.
+        if effect == "peace_treaty":
+            if not self.war_enabled():
+                return False, "war is not waged in this town (war disabled)", None
+            suing_f = self.faction_of(agent.id)
+            if suing_f is None:
+                return False, ("peace_treaty requires you to belong to a "
+                               "faction — peace is sued for BY a belligerent "
+                               "circle"), None
+            wid = str(war_id or target or "").strip()
+            war = self.wars.get(wid)
+            if war is None or war.status != "active":
+                return False, (f"peace_treaty requires the id of an ACTIVE "
+                               f"war (got {wid!r})"), None
+            if suing_f["id"] not in war.belligerents:
+                return False, "your faction is not a belligerent in that war", None
+            amount = int(self._war_param("reparations_base", 25))
+            if reparations is not None and str(reparations).strip() != "":
+                try:
+                    amount = int(reparations)
+                except (TypeError, ValueError):
+                    return False, (f"peace_treaty reparations must be a "
+                                   f"non-negative integer "
+                                   f"(got {reparations!r})"), None
+                if amount < 0:
+                    return False, (f"peace_treaty reparations must be >= 0 "
+                                   f"(got {amount})"), None
+            payload = {"war_id": wid, "reparations": amount,
+                       "faction_id": suing_f["id"]}
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -4357,6 +4450,22 @@ class World:
                     return False, (f"a zone-rule vote for {payload.get('zone_id')!r} "
                                    f"is already open"), None
                 continue
+            # EM-257 — declare_war is scoped per (aggressor, target) pair (two
+            # DIFFERENT feuds may have open declarations at once; the same pair
+            # may not be double-proposed) — mirrors demolish-per-target.
+            if effect == "declare_war":
+                if ((rule.payload or {}).get("aggressor") == payload.get("aggressor")
+                        and (rule.payload or {}).get("target") == payload.get("target")):
+                    return False, ("a war declaration against that faction "
+                                   "is already open"), None
+                continue
+            # EM-257 — peace_treaty is scoped per WAR_ID (two different wars may
+            # have open treaty votes at once; the same war may not be double-sued).
+            if effect == "peace_treaty":
+                if (rule.payload or {}).get("war_id") == payload.get("war_id"):
+                    return False, (f"a peace vote for {payload.get('war_id')!r} "
+                                   f"is already open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -4375,7 +4484,8 @@ class World:
                               "amend_constitution", "relocate_center",
                               "demolish_road", "set_car_policy",  # EM-244 (S3a) — one-shot acts
                               "adopt_master_plan",  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
-                              "set_zone_rule") else None  # EM-265 (SB) — one-shot per-zone act
+                              "set_zone_rule",  # EM-265 (SB) — one-shot per-zone act
+                              "declare_war", "peace_treaty") else None  # EM-257 — one-shot acts per pair/war
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
         # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
@@ -4447,7 +4557,14 @@ class World:
                                            "demolish",
                                            "demolish_road", "set_car_policy",  # EM-244 (S3a)
                                            "adopt_master_plan",  # EM-245 (S3b)
-                                           "set_zone_rule") else None  # EM-265 (SB)
+                                           "set_zone_rule",  # EM-265 (SB)
+                                           # EM-257 — one-shot acts (per pair /
+                                           # per war). Without this exclusion a
+                                           # SECOND war's declaration would be
+                                           # "renewed" against the first and
+                                           # never applied — no war would open.
+                                           "declare_war",
+                                           "peace_treaty") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -4588,6 +4705,129 @@ class World:
                 "text": f"{defendant.name} is led to jail for {sentence} ticks.",
                 "payload": {"until_tick": defendant.crime_status_until_tick},
             })
+            return
+        # EM-257 — declare_war: a passing faction-scoped 70% vote OPENS the war
+        # (World.open_war mints the seeded WarState — EM-256). A belligerent
+        # that dissolved mid-vote, or a pair that somehow got a war opened in
+        # the meantime, is a silent no-op (the vote still applied) — the
+        # demolish vanished-target convention. The war_declared event parks in
+        # the SAME outbox name_town/demolish/trial use (drained + emitted by
+        # the loop's _flush_spawn_events); actor_id anchors on the aggressor's
+        # lowest member (the EM-141 grievance_accrued recipe).
+        if rule.effect == "declare_war":
+            rule.applied = True
+            spec = rule.payload or {}
+            aggr = str(spec.get("aggressor") or "")
+            target = str(spec.get("target") or "")
+            if aggr not in self.factions or target not in self.factions:
+                return
+            if self.active_war_between(aggr, target) is not None:
+                return
+            war = self.open_war(aggr, target, str(spec.get("aims") or ""))
+            aggr_name = str(self.factions[aggr].get("name", "")) or aggr
+            target_name = str(self.factions[target].get("name", "")) or target
+            members = [str(m) for m in self.factions[aggr].get("members", [])]
+            anchor = min(members) if members else ""
+            aims_tail = f" — \"{_truncate(war.aims, 60)}\"" if war.aims else ""
+            self.pending_spawn_events.append(self._faction_event(
+                "war_declared", anchor,
+                f"⚔ {aggr_name} declares WAR on {target_name}{aims_tail}!",
+                {"war_id": war.id, "aggressor": aggr, "target": target,
+                 "aims": war.aims,
+                 "grievance_snapshot": int(spec.get("grievance_snapshot", 0) or 0),
+                 "proposal_id": rule.id},
+            ))
+            return
+        # EM-257 — peace_treaty: the SUING faction's passing 70% vote settles
+        # the war ON CONCESSION TERMS — suing for peace is capitulation. The
+        # loser (the proposing faction, pinned as payload faction_id) pays the
+        # reparations and its derived leader takes the fall: crime_status set
+        # to the (previously declared-but-unused) `exiled`, war_notoriety
+        # stamped on. Reparations clone the trial_fine split at group scope:
+        # the amount is collected from the loser's living members in sorted-id
+        # order (each pays what it can — the min(credits, fine) confiscation),
+        # then split EVENLY across the winner's distinct living members
+        # (share = pot // n, remainder dropped — a sink, exactly like the
+        # trial's restitution). A signed peace also SETTLES the pair's
+        # grievance ledger in both directions, so the same heat cannot
+        # instantly re-open the same war. A war that already settled/vanished
+        # is a silent no-op (the vote still applied). Events (peace_signed,
+        # then exiled) park in the SAME outbox as trial's verdict pair.
+        if rule.effect == "peace_treaty":
+            rule.applied = True
+            spec = rule.payload or {}
+            war = self.wars.get(str(spec.get("war_id") or ""))
+            if war is None or war.status != "active":
+                return
+            loser = str(spec.get("faction_id") or "")
+            if loser not in war.belligerents:
+                return
+            winner = next(b for b in war.belligerents if b != loser)
+            war.status = "settled"
+            try:
+                amount = int(spec.get(
+                    "reparations", self._war_param("reparations_base", 25)))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                amount = int(self._war_param("reparations_base", 25))
+            amount = max(0, amount)
+            loser_rec = self.factions.get(loser) or {}
+            winner_rec = self.factions.get(winner) or {}
+            loser_name = str(loser_rec.get("name", "")) or loser
+            winner_name = str(winner_rec.get("name", "")) or winner
+            # Collect: loser's living members pay in sorted-id order until the
+            # amount is met (each capped by its credits — min(credits, fine)).
+            pot = 0
+            remaining = amount
+            for mid in sorted(str(m) for m in loser_rec.get("members", [])):
+                if remaining <= 0:
+                    break
+                payer = self.agents.get(mid)
+                if payer is None or not payer.alive:
+                    continue
+                paid = min(payer.credits, remaining)
+                if paid > 0:
+                    payer.credits -= paid
+                    pot += paid
+                    remaining -= paid
+            # Split: evenly across the winner's distinct living members
+            # (remainder dropped — the trial restitution arithmetic).
+            recipients = []
+            for mid in sorted(str(m) for m in winner_rec.get("members", [])):
+                a = self.agents.get(mid)
+                if a is not None and a.alive and mid not in recipients:
+                    recipients.append(mid)
+            if recipients and pot > 0:
+                share = pot // len(recipients)
+                if share > 0:
+                    for mid in recipients:
+                        self.agents[mid].credits += share
+            # A signed peace settles the ledger — both directions.
+            self.grievances.pop(self._grievance_key(loser, winner), None)
+            self.grievances.pop(self._grievance_key(winner, loser), None)
+            loser_members = [str(m) for m in loser_rec.get("members", [])]
+            anchor = min(loser_members) if loser_members else ""
+            self.pending_spawn_events.append(self._faction_event(
+                "peace_signed", anchor,
+                f"🕊 {loser_name} sues for peace with {winner_name} — the war "
+                f"is over ({pot} credits in reparations).",
+                {"war_id": war.id, "loser": loser, "winner": winner,
+                 "reparations": pot, "proposal_id": rule.id},
+            ))
+            # Exile — the conceding circle's derived leader (lowest-id living
+            # member, the Wave-E founding convention) takes the fall.
+            leader = self._faction_leader(loser)
+            if leader is not None:
+                leader.crime_status = "exiled"
+                leader.notoriety = min(
+                    100,
+                    leader.notoriety + int(self._war_param("war_notoriety", 10)))
+                self.pending_spawn_events.append(self._faction_event(
+                    "exiled", leader.id,
+                    f"⚔ {leader.name} is EXILED — the price of "
+                    f"{loser_name}'s defeat.",
+                    {"war_id": war.id, "faction_id": loser,
+                     "notoriety": leader.notoriety, "proposal_id": rule.id},
+                ))
             return
         # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
         # article in the living constitution. The op + payload were validated at
@@ -4929,6 +5169,36 @@ class World:
             return None
 
         living_ids = {a.id for a in living}
+
+        # EM-257 — THE one invasive change of the war governance lane: a
+        # FACTION-SCOPED electorate. declare_war / peace_treaty are decided by
+        # the PROPOSING faction alone (its declaration of war / its suit for
+        # peace — the town at large holds no veto over a circle's own
+        # belligerence), so `living` is substituted with the faction's living
+        # roster before the vote arithmetic runs. The payload pins the faction
+        # id at proposal time (aggressor for declare_war, faction_id for
+        # peace_treaty) so the electorate is stable even if the proposer
+        # drifts out of the faction mid-vote. Outsiders MAY cast votes (the
+        # vote path is untouched — zero new tally code) but they are simply
+        # not counted, exactly as dead voters already aren't. An electorate
+        # that dissolved mid-vote (the faction recompute dropped it) REJECTS
+        # the proposal — the question is moot, and a zombie proposal must not
+        # linger forever. The ceil(0.7*n) supermajority arithmetic below is
+        # UNTOUCHED — these effects simply route into it (the demolish lane)
+        # with the substituted electorate.
+        if rule.effect in ("declare_war", "peace_treaty"):
+            _p = rule.payload or {}
+            _fid = str(_p.get("aggressor") or _p.get("faction_id") or "")
+            _roster = {
+                str(m)
+                for m in (self.factions.get(_fid) or {}).get("members", [])
+            }
+            living = [a for a in living if a.id in _roster]
+            living_count = len(living)
+            if living_count == 0:
+                return "rejected"
+            living_ids = {a.id for a in living}
+
         yes_votes = sum(1 for aid, v in rule.votes.items() if v and aid in living_ids)
         no_votes = sum(1 for aid, v in rule.votes.items() if not v and aid in living_ids)
 
@@ -4947,7 +5217,8 @@ class World:
         if rule.effect in ("demolish", "amend_constitution", "relocate_center",
                            "demolish_road", "set_car_policy",  # EM-244 (S3a) — irreversible/structural → 0.7
                            "adopt_master_plan",  # EM-245 (S3b) — structural city morph → 0.7
-                           "set_zone_rule"):  # EM-265 (SB) — structural city policy → 0.7
+                           "set_zone_rule",  # EM-265 (SB) — structural city policy → 0.7
+                           "declare_war", "peace_treaty"):  # EM-257 — faction-scoped 70% (electorate substituted above)
             if rule.effect == "amend_constitution":
                 try:
                     frac = float(self._constitution_param("ratify_threshold", 0.7))
