@@ -2,6 +2,7 @@
 verbatim, and round-trip byte-identically (the factions pattern)."""
 # CRITICAL: petridish.engine.world must be imported BEFORE
 # petridish.agents.runtime to avoid the engine↔agents circular import.
+import copy
 import json
 
 from petridish.engine.world import World, AgentState, PlaceState
@@ -41,10 +42,13 @@ def test_snapshot_round_trip_is_byte_identical():
     w.action_found_settlement(w.agents["a"], "River Camp")
     w.action_found_settlement(w.agents["b"], "")     # seeded pool name
     snap = w.to_snapshot({})
-    restored = World.from_snapshot(snap, params=_params())
+    restored = World.from_snapshot(copy.deepcopy(snap), params=_params())
     again = restored.to_snapshot({})
-    assert json.dumps(snap["settlements"], sort_keys=True) == \
-        json.dumps(again["settlements"], sort_keys=True)
+    # Real persistence dumps WITHOUT sort_keys (loop._save_snapshot), so the
+    # raw dump — key order AND settlement-id order included — is the byte
+    # contract. sort_keys=True would mask an id-order regression (e.g. a
+    # from_snapshot that re-sorts settlements) that changes the stored bytes.
+    assert json.dumps(snap["settlements"]) == json.dumps(again["settlements"])
 
 
 def test_restore_preserves_identity_and_membership():
