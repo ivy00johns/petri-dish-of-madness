@@ -65,32 +65,18 @@ _LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home la
 # stays the true last resort). Total adapter calls per chat(): home + 1 backup.
 _AUTO_BACKUP_PROFILE = "auto"
 
-# ── EM-226 — auto-backup circuit breaker (storm fast-fail) ────────────────────
+# ── EM-226 — auto-backup breaker (observability only) ─────────────────────────
 # During a rate-limit STORM the proxy's own `auto` router returns "All models
-# exhausted" (or times out): there is no healthy upstream left to bounce to.
-# Re-issuing the EM-205 backup every turn then DOUBLES the doomed POST volume
-# (home + auto, both failing) and keeps the upstream rate windows pinned,
-# slowing their refill. The breaker trips on ANY `auto` failure (the auto lane
-# IS the whole-pool health router — if IT can't serve, nothing can) and
-# FAST-FAILS subsequent would-be-backups: the home error propagates straight to
-# the runtime's EM-173 idle fallback with NO 2nd network call. The agents never
-# go quiet (they act on idle); we just stop banging on a door the proxy said is
-# locked, so the upstream windows can refill. Recovery is automatic and
-# COUNTER-based (no clock reads — counters only, like EM-177): every Nth skipped
-# backup PROBES the auto lane once; a probe SUCCESS closes the breaker and
-# normal per-turn backup resumes. Cadence is in *skipped backups*, not seconds,
-# to stay deterministic + testable; at this cadence a sustained storm makes one
-# auto POST per 3 failing turns instead of one per turn (~67% fewer doomed calls)
-# while probing for recovery within ~2 turns.
-#
-# EM-268 note: the live pool is rarely FULLY exhausted — the common case is a few
-# home lanes hard rate-limited (429) while healthy lanes (and `auto` itself) still
-# serve. The old default of 8 turned each transient `auto` blip into a 7-of-8-turn
-# idle BLACKOUT for every rate-limited-home agent, reading as "every other message
-# failed" even though `auto` had capacity two turns later. 3 (the value the
-# breaker tests already exercise) recovers ~2.7x faster and matches tested
-# behavior; test_default_probe_every_is_sane only requires >= 2.
-_AUTO_BREAKER_PROBE_EVERY = 3  # skipped backups between recovery probes
+# exhausted": there is no healthy upstream left to bounce to. The breaker
+# ORIGINALLY fast-failed subsequent would-be-backups (with a counter-based
+# recovery-probe cadence) to stop doubling doomed POSTs — but that MUTED agents
+# to the idle fallback while `auto` was usually still serving, and silently
+# killed the EM-177 recovery probe, violating the never-mute rule. The
+# fast-fail/cadence was RESCINDED 2026-07-06: the backup ALWAYS fires, and the
+# open/closed bit survives purely as observability (auto_backup_health / the
+# storm log lines). EM-304 removed the rescinded design's vestigial state
+# (`_auto_breaker_skips` / `_auto_breaker_probe_every` and the constructor
+# knob) — the bit below is all that remains.
 
 # ── Adaptive Lane Routing (spec 2026-07-07 §9 — Phase P1) ─────────────────────
 # When `adaptive_routing.enabled`, a pinned lane's failure walks the lane
@@ -196,7 +182,6 @@ class Router:
         lane_failover: Any = None,
         overflow_lane: Any = None,
         adaptive_routing: Any = None,
-        auto_breaker_probe_every: int = _AUTO_BREAKER_PROBE_EVERY,
     ):
         self._profiles: dict[str, ModelProfile] = {p.name: p for p in profiles}
         self._adapters: dict[str, Provider] = {
@@ -301,16 +286,14 @@ class Router:
             _AUTO_BACKUP_PROFILE if _AUTO_BACKUP_PROFILE in self._adapters else None
         )
 
-        # ── EM-226 — auto-backup circuit breaker (storm fast-fail) ─────────────
-        # In-memory only; cleared by clear_cache() on world reset so a prior
-        # run's storm never suppresses a fresh run's backups. `_open` is the
-        # breaker state (auto believed unable to serve the whole pool); `_skips`
-        # counts fast-failed would-be-backups since it opened / since the last
-        # probe (drives the recovery-probe cadence). The cadence is clamped to
-        # >=1 so a degenerate config can't divide by zero.
+        # ── EM-226 — auto-backup breaker (observability only) ──────────────────
+        # In-memory only; cleared by clear_cache() on world reset. `_open` means
+        # the proxy `auto` lane's LAST backup attempt failed (the whole-pool
+        # storm signal); it flips closed the moment `auto` serves again. The
+        # 2026-07-06 rescind removed the fast-fail/probe-cadence — nothing is
+        # ever gated on this bit — and EM-304 removed that design's vestigial
+        # `_skips`/`_probe_every` state.
         self._auto_breaker_open: bool = False
-        self._auto_breaker_skips: int = 0
-        self._auto_breaker_probe_every: int = max(1, int(auto_breaker_probe_every))
 
         # ── EM-222 — the dedicated embedding lane ──────────────────────────────
         # The adapter for the profile literally named `embed`, resolved once.
@@ -591,8 +574,8 @@ class Router:
         (2026-07-06): the backup now ALWAYS fires (muting an agent while `auto`
         was usually still serving violated the never-mute rule). The breaker
         state is OBSERVABILITY-ONLY: any `auto` failure marks it open, a served
-        backup marks it closed — it no longer skips or gates a single call. The
-        vestigial breaker fields are slated for removal in EM-304."""
+        backup marks it closed — it no longer skips or gates a single call. Its
+        vestigial fast-fail fields were removed in EM-304."""
         self.note_lane_error(home)
         backup = self._auto_backup
         if backup is None or backup == home:
@@ -630,15 +613,13 @@ class Router:
         """Mark the breaker open after an `auto` failure (the whole-pool storm
         signal). OBSERVABILITY-ONLY since the 2026-07-06 fast-fail rescind — it
         no longer gates any call; the backup always fires. Logs ONLY the open
-        transition. `_auto_breaker_skips` is reset to keep the /api/lanes
-        snapshot tidy (a vestigial field, EM-304)."""
+        transition."""
         if not self._auto_breaker_open:
             log.info(
                 "EM-226 auto-backup breaker OPEN — proxy `auto` last failed "
                 "(observability only; the backup still fires every turn)",
             )
         self._auto_breaker_open = True
-        self._auto_breaker_skips = 0
 
     def _reset_auto_breaker(self) -> None:
         """Close the breaker after a successful backup (the pool serves again).
@@ -646,20 +627,15 @@ class Router:
         if self._auto_breaker_open:
             log.info("EM-226 auto-backup breaker CLOSED — proxy pool serving again")
         self._auto_breaker_open = False
-        self._auto_breaker_skips = 0
 
     def auto_backup_health(self) -> dict:
-        """EM-226 — circuit-breaker snapshot for /api/lanes + tests:
-        {open, skips, probe_every}. OBSERVABILITY-ONLY since the 2026-07-06
-        fast-fail rescind: `open` ⇒ the proxy `auto` lane's LAST attempt failed
-        (it is no longer fast-failed — the backup still fires every turn); it
-        flips closed the next time `auto` serves. Absent an `auto` lane the
-        breaker never trips. `skips`/`probe_every` are vestigial (EM-304)."""
-        return {
-            "open": self._auto_breaker_open,
-            "skips": self._auto_breaker_skips,
-            "probe_every": self._auto_breaker_probe_every,
-        }
+        """EM-226 — breaker snapshot for tests/observability: {open}.
+        OBSERVABILITY-ONLY since the 2026-07-06 fast-fail rescind: `open` ⇒ the
+        proxy `auto` lane's LAST attempt failed (it is no longer fast-failed —
+        the backup still fires every turn); it flips closed the next time
+        `auto` serves. Absent an `auto` lane the breaker never trips. The
+        vestigial `skips`/`probe_every` keys were removed in EM-304."""
+        return {"open": self._auto_breaker_open}
 
     # ── Adaptive Lane Routing (spec 2026-07-07 — P1) ───────────────────────────
 
@@ -1013,7 +989,6 @@ class Router:
         # EM-226 — the storm breaker is per-run state too: a prior run's storm
         # must never suppress a fresh run's backups.
         self._auto_breaker_open = False
-        self._auto_breaker_skips = 0
 
     def cache_stats(self) -> dict:
         """Wave D2 / EM-162 — additive decision-cache bookkeeping:
