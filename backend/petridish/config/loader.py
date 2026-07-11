@@ -1176,6 +1176,30 @@ class BoostParams:
 
 
 @dataclass
+class SettlementParams:
+    """EM-269 (F2) — agent-founded settlements (config `world.settlements`).
+
+    A lightweight Settlement primitive (name + world-frame center + loose
+    membership) that agents found anywhere via the reflex verb
+    `found_settlement`. Settlements are cluster SEEDS for EM-268 free placement
+    — a member's builds anchor to their settlement's center instead of the city
+    origin — never containers that gate building. `len(settlements) > 1` IS
+    emergent multi-city (EM-109's heavier data model stays parked).
+
+    DEFAULT OFF: a world.yaml without the `settlements` block — and every
+    pre-EM-269 snapshot — is byte-identical (no menu line, no prompt line, no
+    snapshot key, placement anchors to the city origin exactly as F1 shipped).
+    The engine reads this block via the defensive `_block_get` accessor with
+    IDENTICAL defaults.
+
+      enabled — offer `found_settlement`, apply settlement-anchored placement,
+                and surface the one-line settlement perception. false ⇒ complete
+                no-op (byte-identical pre-EM-269).
+    """
+    enabled: bool = False
+
+
+@dataclass
 class ConstitutionParams:
     """EM-236 — Living constitution (config `world.constitution`). An amendable,
     ARTICLED foundational document layered over today's flat rule list.
@@ -1602,6 +1626,11 @@ class WorldParams:
     # byte-identical pre-EM-235 + the em161 golden + an untouched scheduler. A
     # positive cost turns the buy-an-extra-turn economy on (the live config sets one).
     boost: BoostParams = field(default_factory=BoostParams)
+    # EM-269 (F2) — agent-founded settlements. Additive, DEFAULT OFF, so a
+    # world.yaml without the `settlements` block is byte-identical to pre-EM-269
+    # (no menu line, no prompt line, no snapshot key, F1 city-origin anchoring).
+    # `enabled: true` turns on found_settlement + settlement-anchored placement.
+    settlements: SettlementParams = field(default_factory=SettlementParams)
     # EM-236 — living constitution. Additive with engine-matching defaults; the
     # constitution is empty until an amendment RATIFIES (a governance act), so a
     # world.yaml without the `constitution` block — and every pre-EM-236 snapshot —
@@ -2580,6 +2609,16 @@ def _parse_boost(raw: dict | None) -> BoostParams:
     )
 
 
+def _parse_settlements(raw: dict | None) -> SettlementParams:
+    """Parse the optional `world.settlements` block (EM-269 F2).
+    Absent/empty/malformed -> engine-matching defaults (enabled False ⇒ a
+    complete no-op, byte-identical pre-EM-269). A malformed `enabled` value
+    coerces truthily like the other block flags — never a crash."""
+    if not isinstance(raw, dict):
+        return SettlementParams()
+    return SettlementParams(enabled=bool(raw.get("enabled", False)))
+
+
 def _parse_constitution(raw: dict | None) -> ConstitutionParams:
     """Parse the optional `world.constitution` block (EM-236).
     Absent/empty/malformed -> engine-matching defaults (the un-amended world is a
@@ -2844,6 +2883,7 @@ def _parse_world(
         cooperation=_parse_cooperation(w.get("cooperation")),
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
         boost=_parse_boost(w.get("boost")),
+        settlements=_parse_settlements(w.get("settlements")),
         constitution=_parse_constitution(w.get("constitution")),
         governance=_parse_governance(w.get("governance")),
         children=_parse_children(w.get("children")),
