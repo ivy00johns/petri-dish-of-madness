@@ -215,6 +215,14 @@ class RelationshipState:
     # Wave E / EM-113 — tick of the last TYPE change. ADDITIVE: pre-E snapshots
     # lack the key and restore 0, so serialization stays backward-compatible.
     since_tick: int = 0
+    # EM-249 — the multi-city down-payment (Wave O). Every relationship edge is
+    # "local" (same-city) today; a future multi-city wave (EM-117) stamps
+    # cross-city edges with an opaque non-local scope instead of RESHAPING the
+    # edge. ADDITIVE with default "local": serialized ONLY when non-default
+    # (AgentState.to_dict) and restored to "local" when absent (from_snapshot),
+    # so every pre-EM-249 snapshot — and every single-city world — keeps the
+    # exact prior dict shape (the EM-155 byte-identical guarantee).
+    scope: str = "local"
 
 
 # Wave L / EM-223 — recursive+reactive plan bounds (the believable-routine layer).
@@ -448,8 +456,11 @@ class AgentState:
             "beliefs_count": len(self.beliefs),
             "relationships": {
                 # Wave E / EM-113 — since_tick is additive (absent ⇒ 0 on restore).
+                # EM-249 — scope rides ONLY when non-default ("local" is omitted),
+                # so every single-city edge keeps the exact prior dict shape.
                 aid: {"type": r.type, "trust": r.trust,
-                      "interactions": r.interactions, "since_tick": r.since_tick}
+                      "interactions": r.interactions, "since_tick": r.since_tick,
+                      **({"scope": r.scope} if r.scope != "local" else {})}
                 for aid, r in self.relationships.items()
             },
         }
@@ -6456,6 +6467,9 @@ class World:
                     trust=rel.trust,
                     interactions=rel.interactions,
                     since_tick=rel.since_tick,
+                    # EM-249 — an inherited edge keeps its scope (all "local"
+                    # today, so this is a no-op until multi-city lands).
+                    scope=rel.scope,
                 )
                 copied_relationships += 1
         # Mark the corpse settled so a re-walk of the death path (defensive
@@ -8327,6 +8341,9 @@ class World:
                     interactions=_int(_block_get(r, "interactions", 0)),
                     # Wave E / EM-113 — additive; pre-E snapshots restore 0.
                     since_tick=_int(_block_get(r, "since_tick", 0)),
+                    # EM-249 — additive; pre-EM-249 snapshots (and every local
+                    # edge, omitted at default) restore "local".
+                    scope=str(_block_get(r, "scope", "local") or "local"),
                 )
                 for aid, r in (d.get("relationships") or {}).items()
             }
