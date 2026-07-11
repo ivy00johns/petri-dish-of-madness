@@ -5715,9 +5715,19 @@ class World:
         image_id = minted["image_id"]
         # Record the mapping with insertion-order recency: pop-then-set moves a
         # re-painted surface to the most-recent (tail) position before capping.
-        self.surface_decals.pop(target, None)
+        prev_image_id = self.surface_decals.pop(target, None)
         self.surface_decals[target] = image_id
         self._evict_decals_over_cap(target)
+        if prev_image_id and prev_image_id != image_id:
+            # EM-302c — annotate the just-parked fetch (transient outbox, NEVER
+            # serialized — off the replay surface) with the mural this repaint
+            # replaced, so the loop can keep the existing artwork when every
+            # provider lane misses (e.g. the paid backstop is over its per-run
+            # cap). Sim state and events are byte-identical with or without it.
+            for entry in reversed(self.pending_image_fetches):
+                if entry.get("image_id") == image_id:
+                    entry["prev_image_id"] = prev_image_id
+                    break
         return {
             "kind": "image_posted",
             "actor_id": agent.id,

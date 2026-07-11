@@ -13,6 +13,14 @@ Contract (contracts/wave-i-atelier.md §1):
     unbilled key 429s and the chain ends with None). Free-first billing law: the
     paid lane only fires after every free lane misses. Override via
     EM_IMAGEGEN_GEMINI_MODEL.
+  - EM-302c — the paid lane carries a HARD per-run generation cap
+    (`world.image_gen.paid_backstop_max_per_run`, default 25 ≈ $1/run): once
+    `max_per_run` paid images have been generated this run, the Gemini member
+    returns None WITHOUT any network call, so the (otherwise zero-cost)
+    create_image/paint_surface reflex path can never grow an unbounded cost
+    tail. Free lanes are never capped. 0 disables the paid lane outright;
+    negative = unlimited (the pre-EM-302 behavior). The counter lives on the
+    provider instance; the loop rebuilds the provider per run.
   - Mock lane = EM_IMAGEGEN_MOCK: returns a fixed minimal valid PNG, no network.
   - Selection precedence (build_provider):
       EM_IMAGEGEN_MOCK
@@ -66,6 +74,10 @@ _GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 _GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-image"
+# EM-302c — the default HARD cap on paid backstop generations per run (~$1/run
+# at the flat ~$0.039/image). Mirrored by ImageGenParams.paid_backstop_max_per_run
+# (config/loader.py) — keep the two in sync.
+_PAID_BACKSTOP_DEFAULT_MAX = 25
 # The FreeLLMAPI proxy's OpenAI-compatible image endpoint lives at {base}/images/
 # generations, where {base} already ends in /v1 (parity with the chat lanes).
 _FREELLMAPI_DEFAULT_BASE = "http://localhost:3001/v1"
@@ -252,20 +264,56 @@ class GeminiImageProvider:
     Model defaults to gemini-2.5-flash-image (override via EM_IMAGEGEN_GEMINI_MODEL).
     Note: that model is PAID — its free-tier request quota is 0, so an unbilled key
     returns HTTP 429. Free-first billing law: this member sits at the END of the
-    chain so it only fires after every free lane misses."""
+    chain so it only fires after every free lane misses.
 
-    def __init__(self, api_key: str, model: str | None = None) -> None:
+    EM-302c — `max_per_run` is the HARD cap on paid GENERATIONS this provider
+    instance will serve (None ⇒ the module default; 0 ⇒ paid lane disabled;
+    negative ⇒ unlimited, the pre-EM-302 behavior). Over the cap, fetch_png
+    returns None with ZERO network calls — the chain's free results stand and
+    the caller's keep-the-existing-image fallback takes over. A slot is
+    reserved BEFORE the awaited call (check+increment is atomic on the
+    single-threaded event loop), so concurrent fetches can never overshoot the
+    cap; a miss releases its slot (a failed attempt doesn't bill)."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str | None = None,
+        max_per_run: int | None = None,
+    ) -> None:
         self._api_key = api_key
         self._model = (
             model
             or os.environ.get("EM_IMAGEGEN_GEMINI_MODEL")
             or _GEMINI_DEFAULT_MODEL
         ).strip()
+        self._max_per_run = (
+            _PAID_BACKSTOP_DEFAULT_MAX if max_per_run is None else int(max_per_run)
+        )
+        self._paid_served = 0
 
     async def fetch_png(self, prompt: str) -> bytes | None:
         prompt = str(prompt or "").strip()
         if not prompt:
             return None
+        capped = self._max_per_run >= 0
+        if capped:
+            if self._paid_served >= self._max_per_run:
+                log.debug(
+                    "gemini paid backstop over its per-run cap (%d) — skipping",
+                    self._max_per_run)
+                return None
+            self._paid_served += 1  # reserve before the await (never overshoot)
+        png: bytes | None = None
+        try:
+            png = await self._generate(prompt)
+        finally:
+            if capped and png is None:
+                self._paid_served -= 1  # a miss doesn't bill — release the slot
+        return png
+
+    async def _generate(self, prompt: str) -> bytes | None:
+        """The uncapped network call (the pre-EM-302 fetch_png body)."""
         url = _GEMINI_URL.format(model=self._model)
         # Key travels in the x-goog-api-key header, never the URL query string
         # (parity with the text GeminiAdapter — query params leak into logs).
@@ -356,14 +404,18 @@ class ChainImageProvider:
         return None
 
 
-def build_provider() -> ImageProvider:
+def build_provider(paid_backstop_max_per_run: int | None = None) -> ImageProvider:
     """Factory honoring the selection precedence (§1):
     EM_IMAGEGEN_MOCK > chain[FreeLLMAPI?, Pollinations, Cloudflare?, Gemini?].
 
     The chain is built from whichever keys/env are present; Pollinations is always
     present (keyless), ahead of the paid backstops — free-first billing law puts
     paid Gemini LAST, so a no-key deployment is exactly the prior default.
-    A single-member chain returns that provider directly (no wrapper)."""
+    A single-member chain returns that provider directly (no wrapper).
+
+    EM-302c — `paid_backstop_max_per_run` is threaded into the paid Gemini
+    member as its hard per-run generation cap (None ⇒ the module default 25;
+    0 ⇒ paid disabled; negative ⇒ unlimited). Free lanes are never capped."""
     if os.environ.get("EM_IMAGEGEN_MOCK"):
         return MockImageProvider()
 
@@ -387,6 +439,7 @@ def build_provider() -> ImageProvider:
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
-        chain.append(GeminiImageProvider(gemini_key))  # PAID — last backstop
+        chain.append(GeminiImageProvider(  # PAID — last backstop, hard-capped
+            gemini_key, max_per_run=paid_backstop_max_per_run))
 
     return chain[0] if len(chain) == 1 else ChainImageProvider(chain)
