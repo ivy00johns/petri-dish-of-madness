@@ -292,7 +292,9 @@ class _AttributedFakeRouter:
         self.noted: list[dict] = []
 
     async def chat_attributed(self, profile_name, messages, *,
-                              max_tokens, temperature):
+                              max_tokens, temperature, require_json=False):
+        # EM-306 — the agent turn is strict-JSON and must say so.
+        assert require_json is True
         return '{"action": "idle", "args": {}}', {
             "routed_via": "routed/sub",
             "usage": {"input_tokens": 7, "output_tokens": 3,

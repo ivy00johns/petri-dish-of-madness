@@ -648,9 +648,14 @@ class AnimalRuntime:
         chat_attr = getattr(self.router, "chat_attributed", None)
         try:
             if callable(chat_attr):
+                # EM-306 — an animal turn is a strict-JSON turn too (the reply
+                # is parsed + schema-validated): mark it require_json so the
+                # adaptive bounce loop skips reasoning-tagged lanes (the
+                # #77/#78 lesson; mirrors the agent runtime).
                 text, attribution = await chat_attr(
                     profile_name, messages,
                     max_tokens=max_tokens, temperature=temperature,
+                    require_json=True,
                 )
             else:
                 text = await self.router.chat(

@@ -5327,9 +5327,18 @@ class AgentRuntime:
             attribution: dict | None = None
             chat_attr = getattr(self.router, "chat_attributed", None)
             if callable(chat_attr):
+                # EM-306 — an agent turn is a STRICT-JSON turn (the reply is
+                # parsed by _extract_first_json and schema-validated; anything
+                # else dead-turns the agent), so mark it require_json: the
+                # adaptive bounce loop then skips reasoning-tagged lanes,
+                # whose chain-of-thought truncates before the object appears
+                # (the #77/#78 lesson). Only the real router offers
+                # chat_attributed, so the kwarg is safe here; the duck-typed
+                # fallback below keeps the historical chat() signature.
                 chat_coro = chat_attr(
                     profile_name, messages,
                     max_tokens=max_tokens, temperature=temperature,
+                    require_json=True,
                 )
             else:
                 chat_coro = self.router.chat(
