@@ -1,0 +1,1165 @@
+{
+  "probe": "EM-297 model-divergence probe",
+  "date": "2026-07-11",
+  "base_url": "http://localhost:3001/v1",
+  "temperature": 0.8,
+  "max_tokens": 1024,
+  "system_prompt": "You are the town architect. You design buildings as strict JSON recipes.\n\nFields (ALL required; values MUST come from the allowed lists):\n- \"footprint\": one of ['tiny', 'small', 'medium', 'large', 'grand']  (ground-plan size)\n- \"floors\": integer 1-8\n- \"roof\": one of ['flat', 'shed', 'gable', 'hip', 'dome', 'spire']\n- \"material\": one of ['wood', 'timber_frame', 'brick', 'stone', 'marble', 'plaster', 'mud_brick']  (main wall material)\n- \"palette\": one of ['warm', 'cool', 'earthy', 'pastel', 'vivid', 'muted', 'monochrome']  (colour mood)\n- \"window_density\": one of ['none', 'sparse', 'regular', 'dense']\n- \"trim\": one of ['none', 'simple', 'ornate', 'gilded']  (decorative detail level)\n\nExample (a blacksmith's forge):\n{\"footprint\": \"small\", \"floors\": 1, \"roof\": \"shed\", \"material\": \"brick\", \"palette\": \"muted\", \"window_density\": \"sparse\", \"trim\": \"none\"}\n\nDesign a recipe that FITS the requested building. Respond with a single JSON object only — no prose, no markdown, no extra keys.",
+  "example_recipe": {
+    "footprint": "small",
+    "floors": 1,
+    "roof": "shed",
+    "material": "brick",
+    "palette": "muted",
+    "window_density": "sparse",
+    "trim": "none"
+  },
+  "models": {
+    "gemini-flash": "gemini-3.5-flash",
+    "qwen-next": "qwen/qwen3-next-80b-a3b-instruct:free",
+    "groq-llama": "llama-3.3-70b-versatile",
+    "gpt-oss-120b": "gpt-oss-120b"
+  },
+  "prompts": {
+    "bakery": "Design a building recipe for: the village bakery, warm bread smell at dawn, run by a cheerful family.",
+    "temple": "Design a building recipe for: the grand temple at the heart of the city, where processions end.",
+    "watchtower": "Design a building recipe for: a watchtower on the city wall, scanning the horizon for raiders.",
+    "fisherman_hut": "Design a building recipe for: a weathered fisherman's hut by the docks, nets drying outside.",
+    "wealthy_manor": "Design a building recipe for: a wealthy merchant's manor on the hill, built to impress rivals.",
+    "slum_shack": "Design a building recipe for: a cramped shack in the poorest alley of the slums.",
+    "bathhouse": "Design a building recipe for: the public bathhouse, steamy and social, tiled and echoing.",
+    "library": "Design a building recipe for: the scholars' library, quiet halls stacked with scrolls."
+  },
+  "results": [
+    {
+      "http_status": 200,
+      "latency_ms": 3373.2,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"medium\", \"floors\": 2, \"roof\": \"gable\", \"material\": \"timber_frame\", \"palette\": \"warm\", \"window_density\": \"regular\", \"trim\": \"simple\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 326,
+        "completion_tokens": 48,
+        "total_tokens": 1023
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "bakery",
+      "recipe": {
+        "footprint": "medium",
+        "floors": 2,
+        "roof": "gable",
+        "material": "timber_frame",
+        "palette": "warm",
+        "window_density": "regular",
+        "trim": "simple"
+      },
+      "strict_valid": true,
+      "example_field_matches": 0
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 4666.6,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"grand\", \"floors\": 4, \"roof\": \"dome\", \"material\": \"marble\", \"palette\": \"warm\", \"window_density\": \"regular\", \"trim\": \"gilded\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 324,
+        "completion_tokens": 47,
+        "total_tokens": 1183
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "temple",
+      "recipe": {
+        "footprint": "grand",
+        "floors": 4,
+        "roof": "dome",
+        "material": "marble",
+        "palette": "warm",
+        "window_density": "regular",
+        "trim": "gilded"
+      },
+      "strict_valid": true,
+      "example_field_matches": 0
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 4304.5,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"small\", \"floors\": 4, \"roof\": \"flat\", \"material\": \"stone\", \"palette\": \"muted\", \"window_density\": \"sparse\", \"trim\": \"simple\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 325,
+        "completion_tokens": 46,
+        "total_tokens": 1047
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "watchtower",
+      "recipe": {
+        "footprint": "small",
+        "floors": 4,
+        "roof": "flat",
+        "material": "stone",
+        "palette": "muted",
+        "window_density": "sparse",
+        "trim": "simple"
+      },
+      "strict_valid": true,
+      "example_field_matches": 3
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 3195.7,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"small\", \"floors\": 1, \"roof\": \"shed\", \"material\": \"wood\", \"palette\": \"muted\", \"window_density\": \"sparse\", \"trim\": \"none\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 324,
+        "completion_tokens": 46,
+        "total_tokens": 1023
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "fisherman_hut",
+      "recipe": {
+        "footprint": "small",
+        "floors": 1,
+        "roof": "shed",
+        "material": "wood",
+        "palette": "muted",
+        "window_density": "sparse",
+        "trim": "none"
+      },
+      "strict_valid": true,
+      "example_field_matches": 6
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 3878.1,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"grand\", \"floors\": 4, \"roof\": \"hip\", \"material\": \"marble\", \"palette\": \"cool\", \"window_density\": \"dense\", \"trim\": \"gilded\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 325,
+        "completion_tokens": 47,
+        "total_tokens": 1246
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "wealthy_manor",
+      "recipe": {
+        "footprint": "grand",
+        "floors": 4,
+        "roof": "hip",
+        "material": "marble",
+        "palette": "cool",
+        "window_density": "dense",
+        "trim": "gilded"
+      },
+      "strict_valid": true,
+      "example_field_matches": 0
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 3239.7,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"tiny\", \"floors\": 1, \"roof\": \"flat\", \"material\": \"wood\", \"palette\": \"muted\", \"window_density\": \"sparse\", \"trim\": \"none\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 321,
+        "completion_tokens": 46,
+        "total_tokens": 1101
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "slum_shack",
+      "recipe": {
+        "footprint": "tiny",
+        "floors": 1,
+        "roof": "flat",
+        "material": "wood",
+        "palette": "muted",
+        "window_density": "sparse",
+        "trim": "none"
+      },
+      "strict_valid": true,
+      "example_field_matches": 4
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 4941.1,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"large\", \"floors\": 2, \"roof\": \"dome\", \"material\": \"marble\", \"palette\": \"cool\", \"window_density\": \"regular\", \"trim\": \"ornate\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 324,
+        "completion_tokens": 47,
+        "total_tokens": 1259
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "bathhouse",
+      "recipe": {
+        "footprint": "large",
+        "floors": 2,
+        "roof": "dome",
+        "material": "marble",
+        "palette": "cool",
+        "window_density": "regular",
+        "trim": "ornate"
+      },
+      "strict_valid": true,
+      "example_field_matches": 0
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 4290.1,
+      "routed_via": "google/gemini-3.5-flash",
+      "json_mode": true,
+      "content": "{\"footprint\": \"grand\", \"floors\": 3, \"roof\": \"dome\", \"material\": \"stone\", \"palette\": \"earthy\", \"window_density\": \"regular\", \"trim\": \"ornate\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 321,
+        "completion_tokens": 48,
+        "total_tokens": 1205
+      },
+      "body_model": "gemini-3.5-flash",
+      "attempts": 1,
+      "model_label": "gemini-flash",
+      "model_id": "gemini-3.5-flash",
+      "prompt_key": "library",
+      "recipe": {
+        "footprint": "grand",
+        "floors": 3,
+        "roof": "dome",
+        "material": "stone",
+        "palette": "earthy",
+        "window_density": "regular",
+        "trim": "ornate"
+      },
+      "strict_valid": true,
+      "example_field_matches": 0
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 80.7,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}"
+      },
+      "model_label": "qwen-next",
+      "model_id": "qwen/qwen3-next-80b-a3b-instruct:free",
+      "prompt_key": "bakery",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 42.7,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}"
+      },
+      "model_label": "qwen-next",
+      "model_id": "qwen/qwen3-next-80b-a3b-instruct:free",
+      "prompt_key": "temple",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 1398.7,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}"
+      },
+      "model_label": "qwen-next",
+      "model_id": "qwen/qwen3-next-80b-a3b-instruct:free",
+      "prompt_key": "watchtower",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 89.4,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}"
+      },
+      "model_label": "groq-llama",
+      "model_id": "llama-3.3-70b-versatile",
+      "prompt_key": "bakery",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 26.4,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}"
+      },
+      "model_label": "groq-llama",
+      "model_id": "llama-3.3-70b-versatile",
+      "prompt_key": "temple",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 35520.8,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}"
+      },
+      "model_label": "groq-llama",
+      "model_id": "llama-3.3-70b-versatile",
+      "prompt_key": "watchtower",
+      "strict_valid": false
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 12602.3,
+      "routed_via": "cerebras/gpt-oss-120b",
+      "json_mode": true,
+      "content": "{\"footprint\":\"small\",\"floors\":1,\"roof\":\"gable\",\"material\":\"brick\",\"palette\":\"warm\",\"window_density\":\"regular\",\"trim\":\"simple\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "total_tokens": 685,
+        "completion_tokens": 290,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0,
+          "reasoning_tokens": 248
+        },
+        "prompt_tokens": 395,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "body_model": "gpt-oss-120b",
+      "attempts": 1,
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "bakery",
+      "recipe": {
+        "footprint": "small",
+        "floors": 1,
+        "roof": "gable",
+        "material": "brick",
+        "palette": "warm",
+        "window_density": "regular",
+        "trim": "simple"
+      },
+      "strict_valid": true,
+      "example_field_matches": 3
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 3135.2,
+      "routed_via": "cerebras/gpt-oss-120b",
+      "json_mode": true,
+      "content": "{\"footprint\":\"grand\",\"floors\":2,\"roof\":\"dome\",\"material\":\"marble\",\"palette\":\"warm\",\"window_density\":\"sparse\",\"trim\":\"gilded\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "total_tokens": 765,
+        "completion_tokens": 371,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0,
+          "reasoning_tokens": 324
+        },
+        "prompt_tokens": 394,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        }
+      },
+      "body_model": "gpt-oss-120b",
+      "attempts": 1,
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "temple",
+      "recipe": {
+        "footprint": "grand",
+        "floors": 2,
+        "roof": "dome",
+        "material": "marble",
+        "palette": "warm",
+        "window_density": "sparse",
+        "trim": "gilded"
+      },
+      "strict_valid": true,
+      "example_field_matches": 1
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 12437.3,
+      "routed_via": "cerebras/gpt-oss-120b",
+      "json_mode": true,
+      "content": "{\"footprint\":\"tiny\",\"floors\":4,\"roof\":\"spire\",\"material\":\"stone\",\"palette\":\"earthy\",\"window_density\":\"sparse\",\"trim\":\"none\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "total_tokens": 630,
+        "completion_tokens": 236,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0,
+          "reasoning_tokens": 192
+        },
+        "prompt_tokens": 394,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        }
+      },
+      "body_model": "gpt-oss-120b",
+      "attempts": 1,
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "watchtower",
+      "recipe": {
+        "footprint": "tiny",
+        "floors": 4,
+        "roof": "spire",
+        "material": "stone",
+        "palette": "earthy",
+        "window_density": "sparse",
+        "trim": "none"
+      },
+      "strict_valid": true,
+      "example_field_matches": 2
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 682.7,
+      "routed_via": "cerebras/gpt-oss-120b",
+      "json_mode": true,
+      "content": "{\"footprint\":\"small\",\"floors\":1,\"roof\":\"shed\",\"material\":\"wood\",\"palette\":\"earthy\",\"window_density\":\"sparse\",\"trim\":\"none\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "total_tokens": 584,
+        "completion_tokens": 191,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0,
+          "reasoning_tokens": 147
+        },
+        "prompt_tokens": 393,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        }
+      },
+      "body_model": "gpt-oss-120b",
+      "attempts": 1,
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "fisherman_hut",
+      "recipe": {
+        "footprint": "small",
+        "floors": 1,
+        "roof": "shed",
+        "material": "wood",
+        "palette": "earthy",
+        "window_density": "sparse",
+        "trim": "none"
+      },
+      "strict_valid": true,
+      "example_field_matches": 5
+    },
+    {
+      "http_status": 200,
+      "latency_ms": 5771.2,
+      "routed_via": "cerebras/gpt-oss-120b",
+      "json_mode": true,
+      "content": "{\"footprint\":\"grand\",\"floors\":4,\"roof\":\"gable\",\"material\":\"marble\",\"palette\":\"vivid\",\"window_density\":\"dense\",\"trim\":\"gilded\"}",
+      "finish_reason": "stop",
+      "usage": {
+        "total_tokens": 585,
+        "completion_tokens": 192,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0,
+          "reasoning_tokens": 146
+        },
+        "prompt_tokens": 393,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "body_model": "gpt-oss-120b",
+      "attempts": 1,
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "wealthy_manor",
+      "recipe": {
+        "footprint": "grand",
+        "floors": 4,
+        "roof": "gable",
+        "material": "marble",
+        "palette": "vivid",
+        "window_density": "dense",
+        "trim": "gilded"
+      },
+      "strict_valid": true,
+      "example_field_matches": 0
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 15137.8,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: This operation was aborted\",\"type\":\"rate_limit_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}"
+      },
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "slum_shack",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 10273.4,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: fetch failed\",\"type\":\"rate_limit_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}"
+      },
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "bathhouse",
+      "strict_valid": false
+    },
+    {
+      "http_status": 429,
+      "latency_ms": 1669.6,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}"
+      },
+      "model_label": "gpt-oss-120b",
+      "model_id": "gpt-oss-120b",
+      "prompt_key": "library",
+      "strict_valid": false
+    }
+  ],
+  "sanity": {
+    "http_status": 200,
+    "latency_ms": 7040.3,
+    "routed_via": "google/gemini-3.5-flash",
+    "json_mode": true,
+    "content": "{\"footprint\": \"small\", \"floors\": 1, \"roof\": \"flat\", \"material\": \"stone\", \"palette\": \"monochrome\", \"window_density\": \"sparse",
+    "finish_reason": "length",
+    "usage": {
+      "prompt_tokens": 319,
+      "completion_tokens": 40,
+      "total_tokens": 1339
+    },
+    "body_model": "gemini-3.5-flash",
+    "attempts": 1
+  },
+  "calls_used": 32,
+  "scoring": {
+    "per_model": {
+      "gemini-flash": {
+        "prompts_sent": 8,
+        "answered": 8,
+        "schema_valid": 8,
+        "schema_valid_rate": 1.0,
+        "echoes_of_example": 1,
+        "hard_echoes": 0,
+        "echo_rate": 0.125,
+        "all_default_recipes": 0
+      },
+      "qwen-next": {
+        "prompts_sent": 3,
+        "answered": 0,
+        "schema_valid": 0,
+        "schema_valid_rate": 0.0,
+        "echoes_of_example": 0,
+        "hard_echoes": 0,
+        "echo_rate": null,
+        "all_default_recipes": 0
+      },
+      "groq-llama": {
+        "prompts_sent": 3,
+        "answered": 0,
+        "schema_valid": 0,
+        "schema_valid_rate": 0.0,
+        "echoes_of_example": 0,
+        "hard_echoes": 0,
+        "echo_rate": null,
+        "all_default_recipes": 0
+      },
+      "gpt-oss-120b": {
+        "prompts_sent": 8,
+        "answered": 5,
+        "schema_valid": 5,
+        "schema_valid_rate": 0.625,
+        "echoes_of_example": 0,
+        "hard_echoes": 0,
+        "echo_rate": 0.0,
+        "all_default_recipes": 0
+      }
+    },
+    "per_prompt_divergence": {
+      "bakery": {
+        "models_with_valid_recipe": 2,
+        "footprint": {
+          "values": {
+            "gemini-flash": "medium",
+            "gpt-oss-120b": "small"
+          },
+          "distinct": 2
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 2,
+            "gpt-oss-120b": 1
+          },
+          "distinct": 2
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "gable",
+            "gpt-oss-120b": "gable"
+          },
+          "distinct": 1
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "timber_frame",
+            "gpt-oss-120b": "brick"
+          },
+          "distinct": 2
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "warm",
+            "gpt-oss-120b": "warm"
+          },
+          "distinct": 1
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "regular",
+            "gpt-oss-120b": "regular"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "simple",
+            "gpt-oss-120b": "simple"
+          },
+          "distinct": 1
+        }
+      },
+      "bathhouse": {
+        "models_with_valid_recipe": 1,
+        "footprint": {
+          "values": {
+            "gemini-flash": "large"
+          },
+          "distinct": 1
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 2
+          },
+          "distinct": 1
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "dome"
+          },
+          "distinct": 1
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "marble"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "cool"
+          },
+          "distinct": 1
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "regular"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "ornate"
+          },
+          "distinct": 1
+        }
+      },
+      "fisherman_hut": {
+        "models_with_valid_recipe": 2,
+        "footprint": {
+          "values": {
+            "gemini-flash": "small",
+            "gpt-oss-120b": "small"
+          },
+          "distinct": 1
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 1,
+            "gpt-oss-120b": 1
+          },
+          "distinct": 1
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "shed",
+            "gpt-oss-120b": "shed"
+          },
+          "distinct": 1
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "wood",
+            "gpt-oss-120b": "wood"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "muted",
+            "gpt-oss-120b": "earthy"
+          },
+          "distinct": 2
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "sparse",
+            "gpt-oss-120b": "sparse"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "none",
+            "gpt-oss-120b": "none"
+          },
+          "distinct": 1
+        }
+      },
+      "library": {
+        "models_with_valid_recipe": 1,
+        "footprint": {
+          "values": {
+            "gemini-flash": "grand"
+          },
+          "distinct": 1
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 3
+          },
+          "distinct": 1
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "dome"
+          },
+          "distinct": 1
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "stone"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "earthy"
+          },
+          "distinct": 1
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "regular"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "ornate"
+          },
+          "distinct": 1
+        }
+      },
+      "slum_shack": {
+        "models_with_valid_recipe": 1,
+        "footprint": {
+          "values": {
+            "gemini-flash": "tiny"
+          },
+          "distinct": 1
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 1
+          },
+          "distinct": 1
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "flat"
+          },
+          "distinct": 1
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "wood"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "muted"
+          },
+          "distinct": 1
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "sparse"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "none"
+          },
+          "distinct": 1
+        }
+      },
+      "temple": {
+        "models_with_valid_recipe": 2,
+        "footprint": {
+          "values": {
+            "gemini-flash": "grand",
+            "gpt-oss-120b": "grand"
+          },
+          "distinct": 1
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 4,
+            "gpt-oss-120b": 2
+          },
+          "distinct": 2
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "dome",
+            "gpt-oss-120b": "dome"
+          },
+          "distinct": 1
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "marble",
+            "gpt-oss-120b": "marble"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "warm",
+            "gpt-oss-120b": "warm"
+          },
+          "distinct": 1
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "regular",
+            "gpt-oss-120b": "sparse"
+          },
+          "distinct": 2
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "gilded",
+            "gpt-oss-120b": "gilded"
+          },
+          "distinct": 1
+        }
+      },
+      "watchtower": {
+        "models_with_valid_recipe": 2,
+        "footprint": {
+          "values": {
+            "gemini-flash": "small",
+            "gpt-oss-120b": "tiny"
+          },
+          "distinct": 2
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 4,
+            "gpt-oss-120b": 4
+          },
+          "distinct": 1
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "flat",
+            "gpt-oss-120b": "spire"
+          },
+          "distinct": 2
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "stone",
+            "gpt-oss-120b": "stone"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "muted",
+            "gpt-oss-120b": "earthy"
+          },
+          "distinct": 2
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "sparse",
+            "gpt-oss-120b": "sparse"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "simple",
+            "gpt-oss-120b": "none"
+          },
+          "distinct": 2
+        }
+      },
+      "wealthy_manor": {
+        "models_with_valid_recipe": 2,
+        "footprint": {
+          "values": {
+            "gemini-flash": "grand",
+            "gpt-oss-120b": "grand"
+          },
+          "distinct": 1
+        },
+        "floors": {
+          "values": {
+            "gemini-flash": 4,
+            "gpt-oss-120b": 4
+          },
+          "distinct": 1
+        },
+        "roof": {
+          "values": {
+            "gemini-flash": "hip",
+            "gpt-oss-120b": "gable"
+          },
+          "distinct": 2
+        },
+        "material": {
+          "values": {
+            "gemini-flash": "marble",
+            "gpt-oss-120b": "marble"
+          },
+          "distinct": 1
+        },
+        "palette": {
+          "values": {
+            "gemini-flash": "cool",
+            "gpt-oss-120b": "vivid"
+          },
+          "distinct": 2
+        },
+        "window_density": {
+          "values": {
+            "gemini-flash": "dense",
+            "gpt-oss-120b": "dense"
+          },
+          "distinct": 1
+        },
+        "trim": {
+          "values": {
+            "gemini-flash": "gilded",
+            "gpt-oss-120b": "gilded"
+          },
+          "distinct": 1
+        }
+      }
+    },
+    "cross_model_divergence_by_field": {
+      "footprint": {
+        "mean_distinct_values_per_prompt": 1.4,
+        "pairwise_disagreement_rate": 0.4
+      },
+      "floors": {
+        "mean_distinct_values_per_prompt": 1.4,
+        "pairwise_disagreement_rate": 0.4
+      },
+      "roof": {
+        "mean_distinct_values_per_prompt": 1.4,
+        "pairwise_disagreement_rate": 0.4
+      },
+      "material": {
+        "mean_distinct_values_per_prompt": 1.2,
+        "pairwise_disagreement_rate": 0.2
+      },
+      "palette": {
+        "mean_distinct_values_per_prompt": 1.6,
+        "pairwise_disagreement_rate": 0.6
+      },
+      "window_density": {
+        "mean_distinct_values_per_prompt": 1.2,
+        "pairwise_disagreement_rate": 0.2
+      },
+      "trim": {
+        "mean_distinct_values_per_prompt": 1.2,
+        "pairwise_disagreement_rate": 0.2
+      }
+    },
+    "within_model_distinct_values": {
+      "gemini-flash": {
+        "footprint": 5,
+        "floors": 4,
+        "roof": 5,
+        "material": 4,
+        "palette": 4,
+        "window_density": 3,
+        "trim": 4
+      },
+      "qwen-next": null,
+      "groq-llama": null,
+      "gpt-oss-120b": {
+        "footprint": 3,
+        "floors": 3,
+        "roof": 4,
+        "material": 4,
+        "palette": 3,
+        "window_density": 3,
+        "trim": 3
+      }
+    },
+    "coherence": {
+      "watchtower": {
+        "expectation": "tall & narrow: floors >= 3 and footprint tiny/small",
+        "per_model": {
+          "gemini-flash": true,
+          "gpt-oss-120b": true
+        },
+        "pass_rate": 1.0
+      },
+      "temple": {
+        "expectation": "ornate/monumental: trim ornate/gilded or material stone/marble",
+        "per_model": {
+          "gemini-flash": true,
+          "gpt-oss-120b": true
+        },
+        "pass_rate": 1.0
+      },
+      "slum_shack": {
+        "expectation": "small & shabby: <=2 floors, tiny/small footprint, trim none/simple",
+        "per_model": {
+          "gemini-flash": true
+        },
+        "pass_rate": 1.0
+      },
+      "wealthy_manor": {
+        "expectation": "imposing: large/grand footprint, or >=2 floors with ornate/gilded trim",
+        "per_model": {
+          "gemini-flash": true,
+          "gpt-oss-120b": true
+        },
+        "pass_rate": 1.0
+      },
+      "fisherman_hut": {
+        "expectation": "modest: tiny/small footprint and <=2 floors",
+        "per_model": {
+          "gemini-flash": true,
+          "gpt-oss-120b": true
+        },
+        "pass_rate": 1.0
+      }
+    }
+  },
+  "supplement_attempts": {
+    "reason": "qwen-next and groq-llama lanes were skipped in the main run after persistent proxy-wide 429 windows ('All models exhausted'). Two supplemental single-model runs re-probed llama via the proxy's canonical id llama-3.3-70b (attempt 1 immediately after the main run, attempt 2 after a 3-minute cooldown). Both sanity calls 429'd on the same proxy-wide window, so no llama data was collected. 2 calls per attempt (sanity + one retry), grand total 36/40 calls.",
+    "attempt_2_record": {
+      "http_status": 429,
+      "latency_ms": 26.3,
+      "routed_via": null,
+      "json_mode": true,
+      "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}",
+      "attempts": 2,
+      "first_attempt_error": {
+        "http_status": 429,
+        "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}"
+      }
+    },
+    "models_tried": {
+      "llama-canonical": "llama-3.3-70b"
+    }
+  },
+  "calls_used_total": 36
+}
