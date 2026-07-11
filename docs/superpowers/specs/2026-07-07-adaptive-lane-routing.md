@@ -1,6 +1,6 @@
 # Spec — Adaptive Lane Routing (custom sorting list + dynamic discovery)
 
-> **Status:** design, ready to build. **Date:** 2026-07-07.
+> **Status:** P1 shipped (#83, 2026-07-07); go-live 2026-07-08; P2-P5 open. **Date:** 2026-07-07.
 > **Owner seam:** `backend/petridish/providers/router.py` + a new lane registry.
 > Supersedes the "delegate everything to `model: auto`" strategy (EM-205) as the
 > *primary* fallback; `auto` becomes one entry in the list, not the whole plan.
@@ -86,7 +86,7 @@ New `config/lanes.yaml` — the ONE place the user controls preference:
 ```yaml
 adaptive_routing:
   enabled: true               # false = today's behavior (pin -> auto), byte-identical
-  max_attempts: 3             # curated healthy lanes tried per turn before idle
+  max_attempts: 4             # W30 amendment: 3 curated + the reserved final `auto` slot
   per_attempt_timeout_s: 12   # reuse the EM-170 turn budget; no 86s doomed cascades
   refresh:
     discover_every_turns: 40  # counter-based (NO clock reads on the replay path)
@@ -152,6 +152,12 @@ Per turn, in `router.chat()` (when `adaptive_routing.enabled`):
    (health-sick) OR (capped/cooling) OR (ctx/out ceiling can't fit this request) OR
    (already tried this turn) OR (reasoning-tagged AND this is a strict-JSON turn — the #77 lesson).
 3. try up to `max_attempts` healthy lanes, each bounded by `per_attempt_timeout_s`.
+   **W30 amendment (2026-07-09):** the FINAL attempt slot is RESERVED for the terminal
+   `auto` backstop whenever it exists, wasn't already tried, and isn't itself sick —
+   curated lanes get `max_attempts - 1`. Without this, a bad rate window on the top
+   curated lanes exhausted the budget before `auto` (priority-last) was ever consulted,
+   reproducing the exact idle-fallback churn this spec exists to kill. Boosted token
+   hints are clamped to each lane's ceiling rather than excluding it (the #77 lesson).
 4. if all fail ⇒ EM-173 idle fallback (rare — only when the curated healthy set is genuinely dry).
 ```
 A turn can no longer take 86s (capped attempts × 12s), so 8-in-a-row can't stack into an

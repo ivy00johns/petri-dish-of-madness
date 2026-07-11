@@ -3499,6 +3499,12 @@ class World:
         building.status = "destroyed"
         building.health = 0
         building.updated_tick = self.tick
+        # EM-298 follow-up — a demolished building's painted facade would
+        # otherwise keep rendering as a decal floating over the rubble (the
+        # frontend draws one SurfaceDecal per buildingSpot regardless of
+        # status). Clear the mapping so the invariant (decals only exist for
+        # live surfaces) holds; deterministic (pure f(state)).
+        self.surface_decals.pop(building.id, None)
         return {
             "kind": "building_demolished",
             "actor_id": actor_id,
@@ -5304,6 +5310,11 @@ class World:
         building.updated_tick = self.tick
         if building.health <= 0:
             building.status = "destroyed"
+            # EM-298 follow-up — arson (human or animal) can also drive health
+            # to 0; clear any painted facade the same way _demolish_building
+            # does, so a mural never keeps rendering over rubble regardless of
+            # HOW the building was destroyed. Deterministic (pure f(state)).
+            self.surface_decals.pop(building.id, None)
         else:
             building.status = "damaged"
         return self._structure_state_changed_event(

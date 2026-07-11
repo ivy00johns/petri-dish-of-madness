@@ -32,12 +32,20 @@ function mk(id: string, extra: Partial<Building> = {}): Building {
 }
 
 describe('EM-268 F1 resolveBuildingPositions', () => {
+  it('go-live: FREE_PLACEMENT_ENABLED is shipped ON', () => {
+    // Lock-in for the EM-268 F1 go-live (PR #81): the module constant is the
+    // shipped production state. If this flips back, it must be a deliberate
+    // decision, not a silent regression.
+    expect(FREE_PLACEMENT_ENABLED).toBe(true);
+  });
+
   it('flag OFF ⇒ identical to assignBuildingLots (byte-identical)', () => {
-    const bs = [mk('bld_a', { position: [3, -2] })];   // position present but flag off
-    const viaWrapper = resolveBuildingPositions(plan, bs, centers);
+    const bs = [mk('bld_a', { position: [3, -2] })];   // position present but flag forced off
+    // Inject flag=false explicitly rather than reading the module constant —
+    // the constant is shipped true, so this exercises the OFF-parity path via
+    // the resolveBuildingPositions test seam instead.
+    const viaWrapper = resolveBuildingPositions(plan, bs, centers, false);
     const viaBase = assignBuildingLots(plan, bs, centers);
-    // Guard the invariant this test relies on:
-    expect(FREE_PLACEMENT_ENABLED).toBe(false);
     expect([...viaWrapper.entries()]).toEqual([...viaBase.entries()]);
   });
 
@@ -52,5 +60,12 @@ describe('EM-268 F1 resolveBuildingPositions', () => {
     const out = resolveBuildingPositions(plan, [b], centers, true);
     const base = assignBuildingLots(plan, [b], centers);
     expect(out.get('bld_a')).toEqual(base.get('bld_a'));
+  });
+
+  it('no forceFlag arg ⇒ defaults to the module constant (production behavior)', () => {
+    const b = mk('bld_a', { position: [1, 1] });
+    const viaDefault = resolveBuildingPositions(plan, [b], centers);
+    const viaExplicitOn = resolveBuildingPositions(plan, [b], centers, true);
+    expect([...viaDefault.entries()]).toEqual([...viaExplicitOn.entries()]);
   });
 });

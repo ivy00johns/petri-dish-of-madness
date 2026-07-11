@@ -6,15 +6,25 @@
 # first), skipping health-sick lanes, lanes whose output ceiling can't fit the
 # request, and reasoning-tagged lanes on strict-JSON turns — up to max_attempts
 # healthy lanes, each bounded by per_attempt_timeout_s, before the runtime's
-# idle fallback. `auto` is just the LAST free entry, not special-cased.
+# idle fallback.
+#
+# RESERVED BACKSTOP (W30): the terminal `auto` entry — the proxy's whole-pool
+# router — is GUARANTEED the final attempt slot: the curated lanes above it get
+# max_attempts-1 attempts and the last one is reserved for `auto`, unless it is
+# the pinned lane, was already tried, or is itself health-sick. Without the
+# reservation, an intermittent rate window that 429s the top curated lanes
+# (each still sub-threshold healthy) burned every attempt before `auto` was
+# ever consulted — the documented last resort was unreachable. Worst case is
+# max_attempts x per_attempt_timeout_s = 48s of wall clock, but 429s return
+# fast, so the realistic cascade stays far below the old 86s doom loops.
 #
 # DEFAULT enabled: false ⇒ byte-identical to today (pin → EM-205 `auto` backup).
 # Flip enabled: true to adopt the ordered bounce loop. Config is captured in
 # runs.config_json, so a run's routing order is pinned for fork/replay.
 
 adaptive_routing:
-  enabled: false               # false = today's pin→auto backup (byte-identical)
-  max_attempts: 3              # curated healthy lanes tried before idle fallback
+  enabled: true                # go-live 2026-07-08 — ordered health-aware bounce loop
+  max_attempts: 4              # 3 curated healthy lanes + the RESERVED `auto` slot
   per_attempt_timeout_s: 12    # per-lane wall-clock cap (no 86s doomed cascades)
   allow_paid: false            # $0-first: `free: false` lanes stay off unless true
 
@@ -24,10 +34,18 @@ adaptive_routing:
   #
   # priority order, best-headroom-first. matcher = source + model glob.
   # a glob `model: "*"` sweeps every remaining lane of that source.
+  # matcher globs run against each lane's ACTUAL model_id (profiles.yaml), NOT
+  # the profile name. The three specific entries below are verified to resolve:
+  #   gpt-oss-120b*    -> profile gpt-oss-120b  (model_id gpt-oss-120b)
+  #   *llama-3.3-70b*  -> profile groq-llama    (model_id llama-3.3-70b-versatile)
+  #   *qwen3-next-80b* -> profile qwen-next     (model_id qwen/qwen3-next-80b-a3b-instruct:free)
+  # Pre-2026-07-08 these were `gpt-oss-120b*` (no such profile — ghost) and bare
+  # `qwen3-next-80b*` (the id is prefixed `qwen/`, so it matched nothing); the
+  # curated priority silently collapsed to config-order with `auto` last.
   order:
-    - { source: freellmapi, model: "gpt-oss-120b*",   free: true }
-    - { source: freellmapi, model: "llama-3.3-70b*",  free: true }
-    - { source: freellmapi, model: "qwen3-next-80b*", free: true }
-    - { source: freellmapi, model: "*",               free: true }  # remaining free lanes
-    - { source: freellmapi, model: "auto" }                          # proxy picker — LAST free resort
-    - { source: anthropic,  model: "claude-sonnet-5", free: false }  # paid, opt-in, dead last
+    - { source: freellmapi, model: "gpt-oss-120b*",    free: true }   # healthy, clean JSON — #1 bounce target
+    - { source: freellmapi, model: "*llama-3.3-70b*",  free: true }
+    - { source: freellmapi, model: "*qwen3-next-80b*", free: true }
+    - { source: freellmapi, model: "*",                free: true }   # remaining free lanes
+    - { source: freellmapi, model: "auto" }                           # proxy picker — LAST free resort
+    - { source: anthropic,  model: "claude-sonnet-5",  free: false }  # paid, opt-in, dead last

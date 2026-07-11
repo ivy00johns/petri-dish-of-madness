@@ -1,7 +1,7 @@
 # PetriDishOfMadness — Start Here
 
 > The one place to land. If you're lost, read this first.
-> **Last updated:** 2026-06-24
+> **Last updated:** 2026-07-09
 
 A tiny, fast, cheap multi-agent world whose marquee feature is **per-agent model
 control** — drop different LLMs (Gemini-Flash, Groq-Llama, Cerebras-Qwen, Mistral,
@@ -19,6 +19,15 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 | **v3 art — Wave A** | Live-run correctness (humanized building names, build→repair redirect) + god-channel proclamations | ✅ Done |
 | **v3 art — Wave B** | "The city comes alive" — golden-hour HDRI + toon shading, instanced foliage/props, per-place-kind buildings | ✅ Done |
 | **v3 art — Wave C** | "A town, not a diorama" — real **CC0 GLB** buildings + animated villagers & critters, a 15-place district town, a real street network | ✅ Done |
+| **Wave M** (W23) | Cooperation economy + governance texture (skills/teach/trade, harm-surface finishers, living constitution) | ✅ Done |
+| **Wave N** (W24–W25) | Agent-controlled city layout — emergent road graph (`build_road`, demolish/car-policy votes, templates, procedural meshing, master-plan morphs) | ✅ Done — visual sign-off on `ROAD_MESH_ENABLED` deferred |
+| **Wave O** (W26) | Emergent society systems — belief/culture (memes), religion, organized war | open (EM-249–263) |
+| **Wave P** (W27) | Agent-controlled building layout (graph-derived zones) | Shipped dormant, then **superseded by F1/EM-268** (free placement); code stays on `main` behind default-off flags |
+| **W29** | Offline-review remediation — 25 findings (EM-272–296) from the 2026-07-01 deep review | ✅ Done — PR #74 |
+| **Wave Q** (W30) | World-authorship first slice — divergence probe (EM-297), agent-authored facades/murals (EM-298 ✅ PR #78), parametric building-recipe grammar keystone (EM-299) | EM-298 done; EM-297/299 open |
+| **F1 free-placement** (W28) | Retire graph-lots placement; deterministic free-coordinate organic building placement, build-anywhere restored | ✅ **Merged + ratified** — PR #81/#82; derive-on-load restore behavior ratified by user 2026-07-09 |
+| **Adaptive lane routing P1** | Custom sorting list + registry-owned bounce loop, replacing blind `auto` delegation | ✅ **Shipped PR #83 (2026-07-07); go-live flip 2026-07-08.** P2–P5 (discovery/refresh, 429 cooldown, direct-provider lanes, observability) open — EM-300 |
+| **W30** | Fable-audit remediation build (this build) — go-live flips, facades decal-clear fix, idle-fallback churn mitigation, ledger intake of the 2026-07-08 deep review | in progress, branch `build/w30-audit-remediation` |
 
 **Where we are:** the lab is well past v1. The marquee feature is proven live — **EM-048**: a
 3-agent / 3-model world ran on FreeLLMAPI for >11 minutes (all three alive, real chat, a passed
@@ -28,20 +37,26 @@ district street network past real buildings under golden-hour light — the proc
 the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minute live demo" in
 `README.md`. Per-wave end-state reports live in `docs/build-results/`.
 
-**Open P1:** none. EM-151 (inspector blank on ~40k-event runs) shipped in Wave F.
+**Open P1:** EM-297 (world-authorship divergence probe), EM-299 (parametric building-recipe
+grammar keystone), EM-300 (adaptive lane routing P2–P5), EM-301 (idle-fallback churn — PR
+#84 open), plus the P1 backlog in Wave M/N/O/Q (see `docs/REMAINING-WORK.md`). EM-151
+(inspector blank on ~40k-event runs) shipped in Wave F.
 
-**Recently merged (2026-06-24):** a wide-ranging asset-library expansion toward the
-EW-grade dense city — building-pool variety + **26 new CC0 GLBs** (buildings #42 + props #43,
-consolidated #43), **ambient moving traffic + parked cars** (#44, EM-169/176), golden-hour
-**dust motes** (#46, EM-127 partial), and **auto-pause on a sustained provider outage** (#47,
-EM-226). All CC0-enforced + recorded in `ASSET_LICENSES.md`; the poly.pizza vendoring runbook
-is `docs/em216-kit-acquisition-plan.md`.
+**Recently merged (2026-07-07):** agent-authored **facades & murals** (#78, EM-298 —
+`paint_surface` + decal render, SHIPPED), the **EM-268 F1 free-placement go-live** (#81 —
+cluster-accretion placement, build-anywhere restored), a **post-merge green-up** (#82 —
+position goldens + EM-298 round-trip fix), a **revert of the 8192 length-retry floor** (#80 —
+PR #77's raise excluded free models, rolled back), and **adaptive lane routing P1** (#83 —
+registry + custom sorting list + bounce loop). **PR #84 is open** (idle-fallback timeout
+labeling + auto-resume, EM-301).
 
-**In flight (2026-06-24):** **deepening the first city** before founding a second (the
-EM-115/122/123 depth track) — **EM-123 zoned districts that mature as megaprojects complete**
-(`Neighborhood` tier model; a completed collective building levels its district up, and the
-3-D city answers with deterministic extra street life — never filler buildings, EM-174-safe;
-byte-identical until a district actually grows). Branch `feat/district-growth`.
+**In flight (2026-07-09):** **F1 free-placement merged + ratified** (PR #81/#82; derive-on-load
+restore behavior locked in 2026-07-09 — closes the paused restore-contradiction gate). **Adaptive
+lane routing P1 live** (registry + custom sorting list + bounce loop, PR #83, go-live flip
+2026-07-08). **PR #84 open** (timeout labeling + auto-resume for the idle-fallback churn thread,
+EM-301). Current work: **W30 remediation build** on branch `build/w30-audit-remediation` — a
+Fable-audit-driven pass (this build) fixing the soft-pin/bounce-loop conflict, the facades
+decal-clear bug, and filing the 2026-07-08 deep-review findings into the ledger (EM-300–306).
 
 ## Which doc is which (ownership map)
 
