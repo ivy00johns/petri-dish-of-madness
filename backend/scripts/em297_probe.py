@@ -388,8 +388,15 @@ def atomic_write(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def run_probe(out_path: Path, base_url: str, api_key: str) -> int:
-    budget = CallBudget()
+def run_probe(
+    out_path: Path,
+    base_url: str,
+    api_key: str,
+    models: list[tuple[str, str]] | None = None,
+    max_calls: int = MAX_CALLS,
+) -> int:
+    models = models or MODELS
+    budget = CallBudget(max_calls=max_calls)
     doc: dict[str, Any] = {
         "probe": "EM-297 model-divergence probe",
         "date": "2026-07-11",
@@ -398,7 +405,7 @@ def run_probe(out_path: Path, base_url: str, api_key: str) -> int:
         "max_tokens": MAX_TOKENS,
         "system_prompt": SYSTEM_PROMPT,
         "example_recipe": EXAMPLE_VALUES,
-        "models": {label: mid for label, mid in MODELS},
+        "models": {label: mid for label, mid in models},
         "prompts": dict(PROMPTS),
         "results": [],
     }
@@ -406,9 +413,9 @@ def run_probe(out_path: Path, base_url: str, api_key: str) -> int:
 
     with httpx.Client() as client:
         # ── sanity call ──
-        print(f"[sanity] {MODELS[0][1]} …", flush=True)
+        print(f"[sanity] {models[0][1]} …", flush=True)
         sanity = call_with_discipline(
-            client, budget, base_url, api_key, MODELS[0][1], SANITY_PROMPT
+            client, budget, base_url, api_key, models[0][1], SANITY_PROMPT
         )
         doc["sanity"] = sanity
         if sanity.get("unreachable") or sanity.get("http_status") not in (200,):
@@ -417,8 +424,8 @@ def run_probe(out_path: Path, base_url: str, api_key: str) -> int:
             return 2
         print(f"[sanity] ok ({sanity.get('latency_ms')} ms, routed_via={sanity.get('routed_via')})", flush=True)
 
-        # ── the grid: 4 models x 8 prompts, strictly sequential ──
-        for label, model_id in MODELS:
+        # ── the grid: models x 8 prompts, strictly sequential ──
+        for label, model_id in models:
             model_failures = 0
             skipped = False
             for pk, prompt in PROMPTS:
@@ -482,6 +489,17 @@ def main() -> int:
         default=None,
         help="re-run scoring over an existing raw json (no network)",
     )
+    ap.add_argument(
+        "--models",
+        default=None,
+        help="override the model grid: comma-separated label=model_id pairs",
+    )
+    ap.add_argument(
+        "--max-calls",
+        type=int,
+        default=MAX_CALLS,
+        help="hard cap on HTTP calls for THIS run (keep run totals <= 40)",
+    )
     args = ap.parse_args()
 
     if args.score_only:
@@ -500,8 +518,18 @@ def main() -> int:
         print("FREELLMAPI_KEY not set (env or --env-file)", file=sys.stderr)
         return 2
 
+    models = None
+    if args.models:
+        models = []
+        for pair in args.models.split(","):
+            label, _, mid = pair.partition("=")
+            if not label or not mid:
+                print(f"bad --models pair: {pair!r}", file=sys.stderr)
+                return 2
+            models.append((label.strip(), mid.strip()))
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    return run_probe(args.out, base_url, api_key)
+    return run_probe(args.out, base_url, api_key, models=models, max_calls=args.max_calls)
 
 
 if __name__ == "__main__":
