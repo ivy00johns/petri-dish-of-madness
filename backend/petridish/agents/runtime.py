@@ -5317,14 +5317,33 @@ class AgentRuntime:
             # call also never reaches the router's cache-store line, so a
             # timed-out call can NOT poison the decision cache. budget<=0 ⇒
             # guard disabled ⇒ byte-for-byte today's await.
-            chat_coro = self.router.chat(
-                profile_name, messages,
-                max_tokens=max_tokens, temperature=temperature,
-            )
-            if budget > 0:
-                text = await asyncio.wait_for(chat_coro, timeout=budget)
+            # EM-307 — prefer the per-call attribution channel: concurrent
+            # chat() calls on one profile (narrator / deep-dive / animal
+            # background tasks sharing an agent's lane) clobber the router's
+            # per-profile pending snapshot, so the profile-level last_usage/
+            # last_routed_via reads below can misattribute. chat_attributed()
+            # returns THIS call's truth alongside the text; duck-typed test
+            # routers without it keep the historical chat() + profile reads.
+            attribution: dict | None = None
+            chat_attr = getattr(self.router, "chat_attributed", None)
+            if callable(chat_attr):
+                chat_coro = chat_attr(
+                    profile_name, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
             else:
-                text = await chat_coro
+                chat_coro = self.router.chat(
+                    profile_name, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
+            if budget > 0:
+                result = await asyncio.wait_for(chat_coro, timeout=budget)
+            else:
+                result = await chat_coro
+            if callable(chat_attr):
+                text, attribution = result
+            else:
+                text = result
         except asyncio.TimeoutError:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             meta["latency_ms"] = elapsed_ms
@@ -5353,12 +5372,21 @@ class AgentRuntime:
             log.error("Unexpected error calling %s: %s", profile_name, exc)
             return None, f"unexpected_error: {exc}", meta
 
-        # Snapshot adapter state IMMEDIATELY after a successful call, before any
-        # retry can overwrite it. usage is None for Mock; prefer the provider's
-        # own latency measurement, falling back to our wall-clock timing.
-        usage = self.router.last_usage(profile_name)
+        # Snapshot this call's routing/usage truth IMMEDIATELY, before any retry
+        # can overwrite it. EM-307: the per-call attribution is authoritative
+        # when present (same values the single-caller profile reads produced);
+        # the profile-level reads remain only for duck-typed test routers.
+        # usage is None for Mock; prefer the provider's own latency
+        # measurement, falling back to our wall-clock timing.
+        if attribution is not None:
+            usage = attribution.get("usage")
+            meta["routed_via"] = attribution.get("routed_via")
+            served_by = attribution.get("served_by")
+        else:
+            usage = self.router.last_usage(profile_name)
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
+            served_by = None
         meta["usage"] = usage
-        meta["routed_via"] = self.router.last_routed_via(profile_name)
         if isinstance(usage, dict) and usage.get("latency_ms") is not None:
             meta["latency_ms"] = usage["latency_ms"]
         else:
@@ -5372,7 +5400,8 @@ class AgentRuntime:
         # from the feed, not from health tracking.
         truncated = _looks_truncated(text)
         self._note_parse_outcome(
-            profile_name, parsed=action_dict is not None, truncated=truncated
+            profile_name, parsed=action_dict is not None, truncated=truncated,
+            served_by=served_by,
         )
         if action_dict is None:
             finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
@@ -5441,13 +5470,26 @@ class AgentRuntime:
             forget(profile_name, messages)
 
     def _note_parse_outcome(
-        self, profile_name: str, *, parsed: bool, truncated: bool
+        self, profile_name: str, *, parsed: bool, truncated: bool,
+        served_by: str | None = None,
     ) -> None:
         """Report one parse attempt's outcome to the router's lane-health
-        window (EM-135). Guarded getattr: duck-typed test routers don't
-        implement note_parse_outcome()."""
+        window (EM-135). `served_by` (EM-307) is the per-call attribution from
+        chat_attributed() so a bounced outcome credits the lane that actually
+        served, without reading the clobberable per-profile snapshot. Guarded
+        getattr: duck-typed test routers don't implement note_parse_outcome();
+        the TypeError retry degrades pre-EM-307 routers to the profile-level
+        attribution (the same _note_timeout_demerit pattern)."""
         note = getattr(self.router, "note_parse_outcome", None)
-        if callable(note):
+        if not callable(note):
+            return
+        if served_by is None:
+            note(profile_name, parsed=parsed, truncated=truncated)
+            return
+        try:
+            note(profile_name, parsed=parsed, truncated=truncated,
+                 served_by=served_by)
+        except TypeError:
             note(profile_name, parsed=parsed, truncated=truncated)
 
     def _turn_llm_budget(self) -> float:

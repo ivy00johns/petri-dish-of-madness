@@ -640,11 +640,23 @@ class AnimalRuntime:
             "usage": None,
         }
         started = time.perf_counter()
+        # EM-307 — animal turns are background tasks running concurrently with
+        # agent turns, often on a SHARED profile: consume the per-call
+        # attribution channel instead of the clobberable per-profile snapshot
+        # (mirror the agent runtime; duck-typed test routers keep chat()).
+        attribution: dict | None = None
+        chat_attr = getattr(self.router, "chat_attributed", None)
         try:
-            text = await self.router.chat(
-                profile_name, messages,
-                max_tokens=max_tokens, temperature=temperature,
-            )
+            if callable(chat_attr):
+                text, attribution = await chat_attr(
+                    profile_name, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
+            else:
+                text = await self.router.chat(
+                    profile_name, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
         except ProviderError as exc:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
             meta["routed_via"] = self.router.last_routed_via(profile_name)
@@ -656,9 +668,15 @@ class AnimalRuntime:
             log.error("Animal unexpected error on %s: %s", profile_name, exc)
             return None, meta
 
-        usage = self.router.last_usage(profile_name)
+        if attribution is not None:
+            usage = attribution.get("usage")
+            meta["routed_via"] = attribution.get("routed_via")
+            served_by = attribution.get("served_by")
+        else:
+            usage = self.router.last_usage(profile_name)
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
+            served_by = None
         meta["usage"] = usage
-        meta["routed_via"] = self.router.last_routed_via(profile_name)
         if isinstance(usage, dict) and usage.get("latency_ms") is not None:
             meta["latency_ms"] = usage["latency_ms"]
         else:
@@ -670,7 +688,8 @@ class AnimalRuntime:
         # extraction succeeded via repair (mirror the agent runtime).
         truncated = _looks_truncated(text)
         self._note_parse_outcome(
-            profile_name, parsed=action_dict is not None, truncated=truncated
+            profile_name, parsed=action_dict is not None, truncated=truncated,
+            served_by=served_by,
         )
         if action_dict is None:
             # Mirror the agent runtime: structural truncation verdict for the
@@ -696,12 +715,24 @@ class AnimalRuntime:
             forget(profile_name, messages)
 
     def _note_parse_outcome(
-        self, profile_name: str, *, parsed: bool, truncated: bool
+        self, profile_name: str, *, parsed: bool, truncated: bool,
+        served_by: str | None = None,
     ) -> None:
         """Report one parse attempt's outcome to the router's lane-health
-        window (EM-135; guarded getattr, mirrors the agent runtime)."""
+        window (EM-135; guarded getattr, mirrors the agent runtime).
+        `served_by` (EM-307) credits a bounced outcome to the lane that
+        actually served; the TypeError retry degrades pre-EM-307 routers to
+        profile-level attribution."""
         note = getattr(self.router, "note_parse_outcome", None)
-        if callable(note):
+        if not callable(note):
+            return
+        if served_by is None:
+            note(profile_name, parsed=parsed, truncated=truncated)
+            return
+        try:
+            note(profile_name, parsed=parsed, truncated=truncated,
+                 served_by=served_by)
+        except TypeError:
             note(profile_name, parsed=parsed, truncated=truncated)
 
     @staticmethod

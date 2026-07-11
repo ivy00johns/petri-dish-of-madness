@@ -1422,18 +1422,40 @@ class TickLoop:
                 {"role": "user", "content": digest + prev_block},
             ]
             profile = self._router.get_profile(profile_name)
-            text = await asyncio.wait_for(
-                self._router.chat(
-                    profile_name,
-                    messages,
-                    # A chapter is a paragraph or two — give it room (was 256).
-                    max_tokens=min(700, getattr(profile, "max_tokens", 700) or 700),
-                    temperature=0.85,
-                ),
-                timeout=45.0,
-            )
+            # EM-307 — the narrator is a background task running concurrently
+            # with agent turns, possibly on a SHARED profile: consume the
+            # per-call attribution channel so the finish_reason/routed_via
+            # below are THIS call's, not a concurrent turn's (duck-typed test
+            # routers keep the historical chat() + profile-level reads).
+            attribution: dict | None = None
+            chat_attr = getattr(self._router, "chat_attributed", None)
+            if callable(chat_attr):
+                text, attribution = await asyncio.wait_for(
+                    chat_attr(
+                        profile_name,
+                        messages,
+                        # A chapter is a paragraph or two — give it room (was 256).
+                        max_tokens=min(700, getattr(profile, "max_tokens", 700) or 700),
+                        temperature=0.85,
+                    ),
+                    timeout=45.0,
+                )
+            else:
+                text = await asyncio.wait_for(
+                    self._router.chat(
+                        profile_name,
+                        messages,
+                        max_tokens=min(700, getattr(profile, "max_tokens", 700) or 700),
+                        temperature=0.85,
+                    ),
+                    timeout=45.0,
+                )
             text = self._clean_chapter(text or "")
-            finish_reason = (self._router.last_usage(profile_name) or {}).get("finish_reason")
+            usage = (
+                attribution.get("usage") if attribution is not None
+                else self._router.last_usage(profile_name)
+            )
+            finish_reason = (usage or {}).get("finish_reason")
             if (
                 not text
                 or self._looks_truncated(text, finish_reason)
@@ -1459,7 +1481,10 @@ class TickLoop:
                 "chronicler_version": CHRONICLER_VERSION,
                 "chaos": facts,
             }
-            routed_via = self._router.last_routed_via(profile_name)
+            routed_via = (
+                attribution.get("routed_via") if attribution is not None
+                else self._router.last_routed_via(profile_name)
+            )
             if routed_via:
                 payload["routed_via"] = routed_via
             self._emit_event({
@@ -1780,18 +1805,38 @@ class TickLoop:
                 },
             ]
             profile = self._router.get_profile(profile_name)
-            text = await asyncio.wait_for(
-                self._router.chat(
-                    profile_name,
-                    messages,
-                    # The definitive chapter — a longer budget than a window recap.
-                    max_tokens=min(1200, getattr(profile, "max_tokens", 1200) or 1200),
-                    temperature=0.85,
-                ),
-                timeout=90.0,
-            )
+            # EM-307 — background task, possibly on a shared profile: per-call
+            # attribution over the clobberable profile-level reads (see the
+            # narrator call above).
+            attribution: dict | None = None
+            chat_attr = getattr(self._router, "chat_attributed", None)
+            if callable(chat_attr):
+                text, attribution = await asyncio.wait_for(
+                    chat_attr(
+                        profile_name,
+                        messages,
+                        # The definitive chapter — a longer budget than a window recap.
+                        max_tokens=min(1200, getattr(profile, "max_tokens", 1200) or 1200),
+                        temperature=0.85,
+                    ),
+                    timeout=90.0,
+                )
+            else:
+                text = await asyncio.wait_for(
+                    self._router.chat(
+                        profile_name,
+                        messages,
+                        max_tokens=min(1200, getattr(profile, "max_tokens", 1200) or 1200),
+                        temperature=0.85,
+                    ),
+                    timeout=90.0,
+                )
             text = self._clean_chapter(text or "")
-            finish_reason = (self._router.last_usage(profile_name) or {}).get("finish_reason")
+            usage = (
+                attribution.get("usage") if attribution is not None
+                else self._router.last_usage(profile_name)
+            )
+            finish_reason = (usage or {}).get("finish_reason")
             if (
                 not text
                 or self._looks_truncated(text, finish_reason)
@@ -1812,7 +1857,10 @@ class TickLoop:
                 "mode": "deepdive",
                 "dimensions": notes,
             }
-            routed_via = self._router.last_routed_via(profile_name)
+            routed_via = (
+                attribution.get("routed_via") if attribution is not None
+                else self._router.last_routed_via(profile_name)
+            )
             if routed_via:
                 payload["routed_via"] = routed_via
             self._emit_event({

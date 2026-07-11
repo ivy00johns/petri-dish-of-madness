@@ -396,10 +396,46 @@ class Router:
         temperature: float,
         require_json: bool = False,
     ) -> str:
-        # `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
-        # bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
-        # ONLY inside the adaptive-enabled except-branch below, so existing
-        # callers that omit it (default False) keep the exact pre-spec path.
+        """Text-only façade over chat_attributed() (the historical interface).
+        EM-307 — callers that consume routing/usage attribution should use
+        chat_attributed() and read the PER-CALL record it returns; the
+        per-profile last_usage()/last_routed_via() reads this call still feeds
+        (via the pending snapshot) are safe only while exactly one call per
+        profile is in flight."""
+        text, _attribution = await self.chat_attributed(
+            profile_name, messages,
+            max_tokens=max_tokens, temperature=temperature,
+            require_json=require_json,
+        )
+        return text
+
+    async def chat_attributed(
+        self,
+        profile_name: str,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        require_json: bool = False,
+    ) -> tuple[str, dict]:
+        """chat() returning (text, attribution) — the EM-307 per-call channel.
+
+        `attribution` = {"routed_via", "usage", "served_by"} for THIS call:
+        exactly the values the profile-level last_routed_via()/last_usage()
+        reads surface immediately after a single-caller chat() (cache HITs get
+        the cached=true snapshot; a bounced call gets the substitute's numbers
+        with the additive EM-198 bounced_from/bounced_to keys; `served_by` is
+        the lane that actually served — the health-attribution target). The
+        runtimes consume THIS record instead of the per-profile pending
+        snapshot, because concurrent chat() calls on one profile (narrator /
+        deep-dive / animal background tasks sharing an agent's lane) clobber
+        that snapshot mid-flight. The snapshot is still staged, byte-identical,
+        for the single-caller last_usage()/last_routed_via() contract.
+
+        `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
+        bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
+        ONLY inside the adaptive-enabled except-branch below, so callers that
+        omit it (default False) keep the exact pre-spec path."""
         adapter = self._adapters.get(profile_name)
         if adapter is None:
             raise ProviderError(profile_name, None, "no adapter for profile")
@@ -416,11 +452,16 @@ class Router:
                 # latency ~0) and the cached routed value.
                 self._cache.move_to_end(key)  # LRU: mark most-recently-used
                 self._cache_hits += 1  # EM-162 bookkeeping
+                hit_usage = self._cached_usage_snapshot(hit.get("usage"))
                 self._pending_cached[profile_name] = {
                     "routed_via": hit.get("routed_via"),
-                    "usage": self._cached_usage_snapshot(hit.get("usage")),
+                    "usage": hit_usage,
                 }
-                return hit["text"]
+                return hit["text"], {
+                    "routed_via": hit.get("routed_via"),
+                    "usage": hit_usage,
+                    "served_by": profile_name,
+                }
             self._cache_misses += 1  # EM-162 bookkeeping (cacheable miss)
 
         # ── MISS (or non-cacheable) ── call the adapter as today. Clear any stale
@@ -545,7 +586,11 @@ class Router:
             self._cache.move_to_end(key)
             while len(self._cache) > self._cache_max:
                 self._cache.popitem(last=False)  # evict least-recently-used
-        return text
+        return text, {
+            "routed_via": served_routed,
+            "usage": served_usage,
+            "served_by": served_by,
+        }
 
     async def _auto_backup_call(
         self,
@@ -1011,6 +1056,7 @@ class Router:
         parsed: bool,
         truncated: bool,
         timed_out: bool = False,
+        served_by: str | None = None,
     ) -> None:
         """Record one runtime parse outcome for this profile's lane (EM-135).
 
@@ -1029,20 +1075,30 @@ class Router:
         present on entries that actually timed out — so pre-EM-170 window
         shapes are unchanged.
 
-        W30 — under adaptive routing, when the last chat() for `profile_name`
-        was BOUNCED (the pending EM-198 snapshot carries `bounced_to`), the
-        outcome is credited to the lane that ACTUALLY served the text, not
-        the pin: crediting bounced successes to a persistently-capped pin
-        aged its error demerits out of the window, flapping it healthy and
-        burning a doomed real call roughly every other turn. Adaptive OFF
-        keeps the exact #76 attribution (byte-identical guarantee)."""
+        W30 — under adaptive routing, when the chat() this outcome describes
+        was BOUNCED, the outcome is credited to the lane that ACTUALLY served
+        the text, not the pin: crediting bounced successes to a persistently-
+        capped pin aged its error demerits out of the window, flapping it
+        healthy and burning a doomed real call roughly every other turn.
+        Adaptive OFF keeps the exact #76 attribution (byte-identical
+        guarantee).
+
+        EM-307 — `served_by` is the per-call attribution channel: runtimes
+        that consumed chat_attributed() pass its `served_by` here so the
+        credit target never depends on the clobberable per-profile pending
+        snapshot. Absent (older/duck-typed callers), the pending-snapshot
+        `bounced_to` read remains as the single-caller fallback — identical
+        to `served_by` whenever only one call per profile is in flight."""
         target = profile_name
         if self._adaptive_enabled():
-            pending = self._pending_cached.get(profile_name)
-            usage = pending.get("usage") if isinstance(pending, dict) else None
-            bounced_to = usage.get("bounced_to") if isinstance(usage, dict) else None
-            if isinstance(bounced_to, str) and bounced_to:
-                target = bounced_to
+            if isinstance(served_by, str) and served_by:
+                target = served_by
+            else:
+                pending = self._pending_cached.get(profile_name)
+                usage = pending.get("usage") if isinstance(pending, dict) else None
+                bounced_to = usage.get("bounced_to") if isinstance(usage, dict) else None
+                if isinstance(bounced_to, str) and bounced_to:
+                    target = bounced_to
         self._record_parse_outcome(
             target, parsed=parsed, truncated=truncated, timed_out=timed_out)
 
