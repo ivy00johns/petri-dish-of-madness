@@ -23,6 +23,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import em297_probe  # noqa: E402
+from em297_recipe_schema import (  # noqa: E402
+    DEFAULTS,
+    FIELD_NAMES,
+    Recipe,
+    coerce_recipe,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -156,3 +162,95 @@ def test_connect_error_still_flags_unreachable(monkeypatch):
     budget = em297_probe.CallBudget(max_calls=4, sleep_s=0)
     rec = em297_probe.call_with_discipline(None, budget, "http://x", "k", "m", "p")
     assert rec.get("unreachable") is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# coerce_recipe — lenient repair path with EVERY repair recorded (EM-299 contract)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _valid_obj(**overrides):
+    obj = {
+        "footprint": "small",
+        "floors": 2,
+        "roof": "gable",
+        "material": "stone",
+        "palette": "warm",
+        "window_density": "regular",
+        "trim": "simple",
+    }
+    obj.update(overrides)
+    return obj
+
+
+def test_coerce_valid_dict_records_no_repairs():
+    recipe, repairs = coerce_recipe(_valid_obj())
+    assert repairs == []
+    assert recipe.as_value_dict() == _valid_obj()
+
+
+def test_coerce_records_completely_missing_keys():
+    recipe, repairs = coerce_recipe({})
+    assert recipe.as_value_dict() == Recipe().as_value_dict()
+    assert len(repairs) == len(FIELD_NAMES)  # one repair per missing field
+    for name in FIELD_NAMES:
+        assert any(name in note and "missing" in note for note in repairs), name
+
+
+def test_coerce_records_explicit_null():
+    _, repairs = coerce_recipe(_valid_obj(footprint=None))
+    assert any("footprint" in note and "null" in note for note in repairs)
+
+
+def test_coerce_invalid_enum_falls_back_to_default_and_records():
+    recipe, repairs = coerce_recipe(_valid_obj(roof="thatched"))
+    assert recipe.roof.value == DEFAULTS["roof"].value
+    assert any("roof" in note and "thatched" in note for note in repairs)
+
+
+@pytest.mark.parametrize(
+    ("raw", "clamped"),
+    [(99, 8), (0, 1), (-3, 1)],
+)
+def test_coerce_clamps_floors_and_records(raw, clamped):
+    recipe, repairs = coerce_recipe(_valid_obj(floors=raw))
+    assert recipe.floors == clamped
+    assert any("floors" in note and "clamped" in note for note in repairs)
+
+
+@pytest.mark.parametrize("raw", [2.7, "2.7"])
+def test_coerce_records_float_truncation(raw):
+    recipe, repairs = coerce_recipe(_valid_obj(floors=raw))
+    assert recipe.floors == 2
+    assert any("floors" in note and "truncat" in note for note in repairs)
+
+
+def test_coerce_whole_float_floors_is_not_a_truncation():
+    recipe, repairs = coerce_recipe(_valid_obj(floors=3.0))
+    assert recipe.floors == 3
+    assert repairs == []
+
+
+def test_coerce_invalid_floors_falls_back_and_records():
+    recipe, repairs = coerce_recipe(_valid_obj(floors="many"))
+    assert recipe.floors == DEFAULTS["floors"]
+    assert any("floors" in note and "many" in note for note in repairs)
+
+
+@pytest.mark.parametrize(
+    ("field", "raw", "want"),
+    [
+        ("material", "Timber-Frame", "timber_frame"),
+        ("material", "mud brick", "mud_brick"),
+        ("footprint", "  GRAND  ", "grand"),
+    ],
+)
+def test_coerce_normalizes_enum_spellings_silently(field, raw, want):
+    recipe, repairs = coerce_recipe(_valid_obj(**{field: raw}))
+    assert recipe.as_value_dict()[field] == want
+    assert repairs == []  # normalization is acceptance, not a repair
+
+
+def test_coerce_drops_unknown_keys_with_note():
+    recipe, repairs = coerce_recipe(_valid_obj(chimneys=3))
+    assert "chimneys" not in recipe.as_value_dict()
+    assert any("chimneys" in note for note in repairs)

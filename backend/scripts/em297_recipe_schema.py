@@ -202,9 +202,13 @@ def parse_recipe_strict(raw: str | dict[str, Any]) -> tuple[Recipe | None, list[
 def coerce_recipe(obj: dict[str, Any]) -> tuple[Recipe, list[str]]:
     """Lenient repair path: always returns a valid Recipe plus repair notes.
 
+    EVERY deviation from the strict schema is recorded (the EM-299 contract —
+    a repair-free coercion means the input was already strictly valid):
     - unknown keys are dropped (noted)
-    - missing / invalid enum values fall back to DEFAULTS (noted)
-    - floors is int()-coerced when possible and clamped to [1, 8] (noted)
+    - completely missing keys fall back to DEFAULTS (noted)
+    - null / invalid enum values fall back to DEFAULTS (noted)
+    - floors is int()-coerced when possible (float truncation noted) and
+      clamped to [1, 8] (noted)
     """
     repairs: list[str] = []
     clean: dict[str, Any] = {}
@@ -214,10 +218,13 @@ def coerce_recipe(obj: dict[str, Any]) -> tuple[Recipe, list[str]]:
             repairs.append(f"dropped unknown key {key!r}")
 
     for name, enum_cls in _ENUM_FIELDS.items():
-        value = obj.get(name)
+        if name not in obj:
+            repairs.append(f"{name}: missing -> default {DEFAULTS[name].value!r}")
+            clean[name] = DEFAULTS[name]
+            continue
+        value = obj[name]
         if value is None:
-            if name in obj:
-                repairs.append(f"{name}: null -> default {DEFAULTS[name].value!r}")
+            repairs.append(f"{name}: null -> default {DEFAULTS[name].value!r}")
             clean[name] = DEFAULTS[name]
             continue
         try:
@@ -226,18 +233,23 @@ def coerce_recipe(obj: dict[str, Any]) -> tuple[Recipe, list[str]]:
             repairs.append(f"{name}: invalid {value!r} -> default {DEFAULTS[name].value!r}")
             clean[name] = DEFAULTS[name]
 
-    floors_raw = obj.get("floors")
-    if floors_raw is None:
-        if "floors" in obj:
-            repairs.append(f"floors: null -> default {DEFAULTS['floors']}")
+    if "floors" not in obj:
+        repairs.append(f"floors: missing -> default {DEFAULTS['floors']}")
+        clean["floors"] = DEFAULTS["floors"]
+    elif obj["floors"] is None:
+        repairs.append(f"floors: null -> default {DEFAULTS['floors']}")
         clean["floors"] = DEFAULTS["floors"]
     else:
+        floors_raw = obj["floors"]
         try:
-            floors = int(float(floors_raw))
-        except (TypeError, ValueError):
+            floors_f = float(floors_raw)
+            floors = int(floors_f)
+        except (TypeError, ValueError, OverflowError):
             repairs.append(f"floors: invalid {floors_raw!r} -> default {DEFAULTS['floors']}")
             floors = DEFAULTS["floors"]
         else:
+            if floors != floors_f:
+                repairs.append(f"floors: {floors_raw!r} truncated -> {floors}")
             clamped = max(FLOORS_MIN, min(FLOORS_MAX, floors))
             if clamped != floors:
                 repairs.append(f"floors: {floors} clamped -> {clamped}")
