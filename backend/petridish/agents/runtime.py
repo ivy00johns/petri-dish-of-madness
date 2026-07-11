@@ -4783,8 +4783,12 @@ class AgentRuntime:
         first_budget = getattr(self.router, "first_attempt_max_tokens", None)
         if callable(first_budget):
             attempt_tokens = first_budget(call_profile, max_tokens)
+        # The EXPLICIT boost signal: True exactly when first_attempt_max_tokens
+        # raised the budget above the profile's configured base — the bounce
+        # clamp must not have to re-infer this from the lane window.
         action_dict, parse_error, llm_meta = await self._call_and_parse(
-            call_profile, messages, attempt_tokens, temperature, agent, attempt=1
+            call_profile, messages, attempt_tokens, temperature, agent, attempt=1,
+            boosted=attempt_tokens > max_tokens,
         )
         llm_attempts.append(self._lane_stamped_span(
             call_profile, llm_meta, profile_name, lane_reason
@@ -4820,8 +4824,14 @@ class AgentRuntime:
                     ),
                 },
             ]
+            # boosted: True whenever the retry budget exceeds the profile's
+            # configured base — covers both the fresh length-retry boost and a
+            # carried-over attempt-1 boost. The window can NOT stand in for
+            # this signal: a bounced-truncated attempt 1 was credited to the
+            # SERVING lane (W30), leaving the pin's window clean.
             action_dict, parse_error, llm_meta = await self._call_and_parse(
-                call_profile, retry_messages, retry_tokens, temperature, agent, attempt=2
+                call_profile, retry_messages, retry_tokens, temperature, agent,
+                attempt=2, boosted=retry_tokens > max_tokens,
             )
             llm_attempts.append(self._lane_stamped_span(
                 call_profile, llm_meta, profile_name, lane_reason
@@ -5286,10 +5296,16 @@ class AgentRuntime:
         temperature: float,
         agent: AgentState,
         attempt: int = 1,
+        boosted: bool = False,
     ) -> tuple[dict | None, str | None, dict]:
         """
         Call the model and parse+validate the response.
         Returns (action_dict, error_string, llm_meta).
+        `boosted=True` marks max_tokens as a truncation-mitigation boost (the
+        EM-135 first-attempt bump or the length-retry), not a genuine floor —
+        threaded to router.chat() so the adaptive bounce clamp keys on the
+        EXPLICIT signal instead of inferring it from the home lane's window
+        (which the W30 bounce-attribution redirect can leave clean).
         action_dict is None on failure. llm_meta carries the per-attempt
         decision-trace metadata for ONE `llm_call` span. Captured PER ATTEMPT
         because the adapter's `last_routed_via`/`last_usage` are overwritten by
@@ -5317,10 +5333,27 @@ class AgentRuntime:
             # call also never reaches the router's cache-store line, so a
             # timed-out call can NOT poison the decision cache. budget<=0 ⇒
             # guard disabled ⇒ byte-for-byte today's await.
-            chat_coro = self.router.chat(
-                profile_name, messages,
-                max_tokens=max_tokens, temperature=temperature,
-            )
+            if boosted:
+                try:
+                    chat_coro = self.router.chat(
+                        profile_name, messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                        boosted=True,
+                    )
+                except TypeError:
+                    # Duck-typed router without the `boosted` kwarg (test
+                    # harnesses / legacy) — the signal is advisory; same
+                    # fallback convention as effective_profile's tier kwarg.
+                    chat_coro = self.router.chat(
+                        profile_name, messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                    )
+            else:
+                # Un-boosted call: the exact pre-signal call shape.
+                chat_coro = self.router.chat(
+                    profile_name, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
             if budget > 0:
                 text = await asyncio.wait_for(chat_coro, timeout=budget)
             else:

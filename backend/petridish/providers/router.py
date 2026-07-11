@@ -412,11 +412,23 @@ class Router:
         max_tokens: int,
         temperature: float,
         require_json: bool = False,
+        boosted: bool = False,
     ) -> str:
         # `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
         # bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
         # ONLY inside the adaptive-enabled except-branch below, so existing
         # callers that omit it (default False) keep the exact pre-spec path.
+        #
+        # `boosted`: True marks THIS max_tokens as a truncation-mitigation BOOST
+        # (the runtime's first_attempt_max_tokens bump or the _retry_max_tokens
+        # length-retry), not a genuine floor. The bounce loop's #77 token clamp
+        # keys on this EXPLICIT signal — inferring the boost from the home
+        # lane's window mis-attributes: the W30 redirect credits a bounced
+        # truncation to the SERVING lane, so a boosted length-retry can arrive
+        # while the pin's window is clean, and 4096 would be treated as a
+        # genuine floor that skips every healthy small-ceiling free lane.
+        # Also read only inside the adaptive except-branch; default False keeps
+        # every existing caller byte-identical.
         adapter = self._adapters.get(profile_name)
         if adapter is None:
             raise ProviderError(profile_name, None, "no adapter for profile")
@@ -489,7 +501,7 @@ class Router:
                 text, served_by = await self._bounce_call(
                     profile_name, probe_exc,
                     messages, max_tokens=max_tokens, temperature=temperature,
-                    require_json=require_json,
+                    require_json=require_json, boosted=boosted,
                 )
             else:
                 text, served_by = await self._bounce_call(
@@ -499,7 +511,7 @@ class Router:
                         "sick-pin recovery probe timed out" if probed
                         else "pinned lane pre-skipped (health-sick)"),
                     messages, max_tokens=max_tokens, temperature=temperature,
-                    require_json=require_json, pre_skip=True,
+                    require_json=require_json, pre_skip=True, boosted=boosted,
                 )
         else:
             try:
@@ -515,7 +527,7 @@ class Router:
                     text, served_by = await self._bounce_call(
                         profile_name, exc, messages,
                         max_tokens=max_tokens, temperature=temperature,
-                        require_json=require_json,
+                        require_json=require_json, boosted=boosted,
                     )
                 else:
                     # EM-205 — retry the SAME call ONCE on the proxy's `auto`
@@ -773,6 +785,7 @@ class Router:
         temperature: float,
         require_json: bool = False,
         pre_skip: bool = False,
+        boosted: bool = False,
     ) -> tuple[str, str]:
         """Adaptive Lane Routing bounce loop (spec §6). Reached two ways:
         (a) the pinned `home` lane just FAILED (`pre_skip=False`) — its error is
@@ -813,20 +826,26 @@ class Router:
         timeout = self._ar_per_attempt_timeout_s()
         last_exc: ProviderError = first_exc
 
-        # #77 token-clamp lesson (the churn fix): when the home lane is
-        # TRUNCATION-BOOSTED (its EM-135 window flagged, so the runtime handed us
-        # a boosted max_tokens like 4096), that boost is a mitigation HINT, not a
-        # hard requirement — a DIFFERENT model may not truncate at all. Its
-        # genuine floor is the home lane's own configured output ceiling. Skipping
-        # every healthy 1024-ceiling free lane because 4096 > 1024 collapsed the
-        # walk to auto-only and died as "All models exhausted" → idle churn. So we
-        # skip a lane only when it can't fit that genuine FLOOR, and CLAMP the
+        # #77 token-clamp lesson (the churn fix): when THIS request's max_tokens
+        # is TRUNCATION-BOOSTED (the caller said so via `boosted` — the runtime's
+        # first_attempt bump or length-retry — or the home lane's EM-135 window
+        # is flagged), that boost is a mitigation HINT, not a hard requirement —
+        # a DIFFERENT model may not truncate at all. Its genuine floor is the
+        # home lane's own configured output ceiling. Skipping every healthy
+        # 1024-ceiling free lane because 4096 > 1024 collapsed the walk to
+        # auto-only and died as "All models exhausted" → idle churn. So we skip
+        # a lane only when it can't fit that genuine FLOOR, and CLAMP the
         # boosted hint down to each attempted lane's ceiling (a truncation-retry
         # beats an idle fallback). An UN-boosted request is genuine: its floor IS
         # max_tokens (so a too-small lane is still skipped — the #77 regression
-        # test stays green).
+        # test stays green). The EXPLICIT signal matters because window
+        # inference mis-attributes: the W30 redirect credits a bounced
+        # truncation to the SERVING lane, so a boosted length-retry can arrive
+        # while the pin's window is clean (_lane_boosted(home) False) — the
+        # window check stays only as a fallback for callers that don't thread
+        # the signal (narrator / animals / duck-typed harnesses).
         base_need = max_tokens
-        if self._lane_boosted(home):
+        if boosted or self._lane_boosted(home):
             home_out = getattr(self._profiles.get(home), "max_tokens", None)
             if home_out is not None:
                 base_need = min(max_tokens, int(home_out))

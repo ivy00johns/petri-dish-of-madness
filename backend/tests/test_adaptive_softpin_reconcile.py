@@ -283,6 +283,143 @@ async def test_unboosted_genuine_large_request_still_skips_a_too_small_lane():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# (3b) Explicit boost signal — the clamp keys on chat(boosted=True), not on
+#      inferring boost from the home lane's window (which the W30 bounce
+#      attribution redirect can leave CLEAN after a bounced truncation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ScriptedAdapter:
+    """Returns a scripted sequence of texts (last one repeats). Records the
+    max_tokens of every call, like _OkAdapter."""
+
+    def __init__(self, name: str, texts: list[str]):
+        self.name = name
+        self.texts = list(texts)
+        self.calls = 0
+        self.seen_max_tokens: list[int] = []
+        self.last_routed_via = f"routed/{name}"
+        self.last_usage: dict | None = None
+
+    async def chat(self, messages, *, max_tokens, temperature):
+        text = self.texts[min(self.calls, len(self.texts) - 1)]
+        self.calls += 1
+        self.seen_max_tokens.append(max_tokens)
+        self.last_usage = {
+            "input_tokens": 10, "output_tokens": 5,
+            "latency_ms": 12.0, "finish_reason": "stop", "cached": False,
+        }
+        return text
+
+
+# Fails to parse (repair cannot salvage it: no comma to backtrack to) but is
+# structurally TRUNCATED — exactly the shape that triggers the runtime's
+# _retry_max_tokens length-retry boost. Mirrors test_em281_retry_budget.py.
+_UNPARSEABLE_TRUNCATED = 'Let me reason about my options first {"acti'
+
+
+@pytest.mark.asyncio
+async def test_explicit_boost_kwarg_clamps_when_home_window_shows_no_boost():
+    """The core defect: the clamp used to key ONLY on _lane_boosted(home).
+    A caller that KNOWS it boosted (the runtime's length-retry) must be able
+    to say so explicitly — even when the home window shows zero truncations
+    (the W30 redirect credits bounced truncations to the SERVING lane, so the
+    pin's window stays clean)."""
+    home = _FailAdapter("home")
+    small = _OkAdapter("small", text="small served")   # out_hint 1024
+    r = _router(
+        [("home", "m-home", home, 1024), ("small", "m-small", small, 1024)],
+        [LaneOrderEntry("freellmapi", "*")],
+    )
+    # The home window is CLEAN — inference alone would treat 4096 as genuine.
+    assert r._lane_boosted("home") is False
+
+    text = await r.chat("home", _MESSAGES, max_tokens=4096, temperature=0.8,
+                        boosted=True)
+
+    assert text == "small served"
+    assert small.calls == 1                      # attempted, not skipped
+    assert small.seen_max_tokens == [1024]       # boost clamped to the ceiling
+
+
+@pytest.mark.asyncio
+async def test_boosted_length_retry_clamps_to_serving_small_lane_end_to_end():
+    """The verifier-confirmed mis-attribution, end-to-end through AgentRuntime:
+    attempt 1 bounces off the failing pin to a small lane whose reply is
+    TRUNCATED; the W30 redirect credits that truncation to the SERVING lane,
+    so _lane_boosted(home) stays False. The length-retry then calls with a
+    boosted 4096 — pre-fix the bounce read the clean home window, treated
+    4096 as a genuine floor, skipped the healthy 1024-ceiling lane that had
+    just served, and collapsed to 'all lanes exhausted' → idle churn. With
+    the explicit signal the retry is clamped and the small lane serves."""
+    from petridish.agents.runtime import AgentRuntime
+
+    home = _FailAdapter("home")
+    small = _ScriptedAdapter(
+        "small", [_UNPARSEABLE_TRUNCATED, _VALID_ACTION_JSON])
+    r = _router(
+        [("home", "m-home", home, 1024), ("small", "m-small", small, 1024)],
+        [LaneOrderEntry("freellmapi", "*")],
+    )
+    params = WorldParams(
+        energy_decay_per_turn=0.0, starting_energy=88.0, starting_credits=10,
+        recharge_cost=2, recharge_amount=20.0, work_reward=4, forage_reward=1,
+        steal_max=5, death_after_zero_turns=10, memory_window=5,
+    )
+    places = [PlaceState(id="plaza", name="Central Plaza", x=0, y=0, kind="social")]
+    agent = AgentState(
+        id="cleo", name="Cleo", personality="curious", profile="home",
+        location="plaza", energy=88.0, credits=10,
+    )
+    world = World(params=params, places=places, agents=[agent])
+    runtime = AgentRuntime(world, r)
+
+    await runtime.run_turn(agent)
+
+    # Attempt 1: home fails → bounce serves the truncated reply from `small`;
+    # the truncation is credited to the SERVING lane (W30), pin stays clean.
+    assert r._lane_boosted("small") is True
+    assert r._lane_boosted("home") is False
+    # Attempt 2 (the boosted length-retry): home fails again and the bounce
+    # must RE-ATTEMPT the healthy small lane with the boost CLAMPED to its
+    # 1024 ceiling — not skip it into an idle fallback.
+    assert home.calls == 2
+    assert small.calls == 2, (
+        "the boosted length-retry skipped the healthy small lane "
+        f"(small saw {small.calls} call(s)) — the #77 collapse is back")
+    assert small.seen_max_tokens == [1024, 1024]
+
+
+@pytest.mark.asyncio
+async def test_default_unboosted_call_keeps_bounce_attribution_byte_identical():
+    """No boost anywhere (default boosted=False, clean windows): the genuine-
+    floor skip and the single-caller EM-198 attribution events are exactly the
+    pre-signal bytes — the new kwarg must be invisible when unused."""
+    home = _FailAdapter("home")
+    small = _OkAdapter("small")                        # out_hint 1024
+    big = _OkAdapter("big", text="big served")         # out_hint 4096
+    r = _router(
+        [("home", "m-home", home, 1024), ("small", "m-small", small, 1024),
+         ("big", "m-big", big, 4096)],
+        [LaneOrderEntry("freellmapi", "*")],
+    )
+
+    text = await r.chat("home", _MESSAGES, max_tokens=4096, temperature=0.8)
+
+    assert text == "big served"
+    assert small.calls == 0        # genuine 4096 floor still skips the #77 lane
+    assert big.seen_max_tokens == [4096]
+    # Exact attribution snapshot — byte-identical to the pre-kwarg contract.
+    assert r.last_usage("home") == {
+        "input_tokens": 10, "output_tokens": 5, "latency_ms": 12.0,
+        "finish_reason": "stop", "cached": False,
+        "bounced_from": "home", "bounced_to": "big",
+    }
+    assert r.last_routed_via("home") == "routed/big"
+    assert r.lane_health()["home"]["window"] == [
+        {"parsed": False, "truncated": False, "error": True}]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # (4) Every sorted lane rate-limited → auto attempted LAST, terminal fail surfaces
 # ══════════════════════════════════════════════════════════════════════════════
 
