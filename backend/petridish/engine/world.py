@@ -5320,6 +5320,14 @@ class World:
             self.surface_decals.pop(building.id, None)
         else:
             building.status = "damaged"
+            # Restart the abandon clock: advance_buildings measures stall-rot
+            # staleness from last_progress_tick, which only construction paths
+            # write — without this refresh, a mature building damaged long after
+            # completion reads as stale-since-construction and flips straight to
+            # abandoned at the next round boundary, skipping the documented
+            # abandon_after_ticks repair window. Deterministic (engine tick, no
+            # clock); last_progress_tick is already snapshot-serialized.
+            building.last_progress_tick = self.tick
         return self._structure_state_changed_event(
             building, frm, building.status, reason, actor_id)
 
