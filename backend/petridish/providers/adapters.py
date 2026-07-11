@@ -62,8 +62,17 @@ async def _post_with_retry(
     """
     try:
         resp = await client.post(url, headers=headers, json=payload, timeout=_TIMEOUT)
-    except (httpx.TimeoutException, httpx.ConnectError) as exc:
-        raise ProviderError(profile, None, str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        # httpx timeout exceptions frequently stringify to '' — which surfaced in
+        # the feed as a blank `provider_error:` badge (the dominant failure mode
+        # when the FreeLLMAPI proxy hangs / is super slow). Give it an explicit,
+        # non-empty detail so the feed + the EM-226 pause reason are legible.
+        raise ProviderError(profile, None, f"timed out after {_TIMEOUT:.0f}s") from exc
+    except httpx.ConnectError as exc:
+        # Proxy unreachable / network down. str(exc) is usually non-empty here,
+        # but guard the blank case so the badge is never empty.
+        detail = str(exc).strip() or "connection refused"
+        raise ProviderError(profile, None, f"network unreachable: {detail}") from exc
 
     if not resp.is_success:
         raise ProviderError(profile, resp.status_code, resp.text[:300])

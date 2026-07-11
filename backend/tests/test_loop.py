@@ -326,3 +326,108 @@ async def test_disabled_flag_never_auto_pauses_on_provider_errors():
     assert loop._paused is False  # flag off ⇒ keeps running (streak still tracked)
     assert loop._provider_error_streak >= 5
     await _drain_task(loop)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-226 network-down grace — auto-resume once connectivity returns
+# ──────────────────────────────────────────────────────────────────────────────
+
+from petridish.engine.loop import _PROVIDER_PROBE_EVERY
+
+
+@pytest.mark.asyncio
+async def test_auto_pause_arms_the_provider_resume_flag():
+    """The EM-226 provider-error pause arms the auto-resume flag."""
+    loop, world = _make_loop(agent_count=2)
+    world.params.provider_error_pause_threshold = 3
+    loop._paused = False
+    world.running = True
+
+    async def fail(agent):
+        return _provider_fail_result(agent)
+    loop._runtime.run_turn = fail  # type: ignore
+
+    agent = next(iter(world.agents.values()))
+    for _ in range(3):
+        await loop._execute_turn(agent)
+
+    assert loop._paused is True
+    assert loop._auto_paused_for_provider is True
+    await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_probes_then_resumes_on_recovery():
+    loop, world = _make_loop(agent_count=2)
+    loop._paused = True
+    world.running = False
+    loop._auto_paused_for_provider = True
+    loop._provider_error_streak = 8
+    loop._provider_pause_emitted = True
+    loop._provider_probe_skips = 0
+
+    kinds: list[str] = []
+    orig = loop._emit_event
+    loop._emit_event = lambda evt: (kinds.append(evt.get("kind")), orig(evt))[1]  # type: ignore
+
+    calls = {"n": 0}
+    async def probe():
+        calls["n"] += 1
+        return True
+    loop._router.probe_connectivity = probe  # type: ignore
+
+    # Counter-gated: the first _PROVIDER_PROBE_EVERY-1 polls neither probe nor resume.
+    for _ in range(_PROVIDER_PROBE_EVERY - 1):
+        assert await loop._maybe_auto_resume() is False
+    assert calls["n"] == 0
+    assert loop._paused is True
+
+    # The cadence poll probes and, on success, resumes + re-arms the one-shot pause.
+    assert await loop._maybe_auto_resume() is True
+    assert calls["n"] == 1
+    assert loop._paused is False
+    assert world.running is True
+    assert loop._auto_paused_for_provider is False
+    assert loop._provider_error_streak == 0
+    assert loop._provider_pause_emitted is False
+    assert "world_resumed" in kinds
+    await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_stays_paused_while_probe_fails():
+    loop, world = _make_loop(agent_count=2)
+    loop._paused = True
+    world.running = False
+    loop._auto_paused_for_provider = True
+
+    async def probe():
+        return False
+    loop._router.probe_connectivity = probe  # type: ignore
+
+    for _ in range(_PROVIDER_PROBE_EVERY * 2):
+        assert await loop._maybe_auto_resume() is False
+    assert loop._paused is True
+    assert loop._auto_paused_for_provider is True
+    await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_noop_when_paused_for_other_reason():
+    """A manual pause (not a provider outage) must never be auto-resumed."""
+    loop, world = _make_loop(agent_count=2)
+    loop._paused = True
+    world.running = False
+    loop._auto_paused_for_provider = False
+
+    probed = {"n": 0}
+    async def probe():
+        probed["n"] += 1
+        return True
+    loop._router.probe_connectivity = probe  # type: ignore
+
+    for _ in range(_PROVIDER_PROBE_EVERY + 5):
+        assert await loop._maybe_auto_resume() is False
+    assert probed["n"] == 0
+    assert loop._paused is True
+    await _drain_task(loop)
