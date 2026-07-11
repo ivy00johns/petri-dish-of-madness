@@ -166,6 +166,9 @@ ACTION_SCHEMA = {
                 # EM-243 (S2) — extend the road graph one axis-aligned block from
                 # the node nearest you, paid in energy (grow-only).
                 "build_road",
+                # EM-269 (F2) — found a settlement centered at your current
+                # place (a free-placement cluster seed; reflex, free).
+                "found_settlement",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -232,6 +235,8 @@ ACTION_SCHEMA = {
                             "set_building_skin",
                             # EM-243 (S2) — extend the road graph one block.
                             "build_road",
+                            # EM-269 (F2) — found a settlement here.
+                            "found_settlement",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -490,6 +495,10 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # EM-243 (S2) — extend the road graph one block; offered anywhere (the real
     # gate is energy + an open direction, computed in _assemble_context).
     "build_road":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-269 (F2) — found a settlement at your current place; offered anywhere
+    # (the real gates — settlements.enabled + unclaimed ground — are computed in
+    # _assemble_context and re-enforced at resolution in action_found_settlement).
+    "found_settlement": {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -2588,6 +2597,7 @@ def _assemble_context(
 
     valid_actions: list[str] = []
     nearby_layout_block = ""  # EM-243 (S2) — set when build_road is offered (below)
+    settlement_block = ""     # EM-269 (F2) — set when settlements are enabled (below)
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
     # (destination/to/null) and burned turns on 'unknown place' world errors.
@@ -2998,6 +3008,48 @@ def _assemble_context(
         if _road_affordable and _layout is not None and _layout.startswith("Nearby layout:"):
             valid_actions.append(
                 "build_road (direction: north|south|east|west) - extend a street one block")
+
+    # ── EM-269 (F2) — settlement-scoped perception + the found_settlement entry.
+    # GATED on world.settlements.enabled (default OFF ⇒ NOTHING renders — the
+    # prompt is byte-identical pre-EM-269, law §0.1). One compact line, always
+    # scoped to the agent (their settlement, or the join-able roster) — never a
+    # coordinate dump (prompt-diet). The menu entry is offered ONLY on unclaimed
+    # ground, in lock-step with action_found_settlement's too_close gate (EM-108:
+    # menu and resolution must agree — no dead turns).
+    _stl_enabled = bool(getattr(world, "_settlements_enabled", None)
+                        and world._settlements_enabled())
+    if _stl_enabled:
+        _stls = getattr(world, "settlements", {}) or {}
+        _mine_id = world.settlement_of(agent.id) if _stls else None
+        _stl_line = ""
+        if _mine_id is not None:
+            _mine = _stls[_mine_id]
+            _n = len(_mine.get('members') or [])
+            _stl_line = (f"Your settlement: {_mine.get('name', _mine_id)} "
+                         f"({_n} member{'s' if _n != 1 else ''}) — your "
+                         f"builds cluster there.")
+            _others = [str(_stls[s].get("name", s))
+                       for s in sorted(_stls) if s != _mine_id]
+            if _others:
+                _stl_line += (" Elsewhere: " + ", ".join(_others[:3])
+                              + ("…" if len(_others) > 3 else "") + ".")
+        elif _stls:
+            _roster = [f"{_stls[s].get('name', s)} "
+                       f"({len(_stls[s].get('members') or [])})"
+                       for s in sorted(_stls)]
+            _stl_line = ("Settlements: " + ", ".join(_roster[:4])
+                         + ("…" if len(_roster) > 4 else "")
+                         + ". Build near one to join it, or found your own.")
+        if _stl_line:
+            settlement_block = f"\n=== 🏘 SETTLEMENTS ===\n  {_stl_line}\n"
+        if _here is not None:
+            from ..engine.citygraph import logical_to_world as _stl_l2w
+            from ..engine.placement import SETTLEMENT_R as _STL_R
+            _wx, _wz = _stl_l2w(float(_here.x), float(_here.y))
+            if world.nearest_settlement(_wx, _wz, _STL_R) is None:
+                valid_actions.append(
+                    "found_settlement (name?) - found a new settlement centered "
+                    "here; your future builds cluster around it")
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
     # Offered to EVERY agent (no location gate) whenever a decree is live, so the
@@ -3707,7 +3759,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
 {project_text}
-{nearby_layout_block}{constitution_block}
+{nearby_layout_block}{settlement_block}{constitution_block}
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
 
@@ -6387,6 +6439,12 @@ class AgentRuntime:
         # ── EM-243 (S2) — extend the road graph one axis-aligned block ──────────
         elif action == "build_road":
             result = self.world.action_build_road(agent, args)
+            return _emit_world_result(result, base, thought)
+
+        # ── EM-269 (F2) — found a settlement at the agent's current place ───────
+        elif action == "found_settlement":
+            result = self.world.action_found_settlement(
+                agent, str(args.get("name") or ""))
             return _emit_world_result(result, base, thought)
 
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────
