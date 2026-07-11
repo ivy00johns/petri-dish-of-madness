@@ -102,6 +102,25 @@ profiles:
     temperature: 0.8
     color: "#d4a017"
 
+  # ── Adaptive Lane Routing (2026-07-08) — bounce-only healthy lane ──
+  # NOT pinned to any agent: it exists so the config/lanes.yaml sorting list's
+  # top priority `gpt-oss-120b*` resolves to a REAL lane. The sorting list was
+  # authored expecting this profile but it was never created, so the #1 bounce
+  # target was a ghost and pinned-lane failures fell straight to idle fallback.
+  # Verified on the live proxy 2026-07-08: HTTP 200, clean strict-JSON output
+  # (finish=stop, no chain-of-thought truncation at 1024), and NOT rate-limited
+  # while the OpenRouter/Groq free lanes were all 429. Instruct-clean here, so
+  # intentionally NOT reasoning-tagged (a reasoning tag would make the bounce
+  # loop skip it on strict-JSON agent turns — the #77/#78 lesson).
+  - name: gpt-oss-120b
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: gpt-oss-120b
+    max_tokens: 1024
+    temperature: 0.8
+    color: "#5b8def"
+
   # ── EM-205 — the proxy's own router model (the universal backup) ──
   # Agents keep their PINNED lane above for the model-vs-model experiment; on a
   # 429 / 5xx / timeout the Router retries the SAME call ONCE here, and
