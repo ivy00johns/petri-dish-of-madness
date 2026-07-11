@@ -1,8 +1,12 @@
 """EM-269 (F2) — settlement-anchored free placement: a member's build clusters
 at their settlement's center; a non-member anchors to the city origin EXACTLY
 as F1 shipped; building near a settlement associates the builder (loosely)."""
+import copy
+import uuid as _uuidlib
+
 # CRITICAL: petridish.engine.world must be imported BEFORE
 # petridish.agents.runtime to avoid the engine↔agents circular import.
+import petridish.engine.world as world_mod
 from petridish.engine.world import World, AgentState, PlaceState
 from petridish.engine.placement import (SETTLEMENT_R, place_all, place_one_anchored)
 from petridish.config.loader import WorldParams, SettlementParams
@@ -36,6 +40,29 @@ def _dist(p, q):
     return ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5
 
 
+def _det_uuid(start=0):
+    """Deterministic uuid4 stand-in (top-32-bit counter ⇒ distinct str[:8]).
+    `start` offsets the counter so a RESET stream can mint ids disjoint from
+    the ones already minted — a reset that re-mints bld_00000001 would silently
+    OVERWRITE that building in world.buildings and turn any 'newest build'
+    assertion vacuous (it would inspect a pre-fork building instead)."""
+    counter = {"n": start}
+
+    def _f():
+        counter["n"] += 1
+        return _uuidlib.UUID(int=counter["n"] << 96)
+
+    return _f
+
+
+def _positions(w):
+    return {bid: b.position for bid, b in sorted(w.buildings.items())}
+
+
+def _newest(w):
+    return max(w.buildings.values(), key=lambda b: (b.created_tick, b.id))
+
+
 # ── member builds anchor to the settlement center ─────────────────────────────
 
 def test_member_build_lands_at_the_settlement(monkeypatch):
@@ -66,6 +93,49 @@ def test_settlement_grows_around_its_seed(monkeypatch):
     # every build clusters at the outpost, none drifts back to the origin
     assert all(_dist(p, center) <= SETTLEMENT_R * 1.5 for p in positions)
     assert all(_dist(p, (0.0, 0.0)) > SETTLEMENT_R for p in positions)
+
+
+def test_fork_continuation_byte_identical_anchored(monkeypatch):
+    """EM-155 fork == continuous, ANCHORED path (mirrors
+    test_free_placement_determinism.py::test_fork_continuation_byte_identical):
+    a settlement member's build that continues after a snapshot round-trip lands
+    byte-identically to the same build on the unforked world — settlement ids,
+    centers and loose membership all survive the fork verbatim, so
+    place_one_anchored sees identical inputs on both sides. Reset the uuid
+    stream before each continuation so both mint the SAME next id ('same
+    subsequent input'); resetting AFTER from_snapshot makes any construction
+    uuid consumption irrelevant. The resets use start=100 so the continuation
+    id (bld_00000065) is DISJOINT from the pre-fork ids (bld_00000001..03) —
+    a start=0 reset would re-mint bld_00000001, overwrite Hut 0, and leave
+    _newest pointing at a pre-fork building (assertions proven vacuous: a
+    simulated lost-center restore bug sailed through start=0 and only the
+    start=100 form caught it)."""
+    monkeypatch.setattr(rt, "FREE_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(world_mod.uuid, "uuid4", _det_uuid())
+    w1 = _world()
+    evt = w1.action_found_settlement(w1.agents["a"], "Outpost")
+    center = tuple(evt["payload"]["center"])
+    for i in range(3):
+        w1.action_propose_project(w1.agents["a"], name=f"Hut {i}", kind="home",
+                                  funds_required=0)
+    w2 = World.from_snapshot(copy.deepcopy(w1.to_snapshot({})), params=_params())
+    assert _positions(w2) == _positions(w1)            # restore is exact
+    assert w2.settlement_of("a") is not None           # membership survived
+
+    monkeypatch.setattr(world_mod.uuid, "uuid4", _det_uuid(start=100))  # w1's next build → bld_00000065
+    w1.action_propose_project(w1.agents["a"], name="Next Hut", kind="home",
+                              funds_required=0)
+    monkeypatch.setattr(world_mod.uuid, "uuid4", _det_uuid(start=100))  # w2's next build → SAME id
+    w2.action_propose_project(w2.agents["a"], name="Next Hut", kind="home",
+                              funds_required=0)
+    n1, n2 = _newest(w1), _newest(w2)
+    assert n1.id == n2.id == "bld_00000065"            # same subsequent input,
+    assert n1.name == "Next Hut"                       # and truly the NEW build
+    assert n1.position is not None
+    assert n1.position == n2.position                  # fork+resume == continuous
+    # and both landed at the outpost — proof the ANCHORED path (not the F1
+    # origin fallback) is what replayed byte-identically.
+    assert _dist(n1.position, center) <= SETTLEMENT_R * 1.5
 
 
 # ── non-members fall back to the F1 city-origin anchor byte-identically ───────
