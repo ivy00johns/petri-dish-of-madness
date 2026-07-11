@@ -322,6 +322,45 @@ class Meme:
         return d
 
 
+# EM-256 — the organized-violence record (Wave O War track): the read-only
+# faction layer promoted to belligerent actors. `belligerents` holds EXACTLY
+# TWO SORTED group ids — faction ids today; a future multi-city wave stamps an
+# additive `scope` instead of RESHAPING the pair (the EM-249 convention).
+# `exhaustion` (group id → 0..100) and `casualties` are the stage-C combat
+# ledgers (EM-258/EM-259) — carried in the schema NOW so a war minted this
+# stage round-trips forward-compatibly. Ids are SEEDED (World.open_war — sha1,
+# never uuid/clock) so replay/fork mints byte-identical wars (EM-155).
+@dataclass
+class WarState:
+    id: str                      # seeded war_<8hex> (World.open_war)
+    belligerents: list[str]      # EXACTLY 2 group ids, sorted
+    aggressor_id: str            # the declaring group (one of belligerents)
+    start_tick: int
+    aims: str = ""
+    casualties: list[str] = field(default_factory=list)       # agent ids (EM-258)
+    exhaustion: dict[str, int] = field(default_factory=dict)  # group id → 0..100
+    status: str = "active"       # active | settled
+
+    def to_dict(self) -> dict:
+        """JSON-safe record. casualties/exhaustion ride ONLY when non-empty
+        (the Meme image_id/parent_id convention) so a fresh war keeps a
+        minimal, byte-stable shape; the scalar core always rides (the whole
+        `wars` collection is already only-when-non-empty)."""
+        d = {
+            "id": self.id,
+            "belligerents": list(self.belligerents),
+            "aggressor_id": self.aggressor_id,
+            "start_tick": self.start_tick,
+            "aims": self.aims,
+            "status": self.status,
+        }
+        if self.casualties:
+            d["casualties"] = list(self.casualties)
+        if self.exhaustion:
+            d["exhaustion"] = {str(k): int(v) for k, v in self.exhaustion.items()}
+        return d
+
+
 # Wave L / EM-223 — recursive+reactive plan bounds (the believable-routine layer).
 PLAN_GOAL_CAP = 200
 PLAN_STEP_CAP = 120
@@ -1397,6 +1436,19 @@ class World:
         self.memes: dict[str, Meme] = {}
         self.culture_camps: dict[str, dict] = {}
         self.town_motif_ref: str | None = None
+        # EM-256 — the Wave O war substrate. Two collections beside factions:
+        # wars {id: WarState} (minted seeded via open_war — the declare_war
+        # governance effect is the only production writer this stage) and
+        # grievances {"src->dst": int} — a DIRECTIONAL group-scope notoriety
+        # analog: src (the aggrieved group) holds heat AGAINST dst (the
+        # offender), fed by _register_war_act (cross-faction crime) and the
+        # public add_grievance seam (Religion/Culture feed ideological
+        # grievance through it later, EM-263), decayed by advance_war. Both
+        # serialized in to_snapshot() only when non-empty (the factions
+        # pattern), so a peaceful world — and every pre-EM-256 snapshot —
+        # stays byte-identical (EM-155).
+        self.wars: dict[str, WarState] = {}
+        self.grievances: dict[str, int] = {}
         # Wave E / EM-184 — active world-scale miracles: [{kind, until_tick}].
         # Timed god miracles (send_rain / bountiful_harvest) live here while
         # active; re-casting REFRESHES until_tick (never stacks); expiry is
@@ -2080,6 +2132,17 @@ class World:
         # newborn's family edges count toward this round's clusters. Diff-
         # driven events park in the same pending_spawn_events outbox.
         self.recompute_factions()
+        # EM-256 — the once-per-round war subsystem, AFTER the faction
+        # recompute (war reads the FRESH faction set) and BEFORE the aging
+        # sweep at this method's tail — the plan's contended-seam order,
+        # asserted by an order-invariant test (test_em256_grievance). RESERVED
+        # SLOTS (Wave O round systems NOT built this pass): diffuse_culture
+        # (EM-252) then recompute_congregations (EM-262) belong BETWEEN
+        # recompute_factions and advance_war — the canonical chain is
+        # recompute_factions → diffuse_culture → recompute_congregations →
+        # advance_war → age_agents. War disabled (the default) ⇒ a no-op that
+        # parks nothing (golden-safe).
+        self.advance_war()
         # EM-233 — the once-per-round memory consolidation ("sleep"), AFTER births
         # so a newborn (whose only belief is its birth line) is well under the
         # ceiling and untouched. Each over-ceiling living agent rolls its oldest
@@ -6401,6 +6464,24 @@ class World:
         pre-Wave-O behavior (the em161 golden)."""
         return bool(self._comm_param("enabled", False))
 
+    def _war_param(self, name: str, default: Any) -> Any:
+        """EM-256 — defensive accessor for the `world.war` config block
+        (WarParams dataclass OR dict OR absent — EM-155 conventions, like
+        _comm_param). An absent block ⇒ every default ⇒ pre-EM-256 worlds run
+        unchanged (enabled defaults FALSE). `default` is only a fallback for a
+        key missing from the block, so keep these call-site defaults ==
+        WarParams defaults."""
+        return _block_get(getattr(self.params, "war", None), name, default)
+
+    def war_enabled(self) -> bool:
+        """EM-256 — config gate `world.war.enabled` (default OFF). Disabled ⇒
+        no grievance bookkeeping, no advance_war sweep, no declare_war /
+        peace_treaty menu entry or proposal, no war prompt line / event —
+        byte-identical pre-Wave-O behavior (the em161 golden). PUBLIC (like
+        boost_enabled / victory_arch_enabled) — the runtime menu/validator
+        gate on it."""
+        return bool(self._war_param("enabled", False))
+
     def _needs_param(self, name: str, default: Any) -> Any:
         """EM-229 — defensive accessor for the `world.needs` config block
         (NeedsParams dataclass OR dict OR absent — EM-155 conventions, like
@@ -7209,7 +7290,71 @@ class World:
         threshold = int(self._crime_param("wanted_threshold", 40))
         if actor.crime_status is None and actor.notoriety >= threshold:
             actor.crime_status = "wanted"
+        # EM-256 — group-scope casus belli: the SAME act feeds the victim's
+        # faction's grievance ledger. Folded HERE (the shared bookkeeping every
+        # crime handler already routes through) instead of into each handler,
+        # so ordinary cross-faction crime feeds war with ONE seam. War
+        # disabled (the default) ⇒ an immediate no-op (golden-safe).
+        self._register_war_act(actor, crime, victim_id)
         return witnessed
+
+    def _register_war_act(
+        self, actor: AgentState, act: str, victim_id: str | None
+    ) -> None:
+        """EM-256 — the GROUP-SCOPE clone of _register_crime: a hostile act
+        across a faction boundary bumps the VICTIM's faction's directional
+        grievance against the ACTOR's faction (the aggrieved group holds the
+        heat — the notoriety analog, aimed). Base grievance_per_act always
+        lands (the victim reports to their own circle) plus grievance_per_-
+        witness per co-located witness (word spreads — the witness-escalation
+        analog; witnesses exclude the actor and the direct victim, like
+        _register_crime). Same-faction / factionless acts feed nothing —
+        internal crime stays EM-240's individual-notoriety story. Gated on
+        war.enabled via add_grievance (default OFF ⇒ no-op). Deterministic —
+        no RNG/clock (EM-155)."""
+        if not self.war_enabled():
+            return
+        victim = self.agents.get(victim_id) if victim_id else None
+        if victim is None:
+            return
+        actor_f = self.faction_of(actor.id)
+        victim_f = self.faction_of(victim.id)
+        if actor_f is None or victim_f is None or actor_f["id"] == victim_f["id"]:
+            return
+        per_act = int(self._war_param("grievance_per_act", 6))
+        per_witness = int(self._war_param("grievance_per_witness", 2))
+        witnesses = [
+            a for a in self.agents_at(actor.location)
+            if a.id != actor.id and a.id != victim_id
+        ]
+        self.add_grievance(
+            victim_f["id"], actor_f["id"],
+            per_act + per_witness * len(witnesses), act,
+        )
+
+    def advance_war(self) -> list[dict]:
+        """EM-256 — the round-boundary war subsystem SKELETON, called from
+        _apply_round_start AFTER recompute_factions (war reads the FRESH
+        faction set) and BEFORE age_agents — the plan's contended-seam order,
+        pinned by a test. THIS pass: grievance decay only (the
+        notoriety-decay analog; an entry that cools to 0 is DROPPED so the
+        ledger — and the snapshot — never carries dead heat). Stage C
+        (EM-259) adds exhaustion accrual + auto-resolution here (exhaustion
+        cap / war-band collapse / a dissolved belligerent → settle with
+        reparations + exile, emit war_exhausted) + the settled-war sweep.
+        Deterministic — no RNG/clock; returns the parked events ([] this
+        pass). War disabled (the default) ⇒ a no-op (golden-safe)."""
+        if not self.war_enabled():
+            return []
+        decay = int(self._war_param("grievance_decay", 1))
+        if decay > 0 and self.grievances:
+            for key in sorted(self.grievances):
+                cooled = int(self.grievances[key]) - decay
+                if cooled > 0:
+                    self.grievances[key] = cooled
+                else:
+                    del self.grievances[key]
+        return []
 
     def advance_crime(self) -> list[dict]:
         """EM-240 — per-round crime status maintenance (called from the loop beside
@@ -7716,10 +7861,20 @@ class World:
                         f"⚑ {self._agent_name(m)} drifts away from {name}",
                         {f"{kind}_id": gid, "name": name},
                     ))
+                # EM-256 — durable EXTRA keys (war_band / treasury_pledged,
+                # later camp fields) ride the continuity rebuild VERBATIM, or
+                # the per-round recompute would silently wipe them (the
+                # faction-snapshot-writer lesson, applied to the OTHER faction
+                # writer). Pre-war groups carry no extras ⇒ byte-identical.
+                extras = {
+                    k: v for k, v in old.items()
+                    if k not in ("name", "founded_tick", "members")
+                }
                 new_store[gid] = {
                     "name": name,
                     "founded_tick": int(old.get("founded_tick", 0)),
                     "members": list(comp),
+                    **extras,
                 }
             else:
                 # A NEW group. Deterministic id (sha1 — never the salted
@@ -7891,6 +8046,150 @@ class World:
                 if not out.endswith(suffix):
                     out = f"{out} {suffix}".strip()
         return out[:200]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-256 — War data model + grievance substrate (Wave O War track). The
+    # read-only faction layer promoted to belligerent actors: directional
+    # group grievance (the notoriety analog), seeded WarState minting, and the
+    # derived-leader / casus-belli read seams the EM-257 governance lane and
+    # the runtime menu consume. All pure compute — zero LLM calls, no clock,
+    # no RNG (EM-155). Everything gates on war.enabled (default OFF), so a
+    # default world stays byte-identical (the em161 golden).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _grievance_key(src: str, dst: str) -> str:
+        """EM-256 — the directional grievance ledger key: `src->dst` = the
+        aggrieved group `src` holds heat AGAINST the offender `dst`. Group ids
+        are hex-suffixed prefixes (fct_/cmp_/cng_) so the separator is
+        collision-safe."""
+        return f"{src}->{dst}"
+
+    def grievance_between(self, src: str, dst: str) -> int:
+        """EM-256 — the heat `src` currently holds against `dst` (0 when none)."""
+        return int(self.grievances.get(self._grievance_key(str(src), str(dst)), 0))
+
+    def add_grievance(self, src: str, dst: str, amount: int, reason: str) -> int:
+        """EM-256 — the ONE public grievance seam: bump the directional heat
+        `src` holds against `dst` (clamped 0..100 like notoriety) and park a
+        `grievance_accrued` event. _register_war_act routes ordinary
+        cross-faction crime here; Religion/Culture later feed ideological /
+        religious grievance through the SAME seam as an opaque input (EM-263)
+        — the caller owns WHY, this owns the ledger. Gated on war.enabled
+        (default OFF ⇒ zero state change, zero events — golden-safe). Returns
+        the new total (0 when inert/invalid). Deterministic — no RNG/clock."""
+        if not self.war_enabled():
+            return 0
+        src, dst = str(src), str(dst)
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 0
+        if not src or not dst or src == dst or amount <= 0:
+            return 0
+        key = self._grievance_key(src, dst)
+        total = max(0, min(100, int(self.grievances.get(key, 0)) + amount))
+        self.grievances[key] = total
+        src_rec = self.factions.get(src) or {}
+        dst_rec = self.factions.get(dst) or {}
+        src_name = str(src_rec.get("name", "")) or src
+        dst_name = str(dst_rec.get("name", "")) or dst
+        # EM-141 convention: actor_id is an AGENT id — anchor on the aggrieved
+        # group's lowest member (the dissolved-faction anchor recipe).
+        members = [str(m) for m in src_rec.get("members", [])]
+        anchor = min(members) if members else ""
+        self.pending_spawn_events.append(self._faction_event(
+            "grievance_accrued", anchor,
+            f"⚔ {src_name} nurses a grievance against {dst_name} "
+            f"({_truncate(str(reason), 40)}; heat {total}).",
+            {"src": src, "dst": dst, "amount": amount, "total": total,
+             "reason": str(reason)[:120]},
+        ))
+        return total
+
+    def open_war(self, aggressor_id: str, target_id: str, aims: str) -> WarState:
+        """EM-256 — mint + register a WarState with a SEEDED id (sha1 of the
+        sorted belligerent pair + tick — never the salted builtin hash, never
+        uuid/clock): war_<8hex>, so replay/fork mints the byte-identical id
+        (EM-155; the mint_meme recipe). IDEMPOTENT: re-opening the same key
+        returns the already-registered war. Belligerents store SORTED (exactly
+        two — group ids today, city-scoped later via an additive key); the
+        aggressor rides separately. The EM-257 declare_war effect is the only
+        production caller this stage."""
+        lo, hi = sorted((str(aggressor_id), str(target_id)))
+        key = f"{lo}:{hi}:{self.tick}".encode()
+        wid = f"war_{hashlib.sha1(key).hexdigest()[:8]}"
+        existing = self.wars.get(wid)
+        if existing is not None:
+            return existing
+        war = WarState(
+            id=wid,
+            belligerents=[lo, hi],
+            aggressor_id=str(aggressor_id),
+            start_tick=self.tick,
+            aims=str(aims or "").strip()[:200],
+        )
+        self.wars[wid] = war
+        return war
+
+    def active_war_between(self, fid_a: str, fid_b: str) -> WarState | None:
+        """EM-256 — the ACTIVE war between two groups, or None. Walked in
+        sorted-id order (deterministic; at most one is expected — declare_war
+        blocks a duplicate pair while one is active)."""
+        pair = sorted((str(fid_a), str(fid_b)))
+        for wid in sorted(self.wars):
+            war = self.wars[wid]
+            if war.status == "active" and sorted(war.belligerents) == pair:
+                return war
+        return None
+
+    def active_wars_for(self, fid: str) -> list["WarState"]:
+        """EM-256 — every ACTIVE war this group fights, sorted by war id (the
+        peace_treaty propose/menu seam)."""
+        fid = str(fid)
+        return [
+            self.wars[wid] for wid in sorted(self.wars)
+            if self.wars[wid].status == "active"
+            and fid in self.wars[wid].belligerents
+        ]
+
+    def casus_belli_targets(self, fid: str) -> list[dict]:
+        """EM-256 — the factions `fid` holds a CASUS BELLI against: grievance
+        >= war.casus_belli_threshold toward a STILL-EXISTING faction it is not
+        already at war with. Sorted by ledger key (deterministic). The
+        declare_war gate + menu read this, so a proposal only ever surfaces
+        past the threshold (EM-257)."""
+        fid = str(fid)
+        threshold = int(self._war_param("casus_belli_threshold", 50))
+        prefix = f"{fid}->"
+        out: list[dict] = []
+        for key in sorted(self.grievances):
+            if not key.startswith(prefix):
+                continue
+            dst = key[len(prefix):]
+            total = int(self.grievances[key])
+            if total < threshold or dst not in self.factions:
+                continue
+            if self.active_war_between(fid, dst) is not None:
+                continue
+            out.append({
+                "id": dst,
+                "name": str(self.factions[dst].get("name", "")) or dst,
+                "grievance": total,
+            })
+        return out
+
+    def _faction_leader(self, fid: str) -> AgentState | None:
+        """EM-257 — the DERIVED leader of a group: its lowest-id LIVING member
+        (the Wave-E founding convention — a new group is named for its lowest
+        -id member). Zero storage, pure read (EM-155); None for an unknown /
+        extinct group. The peace-treaty loser-leader exile reads this."""
+        members = (self.factions.get(str(fid)) or {}).get("members", [])
+        for mid in sorted(str(m) for m in members):
+            agent = self.agents.get(mid)
+            if agent is not None and agent.alive:
+                return agent
+        return None
 
     def _unique_agent_name(self, name: str) -> str:
         """run-663 — never reuse a name another agent already holds. Many agents
@@ -8270,14 +8569,25 @@ class World:
         # faction-free world — and every pre-E snapshot — keeps the exact
         # pre-E key set (absent ⇒ {} on restore).
         if self.factions:
-            snap["factions"] = {
-                fid: {
+            fct_snap: dict[str, dict] = {}
+            for fid, f in self.factions.items():
+                rec: dict[str, Any] = {
                     "name": str(f.get("name", "")),
                     "founded_tick": int(f.get("founded_tick", 0)),
                     "members": [str(m) for m in f.get("members", [])],
                 }
-                for fid, f in self.factions.items()
-            }
+                # EM-256 — the optional war keys (war_band / treasury_pledged)
+                # MUST be emitted here or this schema-coercing writer drops
+                # them on every round-trip (the faction-snapshot-writer
+                # lesson, plan §risks — the hidden required sub-task).
+                # Written only-when-set, so a war-free faction keeps the
+                # exact Wave-E record shape (byte-identical).
+                if f.get("war_band"):
+                    rec["war_band"] = [str(m) for m in f["war_band"]]
+                if int(f.get("treasury_pledged", 0) or 0):
+                    rec["treasury_pledged"] = int(f["treasury_pledged"])
+                fct_snap[fid] = rec
+            snap["factions"] = fct_snap
         # EM-250 — memes / culture camps / town motif (the Wave O culture
         # substrate). Serialized only when non-empty / set (the factions /
         # plaza_banner_ref patterns), so a culture-free world — and every
@@ -8293,6 +8603,17 @@ class World:
             }
         if self.town_motif_ref:
             snap["town_motif_ref"] = self.town_motif_ref
+        # EM-256 — wars + grievances (the Wave O war substrate). Serialized
+        # only when non-empty (the factions pattern), so a peaceful world —
+        # and every pre-EM-256 snapshot — keeps the exact prior key set
+        # (absent ⇒ {} / {} on restore). WarState.to_dict owns the per-war
+        # shape (casualties/exhaustion ride only-when-non-empty).
+        if self.wars:
+            snap["wars"] = {str(wid): w.to_dict() for wid, w in self.wars.items()}
+        if self.grievances:
+            snap["grievances"] = {
+                str(k): int(v) for k, v in self.grievances.items()
+            }
         # Wave E / EM-184 — active timed miracles [{kind, until_tick}].
         # Serialized only when non-empty (the cap_demotions pattern), so a
         # miracle-free world — and every pre-E snapshot — keeps the exact
@@ -8895,15 +9216,25 @@ class World:
         # Wave E / EM-120 — restore factions (additive: pre-E snapshots lack
         # the key and restore {} — identity continuity then survives a
         # fork/restore, so a stable membership re-keeps its id with no events).
-        world.factions = {
-            str(fid): {
+        world.factions = {}
+        for fid, f in (state.get("factions") or {}).items():
+            if not fid:
+                continue
+            fct_rec: dict[str, Any] = {
                 "name": str(_block_get(f, "name", "")),
                 "founded_tick": _int(_block_get(f, "founded_tick", 0)),
                 "members": [str(m) for m in (_block_get(f, "members", []) or [])],
             }
-            for fid, f in (state.get("factions") or {}).items()
-            if fid
-        }
+            # EM-256 — the optional war keys restore only-when-set (absent in
+            # pre-EM-256 / war-free snapshots ⇒ the exact Wave-E record shape,
+            # byte-identical), mirroring the writer above.
+            band = _block_get(f, "war_band", None)
+            if band:
+                fct_rec["war_band"] = [str(m) for m in band]
+            pledged = _int(_block_get(f, "treasury_pledged", 0))
+            if pledged:
+                fct_rec["treasury_pledged"] = pledged
+            world.factions[str(fid)] = fct_rec
         # EM-250 — restore memes / culture camps / town motif (additive:
         # pre-EM-250 snapshots lack the keys and restore {} / {} / None, so a
         # culture-free fork/replay is byte-identical). Defensive: a meme row
@@ -8935,6 +9266,40 @@ class World:
         }
         _motif = state.get("town_motif_ref")
         world.town_motif_ref = str(_motif) if _motif else None
+        # EM-256 — restore wars + grievances (additive: pre-EM-256 snapshots
+        # lack the keys and restore {} / {}, so a peaceful fork/replay is
+        # byte-identical). Defensive: a war row that is not a dict, has a
+        # blank id, or lacks exactly two distinct belligerents is dropped; an
+        # unknown status coerces to "active"; exhaustion clamps 0..100; a
+        # grievance entry that is not a positive int is dropped (the ledger
+        # never carries dead heat — advance_war's invariant).
+        restored_wars: dict[str, WarState] = {}
+        for wid, wrec in (state.get("wars") or {}).items():
+            if not isinstance(wrec, dict) or not wid:
+                continue
+            sides = sorted({str(b) for b in (wrec.get("belligerents") or []) if b})
+            if len(sides) != 2:
+                continue
+            status = str(wrec.get("status", "active"))
+            restored_wars[str(wid)] = WarState(
+                id=str(wid),
+                belligerents=sides,
+                aggressor_id=str(wrec.get("aggressor_id", "")),
+                start_tick=_int(wrec.get("start_tick")),
+                aims=str(wrec.get("aims", "")),
+                casualties=[str(c) for c in (wrec.get("casualties") or [])],
+                exhaustion={
+                    str(g): max(0, min(100, _int(v)))
+                    for g, v in (wrec.get("exhaustion") or {}).items() if g
+                },
+                status=status if status in ("active", "settled") else "active",
+            )
+        world.wars = restored_wars
+        world.grievances = {}
+        for gkey, gval in (state.get("grievances") or {}).items():
+            heat = _int(gval)
+            if gkey and "->" in str(gkey) and heat > 0:
+                world.grievances[str(gkey)] = min(100, heat)
         # Wave E / EM-184 — restore active timed miracles (additive: pre-E
         # snapshots lack the key and restore [] — a mid-rain snapshot keeps
         # its buff on resume and still expires on schedule).
