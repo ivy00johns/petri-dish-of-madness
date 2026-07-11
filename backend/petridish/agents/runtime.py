@@ -2080,6 +2080,14 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # method world.action_propose_rule is NOT flag-gated (stays directly callable).
         if GRAPH_ZONES_ENABLED:
             valid_effects.add("set_zone_rule")  # EM-265 (SB)
+        # EM-257 — the war governance lane rides ONLY when war is enabled (the
+        # set_zone_rule flag recipe, but config-gated like victory-arch/boost):
+        # default OFF ⇒ not in the set ⇒ rejected as an invalid effect ⇒ agent
+        # behavior byte-identical when dormant. The world method stays directly
+        # callable (it rejects with its own war-disabled reason).
+        if getattr(world, "war_enabled", None) and world.war_enabled():
+            valid_effects.add("declare_war")
+            valid_effects.add("peace_treaty")
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -2183,6 +2191,52 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             if zone_id not in current_zones:
                 return ("set_zone_rule requires args.zone_id = the id of a real "
                         "current zone (a city block)")
+        # EM-257 — declare_war: mirror the world's checks (faction membership +
+        # a casus-belli target, resolved by faction id OR name — the trial
+        # defendant-resolution recipe) so the gate AGREES with
+        # world.action_propose_rule (EM-108 menu/resolution rule). These
+        # branches only run when war is enabled (the effect passed the set
+        # above). casus_belli_targets already folds in the grievance
+        # threshold, target existence, and the not-already-at-war guard.
+        if effect == "declare_war":
+            _f = world.faction_of(agent.id) if hasattr(world, "faction_of") else None
+            if _f is None:
+                return ("declare_war requires you to belong to a faction — "
+                        "a war is declared BY a circle, not a lone agent")
+            target = str(args.get("target") or "").strip()
+            _factions = getattr(world, "factions", {}) or {}
+            _tid = target if target in _factions else None
+            if _tid is None and target:
+                _wanted = target.lower()
+                _tid = next(
+                    (fid for fid in sorted(_factions)
+                     if str(_factions[fid].get("name", "")).strip().lower()
+                     == _wanted),
+                    None)
+            _casus = {t["id"] for t in world.casus_belli_targets(_f["id"])}
+            if _tid is None or _tid not in _casus:
+                return ("declare_war requires args.target = a faction your "
+                        "circle holds a casus belli against (grievance past "
+                        "the threshold)")
+        # EM-257 — peace_treaty: mirror the world's checks (faction membership +
+        # an ACTIVE war the faction is fighting; the id may ride args.war_id or
+        # the generic args.target) plus the reparations shape.
+        if effect == "peace_treaty":
+            _f = world.faction_of(agent.id) if hasattr(world, "faction_of") else None
+            if _f is None:
+                return ("peace_treaty requires you to belong to a faction — "
+                        "peace is sued for BY a belligerent circle")
+            _wid = str(args.get("war_id") or args.get("target") or "").strip()
+            if _wid not in {w.id for w in world.active_wars_for(_f["id"])}:
+                return ("peace_treaty requires args.war_id = the id of an "
+                        "active war your faction is fighting")
+            _rep = args.get("reparations")
+            if _rep is not None and str(_rep).strip() != "":
+                try:
+                    if int(_rep) < 0:
+                        return "peace_treaty reparations must be >= 0"
+                except (TypeError, ValueError):
+                    return "peace_treaty reparations must be a non-negative integer"
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -2833,6 +2887,35 @@ def _assemble_context(
                 propose_line += "|set_zone_rule"
                 propose_tail += ("; set_zone_rule needs zone_id=<from NEARBY ZONES> + "
                                  "hint=residential|market|civic|open (optional density_cap)")
+        # EM-257 — the war governance lane surfaces ONLY when relevant, gated
+        # EXACTLY as the validator gates it (EM-108 menu/resolution agreement):
+        # declare_war only when the agent's faction holds a live casus belli
+        # (grievance past the threshold — the EM-256 read seam), peace_treaty
+        # only when its faction is actually at war. War disabled (the default),
+        # a factionless agent, or a quiet ledger ⇒ NO new line ⇒ the peacetime
+        # prompt/menu is byte-identical (the em161 golden). Concrete ids in the
+        # tail (the promote_image FINDING 1(b) recipe) so the model is offered
+        # a target that will actually resolve.
+        if getattr(world, "war_enabled", None) and world.war_enabled():
+            _wf = world.faction_of(agent.id) if hasattr(world, "faction_of") else None
+            if _wf is not None:
+                _casus = world.casus_belli_targets(_wf["id"])
+                if _casus:
+                    propose_line += "|declare_war"
+                    propose_tail += (
+                        f"; declare_war needs target=<a faction id, e.g. "
+                        f"{_casus[0]['id']} ({_casus[0]['name']}, grievance "
+                        f"{_casus[0]['grievance']})> — your faction ALONE "
+                        f"decides, on a 70% vote of its members")
+                _at_war = world.active_wars_for(_wf["id"])
+                if _at_war:
+                    propose_line += "|peace_treaty"
+                    propose_tail += (
+                        f"; peace_treaty needs war_id=<an active war's id, "
+                        f"e.g. {_at_war[0].id}> (optional reparations=<credits "
+                        f"your side pays>) — suing for peace CONCEDES: your "
+                        f"faction pays and its leader is exiled; your faction "
+                        f"alone decides, on a 70% vote")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -6214,10 +6297,16 @@ class AgentRuntime:
             zone_id = args.get("zone_id")
             hint = args.get("hint")
             density_cap = args.get("density_cap")
+            # EM-257 — declare_war reuses the generic target (the enemy faction,
+            # id or name); peace_treaty carries war_id (or the generic target —
+            # the demolish target/building_id convention) + optional reparations.
+            war_id = args.get("war_id")
+            reparations = args.get("reparations")
             ok, reason, rule = self.world.action_propose_rule(
                 agent, effect, text, name, target, image_id, op, article_id,
                 scope=scope, policy=policy,
-                zone_id=zone_id, hint=hint, density_cap=density_cap)
+                zone_id=zone_id, hint=hint, density_cap=density_cap,
+                war_id=war_id, reparations=reparations)
             if ok and rule:
                 # EM-100 — feed text leads with the rule's text + effect tag.
                 label = _rule_label(text)
