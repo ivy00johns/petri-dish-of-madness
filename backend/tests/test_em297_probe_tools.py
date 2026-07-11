@@ -25,9 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import em297_probe  # noqa: E402
 from em297_recipe_schema import (  # noqa: E402
     DEFAULTS,
+    EXAMPLE_RECIPE,
     FIELD_NAMES,
     Recipe,
     coerce_recipe,
+    extract_json_object,
+    parse_recipe_strict,
 )
 
 
@@ -254,3 +257,144 @@ def test_coerce_drops_unknown_keys_with_note():
     recipe, repairs = coerce_recipe(_valid_obj(chimneys=3))
     assert "chimneys" not in recipe.as_value_dict()
     assert any("chimneys" in note for note in repairs)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# parse_recipe_strict — hard validation (extra keys, floors bounds)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_strict_accepts_valid_dict():
+    recipe, errors = parse_recipe_strict(_valid_obj())
+    assert errors == []
+    assert recipe.as_value_dict() == _valid_obj()
+
+
+def test_strict_rejects_extra_key():
+    recipe, errors = parse_recipe_strict(_valid_obj(chimneys=3))
+    assert recipe is None
+    assert any("chimneys" in e for e in errors)
+
+
+@pytest.mark.parametrize("floors", [0, 9, -1])
+def test_strict_rejects_out_of_bounds_floors(floors):
+    recipe, errors = parse_recipe_strict(_valid_obj(floors=floors))
+    assert recipe is None
+    assert any("floors" in e for e in errors)
+
+
+@pytest.mark.parametrize("floors", [1, 8])
+def test_strict_accepts_boundary_floors(floors):
+    recipe, errors = parse_recipe_strict(_valid_obj(floors=floors))
+    assert errors == []
+    assert recipe.floors == floors
+
+
+def test_strict_parses_string_input_via_extraction():
+    recipe, errors = parse_recipe_strict('Sure! ```json\n{"floors": 2}\n```')
+    assert errors == []
+    assert recipe.floors == 2  # other fields fall back to schema defaults
+
+
+def test_strict_reports_missing_json_in_string():
+    recipe, errors = parse_recipe_strict("no json here at all")
+    assert recipe is None
+    assert errors == ["no JSON object found in output"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# extract_json_object — whole string, fenced, embedded-in-prose
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ('{"a": 1}', {"a": 1}),
+        ('```json\n{"a": 1}\n```', {"a": 1}),
+        ('```\n{"a": 1}\n```', {"a": 1}),
+        ('Here is your recipe:\n{"a": 1}\nEnjoy!', {"a": 1}),
+        ('prose {"nested": {"b": 2}} more prose', {"nested": {"b": 2}}),
+    ],
+)
+def test_extract_json_object_variants(text, want):
+    assert extract_json_object(text) == want
+
+
+@pytest.mark.parametrize("text", ["no json here", "[1, 2, 3]", '"just a string"', ""])
+def test_extract_json_object_returns_none_without_a_dict(text):
+    assert extract_json_object(text) is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# score() — echo-threshold boundary, pairwise divergence math, defaults detector
+# ──────────────────────────────────────────────────────────────────────────────
+
+EXAMPLE_VALUES = EXAMPLE_RECIPE.as_value_dict()
+
+
+def _result(model, prompt, recipe):
+    return {
+        "model_label": model,
+        "prompt_key": prompt,
+        "content": "x",
+        "recipe": dict(recipe),
+    }
+
+
+def test_score_echo_threshold_boundary():
+    hard = dict(EXAMPLE_VALUES)  # 7/7 fields -> hard echo (and near-echo)
+    near = dict(EXAMPLE_VALUES, material="wood")  # 6/7 -> near-echo only
+    below = dict(EXAMPLE_VALUES, material="wood", roof="dome")  # 5/7 -> no echo
+
+    scoring = em297_probe.score(
+        [_result("m", "p1", hard), _result("m", "p2", near), _result("m", "p3", below)]
+    )
+    pm = scoring["per_model"]["m"]
+    assert pm["hard_echoes"] == 1
+    assert pm["echoes_of_example"] == 2  # the hard echo plus the 6/7 boundary case
+    assert pm["echo_rate"] == round(2 / 3, 3)
+
+
+def test_score_all_defaults_detector_is_not_the_echo_detector():
+    defaults = Recipe().as_value_dict()
+    scoring = em297_probe.score([_result("m", "p1", defaults)])
+    pm = scoring["per_model"]["m"]
+    assert pm["all_default_recipes"] == 1
+    # the example is deliberately non-default: defaults must NOT read as an echo
+    assert pm["echoes_of_example"] == 0
+
+
+def test_score_pairwise_divergence_math():
+    base = Recipe().as_value_dict()
+    results = [
+        _result("a", "p", dict(base, footprint="small", floors=1)),
+        _result("b", "p", dict(base, footprint="small", floors=2)),
+        _result("c", "p", dict(base, footprint="grand", floors=3)),
+        # single-recipe prompt: below the >=2 guard, must not skew field stats
+        _result("a", "solo", dict(base, footprint="tiny")),
+    ]
+    scoring = em297_probe.score(results)
+    div = scoring["cross_model_divergence_by_field"]
+
+    # footprint: {small, small, grand} -> 2 distinct; pairs differing: 2 of 3
+    assert div["footprint"]["mean_distinct_values_per_prompt"] == 2.0
+    assert div["footprint"]["pairwise_disagreement_rate"] == round(2 / 3, 3)
+    # floors: {1, 2, 3} -> all pairs differ
+    assert div["floors"]["mean_distinct_values_per_prompt"] == 3.0
+    assert div["floors"]["pairwise_disagreement_rate"] == 1.0
+    # roof: identical everywhere -> zero disagreement
+    assert div["roof"]["mean_distinct_values_per_prompt"] == 1.0
+    assert div["roof"]["pairwise_disagreement_rate"] == 0.0
+
+    pp = scoring["per_prompt_divergence"]
+    assert pp["p"]["models_with_valid_recipe"] == 3
+    assert pp["p"]["footprint"]["distinct"] == 2
+    assert pp["solo"]["models_with_valid_recipe"] == 1
+
+
+def test_score_with_no_valid_recipes_yields_null_rates():
+    scoring = em297_probe.score(
+        [{"model_label": "m", "prompt_key": "p1", "content": ""}]
+    )
+    pm = scoring["per_model"]["m"]
+    assert pm["schema_valid"] == 0
+    assert pm["echo_rate"] is None
