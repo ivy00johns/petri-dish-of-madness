@@ -32,6 +32,13 @@ log = logging.getLogger(__name__)
 #   v2 = chapters carry payload["chaos"] (cast/quotes/laws/conflicts/deaths/counts)
 CHRONICLER_VERSION = 2
 
+# EM-226 network-down grace — while auto-paused for a provider/network outage,
+# the pause-wait loop cheaply probes connectivity every this-many polls (~0.5s
+# each) and auto-resumes when a model answers, so a transient blip doesn't
+# strand the run waiting for a manual restart. Counter-based (no clock reads) so
+# replay is unaffected.
+_PROVIDER_PROBE_EVERY = 20
+
 
 def _world_params_json(world_params: object) -> dict:
     """JSON-ready view of WorldParams for the runs config blob.
@@ -177,6 +184,11 @@ class TickLoop:
         self._provider_error_streak: int = 0
         self._provider_pause_emitted: bool = False
         self._last_provider_error: str | None = None
+        # EM-226 network-down grace — auto-RESUME a provider-error pause once
+        # connectivity returns (probe-gated), so a transient outage doesn't
+        # strand the run until a manual restart.
+        self._auto_paused_for_provider: bool = False
+        self._provider_probe_skips: int = 0
 
         # W11a / EM-094 — Narrator mode. The in-flight narrator call, run OFF the
         # agents' critical path (same pattern as the animal cadence) so a slow /
@@ -263,6 +275,8 @@ class TickLoop:
         # connection isn't immediately re-paused; re-arm the one-shot pause event.
         self._provider_error_streak = 0
         self._provider_pause_emitted = False
+        self._auto_paused_for_provider = False
+        self._provider_probe_skips = 0
         self._paused = False
         self._world.running = True
         self._step_event.set()
@@ -558,6 +572,10 @@ class TickLoop:
                     await asyncio.wait_for(self._step_event.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
                     pass
+                # EM-226 network-down grace: if we auto-paused for a provider/
+                # network outage, probe connectivity and auto-resume when it's
+                # back (breaks this wait by clearing self._paused).
+                await self._maybe_auto_resume()
 
             # Decide whether this iteration is a one-shot step or a continuous turn.
             # A queued step always advances exactly one turn (even while running);
@@ -850,6 +868,8 @@ class TickLoop:
                 and not self._provider_pause_emitted
             ):
                 self._emit_provider_pause(self._provider_error_streak, tick)
+                self._auto_paused_for_provider = True
+                self._provider_probe_skips = 0
                 self.pause()
                 self._broadcast_world_state()
         finally:
@@ -2080,6 +2100,48 @@ class TickLoop:
                 "auto_paused": True,
             },
         })
+
+    async def _maybe_auto_resume(self) -> bool:
+        """EM-226 network-down grace — while auto-paused for a provider/network
+        outage, cheaply probe connectivity every `_PROVIDER_PROBE_EVERY`
+        pause-wait polls and auto-resume when a model answers, so a transient
+        blip doesn't strand the run until a manual restart. Counter-gated (no
+        clock reads → replay-safe). Returns True when it resumed.
+
+        Only ONE probe fires per cycle and it goes to the `auto` lane (the
+        proxy's own health router) with a tiny budget — vastly cheaper than
+        letting all agents burn full 30s-timeout turns, which is what would
+        re-open the exact pause-churn this grace is meant to end."""
+        if not self._auto_paused_for_provider or not self._paused:
+            return False
+        self._provider_probe_skips += 1
+        if self._provider_probe_skips < _PROVIDER_PROBE_EVERY:
+            return False
+        self._provider_probe_skips = 0
+        probe = getattr(self._router, "probe_connectivity", None)
+        if probe is None:
+            return False
+        try:
+            ok = await probe()
+        except Exception:  # a probe must never crash the loop
+            ok = False
+        if not ok:
+            return False
+        # Connectivity is back — resume and re-arm the one-shot pause machinery.
+        self._emit_event({
+            "kind": "world_resumed",
+            "actor_id": None,
+            "actor_type": "system",
+            "text": "▶ Network recovered — resuming automatically.",
+            "payload": {"reason": "provider_recovery", "auto_resumed": True},
+        })
+        self._auto_paused_for_provider = False
+        self._provider_error_streak = 0
+        self._provider_pause_emitted = False
+        self._paused = False
+        self._world.running = True
+        self._broadcast_world_state()
+        return True
 
     def _emit_extinction(self, last_agent: AgentState, tick: int) -> None:
         """Emit `world_extinct` (EM-071, event-log v1.1.0 §4) — once per run.

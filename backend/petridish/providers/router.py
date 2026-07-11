@@ -1456,6 +1456,29 @@ class Router:
         # Cheap: just check that API key is present
         return bool(profile.api_key())
 
+    async def probe_connectivity(self, *, max_tokens: int = 8) -> bool:
+        """Live liveness probe for the loop's network-down auto-resume (EM-226).
+        Unlike `health` (a key-present check), this makes ONE tiny real call on
+        the `auto` lane (the FreeLLMAPI health router) — or any non-mock lane if
+        `auto` is absent — and returns True only when a model actually answers.
+        False on any provider/transport error. Never raises, so the loop's
+        recovery poll can call it safely."""
+        lane = "auto" if "auto" in self._adapters else next(
+            (n for n in self._adapters if not self._is_mock_profile(n)), None
+        )
+        adapter = self._adapters.get(lane) if lane else None
+        if adapter is None:
+            return False
+        try:
+            await adapter.chat(
+                [{"role": "user", "content": "ping"}],
+                max_tokens=max_tokens,
+                temperature=0.0,
+            )
+            return True
+        except Exception:
+            return False
+
     def legend(self) -> list[dict]:
         import asyncio
         result = []
