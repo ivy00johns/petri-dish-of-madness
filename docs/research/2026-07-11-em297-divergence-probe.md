@@ -120,8 +120,9 @@ model collapsed to one template of its own.
 | wealthy manor | large/grand, or ≥ 2 floors + ornate/gilded | pass | pass | 1.0 |
 | fisherman hut | tiny/small and ≤ 2 floors | pass | pass | 1.0 |
 
-**10/10 evaluated checks passed.** Nothing incoherent was produced by any model at any point:
-no 8-floor shack, no marble hut, no tiny temple.
+**9/9 evaluated checks passed** (10 planned; the slum-shack × gpt-oss cell was lost to a 429, so
+9 were evaluable). Nothing incoherent was produced by any model at any point: no 8-floor shack,
+no marble hut, no tiny temple.
 
 ## 6. Verdict: GO (qualified) for EM-299
 
@@ -139,19 +140,22 @@ premise held:
 **Qualifications (and what they oblige):**
 
 - **Coverage is 2 of 4 lanes** (Google + OpenAI-oss/Cerebras). Qwen and llama never got routed —
-  every one of their 10 calls died on proxy-wide 429 windows, including 4 supplemental calls via
-  the canonical `llama-3.3-70b` id after a cooldown. That is the EM-301 churn, not model evidence.
+  all 8 of their logical calls (16 HTTP calls including retries: 3 + 3 main-grid prompts, plus 2
+  supplemental sanity calls via the canonical `llama-3.3-70b` id after a cooldown) died on
+  proxy-wide 429 windows. That is the EM-301 churn, not model evidence.
   **Obligation:** before EM-299's *visual sign-off* (not before starting it), run the cheap top-up —
   `em297_probe.py --models "qwen=qwen/qwen3-next-80b-a3b-instruct:free,llama=llama-3.3-70b-versatile"`
-  (~18 calls) in a healthy window, merge with `--score-only`. A surprise there (e.g. llama echoing)
-  would tune prompts/schema, not kill the keystone: the skyline thesis already stands on two labs
-  diverging.
+  (~18 calls) in a healthy window, merge with `--score-only`. The top-up keeps go/no-go authority:
+  if ONE missing lane echoes, that tunes prompts/schema (the skyline thesis still stands on two
+  labs diverging); **if BOTH missing lanes echo, revisit the GO** — half the production grid
+  parroting the example would undercut the divergence premise itself.
 - **429s are a production fact, not just a probe artifact.** 3 of gpt-oss's 8 recipe turns died in
   the proxy, mid-grid. EM-299's catalog fallback (recipe absent ⇒ today's lookup) is therefore
   **load-bearing, not an edge case**, and the lenient `coerce_recipe` defaults path should ride
   along so a *malformed* recipe also degrades to a building, never a hole.
 - **n=1 per model-prompt cell** at temperature 0.8 — per-cell values carry sampling noise; the
-  aggregate signal (13/13 valid, 0 echoes, 10/10 coherence) is what to trust.
+  aggregate signal (13/13 valid, 0 echoes, 9/9 evaluated coherence checks — 10 planned, 1 lost
+  to a 429) is what to trust.
 
 **Recommended EM-299 posture:** build it. Keep the probe's exact schema shape as the starting
 grammar (it validated at 100 % as-is), keep enums closed, keep the one-shot example distinctive
@@ -169,6 +173,8 @@ coerce-with-logged-repairs → catalog-fallback as three explicit tiers.
 
 Raw data: [`em297-raw.json`](em297-raw.json) — includes the full system prompt, every raw
 response, `X-Routed-Via` routing evidence, token usage, latencies, all 429 bodies, and the scoring
-block. The failed llama supplement attempt is preserved in
-[`em297-raw-supplement.json`](em297-raw-supplement.json) and summarized under
-`supplement_attempts` in the main file.
+block. Both failed llama supplement attempts are summarized under `supplement_attempts` in the
+main file. [`em297-raw-supplement.json`](em297-raw-supplement.json) preserves only attempt 2's
+raw record: both attempts wrote to the same output path, so attempt 1's raw record was
+overwritten by attempt 2 (attempt 1's outcome — sanity 429, same proxy-wide window — survives
+only in the `supplement_attempts.reason` summary).
