@@ -372,6 +372,15 @@ class Router:
         return self._cache_enabled and self._cache_max > 0 and not self._is_mock_profile(profile_name)
 
     @staticmethod
+    def _usage_view(usage):
+        """Defensive copy of a usage dict (W30 review). The returned per-call
+        attribution, the staged pending snapshot and the decision-cache entry
+        must never alias ONE mutable dict (or the adapter's own last_usage) —
+        a consumer mutating its record would silently leak into every other
+        consumer. Shallow is enough: usage values are scalars."""
+        return dict(usage) if isinstance(usage, dict) else usage
+
+    @staticmethod
     def _cached_usage_snapshot(usage: dict | None) -> dict:
         """Usage snapshot surfaced on a HIT: cached=true, tokens null, latency ~0.
 
@@ -420,17 +429,29 @@ class Router:
     ) -> tuple[str, dict]:
         """chat() returning (text, attribution) — the EM-307 per-call channel.
 
-        `attribution` = {"routed_via", "usage", "served_by"} for THIS call:
-        exactly the values the profile-level last_routed_via()/last_usage()
-        reads surface immediately after a single-caller chat() (cache HITs get
-        the cached=true snapshot; a bounced call gets the substitute's numbers
-        with the additive EM-198 bounced_from/bounced_to keys; `served_by` is
-        the lane that actually served — the health-attribution target). The
-        runtimes consume THIS record instead of the per-profile pending
-        snapshot, because concurrent chat() calls on one profile (narrator /
-        deep-dive / animal background tasks sharing an agent's lane) clobber
-        that snapshot mid-flight. The snapshot is still staged, byte-identical,
-        for the single-caller last_usage()/last_routed_via() contract.
+        `attribution` = {"routed_via", "usage", "served_by"} for THIS call.
+        `served_by` — the lane that actually served (the health-attribution
+        target) — is exact per-call state on every path (home serve / bounce /
+        EM-205 backup / cache HIT). Cache HITs get the cached=true snapshot; a
+        bounced call gets the substitute's numbers with the additive EM-198
+        bounced_from/bounced_to keys.
+
+        GUARANTEE SCOPE (W30 review): `routed_via`/`usage` are read from the
+        serving ADAPTER's mutable last_routed_via/last_usage right after the
+        call returns. That eliminates the per-profile pending-snapshot clobber
+        — concurrent calls on one profile resolving on DIFFERENT lanes
+        (narrator / deep-dive / animal background tasks sharing an agent's
+        lane), the hazard EM-307 fixed — but attribution still RACES at the
+        adapter level on bounced/probed paths: two concurrent calls completing
+        on the SAME adapter can swap each other's usage numbers between the
+        adapter's return and this read. `served_by` (hence health credit) is
+        unaffected; cache HITs are unaffected (their snapshot is stored, not
+        read back). Closing the residual means returning usage from
+        adapter.chat() itself — a cross-adapter interface change, left open.
+
+        The runtimes consume THIS record instead of the per-profile pending
+        snapshot. The snapshot is still staged, byte-identical, for the
+        single-caller last_usage()/last_routed_via() contract.
 
         `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
         bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
@@ -459,7 +480,8 @@ class Router:
                 }
                 return hit["text"], {
                     "routed_via": hit.get("routed_via"),
-                    "usage": hit_usage,
+                    # copy-on-write: never hand out the staged snapshot's dict
+                    "usage": self._usage_view(hit_usage),
                     "served_by": profile_name,
                 }
             self._cache_misses += 1  # EM-162 bookkeeping (cacheable miss)
@@ -574,21 +596,23 @@ class Router:
                 }
             self._pending_cached[profile_name] = {
                 "routed_via": served_routed,
-                "usage": served_usage,
+                # copy-on-write (W30): the snapshot, the cache entry and the
+                # returned attribution each get their OWN usage dict.
+                "usage": self._usage_view(served_usage),
             }
 
         if cacheable and key is not None:
             self._cache[key] = {
                 "text": text,
                 "routed_via": served_routed,
-                "usage": served_usage,
+                "usage": self._usage_view(served_usage),
             }
             self._cache.move_to_end(key)
             while len(self._cache) > self._cache_max:
                 self._cache.popitem(last=False)  # evict least-recently-used
         return text, {
             "routed_via": served_routed,
-            "usage": served_usage,
+            "usage": self._usage_view(served_usage),
             "served_by": served_by,
         }
 
