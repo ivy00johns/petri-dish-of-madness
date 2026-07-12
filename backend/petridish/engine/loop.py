@@ -2332,7 +2332,9 @@ class TickLoop:
 
         stamped = {
             "type": "event",
-            "seq": self._next_seq(),
+            # Finalized below: the broadcast copy carries the persisted row's
+            # AUTOINCREMENT event_id, NOT the per-boot counter (see save_event).
+            "seq": 0,
             "tick": tick,
             "kind": evt.get("kind", "agent_action"),
             "actor_id": evt.get("actor_id"),
@@ -2350,11 +2352,24 @@ class TickLoop:
             "payload": evt.get("payload", {}),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        self._repo.save_event(run_id, stamped, tick)
+        # WS/DB seq unification (feed-freeze root, likely EM-305): a live
+        # `event` message's seq IS the persisted events.seq (event-log.md §1).
+        # The old per-boot counter restarted at 0 on every backend restart/fork
+        # and diverged from the REST-served event_ids, so clients deduping live
+        # events against fetched history silently dropped fresh events. The
+        # counter (_next_seq) now numbers ONLY the never-persisted world_state
+        # snapshots. Fallback: a duck-typed repo without a rowid return keeps
+        # the counter so a broadcast never carries a null seq.
+        row_seq = self._repo.save_event(run_id, stamped, tick)
+        stamped["seq"] = row_seq if isinstance(row_seq, int) else self._next_seq()
         self._broadcaster(stamped)
 
     def _broadcast_world_state(self) -> None:
-        """Send a fresh world_state snapshot over WS."""
+        """Send a fresh world_state snapshot over WS.
+
+        world_state seq stays the per-boot counter: snapshots are ephemeral
+        projections that are never persisted, so there is no DB id to carry —
+        unlike `event` messages, whose seq is the events.seq event_id."""
         profile_colors = {
             p["name"]: p["color"] for p in self._router.legend()
         }
