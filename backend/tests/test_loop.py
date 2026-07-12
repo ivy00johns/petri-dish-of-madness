@@ -431,3 +431,102 @@ async def test_auto_resume_noop_when_paused_for_other_reason():
     assert probed["n"] == 0
     assert loop._paused is True
     await _drain_task(loop)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _run() turn guard — an unhandled turn exception must pause, not silently kill
+# the tick task (the old bug: the task died with the exception while
+# /api/health kept reporting running=true).
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_turn_crash_pauses_instead_of_killing_the_task():
+    loop, world = _make_loop(interval=0.01)
+    msgs: list[dict] = []
+    loop._broadcaster = msgs.append  # type: ignore
+
+    orig_run_turn = loop._runtime.run_turn
+
+    async def boom(agent):
+        raise RuntimeError("synthetic turn crash")
+    loop._runtime.run_turn = boom  # type: ignore
+
+    try:
+        loop.start()
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if loop._paused:
+                break
+
+        # The task survived the crash (old bug: it died with the exception).
+        assert loop._task is not None and not loop._task.done(), (
+            "tick task died on a turn exception instead of pausing"
+        )
+        # ... and the world was auto-paused so /api/health tells the truth.
+        assert loop._paused is True
+        assert world.running is False
+        # An internal-error crash must NOT arm the EM-226 connectivity probe:
+        # it won't heal with the network, so no auto-resume.
+        assert loop._auto_paused_for_provider is False
+
+        # A best-effort world_paused {reason: internal_error} was emitted.
+        paused = [m for m in msgs
+                  if m.get("type") == "event" and m.get("kind") == "world_paused"]
+        assert paused, "no world_paused event for the crashed turn"
+        assert paused[-1]["payload"]["reason"] == "internal_error"
+        assert paused[-1]["payload"]["auto_paused"] is True
+        # The pause broadcast a fresh world_state carrying running=False.
+        states = [m for m in msgs if m.get("type") == "world_state"]
+        assert states and states[-1]["running"] is False
+
+        # The loop is not just alive but FUNCTIONAL: with a healthy runtime
+        # back, a step advances a turn exactly as before the crash.
+        loop._runtime.run_turn = orig_run_turn  # type: ignore
+        tick_before = world.tick
+        loop.step()
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if world.tick > tick_before:
+                break
+        assert world.tick == tick_before + 1
+    finally:
+        await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_turn_crash_still_resolves_step_waiters():
+    """A crash during a queued step must not hang the step_and_wait caller."""
+    loop, world = _make_loop()
+
+    async def boom(agent):
+        raise RuntimeError("synthetic turn crash")
+    loop._runtime.run_turn = boom  # type: ignore
+
+    try:
+        tick = await asyncio.wait_for(loop.step_and_wait(timeout=2.0), timeout=3.0)
+        assert tick == world.tick  # resolved, not timed out/hung
+        assert loop._task is not None and not loop._task.done()
+        assert loop._paused is True
+    finally:
+        await _drain_task(loop)
+
+
+@pytest.mark.asyncio
+async def test_turn_cancellation_still_propagates_through_the_guard():
+    """reset/fork teardown cancels the task THROUGH the awaited turn — the
+    guard must re-raise CancelledError, never swallow it into a pause."""
+    loop, world = _make_loop()
+    started = asyncio.Event()
+
+    async def hang(agent):
+        started.set()
+        await asyncio.Event().wait()  # parks until cancelled
+    loop._runtime.run_turn = hang  # type: ignore
+
+    loop.start()
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    assert loop._task is not None
+    loop._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loop._task
+    assert loop._task.done()

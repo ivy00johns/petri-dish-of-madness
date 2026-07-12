@@ -601,7 +601,23 @@ class TickLoop:
                     self._resolve_step_waiter()
                 continue
 
-            await self._execute_turn(agent)
+            try:
+                await self._execute_turn(agent)
+            except asyncio.CancelledError:
+                # reset/fork teardown cancels the task through this await —
+                # cancellation MUST propagate, never turn into a pause.
+                raise
+            except Exception as exc:
+                # An unhandled turn exception used to kill this task silently
+                # while /api/health kept reporting running=true (the world just
+                # froze). Mirror the EM-226 auto-pause instead: log it, emit a
+                # best-effort world_paused {reason: internal_error}, pause, and
+                # broadcast — the task stays alive so resume/step still work.
+                log.exception(
+                    "turn crashed (agent=%s tick=%s) — auto-pausing",
+                    agent.id, self._world.tick,
+                )
+                self._pause_for_internal_error(agent, exc)
 
             if consumed_step:
                 self._resolve_step_waiter()
@@ -2100,6 +2116,44 @@ class TickLoop:
                 "auto_paused": True,
             },
         })
+
+    def _pause_for_internal_error(self, agent: AgentState, exc: BaseException) -> None:
+        """A turn crashed with an unhandled exception (guard in _run). Mirror
+        the EM-226 provider auto-pause: emit world_paused {reason:
+        internal_error}, pause, and broadcast so clients see running=false
+        immediately. Every step is best-effort — recovery itself must never
+        kill the just-rescued loop task. Unlike the provider pause this does
+        NOT arm _auto_paused_for_provider: an internal error won't heal with
+        connectivity, so there is no auto-resume probing — a human resumes."""
+        # The crash may have skipped _execute_turn's finally; never leak the
+        # dead turn's correlation id onto later standalone events.
+        self._current_turn_id = None
+        try:
+            self._emit_event({
+                "kind": "world_paused",
+                "actor_id": None,
+                "actor_type": "system",
+                "turn_id": None,
+                "text": (
+                    f"⏸ Auto-paused — {agent.name}'s turn crashed with an "
+                    f"internal error ({type(exc).__name__}). The loop is "
+                    f"intact; resume or step to continue (see backend logs)."
+                ),
+                "payload": {
+                    "tick": self._world.tick,
+                    "reason": "internal_error",
+                    "agent_id": agent.id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "auto_paused": True,
+                },
+            })
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to emit the internal_error world_paused")
+        self.pause()
+        try:
+            self._broadcast_world_state()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to broadcast after the internal_error pause")
 
     async def _maybe_auto_resume(self) -> bool:
         """EM-226 network-down grace — while auto-paused for a provider/network
