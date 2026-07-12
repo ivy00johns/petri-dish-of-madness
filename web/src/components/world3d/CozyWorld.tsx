@@ -52,6 +52,7 @@ import { resolveBuildingPositions, DEFAULT_CITY_SEED } from './cityLayout';
 import { Ambiance } from './Ambiance';
 import { Traffic } from './Traffic';
 import { StreetLabels } from './StreetLabels';
+import { SettlementLabels } from './SettlementLabels';
 import { CityNameChip } from './CityNameChip';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
@@ -684,6 +685,10 @@ export function CozyWorld({
             floating place/structure labels. Lives here (not CityScape):
             useProximity needs the R3F frame loop. */}
         <StreetLabels streets={cityPlan.streets} />
+        {/* EM-269 (F2): floating settlement-name markers at each agent-founded
+            settlement's WORLD-frame center (rendered direct, no conversion).
+            Absent/empty ⇒ nothing — pre-EM-269 backends render unchanged. */}
+        <SettlementLabels settlements={world?.settlements} />
         {/* EM-169: ambient moving traffic on the road grid (deterministic
             fleet, clock-driven sweep, reduced-motion-safe). Sibling of the
             scene so it shares the frame loop + world space; no handlers. */}

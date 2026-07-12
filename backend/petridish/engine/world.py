@@ -987,6 +987,16 @@ _PROCGEN_DESCRIPTIONS: dict[str, str] = {
     "home": "Rest and recharge.",
 }
 
+# EM-269 (F2) — invented settlement names, picked SEEDED when a founder names
+# nothing (the _PROCGEN_NAMES discipline: a display-name pool, no new art, no
+# new kinds). The pick walks from a _seed_int start index to the first unused
+# name — deterministic, wall-clock-free, replay-identical.
+_SETTLEMENT_NAMES: list[str] = [
+    "Ashvale", "Kettlebrook", "Farwatch", "Mossmarket", "Emberfield",
+    "Thornmere", "Gullhaven", "Larkspur", "Quietwater", "Redbarrow",
+    "Stonereach", "Windrow",
+]
+
 _PROCGEN_MAX_PLACES = 12  # hard cap on generated town places (prompt-size gate)
 
 
@@ -1252,6 +1262,19 @@ class World:
         # only when non-empty (the cap_demotions pattern), so pre-E snapshots
         # stay byte-identical.
         self.factions: dict[str, dict] = {}
+        # EM-269 (F2) — agent-founded settlements: {id: {name, center,
+        # founded_tick, founder_id, members}}. `center` is a WORLD-frame [x, z]
+        # (±33 — the EM-268 placement frame; the logical→world conversion happens
+        # ONCE at founding, mirroring action_build_road). Membership is LOOSE
+        # (agent ids; at most one settlement per agent — building near a center
+        # re-associates). Settlements are cluster SEEDS for free placement,
+        # never containers that gate building; len(settlements) > 1 IS emergent
+        # multi-city. Event-sourced: found_settlement mints one (seeded id, the
+        # prop-id discipline — never uuid4) and emits settlement_founded;
+        # building nearby emits settlement_joined. Serialized in to_snapshot()
+        # only when non-empty (the factions pattern), so pre-EM-269 snapshots —
+        # and every settlement-free world — stay byte-identical.
+        self.settlements: dict[str, dict] = {}
         # Wave E / EM-184 — active world-scale miracles: [{kind, until_tick}].
         # Timed god miracles (send_rain / bountiful_harvest) live here while
         # active; re-casting REFRESHES until_tick (never stacks); expiry is
@@ -3596,6 +3619,154 @@ class World:
             },
         }
 
+    # ── EM-269 (F2) — agent-founded settlements (free-placement cluster seeds) ──
+    # A Settlement is name + world-frame center + LOOSE membership — a cluster
+    # SEED for EM-268 free placement, never a container that gates building.
+    # len(settlements) > 1 IS emergent multi-city (EM-109's heavier model stays
+    # parked); ids are opaque and nothing below assumes a single city.
+
+    def _stl_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.settlements` config block
+        (dataclass OR dict OR absent — EM-155 conventions, like _fct_param)."""
+        return _block_get(getattr(self.params, "settlements", None), name, default)
+
+    def _settlements_enabled(self) -> bool:
+        """Config gate `world.settlements.enabled` (default OFF). Disabled ⇒ no
+        found_settlement, no settlement anchoring/joining, no perception line,
+        no snapshot key — byte-identical pre-EM-269 behavior."""
+        return bool(self._stl_param("enabled", False))
+
+    def _settlement_id(self, founder_id: str, ordinal: int) -> str:
+        """A SEEDED, replay-stable settlement id (NEVER uuid4 — the EM-155
+        keystone). Mirrors _prop_id/_image_id: sha256 of (founder, tick,
+        ordinal, city_seed) via the animal layer's _seed_int; `tick` keeps ids
+        unique across the run's history, `ordinal` is the collision bump."""
+        from ..animals.runtime import _seed_int
+        seed = _seed_int("settlement", self.city_seed, founder_id, self.tick, ordinal)
+        return f"stl_{format(seed % (16 ** 10), '010x')}"
+
+    def _settlement_name(self, raw: str, founder_id: str) -> str:
+        """The founded settlement's display name. A model-authored name is
+        humanized (the EM-129 _humanize_project_name discipline, capped at 40);
+        a junk/absent/already-taken name falls back to a SEEDED walk over
+        _SETTLEMENT_NAMES to the first unused entry (deterministic, replay-
+        identical). A fully exhausted pool numbers the town — never a crash."""
+        used = {str(s.get("name", "")).casefold() for s in self.settlements.values()}
+        text = _humanize_project_name(raw)[:40]
+        if text and text.casefold() not in used:
+            return text
+        from ..animals.runtime import _seed_int
+        start = _seed_int("settlement-name", self.city_seed, founder_id, self.tick)
+        n = len(_SETTLEMENT_NAMES)
+        for off in range(n):
+            cand = _SETTLEMENT_NAMES[(start + off) % n]
+            if cand.casefold() not in used:
+                return cand
+        base = text or _SETTLEMENT_NAMES[start % n]
+        return f"{base} {len(self.settlements) + 1}"[:40]
+
+    def settlement_of(self, agent_id: str) -> str | None:
+        """The settlement `agent_id` belongs to, or None. Membership is LOOSE
+        and at-most-one by construction (found/join always re-associates);
+        iterating sorted ids keeps even a corrupted double-entry deterministic."""
+        for sid in sorted(self.settlements):
+            if agent_id in (self.settlements[sid].get("members") or []):
+                return sid
+        return None
+
+    def nearest_settlement(self, wx: float, wz: float, within: float) -> str | None:
+        """The nearest settlement whose WORLD-frame center is within `within`
+        world units of (wx, wz), or None. Distance ties break on sorted id —
+        deterministic (never dict order)."""
+        best: str | None = None
+        best_d2 = float(within) * float(within)
+        for sid in sorted(self.settlements):
+            c = self.settlements[sid].get("center") or (0.0, 0.0)
+            d2 = (float(c[0]) - wx) ** 2 + (float(c[1]) - wz) ** 2
+            if d2 > best_d2:
+                continue
+            if best is None or d2 < best_d2:
+                best, best_d2 = sid, d2
+        return best
+
+    def _settlement_reassociate(self, agent_id: str, sid: str) -> bool:
+        """Move `agent_id`'s loose membership to settlement `sid` (removing it
+        from any previous one). Returns True when the membership actually
+        changed. Pure list surgery — deterministic, no events (callers emit)."""
+        prev = self.settlement_of(agent_id)
+        if prev == sid:
+            return False
+        if prev is not None:
+            self.settlements[prev]["members"] = [
+                m for m in self.settlements[prev].get("members", []) if m != agent_id]
+        members = self.settlements[sid].setdefault("members", [])
+        if agent_id not in members:
+            members.append(agent_id)
+        return True
+
+    def action_found_settlement(self, agent: AgentState, name: str = "") -> dict:
+        """EM-269 (F2) — the reflex founding verb: the agent founds a settlement
+        centered at their CURRENT place (the logical→world conversion happens
+        ONCE, here — the action_build_road discipline; a missed conversion fails
+        silently, EM-243's lesson). Free (a declaration, not a construction);
+        the founder becomes its first loose member and their future builds
+        anchor to it. Ground already claimed by another settlement (within
+        SETTLEMENT_R) is rejected with guidance — never a silent dead turn."""
+        from .placement import SETTLEMENT_R
+        if not self._settlements_enabled():
+            return self._fail_event(
+                agent.id, "found_settlement", "settlements_disabled",
+                f"{agent.name} dreams of founding a settlement, but this world "
+                f"does not allow it.")
+        place = self.places.get(agent.location)
+        if place is None:
+            return self._fail_event(
+                agent.id, "found_settlement", "no_location",
+                f"{agent.name} can't found a settlement from nowhere.")
+        wx, wz = logical_to_world(float(place.x), float(place.y))
+        near = self.nearest_settlement(wx, wz, SETTLEMENT_R)
+        if near is not None:
+            near_name = self.settlements[near].get("name", near)
+            return self._fail_event(
+                agent.id, "found_settlement", "too_close",
+                f"{agent.name} would found a settlement here, but {near_name} "
+                f"already claims this ground — build there instead, or strike "
+                f"out somewhere farther.")
+        ordinal = 0
+        sid = self._settlement_id(agent.id, ordinal)
+        while sid in self.settlements:
+            ordinal += 1
+            sid = self._settlement_id(agent.id, ordinal)
+        sname = self._settlement_name(str(name or ""), agent.id)
+        # Founding IS (re)association: leave any previous settlement first.
+        prev = self.settlement_of(agent.id)
+        if prev is not None:
+            self.settlements[prev]["members"] = [
+                m for m in self.settlements[prev].get("members", [])
+                if m != agent.id]
+        self.settlements[sid] = {
+            "name": sname,
+            # round(4) — the _prop_offset discipline: byte-stable snapshots.
+            "center": (round(wx, 4), round(wz, 4)),
+            "founded_tick": self.tick,
+            "founder_id": agent.id,
+            "members": [agent.id],
+        }
+        return {
+            "kind": "settlement_founded",
+            "actor_id": agent.id,
+            "text": f"{agent.name} founds {sname} — a new settlement rises "
+                    f"at {place.name}.",
+            "payload": {
+                "settlement_id": sid,
+                "name": sname,
+                "raw_name": str(name or "")[:40],
+                "center": [self.settlements[sid]["center"][0],
+                           self.settlements[sid]["center"][1]],
+                "founder_id": agent.id,
+            },
+        }
+
     def action_set_building_skin(
         self, agent: AgentState, building_id: str, skin: str
     ) -> dict:
@@ -4938,11 +5109,26 @@ class World:
         # (flag off ⇒ None ⇒ byte-identical). Lazy import mirrors the GRAPH_ZONES
         # pattern (avoids the engine→agents cycle). Anchor = world origin (city
         # center). Placed over the FULL set incl. this build (it sorts last).
+        # EM-269 (F2) — a settlement MEMBER's build anchors to their settlement's
+        # center instead (place_one_anchored: attach to STORED positions within
+        # SETTLEMENT_R of the anchor — the outpost grows around its seed). A
+        # non-member — and every world with settlements disabled — anchors to the
+        # city origin EXACTLY as F1 shipped (byte-identical fallback).
         from ..agents.runtime import FREE_PLACEMENT_ENABLED
         if FREE_PLACEMENT_ENABLED:
-            from .placement import place_one
-            building.position = place_one(building, list(self.buildings.values()),
-                                          (0.0, 0.0), self.city_seed)
+            home_sid = (self.settlement_of(agent.id)
+                        if self._settlements_enabled() else None)
+            if home_sid is not None:
+                from .placement import place_one_anchored
+                _c = self.settlements[home_sid].get("center") or (0.0, 0.0)
+                building.position = place_one_anchored(
+                    building, list(self.buildings.values()),
+                    (float(_c[0]), float(_c[1])), self.city_seed)
+            else:
+                from .placement import place_one
+                building.position = place_one(
+                    building, list(self.buildings.values()),
+                    (0.0, 0.0), self.city_seed)
         # EM-266 (SC) — record defiance (observation ONLY; NO penalty, NO block). Only
         # under a stored zone with a ZoneRule: a build defies its zone when it is OVER
         # the density cap (count of LIVE buildings whose zone_id == this zone, THIS one
@@ -5007,7 +5193,32 @@ class World:
         state_evt = self._structure_state_changed_event(
             building, "none", "planned", "proposed", agent.id
         )
-        return {"_multi": [proposed_evt, state_evt], "_building_id": building.id}
+        turn_events = [proposed_evt, state_evt]
+        # EM-269 (F2) — LOOSE joining: build near a settlement, get associated.
+        # The STORED world-frame position (not the agent's place) is the signal —
+        # what clusters at a settlement is what joins it (SETTLEMENT_R keeps
+        # growth and membership in lock-step). Only a CHANGED membership emits
+        # settlement_joined; a member building at home re-joins nothing.
+        if self._settlements_enabled() and building.position is not None:
+            from .placement import SETTLEMENT_R
+            near_sid = self.nearest_settlement(
+                float(building.position[0]), float(building.position[1]),
+                SETTLEMENT_R)
+            if near_sid is not None and self._settlement_reassociate(agent.id, near_sid):
+                s_name = self.settlements[near_sid].get("name", near_sid)
+                turn_events.append({
+                    "kind": "settlement_joined",
+                    "actor_id": agent.id,
+                    "text": f"{agent.name} builds within {s_name}'s reach and "
+                            f"is counted among its people.",
+                    "payload": {
+                        "settlement_id": near_sid,
+                        "name": s_name,
+                        "agent_id": agent.id,
+                        "building_id": building.id,
+                    },
+                })
+        return {"_multi": turn_events, "_building_id": building.id}
 
     def action_contribute_funds(
         self, agent: AgentState, building_id: str, amount: int
@@ -7946,6 +8157,24 @@ class World:
                 }
                 for fid, f in self.factions.items()
             }
+        # EM-269 (F2) — settlements {id: {name, center, founded_tick,
+        # founder_id, members}}. Serialized only when non-empty (the factions
+        # pattern), so a settlement-free world — and every pre-EM-269
+        # snapshot — keeps the exact prior key set (absent ⇒ {} on restore).
+        # `center` stays the WORLD frame (±33) it was founded in — the frontend
+        # renders it directly, no conversion (the anti-EM-243 discipline).
+        if self.settlements:
+            snap["settlements"] = {
+                sid: {
+                    "name": str(s.get("name", "")),
+                    "center": [float((s.get("center") or (0.0, 0.0))[0]),
+                               float((s.get("center") or (0.0, 0.0))[1])],
+                    "founded_tick": int(s.get("founded_tick", 0)),
+                    "founder_id": str(s.get("founder_id", "")),
+                    "members": [str(m) for m in s.get("members", [])],
+                }
+                for sid, s in self.settlements.items()
+            }
         # Wave E / EM-184 — active timed miracles [{kind, until_tick}].
         # Serialized only when non-empty (the cap_demotions pattern), so a
         # miracle-free world — and every pre-E snapshot — keeps the exact
@@ -8540,6 +8769,24 @@ class World:
             }
             for fid, f in (state.get("factions") or {}).items()
             if fid
+        }
+        # EM-269 (F2) — restore settlements (additive: pre-EM-269 snapshots
+        # lack the key and restore {} — identity continuity survives a
+        # fork/restore: ids, names, centers and loose membership all come back
+        # verbatim, so anchored placement replays byte-identically).
+        world.settlements = {
+            str(sid): {
+                "name": str(_block_get(s, "name", "")),
+                "center": (
+                    float((_block_get(s, "center", None) or [0.0, 0.0])[0]),
+                    float((_block_get(s, "center", None) or [0.0, 0.0])[1]),
+                ),
+                "founded_tick": _int(_block_get(s, "founded_tick", 0)),
+                "founder_id": str(_block_get(s, "founder_id", "")),
+                "members": [str(m) for m in (_block_get(s, "members", []) or [])],
+            }
+            for sid, s in (state.get("settlements") or {}).items()
+            if sid
         }
         # Wave E / EM-184 — restore active timed miracles (additive: pre-E
         # snapshots lack the key and restore [] — a mid-rain snapshot keeps
