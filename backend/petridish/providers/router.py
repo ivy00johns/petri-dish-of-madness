@@ -65,32 +65,18 @@ _LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home la
 # stays the true last resort). Total adapter calls per chat(): home + 1 backup.
 _AUTO_BACKUP_PROFILE = "auto"
 
-# ── EM-226 — auto-backup circuit breaker (storm fast-fail) ────────────────────
+# ── EM-226 — auto-backup breaker (observability only) ─────────────────────────
 # During a rate-limit STORM the proxy's own `auto` router returns "All models
-# exhausted" (or times out): there is no healthy upstream left to bounce to.
-# Re-issuing the EM-205 backup every turn then DOUBLES the doomed POST volume
-# (home + auto, both failing) and keeps the upstream rate windows pinned,
-# slowing their refill. The breaker trips on ANY `auto` failure (the auto lane
-# IS the whole-pool health router — if IT can't serve, nothing can) and
-# FAST-FAILS subsequent would-be-backups: the home error propagates straight to
-# the runtime's EM-173 idle fallback with NO 2nd network call. The agents never
-# go quiet (they act on idle); we just stop banging on a door the proxy said is
-# locked, so the upstream windows can refill. Recovery is automatic and
-# COUNTER-based (no clock reads — counters only, like EM-177): every Nth skipped
-# backup PROBES the auto lane once; a probe SUCCESS closes the breaker and
-# normal per-turn backup resumes. Cadence is in *skipped backups*, not seconds,
-# to stay deterministic + testable; at this cadence a sustained storm makes one
-# auto POST per 3 failing turns instead of one per turn (~67% fewer doomed calls)
-# while probing for recovery within ~2 turns.
-#
-# EM-268 note: the live pool is rarely FULLY exhausted — the common case is a few
-# home lanes hard rate-limited (429) while healthy lanes (and `auto` itself) still
-# serve. The old default of 8 turned each transient `auto` blip into a 7-of-8-turn
-# idle BLACKOUT for every rate-limited-home agent, reading as "every other message
-# failed" even though `auto` had capacity two turns later. 3 (the value the
-# breaker tests already exercise) recovers ~2.7x faster and matches tested
-# behavior; test_default_probe_every_is_sane only requires >= 2.
-_AUTO_BREAKER_PROBE_EVERY = 3  # skipped backups between recovery probes
+# exhausted": there is no healthy upstream left to bounce to. The breaker
+# ORIGINALLY fast-failed subsequent would-be-backups (with a counter-based
+# recovery-probe cadence) to stop doubling doomed POSTs — but that MUTED agents
+# to the idle fallback while `auto` was usually still serving, and silently
+# killed the EM-177 recovery probe, violating the never-mute rule. The
+# fast-fail/cadence was RESCINDED 2026-07-06: the backup ALWAYS fires, and the
+# open/closed bit survives purely as observability (auto_backup_health / the
+# storm log lines). EM-304 removed the rescinded design's vestigial state
+# (`_auto_breaker_skips` / `_auto_breaker_probe_every` and the constructor
+# knob) — the bit below is all that remains.
 
 # ── Adaptive Lane Routing (spec 2026-07-07 §9 — Phase P1) ─────────────────────
 # When `adaptive_routing.enabled`, a pinned lane's failure walks the lane
@@ -196,7 +182,6 @@ class Router:
         lane_failover: Any = None,
         overflow_lane: Any = None,
         adaptive_routing: Any = None,
-        auto_breaker_probe_every: int = _AUTO_BREAKER_PROBE_EVERY,
     ):
         self._profiles: dict[str, ModelProfile] = {p.name: p for p in profiles}
         self._adapters: dict[str, Provider] = {
@@ -301,16 +286,14 @@ class Router:
             _AUTO_BACKUP_PROFILE if _AUTO_BACKUP_PROFILE in self._adapters else None
         )
 
-        # ── EM-226 — auto-backup circuit breaker (storm fast-fail) ─────────────
-        # In-memory only; cleared by clear_cache() on world reset so a prior
-        # run's storm never suppresses a fresh run's backups. `_open` is the
-        # breaker state (auto believed unable to serve the whole pool); `_skips`
-        # counts fast-failed would-be-backups since it opened / since the last
-        # probe (drives the recovery-probe cadence). The cadence is clamped to
-        # >=1 so a degenerate config can't divide by zero.
+        # ── EM-226 — auto-backup breaker (observability only) ──────────────────
+        # In-memory only; cleared by clear_cache() on world reset. `_open` means
+        # the proxy `auto` lane's LAST backup attempt failed (the whole-pool
+        # storm signal); it flips closed the moment `auto` serves again. The
+        # 2026-07-06 rescind removed the fast-fail/probe-cadence — nothing is
+        # ever gated on this bit — and EM-304 removed that design's vestigial
+        # `_skips`/`_probe_every` state.
         self._auto_breaker_open: bool = False
-        self._auto_breaker_skips: int = 0
-        self._auto_breaker_probe_every: int = max(1, int(auto_breaker_probe_every))
 
         # ── EM-222 — the dedicated embedding lane ──────────────────────────────
         # The adapter for the profile literally named `embed`, resolved once.
@@ -389,6 +372,15 @@ class Router:
         return self._cache_enabled and self._cache_max > 0 and not self._is_mock_profile(profile_name)
 
     @staticmethod
+    def _usage_view(usage):
+        """Defensive copy of a usage dict (W30 review). The returned per-call
+        attribution, the staged pending snapshot and the decision-cache entry
+        must never alias ONE mutable dict (or the adapter's own last_usage) —
+        a consumer mutating its record would silently leak into every other
+        consumer. Shallow is enough: usage values are scalars."""
+        return dict(usage) if isinstance(usage, dict) else usage
+
+    @staticmethod
     def _cached_usage_snapshot(usage: dict | None) -> dict:
         """Usage snapshot surfaced on a HIT: cached=true, tokens null, latency ~0.
 
@@ -414,21 +406,68 @@ class Router:
         require_json: bool = False,
         boosted: bool = False,
     ) -> str:
-        # `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
-        # bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
-        # ONLY inside the adaptive-enabled except-branch below, so existing
-        # callers that omit it (default False) keep the exact pre-spec path.
-        #
-        # `boosted`: True marks THIS max_tokens as a truncation-mitigation BOOST
-        # (the runtime's first_attempt_max_tokens bump or the _retry_max_tokens
-        # length-retry), not a genuine floor. The bounce loop's #77 token clamp
-        # keys on this EXPLICIT signal — inferring the boost from the home
-        # lane's window mis-attributes: the W30 redirect credits a bounced
-        # truncation to the SERVING lane, so a boosted length-retry can arrive
-        # while the pin's window is clean, and 4096 would be treated as a
-        # genuine floor that skips every healthy small-ceiling free lane.
-        # Also read only inside the adaptive except-branch; default False keeps
-        # every existing caller byte-identical.
+        """Text-only façade over chat_attributed() (the historical interface).
+        EM-307 — callers that consume routing/usage attribution should use
+        chat_attributed() and read the PER-CALL record it returns; the
+        per-profile last_usage()/last_routed_via() reads this call still feeds
+        (via the pending snapshot) are safe only while exactly one call per
+        profile is in flight."""
+        text, _attribution = await self.chat_attributed(
+            profile_name, messages,
+            max_tokens=max_tokens, temperature=temperature,
+            require_json=require_json, boosted=boosted,
+        )
+        return text
+
+    async def chat_attributed(
+        self,
+        profile_name: str,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        require_json: bool = False,
+        boosted: bool = False,
+    ) -> tuple[str, dict]:
+        """chat() returning (text, attribution) — the EM-307 per-call channel.
+
+        `attribution` = {"routed_via", "usage", "served_by"} for THIS call.
+        `served_by` — the lane that actually served (the health-attribution
+        target) — is exact per-call state on every path (home serve / bounce /
+        EM-205 backup / cache HIT). Cache HITs get the cached=true snapshot; a
+        bounced call gets the substitute's numbers with the additive EM-198
+        bounced_from/bounced_to keys.
+
+        GUARANTEE SCOPE (W30 review): `routed_via`/`usage` are read from the
+        serving ADAPTER's mutable last_routed_via/last_usage right after the
+        call returns. That eliminates the per-profile pending-snapshot clobber
+        — concurrent calls on one profile resolving on DIFFERENT lanes
+        (narrator / deep-dive / animal background tasks sharing an agent's
+        lane), the hazard EM-307 fixed — but attribution still RACES at the
+        adapter level on bounced/probed paths: two concurrent calls completing
+        on the SAME adapter can swap each other's usage numbers between the
+        adapter's return and this read. `served_by` (hence health credit) is
+        unaffected; cache HITs are unaffected (their snapshot is stored, not
+        read back). Closing the residual means returning usage from
+        adapter.chat() itself — a cross-adapter interface change, left open.
+
+        The runtimes consume THIS record instead of the per-profile pending
+        snapshot. The snapshot is still staged, byte-identical, for the
+        single-caller last_usage()/last_routed_via() contract.
+
+        `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
+        bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
+        ONLY inside the adaptive-enabled except-branch below, so callers that
+        omit it (default False) keep the exact pre-spec path.
+
+        `boosted` (#91): True marks THIS max_tokens as a truncation-mitigation
+        BOOST (the runtime's first_attempt_max_tokens bump or the
+        _retry_max_tokens length-retry), not a genuine floor. The bounce
+        loop's #77 token clamp keys on this EXPLICIT signal (see _bounce_call);
+        inferring the boost from the home lane's window mis-attributes, because
+        the W30 redirect credits a bounced truncation to the SERVING lane. Also
+        read only inside the adaptive except-branch; default False keeps every
+        existing caller byte-identical."""
         adapter = self._adapters.get(profile_name)
         if adapter is None:
             raise ProviderError(profile_name, None, "no adapter for profile")
@@ -445,11 +484,17 @@ class Router:
                 # latency ~0) and the cached routed value.
                 self._cache.move_to_end(key)  # LRU: mark most-recently-used
                 self._cache_hits += 1  # EM-162 bookkeeping
+                hit_usage = self._cached_usage_snapshot(hit.get("usage"))
                 self._pending_cached[profile_name] = {
                     "routed_via": hit.get("routed_via"),
-                    "usage": self._cached_usage_snapshot(hit.get("usage")),
+                    "usage": hit_usage,
                 }
-                return hit["text"]
+                return hit["text"], {
+                    "routed_via": hit.get("routed_via"),
+                    # copy-on-write: never hand out the staged snapshot's dict
+                    "usage": self._usage_view(hit_usage),
+                    "served_by": profile_name,
+                }
             self._cache_misses += 1  # EM-162 bookkeeping (cacheable miss)
 
         # ── MISS (or non-cacheable) ── call the adapter as today. Clear any stale
@@ -562,19 +607,25 @@ class Router:
                 }
             self._pending_cached[profile_name] = {
                 "routed_via": served_routed,
-                "usage": served_usage,
+                # copy-on-write (W30): the snapshot, the cache entry and the
+                # returned attribution each get their OWN usage dict.
+                "usage": self._usage_view(served_usage),
             }
 
         if cacheable and key is not None:
             self._cache[key] = {
                 "text": text,
                 "routed_via": served_routed,
-                "usage": served_usage,
+                "usage": self._usage_view(served_usage),
             }
             self._cache.move_to_end(key)
             while len(self._cache) > self._cache_max:
                 self._cache.popitem(last=False)  # evict least-recently-used
-        return text
+        return text, {
+            "routed_via": served_routed,
+            "usage": self._usage_view(served_usage),
+            "served_by": served_by,
+        }
 
     async def _auto_backup_call(
         self,
@@ -603,8 +654,8 @@ class Router:
         (2026-07-06): the backup now ALWAYS fires (muting an agent while `auto`
         was usually still serving violated the never-mute rule). The breaker
         state is OBSERVABILITY-ONLY: any `auto` failure marks it open, a served
-        backup marks it closed — it no longer skips or gates a single call. The
-        vestigial breaker fields are slated for removal in EM-304."""
+        backup marks it closed — it no longer skips or gates a single call. Its
+        vestigial fast-fail fields were removed in EM-304."""
         self.note_lane_error(home)
         backup = self._auto_backup
         if backup is None or backup == home:
@@ -642,15 +693,13 @@ class Router:
         """Mark the breaker open after an `auto` failure (the whole-pool storm
         signal). OBSERVABILITY-ONLY since the 2026-07-06 fast-fail rescind — it
         no longer gates any call; the backup always fires. Logs ONLY the open
-        transition. `_auto_breaker_skips` is reset to keep the /api/lanes
-        snapshot tidy (a vestigial field, EM-304)."""
+        transition."""
         if not self._auto_breaker_open:
             log.info(
                 "EM-226 auto-backup breaker OPEN — proxy `auto` last failed "
                 "(observability only; the backup still fires every turn)",
             )
         self._auto_breaker_open = True
-        self._auto_breaker_skips = 0
 
     def _reset_auto_breaker(self) -> None:
         """Close the breaker after a successful backup (the pool serves again).
@@ -658,20 +707,15 @@ class Router:
         if self._auto_breaker_open:
             log.info("EM-226 auto-backup breaker CLOSED — proxy pool serving again")
         self._auto_breaker_open = False
-        self._auto_breaker_skips = 0
 
     def auto_backup_health(self) -> dict:
-        """EM-226 — circuit-breaker snapshot for /api/lanes + tests:
-        {open, skips, probe_every}. OBSERVABILITY-ONLY since the 2026-07-06
-        fast-fail rescind: `open` ⇒ the proxy `auto` lane's LAST attempt failed
-        (it is no longer fast-failed — the backup still fires every turn); it
-        flips closed the next time `auto` serves. Absent an `auto` lane the
-        breaker never trips. `skips`/`probe_every` are vestigial (EM-304)."""
-        return {
-            "open": self._auto_breaker_open,
-            "skips": self._auto_breaker_skips,
-            "probe_every": self._auto_breaker_probe_every,
-        }
+        """EM-226 — breaker snapshot for tests/observability: {open}.
+        OBSERVABILITY-ONLY since the 2026-07-06 fast-fail rescind: `open` ⇒ the
+        proxy `auto` lane's LAST attempt failed (it is no longer fast-failed —
+        the backup still fires every turn); it flips closed the next time
+        `auto` serves. Absent an `auto` lane the breaker never trips. The
+        vestigial `skips`/`probe_every` keys were removed in EM-304."""
+        return {"open": self._auto_breaker_open}
 
     # ── Adaptive Lane Routing (spec 2026-07-07 — P1) ───────────────────────────
 
@@ -1072,7 +1116,6 @@ class Router:
         # EM-226 — the storm breaker is per-run state too: a prior run's storm
         # must never suppress a fresh run's backups.
         self._auto_breaker_open = False
-        self._auto_breaker_skips = 0
 
     def cache_stats(self) -> dict:
         """Wave D2 / EM-162 — additive decision-cache bookkeeping:
@@ -1095,6 +1138,7 @@ class Router:
         parsed: bool,
         truncated: bool,
         timed_out: bool = False,
+        served_by: str | None = None,
     ) -> None:
         """Record one runtime parse outcome for this profile's lane (EM-135).
 
@@ -1113,20 +1157,30 @@ class Router:
         present on entries that actually timed out — so pre-EM-170 window
         shapes are unchanged.
 
-        W30 — under adaptive routing, when the last chat() for `profile_name`
-        was BOUNCED (the pending EM-198 snapshot carries `bounced_to`), the
-        outcome is credited to the lane that ACTUALLY served the text, not
-        the pin: crediting bounced successes to a persistently-capped pin
-        aged its error demerits out of the window, flapping it healthy and
-        burning a doomed real call roughly every other turn. Adaptive OFF
-        keeps the exact #76 attribution (byte-identical guarantee)."""
+        W30 — under adaptive routing, when the chat() this outcome describes
+        was BOUNCED, the outcome is credited to the lane that ACTUALLY served
+        the text, not the pin: crediting bounced successes to a persistently-
+        capped pin aged its error demerits out of the window, flapping it
+        healthy and burning a doomed real call roughly every other turn.
+        Adaptive OFF keeps the exact #76 attribution (byte-identical
+        guarantee).
+
+        EM-307 — `served_by` is the per-call attribution channel: runtimes
+        that consumed chat_attributed() pass its `served_by` here so the
+        credit target never depends on the clobberable per-profile pending
+        snapshot. Absent (older/duck-typed callers), the pending-snapshot
+        `bounced_to` read remains as the single-caller fallback — identical
+        to `served_by` whenever only one call per profile is in flight."""
         target = profile_name
         if self._adaptive_enabled():
-            pending = self._pending_cached.get(profile_name)
-            usage = pending.get("usage") if isinstance(pending, dict) else None
-            bounced_to = usage.get("bounced_to") if isinstance(usage, dict) else None
-            if isinstance(bounced_to, str) and bounced_to:
-                target = bounced_to
+            if isinstance(served_by, str) and served_by:
+                target = served_by
+            else:
+                pending = self._pending_cached.get(profile_name)
+                usage = pending.get("usage") if isinstance(pending, dict) else None
+                bounced_to = usage.get("bounced_to") if isinstance(usage, dict) else None
+                if isinstance(bounced_to, str) and bounced_to:
+                    target = bounced_to
         self._record_parse_outcome(
             target, parsed=parsed, truncated=truncated, timed_out=timed_out)
 

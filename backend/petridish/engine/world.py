@@ -10118,10 +10118,13 @@ class World:
             world.buildings[b.id] = b
 
         # EM-268 (F1) — derive-on-load migration: fill ONLY missing positions
-        # (pre-F1 buildings), treating already-positioned ones as fixed parents;
-        # NEVER overwrite. Destroyed buildings stay in the set as fixed parents
-        # (they're never popped). Canonical order == creation order ⇒ this batch
-        # equals what live-incremental produced (R3). Flag off ⇒ no-op (byte-id).
+        # (pre-F1 buildings), treating already-positioned ones as fixed parents
+        # (STORED-WINS, EM-303 — place_all itself seeds stored positions before
+        # deriving, so a mixed snapshot clusters around the STORED town, never a
+        # recomputed phantom of it); NEVER overwrite. Destroyed buildings stay
+        # in the set as fixed parents (they're never popped). Canonical order ==
+        # creation order ⇒ this batch equals what live-incremental produced
+        # (R3). Flag off ⇒ no-op (byte-id).
         from ..agents.runtime import FREE_PLACEMENT_ENABLED
         if FREE_PLACEMENT_ENABLED and any(
                 b.position is None for b in world.buildings.values()):

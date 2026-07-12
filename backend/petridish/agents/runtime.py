@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -4045,6 +4046,23 @@ def _perceived_context(
     return perceived, memory
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    """True when `fn` can receive keyword argument `name` (an explicit
+    parameter or **kwargs). W30 review — signature inspection replaces the
+    old `except TypeError` retry around duck-typed router methods, which
+    also swallowed a REAL TypeError raised INSIDE the callee (masking the
+    bug it was reporting). Uninspectable callables degrade to False (the
+    legacy call shape) — never a masked exception."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):  # pragma: no cover - C callables etc.
+        return False
+    for p in sig.parameters.values():
+        if p.kind is inspect.Parameter.VAR_KEYWORD or p.name == name:
+            return True
+    return False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Agent runtime
 # ──────────────────────────────────────────────────────────────────────────────
@@ -5584,31 +5602,51 @@ class AgentRuntime:
             # call also never reaches the router's cache-store line, so a
             # timed-out call can NOT poison the decision cache. budget<=0 ⇒
             # guard disabled ⇒ byte-for-byte today's await.
-            if boosted:
+            # EM-307 — prefer the per-call attribution channel: concurrent
+            # chat() calls on one profile (narrator / deep-dive / animal
+            # background tasks sharing an agent's lane) clobber the router's
+            # per-profile pending snapshot, so the profile-level last_usage/
+            # last_routed_via reads below can misattribute. chat_attributed()
+            # returns THIS call's truth alongside the text; duck-typed test
+            # routers without it keep the historical chat() + profile reads.
+            attribution: dict | None = None
+            chat_attr = getattr(self.router, "chat_attributed", None)
+            if callable(chat_attr):
+                # EM-306 — an agent turn is a STRICT-JSON turn (the reply is
+                # parsed by _extract_first_json and schema-validated; anything
+                # else dead-turns the agent), so mark it require_json: the
+                # adaptive bounce loop then skips reasoning-tagged lanes,
+                # whose chain-of-thought truncates before the object appears
+                # (the #77/#78 lesson). `boosted` (#91) threads the truncation-
+                # boost signal so the bounce loop's #77 token clamp keys on the
+                # explicit flag. The real router accepts both kwargs; duck-typed
+                # attributed routers (test harnesses) may lack `boosted`, so it
+                # is advisory — drop it on TypeError, keep the attribution.
                 try:
-                    chat_coro = self.router.chat(
+                    chat_coro = chat_attr(
                         profile_name, messages,
                         max_tokens=max_tokens, temperature=temperature,
-                        boosted=True,
+                        require_json=True, boosted=boosted,
                     )
                 except TypeError:
-                    # Duck-typed router without the `boosted` kwarg (test
-                    # harnesses / legacy) — the signal is advisory; same
-                    # fallback convention as effective_profile's tier kwarg.
-                    chat_coro = self.router.chat(
+                    chat_coro = chat_attr(
                         profile_name, messages,
                         max_tokens=max_tokens, temperature=temperature,
+                        require_json=True,
                     )
             else:
-                # Un-boosted call: the exact pre-signal call shape.
                 chat_coro = self.router.chat(
                     profile_name, messages,
                     max_tokens=max_tokens, temperature=temperature,
                 )
             if budget > 0:
-                text = await asyncio.wait_for(chat_coro, timeout=budget)
+                result = await asyncio.wait_for(chat_coro, timeout=budget)
             else:
-                text = await chat_coro
+                result = await chat_coro
+            if callable(chat_attr):
+                text, attribution = result
+            else:
+                text = result
         except asyncio.TimeoutError:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             meta["latency_ms"] = elapsed_ms
@@ -5637,12 +5675,21 @@ class AgentRuntime:
             log.error("Unexpected error calling %s: %s", profile_name, exc)
             return None, f"unexpected_error: {exc}", meta
 
-        # Snapshot adapter state IMMEDIATELY after a successful call, before any
-        # retry can overwrite it. usage is None for Mock; prefer the provider's
-        # own latency measurement, falling back to our wall-clock timing.
-        usage = self.router.last_usage(profile_name)
+        # Snapshot this call's routing/usage truth IMMEDIATELY, before any retry
+        # can overwrite it. EM-307: the per-call attribution is authoritative
+        # when present (same values the single-caller profile reads produced);
+        # the profile-level reads remain only for duck-typed test routers.
+        # usage is None for Mock; prefer the provider's own latency
+        # measurement, falling back to our wall-clock timing.
+        if attribution is not None:
+            usage = attribution.get("usage")
+            meta["routed_via"] = attribution.get("routed_via")
+            served_by = attribution.get("served_by")
+        else:
+            usage = self.router.last_usage(profile_name)
+            meta["routed_via"] = self.router.last_routed_via(profile_name)
+            served_by = None
         meta["usage"] = usage
-        meta["routed_via"] = self.router.last_routed_via(profile_name)
         if isinstance(usage, dict) and usage.get("latency_ms") is not None:
             meta["latency_ms"] = usage["latency_ms"]
         else:
@@ -5656,7 +5703,8 @@ class AgentRuntime:
         # from the feed, not from health tracking.
         truncated = _looks_truncated(text)
         self._note_parse_outcome(
-            profile_name, parsed=action_dict is not None, truncated=truncated
+            profile_name, parsed=action_dict is not None, truncated=truncated,
+            served_by=served_by,
         )
         if action_dict is None:
             finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
@@ -5725,13 +5773,24 @@ class AgentRuntime:
             forget(profile_name, messages)
 
     def _note_parse_outcome(
-        self, profile_name: str, *, parsed: bool, truncated: bool
+        self, profile_name: str, *, parsed: bool, truncated: bool,
+        served_by: str | None = None,
     ) -> None:
         """Report one parse attempt's outcome to the router's lane-health
-        window (EM-135). Guarded getattr: duck-typed test routers don't
-        implement note_parse_outcome()."""
+        window (EM-135). `served_by` (EM-307) is the per-call attribution from
+        chat_attributed() so a bounced outcome credits the lane that actually
+        served, without reading the clobberable per-profile snapshot. Guarded
+        getattr: duck-typed test routers don't implement note_parse_outcome();
+        signature inspection (not a TypeError retry, which would mask a real
+        TypeError raised INSIDE note()) degrades pre-EM-307 routers to the
+        profile-level attribution."""
         note = getattr(self.router, "note_parse_outcome", None)
-        if callable(note):
+        if not callable(note):
+            return
+        if served_by is not None and _accepts_kwarg(note, "served_by"):
+            note(profile_name, parsed=parsed, truncated=truncated,
+                 served_by=served_by)
+        else:
             note(profile_name, parsed=parsed, truncated=truncated)
 
     def _turn_llm_budget(self) -> float:

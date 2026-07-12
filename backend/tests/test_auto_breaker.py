@@ -24,7 +24,7 @@ import pytest
 
 from petridish.config.loader import ModelProfile
 from petridish.providers.base import ProviderError
-from petridish.providers.router import Router, _AUTO_BREAKER_PROBE_EVERY
+from petridish.providers.router import Router
 
 pytestmark = pytest.mark.asyncio
 
@@ -104,8 +104,7 @@ class _FlakyAuto:
 
 
 def _router(adapters: dict[str, object], *, auto: object | None = None,
-            cache_enabled: bool = False, with_mock: bool = True,
-            probe_every: int = 3) -> Router:
+            cache_enabled: bool = False, with_mock: bool = True) -> Router:
     profiles = [_profile(name) for name in adapters]
     overrides = dict(adapters)
     if auto is not None:
@@ -115,7 +114,6 @@ def _router(adapters: dict[str, object], *, auto: object | None = None,
         profiles.append(_profile("mock", adapter="mock"))
     return Router(
         profiles, adapter_overrides=overrides, cache_enabled=cache_enabled,
-        auto_breaker_probe_every=probe_every,
     )
 
 
@@ -128,7 +126,7 @@ async def test_storm_still_attempts_the_backup_every_turn():
     # POST every turn rather than mute the agent — the breaker no longer skips.
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
-    r = _router({"home": home}, auto=auto, probe_every=3)
+    r = _router({"home": home}, auto=auto)
 
     for _ in range(3):
         with pytest.raises(ProviderError):
@@ -139,7 +137,7 @@ async def test_storm_still_attempts_the_backup_every_turn():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# (B) probe cadence — only every Nth skip POSTs to auto during a sustained storm
+# (B) no probe cadence — auto is POSTed on every failing turn (skip rescinded)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def test_no_skip_cadence_auto_is_hit_on_every_failing_turn():
@@ -147,7 +145,7 @@ async def test_no_skip_cadence_auto_is_hit_on_every_failing_turn():
     # must NOT throttle the backup. All 7 failing turns POST to auto.
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
-    r = _router({"home": home}, auto=auto, probe_every=3)
+    r = _router({"home": home}, auto=auto)
 
     for _ in range(7):
         with pytest.raises(ProviderError):
@@ -165,7 +163,7 @@ async def test_open_state_clears_the_moment_auto_serves_again():
     # and "closes" the instant auto serves — but nothing is ever skipped between.
     home = _FailAdapter("home", 429)
     auto = _FlakyAuto("auto", fail_first=1)  # call#1 fails (opens), call#2+ serves
-    r = _router({"home": home}, auto=auto, probe_every=3)
+    r = _router({"home": home}, auto=auto)
 
     with pytest.raises(ProviderError):   # turn 1: auto#1 fails → opens
         await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
@@ -185,15 +183,14 @@ async def test_open_state_clears_the_moment_auto_serves_again():
 async def test_clear_cache_closes_the_breaker():
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
-    r = _router({"home": home}, auto=auto, probe_every=3)
+    r = _router({"home": home}, auto=auto)
 
     with pytest.raises(ProviderError):
         await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
     assert r.auto_backup_health()["open"] is True
 
     r.clear_cache()
-    assert r.auto_backup_health()["open"] is False
-    assert r.auto_backup_health()["skips"] == 0
+    assert r.auto_backup_health() == {"open": False}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -203,7 +200,7 @@ async def test_clear_cache_closes_the_breaker():
 async def test_healthy_pool_never_trips_the_breaker():
     home = _FailAdapter("home", 429)
     auto = _OkAdapter("auto", text="auto served")
-    r = _router({"home": home}, auto=auto, probe_every=3)
+    r = _router({"home": home}, auto=auto)
 
     for _ in range(4):
         text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
@@ -214,18 +211,23 @@ async def test_healthy_pool_never_trips_the_breaker():
 
 async def test_no_auto_lane_breaker_stays_closed():
     home = _FailAdapter("home", 429)
-    r = _router({"home": home}, auto=None, probe_every=3)
+    r = _router({"home": home}, auto=None)
 
     with pytest.raises(ProviderError):
         await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
     assert r.auto_backup_health()["open"] is False
 
 
-async def test_default_probe_every_is_sane():
-    # The shipped cadence must probe periodically (recovery) without re-hammering
-    # the pool every turn (the whole point of the breaker). async only to inherit
-    # the module's asyncio mark cleanly — no awaiting needed.
-    assert _AUTO_BREAKER_PROBE_EVERY >= 2
+async def test_vestigial_fast_fail_state_is_gone():
+    # EM-304 — the rescinded fast-fail design's state is fully removed: the
+    # health snapshot carries ONLY the open/closed observability bit, and the
+    # old constructor cadence knob no longer exists. async only to inherit the
+    # module's asyncio mark cleanly — no awaiting needed.
+    home = _FailAdapter("home", 429)
+    r = _router({"home": home}, auto=None)
+    assert r.auto_backup_health() == {"open": False}
+    with pytest.raises(TypeError):
+        Router([], auto_breaker_probe_every=3)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -238,7 +240,7 @@ async def test_default_probe_every_is_sane():
 async def test_tripped_breaker_still_fires_the_backup_never_mutes():
     home = _FailAdapter("home", 429)
     auto = _FlakyAuto("auto", fail_first=1)  # call#1 fails (opens), call#2+ serves
-    r = _router({"home": home}, auto=auto, probe_every=3)
+    r = _router({"home": home}, auto=auto)
 
     # Turn 1: home + auto both fail → the breaker "opens".
     with pytest.raises(ProviderError):
