@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -3794,6 +3795,23 @@ def _perceived_context(
     return perceived, memory
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    """True when `fn` can receive keyword argument `name` (an explicit
+    parameter or **kwargs). W30 review — signature inspection replaces the
+    old `except TypeError` retry around duck-typed router methods, which
+    also swallowed a REAL TypeError raised INSIDE the callee (masking the
+    bug it was reporting). Uninspectable callables degrade to False (the
+    legacy call shape) — never a masked exception."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):  # pragma: no cover - C callables etc.
+        return False
+    for p in sig.parameters.values():
+        if p.kind is inspect.Parameter.VAR_KEYWORD or p.name == name:
+            return True
+    return False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Agent runtime
 # ──────────────────────────────────────────────────────────────────────────────
@@ -5487,18 +5505,16 @@ class AgentRuntime:
         chat_attributed() so a bounced outcome credits the lane that actually
         served, without reading the clobberable per-profile snapshot. Guarded
         getattr: duck-typed test routers don't implement note_parse_outcome();
-        the TypeError retry degrades pre-EM-307 routers to the profile-level
-        attribution (the same _note_timeout_demerit pattern)."""
+        signature inspection (not a TypeError retry, which would mask a real
+        TypeError raised INSIDE note()) degrades pre-EM-307 routers to the
+        profile-level attribution."""
         note = getattr(self.router, "note_parse_outcome", None)
         if not callable(note):
             return
-        if served_by is None:
-            note(profile_name, parsed=parsed, truncated=truncated)
-            return
-        try:
+        if served_by is not None and _accepts_kwarg(note, "served_by"):
             note(profile_name, parsed=parsed, truncated=truncated,
                  served_by=served_by)
-        except TypeError:
+        else:
             note(profile_name, parsed=parsed, truncated=truncated)
 
     def _turn_llm_budget(self) -> float:

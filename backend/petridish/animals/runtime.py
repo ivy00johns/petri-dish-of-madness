@@ -313,6 +313,7 @@ def _role_card(animal: Animal) -> dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 from ..agents.runtime import (  # noqa: E402  (intentional reuse)
+    _accepts_kwarg,
     _extract_first_json,
     _looks_truncated,
     _retry_max_tokens,
@@ -726,18 +727,16 @@ class AnimalRuntime:
         """Report one parse attempt's outcome to the router's lane-health
         window (EM-135; guarded getattr, mirrors the agent runtime).
         `served_by` (EM-307) credits a bounced outcome to the lane that
-        actually served; the TypeError retry degrades pre-EM-307 routers to
-        profile-level attribution."""
+        actually served; signature inspection (not a TypeError retry, which
+        would mask a real TypeError raised INSIDE note()) degrades pre-EM-307
+        routers to profile-level attribution."""
         note = getattr(self.router, "note_parse_outcome", None)
         if not callable(note):
             return
-        if served_by is None:
-            note(profile_name, parsed=parsed, truncated=truncated)
-            return
-        try:
+        if served_by is not None and _accepts_kwarg(note, "served_by"):
             note(profile_name, parsed=parsed, truncated=truncated,
                  served_by=served_by)
-        except TypeError:
+        else:
             note(profile_name, parsed=parsed, truncated=truncated)
 
     @staticmethod
