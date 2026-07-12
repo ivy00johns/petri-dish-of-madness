@@ -1032,6 +1032,45 @@ class WarParams:
                               carries when the proposer names no amount.
       war_notoriety         — notoriety stamped on the EXILED loser leader
                               when a peace treaty settles a war (EM-257).
+
+    EM-258 — combat-resolution coefficients (the ONE genuinely new mechanic:
+    the seeded clash contest, plan §Feature 3). Every float product is
+    FLOOR()ed by the engine (the float-drift guard) so these may stay floats:
+
+      skill_weight          — power per `combat` skill level.
+      support_weight        — power per co-located war-band comrade.
+      terrain_bonus         — the DEFENDER's bonus when a standing structure
+                              shelters them (fighting from cover).
+      morale_weight         — power per morale point (morale is DERIVED:
+                              100 − faction exhaustion; floor()ed product).
+      swing_span            — seeded swing is an integer in [-span, +span].
+      margin_cap            — |margin| is capped here before damage scaling.
+      base_damage           — flat energy damage every clash deals the loser
+                              (the winner takes base_damage // 2).
+      damage_per_margin     — extra loser damage per capped margin point
+                              (floor()ed product).
+      retreat_floor         — a loser whose faction morale is at/below this
+                              retreats to the lowest-id enemy-free place.
+      clash_requires_band   — when true (default) clash/siege require the
+                              ACTOR to have mustered into the war band.
+      band_trust_seed       — trust floor sealed across the war-band ally
+                              ring on muster (the conspiracy_trust_seed
+                              analog).
+      exhaustion_per_clash  — war exhaustion the loser's faction takes per
+                              clash (the winner takes half, floored).
+      exhaustion_per_casualty — extra exhaustion a faction takes when a
+                              clash kills one of its members.
+
+    EM-259 — siege + endgame tunables:
+
+      siege_damage          — building damage per siege (routes through the
+                              shared _damage_building path).
+      exhaustion_per_siege  — exhaustion the besieged owner's faction takes.
+      exhaustion_per_round  — passive war weariness both belligerents accrue
+                              at every round boundary while a war is active.
+      exhaustion_cap        — at/above this a faction collapses and the war
+                              auto-resolves (advance_war settles it with
+                              reparations + exile, emitting war_exhausted).
     """
     enabled: bool = False
     casus_belli_threshold: int = 50
@@ -1040,6 +1079,25 @@ class WarParams:
     grievance_decay: int = 1
     reparations_base: int = 25
     war_notoriety: int = 10
+    # EM-258 — combat coefficients.
+    skill_weight: int = 5
+    support_weight: int = 4
+    terrain_bonus: int = 5
+    morale_weight: float = 0.1
+    swing_span: int = 10
+    margin_cap: int = 40
+    base_damage: int = 8
+    damage_per_margin: float = 0.5
+    retreat_floor: int = 30
+    clash_requires_band: bool = True
+    band_trust_seed: int = 30
+    exhaustion_per_clash: int = 5
+    exhaustion_per_casualty: int = 15
+    # EM-259 — siege + endgame.
+    siege_damage: int = 20
+    exhaustion_per_siege: int = 4
+    exhaustion_per_round: int = 1
+    exhaustion_cap: int = 100
 
 
 @dataclass
@@ -2530,6 +2588,12 @@ def _parse_war(raw: dict | None) -> WarParams:
         except (TypeError, ValueError):
             return default
 
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
     return WarParams(
         enabled=bool(raw.get("enabled", d.enabled)),
         casus_belli_threshold=_int("casus_belli_threshold", d.casus_belli_threshold),
@@ -2538,6 +2602,27 @@ def _parse_war(raw: dict | None) -> WarParams:
         grievance_decay=_int("grievance_decay", d.grievance_decay),
         reparations_base=_int("reparations_base", d.reparations_base),
         war_notoriety=_int("war_notoriety", d.war_notoriety),
+        # EM-258 — combat coefficients.
+        skill_weight=_int("skill_weight", d.skill_weight),
+        support_weight=_int("support_weight", d.support_weight),
+        terrain_bonus=_int("terrain_bonus", d.terrain_bonus),
+        morale_weight=_float("morale_weight", d.morale_weight),
+        swing_span=_int("swing_span", d.swing_span),
+        margin_cap=_int("margin_cap", d.margin_cap),
+        base_damage=_int("base_damage", d.base_damage),
+        damage_per_margin=_float("damage_per_margin", d.damage_per_margin),
+        retreat_floor=_int("retreat_floor", d.retreat_floor),
+        clash_requires_band=bool(
+            raw.get("clash_requires_band", d.clash_requires_band)),
+        band_trust_seed=_int("band_trust_seed", d.band_trust_seed),
+        exhaustion_per_clash=_int("exhaustion_per_clash", d.exhaustion_per_clash),
+        exhaustion_per_casualty=_int(
+            "exhaustion_per_casualty", d.exhaustion_per_casualty),
+        # EM-259 — siege + endgame.
+        siege_damage=_int("siege_damage", d.siege_damage),
+        exhaustion_per_siege=_int("exhaustion_per_siege", d.exhaustion_per_siege),
+        exhaustion_per_round=_int("exhaustion_per_round", d.exhaustion_per_round),
+        exhaustion_cap=_int("exhaustion_cap", d.exhaustion_cap),
     )
 
 

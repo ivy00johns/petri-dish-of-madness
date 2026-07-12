@@ -463,7 +463,7 @@ class AgentState:
     role: str = "citizen"         # citizen | enforcer — enforcer unlocks justice verbs
     # EM-240 — crime status substrate. ALL additive, serialized only when set.
     notoriety: int = 0                       # 0..100; witnessed-crime heat, decays
-    crime_status: str | None = None          # None|wanted|detained|jailed|exiled
+    crime_status: str | None = None          # None|wanted|detained|jailed|exiled|belligerent
     crime_status_until_tick: int = 0         # release tick for detained/jailed
     rap_sheet: list[dict] = field(default_factory=list)  # capped crime record
     # EM-229 — three-needs psychology. Two decaying drives alongside `energy`
@@ -4743,16 +4743,13 @@ class World:
         # loser (the proposing faction, pinned as payload faction_id) pays the
         # reparations and its derived leader takes the fall: crime_status set
         # to the (previously declared-but-unused) `exiled`, war_notoriety
-        # stamped on. Reparations clone the trial_fine split at group scope:
-        # the amount is collected from the loser's living members in sorted-id
-        # order (each pays what it can — the min(credits, fine) confiscation),
-        # then split EVENLY across the winner's distinct living members
-        # (share = pot // n, remainder dropped — a sink, exactly like the
-        # trial's restitution). A signed peace also SETTLES the pair's
-        # grievance ledger in both directions, so the same heat cannot
-        # instantly re-open the same war. A war that already settled/vanished
-        # is a silent no-op (the vote still applied). Events (peace_signed,
-        # then exiled) park in the SAME outbox as trial's verdict pair.
+        # stamped on. The whole settlement (trial_fine-cloned reparations
+        # split, both-ways grievance clearing, exile) lives in the SHARED
+        # _settle_war lane — the EM-259 exhaustion auto-resolution settles
+        # through the exact same code, so the two endings can never drift.
+        # A war that already settled/vanished is a silent no-op (the vote
+        # still applied). Events (peace_signed, then exiled) park in the SAME
+        # outbox as trial's verdict pair.
         if rule.effect == "peace_treaty":
             rule.applied = True
             spec = rule.payload or {}
@@ -4762,72 +4759,13 @@ class World:
             loser = str(spec.get("faction_id") or "")
             if loser not in war.belligerents:
                 return
-            winner = next(b for b in war.belligerents if b != loser)
-            war.status = "settled"
             try:
                 amount = int(spec.get(
                     "reparations", self._war_param("reparations_base", 25)))
             except (TypeError, ValueError):  # pragma: no cover - defensive
                 amount = int(self._war_param("reparations_base", 25))
-            amount = max(0, amount)
-            loser_rec = self.factions.get(loser) or {}
-            winner_rec = self.factions.get(winner) or {}
-            loser_name = str(loser_rec.get("name", "")) or loser
-            winner_name = str(winner_rec.get("name", "")) or winner
-            # Collect: loser's living members pay in sorted-id order until the
-            # amount is met (each capped by its credits — min(credits, fine)).
-            pot = 0
-            remaining = amount
-            for mid in sorted(str(m) for m in loser_rec.get("members", [])):
-                if remaining <= 0:
-                    break
-                payer = self.agents.get(mid)
-                if payer is None or not payer.alive:
-                    continue
-                paid = min(payer.credits, remaining)
-                if paid > 0:
-                    payer.credits -= paid
-                    pot += paid
-                    remaining -= paid
-            # Split: evenly across the winner's distinct living members
-            # (remainder dropped — the trial restitution arithmetic).
-            recipients = []
-            for mid in sorted(str(m) for m in winner_rec.get("members", [])):
-                a = self.agents.get(mid)
-                if a is not None and a.alive and mid not in recipients:
-                    recipients.append(mid)
-            if recipients and pot > 0:
-                share = pot // len(recipients)
-                if share > 0:
-                    for mid in recipients:
-                        self.agents[mid].credits += share
-            # A signed peace settles the ledger — both directions.
-            self.grievances.pop(self._grievance_key(loser, winner), None)
-            self.grievances.pop(self._grievance_key(winner, loser), None)
-            loser_members = [str(m) for m in loser_rec.get("members", [])]
-            anchor = min(loser_members) if loser_members else ""
-            self.pending_spawn_events.append(self._faction_event(
-                "peace_signed", anchor,
-                f"🕊 {loser_name} sues for peace with {winner_name} — the war "
-                f"is over ({pot} credits in reparations).",
-                {"war_id": war.id, "loser": loser, "winner": winner,
-                 "reparations": pot, "proposal_id": rule.id},
-            ))
-            # Exile — the conceding circle's derived leader (lowest-id living
-            # member, the Wave-E founding convention) takes the fall.
-            leader = self._faction_leader(loser)
-            if leader is not None:
-                leader.crime_status = "exiled"
-                leader.notoriety = min(
-                    100,
-                    leader.notoriety + int(self._war_param("war_notoriety", 10)))
-                self.pending_spawn_events.append(self._faction_event(
-                    "exiled", leader.id,
-                    f"⚔ {leader.name} is EXILED — the price of "
-                    f"{loser_name}'s defeat.",
-                    {"war_id": war.id, "faction_id": loser,
-                     "notoriety": leader.notoriety, "proposal_id": rule.id},
-                ))
+            self._settle_war(war, loser, amount, event_kind="peace_signed",
+                             payload_extra={"proposal_id": rule.id})
             return
         # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
         # article in the living constitution. The op + payload were validated at
@@ -7604,19 +7542,35 @@ class World:
         )
 
     def advance_war(self) -> list[dict]:
-        """EM-256 — the round-boundary war subsystem SKELETON, called from
+        """EM-256/EM-259 — the round-boundary war subsystem, called from
         _apply_round_start AFTER recompute_factions (war reads the FRESH
         faction set) and BEFORE age_agents — the plan's contended-seam order,
-        pinned by a test. THIS pass: grievance decay only (the
-        notoriety-decay analog; an entry that cools to 0 is DROPPED so the
-        ledger — and the snapshot — never carries dead heat). Stage C
-        (EM-259) adds exhaustion accrual + auto-resolution here (exhaustion
-        cap / war-band collapse / a dissolved belligerent → settle with
-        reparations + exile, emit war_exhausted) + the settled-war sweep.
-        Deterministic — no RNG/clock; returns the parked events ([] this
-        pass). War disabled (the default) ⇒ a no-op (golden-safe)."""
+        pinned by a test. Four passes, all deterministic (no RNG/clock):
+
+          1. GRIEVANCE DECAY (EM-256) — the notoriety-decay analog; an entry
+             that cools to 0 is DROPPED (the ledger — and the snapshot —
+             never carries dead heat).
+          2. EXHAUSTION ACCRUAL (EM-259) — every active war grinds BOTH
+             belligerents by exhaustion_per_round (war weariness accrues even
+             without combat; clashes/sieges/casualties add their own).
+          3. AUTO-RESOLUTION (EM-259) — a collapsed side (_war_collapse: a
+             dissolved faction, a war band with no living member, or the
+             exhaustion cap) loses on the spot: the war settles through the
+             SHARED _settle_war lane (reparations_base + exile) with the
+             war_exhausted announce kind.
+          4. SWEEP (EM-259) — settled wars are DELETED (the announce events
+             told the story; the snapshot never carries dead wars), factions
+             no longer at war lose their war_band key (the band disbands),
+             and their members' `belligerent` marker clears back to None.
+
+        Events park in pending_spawn_events (the EM-141 outbox — drained by
+        the loop's _flush_spawn_events) and the newly parked slice is also
+        returned for tests. War disabled (the default) ⇒ a no-op
+        (golden-safe)."""
         if not self.war_enabled():
             return []
+        parked_from = len(self.pending_spawn_events)
+        # 1) grievance decay.
         decay = int(self._war_param("grievance_decay", 1))
         if decay > 0 and self.grievances:
             for key in sorted(self.grievances):
@@ -7625,7 +7579,40 @@ class World:
                     self.grievances[key] = cooled
                 else:
                     del self.grievances[key]
-        return []
+        # 2) + 3) exhaustion accrual then auto-resolution, per active war in
+        # sorted-id order (replay-stable).
+        per_round = max(0, int(self._war_param("exhaustion_per_round", 1)))
+        cap = max(1, int(self._war_param("exhaustion_cap", 100)))
+        for wid in sorted(self.wars):
+            war = self.wars[wid]
+            if war.status != "active":
+                continue
+            for fid in war.belligerents:  # stored sorted — deterministic
+                self._bump_exhaustion(war, fid, per_round)
+            loser, reason = self._war_collapse(war, cap)
+            if loser is not None:
+                self._settle_war(
+                    war, loser,
+                    int(self._war_param("reparations_base", 25)),
+                    event_kind="war_exhausted",
+                    payload_extra={"reason": reason})
+        # 4) sweep settled wars + disband bands + clear `belligerent`.
+        for wid in [w for w in sorted(self.wars)
+                    if self.wars[w].status == "settled"]:
+            del self.wars[wid]
+        at_war = {fid for w in self.wars.values() if w.status == "active"
+                  for fid in w.belligerents}
+        for fid in sorted(self.factions):
+            if fid not in at_war and "war_band" in self.factions[fid]:
+                del self.factions[fid]["war_band"]
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            if agent.crime_status != "belligerent":
+                continue
+            fct = self.faction_of(aid)
+            if fct is None or fct["id"] not in at_war:
+                agent.crime_status = None
+        return list(self.pending_spawn_events[parked_from:])
 
     def advance_crime(self) -> list[dict]:
         """EM-240 — per-round crime status maintenance (called from the loop beside
@@ -8462,6 +8449,465 @@ class World:
                 return agent
         return None
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-258/EM-259 — the combat primitive + war endgame (Wave O War stage C).
+    # clash is THE one genuinely new mechanic in the portfolio: a pure seeded
+    # stat contest (no random, no clock — EM-155). Death rides the existing
+    # energy→check_death model (energy IS the HP analog; the frozen
+    # no-weapons/no-HP-objects constraint holds), siege rides the shared
+    # _damage_building path, and the endgame settles through the SAME
+    # _settle_war lane the EM-257 peace_treaty vote uses.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _war_band_of(self, fid: str) -> list[str]:
+        """EM-258 — the faction's mustered war band (ids, verbatim). Reads the
+        LIVE record (faction_of returns a copy that drops the war keys)."""
+        return [str(m) for m in
+                (self.factions.get(str(fid)) or {}).get("war_band", [])]
+
+    def _war_morale(self, war: WarState, fid: str) -> int:
+        """EM-258 — DERIVED morale: 100 − the faction's war exhaustion (plan
+        decision: no per-agent morale field; devotion stays separate)."""
+        return max(0, min(100, 100 - int(war.exhaustion.get(str(fid), 0))))
+
+    def _bump_exhaustion(self, war: WarState, fid: str, amount: int) -> None:
+        """EM-258/EM-259 — accrue war exhaustion for one belligerent, clamped
+        0..100 (the notoriety clamp). Non-positive amounts are no-ops so a
+        zeroed config never writes a key (snapshot stays minimal)."""
+        if amount <= 0:
+            return
+        fid = str(fid)
+        war.exhaustion[fid] = max(
+            0, min(100, int(war.exhaustion.get(fid, 0)) + int(amount)))
+
+    def _clash_power(self, war: WarState, combatant: AgentState, fid: str,
+                     defending: bool) -> int:
+        """EM-258 — the combat power read: E + S*skill_weight +
+        B*support_weight + D + floor(M*morale_weight). Every input is durable
+        snapshot-stable state (energy, the optional `combat` skill, co-located
+        band support, the defender's building cover, derived morale), every
+        float product is FLOOR()ed (the plan's float-drift guard — never
+        round())."""
+        energy = int(math.floor(combatant.energy))
+        skill = combatant.skill_level("combat") * int(
+            self._war_param("skill_weight", 5))
+        band = set(self._war_band_of(fid))
+        support = sum(
+            1 for a in self.agents_at(combatant.location)
+            if a.id != combatant.id and a.id in band
+        ) * int(self._war_param("support_weight", 4))
+        terrain = 0
+        if defending and any(
+            b.location == combatant.location
+            and b.status not in ("planned", "destroyed")
+            for b in self.buildings.values()
+        ):
+            terrain = int(self._war_param("terrain_bonus", 5))
+        morale = int(math.floor(
+            self._war_morale(war, fid)
+            * float(self._war_param("morale_weight", 0.1))))
+        return energy + skill + support + terrain + morale
+
+    def action_muster(self, agent: AgentState) -> dict:
+        """EM-258 — join your faction's war band (reflex; zero extra LLM
+        calls). Seals an ally ring across the band (the accept_contract
+        conspiracy-bond clone: mutual trust floored at band_trust_seed,
+        neutral edges promoted to ally) and marks the agent `belligerent` —
+        a STATUS marker only (the band list is the truth; the jail-gate
+        ignores belligerent). Never clobbers an existing crime_status
+        (wanted stays wanted). Deterministic — no RNG/clock (EM-155)."""
+        if not self.war_enabled():
+            return self._fail_event(
+                agent.id, "muster", "war disabled",
+                f"{agent.name} drills for a war that never comes.")
+        fct = self.faction_of(agent.id)
+        if fct is None:
+            return self._fail_event(
+                agent.id, "muster", "no faction",
+                f"{agent.name} has no circle to fight for.")
+        if not self.active_wars_for(fct["id"]):
+            return self._fail_event(
+                agent.id, "muster", "not at war",
+                f"{agent.name} musters for a war that does not exist.")
+        rec = self.factions[fct["id"]]  # the LIVE record (copies drop war keys)
+        band = [str(m) for m in rec.get("war_band", [])]
+        if agent.id in band:
+            return self._fail_event(
+                agent.id, "muster", "already mustered",
+                f"{agent.name} already marches with the war band.")
+        # Seal the ally ring with every LIVING banded comrade (sorted order —
+        # deterministic; the accept_contract recipe, silent like it).
+        seed = int(self._war_param("band_trust_seed", 30))
+        for mid in sorted(band):
+            other = self.agents.get(mid)
+            if other is None or not other.alive:
+                continue
+            for a, b in ((agent, other), (other, agent)):
+                rel = a.relationships.get(b.id)
+                if rel is None:
+                    rel = RelationshipState()
+                    a.relationships[b.id] = rel
+                rel.trust = max(rel.trust, seed)
+                if rel.type in ("neutral",):
+                    rel.type = "ally"
+                    rel.since_tick = self.tick
+        band.append(agent.id)
+        rec["war_band"] = band
+        if agent.crime_status is None:
+            agent.crime_status = "belligerent"
+        name = str(rec.get("name", "")) or fct["id"]
+        return {
+            "kind": "war_band_joined",
+            "actor_id": agent.id,
+            "text": f"⚔ {agent.name} musters with {name}'s war band "
+                    f"({len(band)} strong).",
+            "payload": {"action": "muster", "faction_id": fct["id"],
+                        "band_size": len(band)},
+        }
+
+    def action_clash(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-258 — the combat primitive: a co-located contest between
+        OPPOSING BELLIGERENTS, resolved by the plan's exact formula:
+
+            seed   = _seed_int("clash", city_seed, tick, *sorted ids)  # symmetric
+            swing  = (seed % (2*span+1)) - span                        # [-span, +span]
+            margin = power(attacker) + swing - power(defender)
+            winner = attacker if margin >= 0 else defender
+            dmg_loser  = base_damage + floor(min(|margin|, cap) * per_margin)
+            dmg_winner = base_damage // 2
+
+        The seed is SYMMETRIC in the pair (sorted ids) so who initiates cannot
+        re-roll the swing (order-independence, pinned by test). Damage is an
+        energy decrement then the EXISTING check_death — energy IS the HP
+        analog (frozen constraint). The ACTOR's own death check stays with the
+        loop's post-turn sweep (calling it here too would double-count the
+        zero-energy turn); a TARGET kill is resolved here (the target gets no
+        turn), recorded in war.casualties, and the loser retreats
+        deterministically (lowest-id enemy-free place) when faction morale
+        breaks at/below retreat_floor. Pure seeded compute — no RNG/clock."""
+        if not self.war_enabled():
+            return self._fail_event(
+                agent.id, "clash", "war disabled",
+                f"{agent.name} swings at shadows — there is no war.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "clash", "self",
+                f"{agent.name} cannot clash with themselves.")
+        if not target.alive or agent.location != target.location:
+            return self._fail_event(
+                agent.id, "clash", "not co-located",
+                f"{agent.name} found no enemy in reach.")
+        af = self.faction_of(agent.id)
+        tf = self.faction_of(target.id)
+        war = (self.active_war_between(af["id"], tf["id"])
+               if af is not None and tf is not None else None)
+        if war is None:
+            return self._fail_event(
+                agent.id, "clash", "not at war",
+                f"{agent.name} has no war with {target.name}.")
+        if bool(self._war_param("clash_requires_band", True)) and \
+                agent.id not in self._war_band_of(af["id"]):
+            return self._fail_event(
+                agent.id, "clash", "not mustered",
+                f"{agent.name} must muster with the war band first.")
+        from ..animals.runtime import _seed_int
+        span = max(0, int(self._war_param("swing_span", 10)))
+        seed = _seed_int("clash", self.city_seed, self.tick,
+                         *sorted((agent.id, target.id)))
+        swing = (seed % (2 * span + 1)) - span
+        p_att = self._clash_power(war, agent, af["id"], defending=False)
+        p_def = self._clash_power(war, target, tf["id"], defending=True)
+        margin = p_att + swing - p_def
+        if margin >= 0:
+            winner, loser, wfid, lfid = agent, target, af["id"], tf["id"]
+        else:
+            winner, loser, wfid, lfid = target, agent, tf["id"], af["id"]
+        abs_margin = min(abs(margin), max(0, int(self._war_param("margin_cap", 40))))
+        base_damage = max(0, int(self._war_param("base_damage", 8)))
+        dmg_loser = base_damage + int(math.floor(
+            abs_margin * float(self._war_param("damage_per_margin", 0.5))))
+        dmg_winner = base_damage // 2
+        loser.energy = max(0.0, loser.energy - dmg_loser)
+        winner.energy = max(0.0, winner.energy - dmg_winner)
+        per_clash = max(0, int(self._war_param("exhaustion_per_clash", 5)))
+        self._bump_exhaustion(war, lfid, per_clash)
+        self._bump_exhaustion(war, wfid, per_clash // 2)
+        # TARGET death rides the existing energy→check_death model (the actor's
+        # check stays with the loop's post-turn sweep — see docstring).
+        extra_events: list[dict] = []
+        target_fell = False
+        if target.energy <= 0 and self.check_death(target):
+            target_fell = True
+            war.casualties.append(target.id)
+            self._bump_exhaustion(
+                war, tf["id"],
+                max(0, int(self._war_param("exhaustion_per_casualty", 15))))
+            extra_events.append({
+                "kind": "agent_died",
+                "actor_id": target.id,
+                "text": f"{target.name} has died (slain in battle).",
+                "payload": {"energy": target.energy, "tick": self.tick,
+                            "war_id": war.id},
+            })
+            inherit_evt = self.apply_inheritance(target)
+            if inherit_evt is not None:
+                extra_events.append(inherit_evt)
+        # Morale break ⇒ deterministic retreat: the lowest-id OTHER place free
+        # of the winning faction's living members. No adjacency graph exists at
+        # the place level, so "adjacent" reads as "reachable" (every place is
+        # one move away) — the deterministic lowest-id rule the plan pins.
+        retreated_to: str | None = None
+        if loser.alive and self._war_morale(war, lfid) <= int(
+                self._war_param("retreat_floor", 30)):
+            enemy_ids = {
+                str(m)
+                for m in (self.factions.get(wfid) or {}).get("members", [])
+                if (a := self.agents.get(str(m))) is not None and a.alive
+            }
+            for pid in sorted(self.places):
+                if pid == loser.location:
+                    continue
+                if any(a.id in enemy_ids for a in self.agents_at(pid)):
+                    continue
+                retreated_to = pid
+                break
+            if retreated_to is not None:
+                loser.location = retreated_to
+        text = (f"⚔ {agent.name} clashes with {target.name} — "
+                f"{winner.name} prevails")
+        if target_fell:
+            text += f"; {target.name} falls"
+        elif retreated_to is not None:
+            text += f"; {loser.name} retreats to {retreated_to}"
+        text += "!"
+        payload: dict[str, Any] = {
+            "action": "clash", "war_id": war.id,
+            "attacker": agent.id, "defender": target.id,
+            "winner": winner.id, "loser": loser.id,
+            "swing": swing, "margin": margin,
+            "damage_loser": dmg_loser, "damage_winner": dmg_winner,
+        }
+        if retreated_to is not None:
+            payload["retreated_to"] = retreated_to
+        clash_evt = {
+            "kind": "war_clash",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": text,
+            "payload": payload,
+        }
+        if extra_events:
+            return {"_multi": [clash_evt, *extra_events]}
+        return clash_evt
+
+    def action_siege(self, agent: AgentState, building_id: str) -> dict:
+        """EM-259 — lay siege to an ENEMY structure (reflex, @building gate).
+        Routes through the SHARED _damage_building path (invariant 8 — exactly
+        like arson/vandalize), so damaged/destroyed transitions, health clamps
+        and facade-decal clearing all hold identically. A valid target is a
+        non-destroyed, co-located building whose OWNER is a member of a
+        faction the actor's circle is at war with (public/unowned structures
+        are not war targets). NOT a crime — no notoriety, no grievance (the
+        war is already declared); the besieged faction takes
+        exhaustion_per_siege instead. Deterministic — no RNG/clock."""
+        if not self.war_enabled():
+            return self._fail_event(
+                agent.id, "siege", "war disabled",
+                f"{agent.name} circles walls no war has touched.")
+        building = self.buildings.get(building_id)
+        if building is None:
+            return self._fail_event(
+                agent.id, "siege", "building_not_found",
+                f"{agent.name} tried to besiege an unknown structure.")
+        if building.status == "destroyed":
+            return self._fail_event(
+                agent.id, "siege", "already destroyed",
+                f"{agent.name} cannot besiege {building.name} (already rubble).")
+        if building.location != agent.location:
+            return self._fail_event(
+                agent.id, "siege", "not here",
+                f"{agent.name} must stand at {building.name} to besiege it.")
+        af = self.faction_of(agent.id)
+        owner = self.agents.get(building.owner_id) if building.owner_id else None
+        of = self.faction_of(owner.id) if owner is not None else None
+        war = (self.active_war_between(af["id"], of["id"])
+               if af is not None and of is not None else None)
+        if war is None:
+            return self._fail_event(
+                agent.id, "siege", "not an enemy structure",
+                f"{agent.name} finds no enemy banner over {building.name} — "
+                "only structures owned by a faction you are at war with can "
+                "be besieged.")
+        if bool(self._war_param("clash_requires_band", True)) and \
+                agent.id not in self._war_band_of(af["id"]):
+            return self._fail_event(
+                agent.id, "siege", "not mustered",
+                f"{agent.name} must muster with the war band first.")
+        damage = max(0, int(self._war_param("siege_damage", 20)))
+        state_evt = self._damage_building(building, damage, agent.id, "siege")
+        self._bump_exhaustion(
+            war, of["id"],
+            max(0, int(self._war_param("exhaustion_per_siege", 4))))
+        fate = ("reduced to rubble" if building.status == "destroyed"
+                else f"{building.health} health left")
+        return {"_multi": [
+            {
+                "kind": "war_siege",
+                "actor_id": agent.id,
+                "target_id": building.id,
+                "text": f"⚔ {agent.name} lays siege to {building.name} "
+                        f"({fate})!",
+                "payload": {"action": "siege", "war_id": war.id,
+                            "building_id": building.id, "damage": damage,
+                            "health": building.health},
+            },
+            state_evt,
+        ]}
+
+    def _war_collapse(self, war: WarState, cap: int) -> tuple[str | None, str | None]:
+        """EM-259 — the auto-resolution read: which belligerent (if any)
+        collapses this round, and why. Checked in a deterministic cascade:
+
+          1. a DISSOLVED faction (gone from the store, or no living member)
+             always loses — both dissolved ⇒ the aggressor takes the blame;
+          2. WAR-BAND COLLAPSE — a side that mustered a band (the key exists)
+             but keeps no living banded member, while the enemy still fields
+             one, has lost its army;
+          3. the EXHAUSTION CAP — at/above cap a faction folds; both at cap ⇒
+             the HIGHER exhaustion loses, a tie ⇒ the aggressor does.
+
+        Pure read — no state change, no RNG/clock (EM-155)."""
+        lo, hi = war.belligerents[0], war.belligerents[1]
+
+        def _dissolved(fid: str) -> bool:
+            rec = self.factions.get(fid)
+            if rec is None:
+                return True
+            return not any(
+                (a := self.agents.get(str(m))) is not None and a.alive
+                for m in rec.get("members", []))
+
+        aggr = (war.aggressor_id if war.aggressor_id in war.belligerents
+                else lo)
+        d_lo, d_hi = _dissolved(lo), _dissolved(hi)
+        if d_lo and d_hi:
+            return aggr, "belligerents dissolved"
+        if d_lo:
+            return lo, "faction dissolved"
+        if d_hi:
+            return hi, "faction dissolved"
+
+        def _band_strength(fid: str) -> int:
+            members = {str(m) for m in
+                       (self.factions.get(fid) or {}).get("members", [])}
+            return sum(
+                1 for m in self._war_band_of(fid)
+                if m in members
+                and (a := self.agents.get(m)) is not None and a.alive)
+
+        has_lo = "war_band" in (self.factions.get(lo) or {})
+        has_hi = "war_band" in (self.factions.get(hi) or {})
+        s_lo, s_hi = _band_strength(lo), _band_strength(hi)
+        if has_lo and s_lo == 0 and s_hi > 0:
+            return lo, "war band collapsed"
+        if has_hi and s_hi == 0 and s_lo > 0:
+            return hi, "war band collapsed"
+        e_lo = int(war.exhaustion.get(lo, 0))
+        e_hi = int(war.exhaustion.get(hi, 0))
+        if e_lo >= cap or e_hi >= cap:
+            if e_lo > e_hi:
+                return lo, "exhaustion"
+            if e_hi > e_lo:
+                return hi, "exhaustion"
+            return aggr, "exhaustion"
+        return None, None
+
+    def _settle_war(self, war: WarState, loser: str, amount: int, *,
+                    event_kind: str, payload_extra: dict | None = None) -> None:
+        """EM-257/EM-259 — the ONE war-settlement lane: the peace_treaty vote
+        and the advance_war auto-resolution both land here, so reparations,
+        the grievance-ledger clearing, and the loser-leader exile can never
+        drift apart. Reparations clone the trial_fine split at group scope:
+        collected from the loser's living members in sorted-id order (each
+        capped by its credits), split EVENLY across the winner's distinct
+        living members (remainder dropped — a sink, exactly like the trial's
+        restitution; an extinct winner ⇒ a victimless-trial sink). A settled
+        war clears the pair's directional grievances BOTH ways (the same heat
+        cannot instantly re-open the same war). The announce event
+        (peace_signed / war_exhausted) parks first, then the exile — the
+        EM-141 outbox order the tests pin. Deterministic — no RNG/clock."""
+        winner = next(b for b in war.belligerents if b != loser)
+        war.status = "settled"
+        amount = max(0, int(amount))
+        loser_rec = self.factions.get(loser) or {}
+        winner_rec = self.factions.get(winner) or {}
+        loser_name = str(loser_rec.get("name", "")) or loser
+        winner_name = str(winner_rec.get("name", "")) or winner
+        # Collect: loser's living members pay in sorted-id order until the
+        # amount is met (each capped by its credits — min(credits, fine)).
+        pot = 0
+        remaining = amount
+        for mid in sorted(str(m) for m in loser_rec.get("members", [])):
+            if remaining <= 0:
+                break
+            payer = self.agents.get(mid)
+            if payer is None or not payer.alive:
+                continue
+            paid = min(payer.credits, remaining)
+            if paid > 0:
+                payer.credits -= paid
+                pot += paid
+                remaining -= paid
+        # Split: evenly across the winner's distinct living members
+        # (remainder dropped — the trial restitution arithmetic).
+        recipients: list[str] = []
+        for mid in sorted(str(m) for m in winner_rec.get("members", [])):
+            a = self.agents.get(mid)
+            if a is not None and a.alive and mid not in recipients:
+                recipients.append(mid)
+        if recipients and pot > 0:
+            share = pot // len(recipients)
+            if share > 0:
+                for mid in recipients:
+                    self.agents[mid].credits += share
+        # A signed peace settles the ledger — both directions.
+        self.grievances.pop(self._grievance_key(loser, winner), None)
+        self.grievances.pop(self._grievance_key(winner, loser), None)
+        loser_members = [str(m) for m in loser_rec.get("members", [])]
+        anchor = min(loser_members) if loser_members else ""
+        if event_kind == "war_exhausted":
+            text = (f"⚔ The war between {winner_name} and {loser_name} "
+                    f"collapses — {loser_name} yields ({pot} credits in "
+                    f"reparations).")
+        else:
+            text = (f"🕊 {loser_name} sues for peace with {winner_name} — "
+                    f"the war is over ({pot} credits in reparations).")
+        payload: dict[str, Any] = {
+            "war_id": war.id, "loser": loser, "winner": winner,
+            "reparations": pot, **(payload_extra or {}),
+        }
+        self.pending_spawn_events.append(
+            self._faction_event(event_kind, anchor, text, payload))
+        # Exile — the conceding circle's derived leader (lowest-id living
+        # member, the Wave-E founding convention) takes the fall.
+        leader = self._faction_leader(loser)
+        if leader is not None:
+            leader.crime_status = "exiled"
+            leader.notoriety = min(
+                100,
+                leader.notoriety + int(self._war_param("war_notoriety", 10)))
+            exile_payload: dict[str, Any] = {
+                "war_id": war.id, "faction_id": loser,
+                "notoriety": leader.notoriety,
+            }
+            if payload_extra and "proposal_id" in payload_extra:
+                exile_payload["proposal_id"] = payload_extra["proposal_id"]
+            self.pending_spawn_events.append(self._faction_event(
+                "exiled", leader.id,
+                f"⚔ {leader.name} is EXILED — the price of "
+                f"{loser_name}'s defeat.",
+                exile_payload))
+
     def _unique_agent_name(self, name: str) -> str:
         """run-663 — never reuse a name another agent already holds. Many agents
         MAY share a MODEL (intended), but a shared NAME blends two identities
@@ -9204,9 +9650,12 @@ class World:
                 # EM-240 — crime status scalars: additive. Pre-EM-240 snapshots
                 # lack these keys and restore the clean defaults; notoriety is
                 # clamped 0..100 and an unknown crime_status fails safe to None.
+                # EM-258 — `belligerent` (the war-band marker) joins the
+                # whitelist so a mustered agent round-trips (exiled already did).
                 notoriety=max(0, min(100, _int(d.get("notoriety")))),
                 crime_status=(str(d.get("crime_status")) if d.get("crime_status")
-                              in ("wanted", "detained", "jailed", "exiled") else None),
+                              in ("wanted", "detained", "jailed", "exiled",
+                                  "belligerent") else None),
                 crime_status_until_tick=_int(d.get("crime_status_until_tick")),
                 rap_sheet=[dict(e) for e in (d.get("rap_sheet") or []) if isinstance(e, dict)],
                 # EM-229 — needs: additive. Pre-EM-229 snapshots lack the keys
