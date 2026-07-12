@@ -6,11 +6,14 @@
  *     MODEL_REGISTRY + MODEL_POOLS — coverage is exact both directions and
  *     every value matches to 5e-3, so a swapped/added model fails loudly
  *     (with the expected row printed) instead of mis-placing murals;
- *   • rotatedFrontExtent — the y-rotation math on an asymmetric footprint;
+ *   • rotatedFrontExtent / rotatedXCenter — the y-rotation math on an
+ *     asymmetric footprint;
  *   • decalPlacement — the defect cases: deep GLBs (theater/tavern) get a
- *     front past the old fixed 1.06, short GLBs (garden) shrink + lower the
- *     canvas, tall GLBs keep the exact legacy mural height, procedural
- *     statuses fall back per-variant, damaged gets the scorched-box front.
+ *     front past the old fixed 1.06, x-offset GLBs (dock) center the mural
+ *     on the measured facade instead of the group origin, short GLBs
+ *     (garden) shrink + lower the canvas, tall GLBs keep the exact legacy
+ *     mural height, procedural statuses fall back per-variant, damaged gets
+ *     the scorched-box front.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -20,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as THREE from 'three';
 import { MODEL_REGISTRY, MODEL_POOLS, type ModelSpec } from './assets/models';
-import { resolveStructureModel } from './structureModel';
+import { modelRotationY, resolveStructureModel } from './structureModel';
 import {
   DAMAGED_FRONT_Z,
   DECAL_BASE_Y,
@@ -31,6 +34,7 @@ import {
   PROCEDURAL_FRONT_Z,
   decalPlacement,
   rotatedFrontExtent,
+  rotatedXCenter,
   type DecalBounds,
 } from './decalLayout';
 
@@ -163,6 +167,46 @@ describe('rotatedFrontExtent', () => {
   });
 });
 
+// ── rotatedXCenter ───────────────────────────────────────────────────────────
+
+describe('rotatedXCenter', () => {
+  // Footprint center (1, −2): x-offset AND z-offset so every rotation differs.
+  const box: DecalBounds = { minX: -1, maxX: 3, minZ: -5, maxZ: 1, maxY: 9 };
+
+  it('rotation 0 is the raw footprint x-center', () => {
+    expect(rotatedXCenter(box, 0)).toBeCloseTo(1, 10);
+  });
+
+  it('rotation π/2 maps the z-center onto x (x′ = z)', () => {
+    expect(rotatedXCenter(box, Math.PI / 2)).toBeCloseTo(-2, 10);
+  });
+
+  it('rotation π mirrors the x-center (x′ = −x)', () => {
+    expect(rotatedXCenter(box, Math.PI)).toBeCloseTo(-1, 10);
+  });
+
+  it('rotation −π/2 maps the negated z-center onto x (x′ = −z)', () => {
+    expect(rotatedXCenter(box, -Math.PI / 2)).toBeCloseTo(2, 10);
+  });
+
+  it('matches the midpoint of the rotated corner x-extent (any angle)', () => {
+    // The analytic center-rotation must equal brute-forcing the corners.
+    const theta = 0.7;
+    const cos = Math.cos(theta);
+    const sin = Math.sin(theta);
+    const xs = (
+      [
+        [box.minX, box.minZ],
+        [box.minX, box.maxZ],
+        [box.maxX, box.minZ],
+        [box.maxX, box.maxZ],
+      ] as Array<[number, number]>
+    ).map(([x, z]) => x * cos + z * sin);
+    expect(rotatedXCenter(box, theta)).toBeCloseTo(
+      (Math.min(...xs) + Math.max(...xs)) / 2, 10);
+  });
+});
+
 // ── decalPlacement ───────────────────────────────────────────────────────────
 
 const operational = (kind: string, id = 'b1') =>
@@ -172,21 +216,29 @@ describe('decalPlacement (EM-302b)', () => {
   it('places the plane at the resolved GLB front + the surface-normal epsilon', () => {
     // tavern is registry-only (no pool): poly/tavern.glb, maxZ 2.011 × 0.78.
     const spec = MODEL_REGISTRY.tavern!;
+    const box = GLB_DECAL_BOUNDS[spec.url];
     const p = decalPlacement(operational('tavern'));
-    expect(p.z).toBeCloseTo(
-      GLB_DECAL_BOUNDS[spec.url].maxZ * spec.scale + DECAL_EPSILON, 6);
+    expect(p.z).toBeCloseTo(box.maxZ * spec.scale + DECAL_EPSILON, 6);
     // The defect: the fixed 1.06 sat INSIDE this facade (front ≈1.57).
     expect(p.z).toBeGreaterThan(1.5);
+    // And the mural centers on the measured facade x (tavern ≈ origin-centered).
+    expect(p.x).toBeCloseTo(((box.minX + box.maxX) / 2) * spec.scale, 6);
   });
 
   it('tracks the SAME pool GLB the Structure renderer picked for this id', () => {
     for (const id of ['b1', 'b2', 'casa', 'x9']) {
-      const { spec } = resolveStructureModel('house', id);
+      const { variant, spec } = resolveStructureModel('house', id);
       const p = decalPlacement(operational('house', id));
       expect(spec).not.toBeNull();
+      // The exact rotation the implementation folds in: spec + variant facing.
+      const rotation = (spec!.rotation ?? 0) + modelRotationY(variant);
       expect(p.z).toBeCloseTo(
-        rotatedFrontExtent(GLB_DECAL_BOUNDS[spec!.url], spec!.rotation ?? 0) *
+        rotatedFrontExtent(GLB_DECAL_BOUNDS[spec!.url], rotation) *
           spec!.scale + DECAL_EPSILON,
+        6,
+      );
+      expect(p.x).toBeCloseTo(
+        rotatedXCenter(GLB_DECAL_BOUNDS[spec!.url], rotation) * spec!.scale,
         6,
       );
     }
@@ -228,6 +280,16 @@ describe('decalPlacement (EM-302b)', () => {
       GLB_DECAL_BOUNDS[spec.url].maxZ * spec.scale + DECAL_EPSILON, 6);
   });
 
+  it('centers the mural on the measured facade x (dock hull is x-offset)', () => {
+    const spec = MODEL_REGISTRY.dock!;
+    const box = GLB_DECAL_BOUNDS[spec.url];
+    const p = decalPlacement(operational('dock'));
+    // minX −0.139 / maxX 1.169 × 1.91: the hull's center sits ≈ 0.98 to the
+    // right of the group origin — an x=0 mural hung half off the planks.
+    expect(p.x).toBeCloseTo(((box.minX + box.maxX) / 2) * spec.scale, 6);
+    expect(p.x).toBeGreaterThan(0.9);
+  });
+
   it('offline uses the same measured GLB placement as operational', () => {
     const a = decalPlacement(operational('tavern'));
     const b = decalPlacement({ id: 'b1', kind: 'tavern', status: 'offline' });
@@ -236,14 +298,16 @@ describe('decalPlacement (EM-302b)', () => {
 
   it('damaged gets the scorched procedural-box front', () => {
     const p = decalPlacement({ id: 'b1', kind: 'tavern', status: 'damaged' });
-    expect(p).toEqual({ y: DECAL_BASE_Y, z: DAMAGED_FRONT_Z + DECAL_EPSILON, scale: 1 });
+    expect(p).toEqual({
+      x: 0, y: DECAL_BASE_Y, z: DAMAGED_FRONT_Z + DECAL_EPSILON, scale: 1,
+    });
   });
 
   it.each([['planned'], ['under_construction'], ['abandoned'], ['destroyed']] as const)(
     '%s keeps the legacy plane (no finished facade to measure)',
     (status) => {
       const p = decalPlacement({ id: 'b1', kind: 'house', status: status as never });
-      expect(p).toEqual({ y: DECAL_BASE_Y, z: LEGACY_DECAL_Z, scale: 1 });
+      expect(p).toEqual({ x: 0, y: DECAL_BASE_Y, z: LEGACY_DECAL_Z, scale: 1 });
     },
   );
 

@@ -5,20 +5,25 @@ minted image parks a PNG fetch, and when every FREE lane misses, the chain
 falls through to the PAID Gemini backstop with no bound. Pinned here:
 
   * GeminiImageProvider.max_per_run — over the cap the paid lane returns None
-    with ZERO network calls; a successful generation consumes a slot; a miss
-    (429/parse failure) releases its slot; 0 disables the lane outright;
-    negative = unlimited (pre-EM-302); concurrent fetches can never overshoot
-    (the slot is reserved before the awaited call).
+    with ZERO network calls; a successful generation consumes a slot; an
+    UNBILLED miss (no HTTP 200: 429/network failure) releases its slot; a
+    billed-but-REJECTED 200 (unusable payload) KEEPS its slot consumed — the
+    generation was charged, so releasing would let real spend exceed the cap;
+    0 disables the lane outright; negative = unlimited (pre-EM-302);
+    concurrent fetches can never overshoot (the slot is reserved before the
+    awaited call).
   * build_provider threads `paid_backstop_max_per_run` into the Gemini member
     (None ⇒ the module default 25); free lanes are NEVER capped.
   * config plumbing — ImageGenParams.paid_backstop_max_per_run default 25,
     parsed unfloored (0/negative are first-class), garbage falls back.
   * loop wiring — _drain_image_fetches builds the provider with the config'd
     cap; reset() drops the provider so a NEW run re-arms the budget.
-  * the repaint fallback — when every lane misses, a paint_surface REPAINT
-    keeps the previous artwork (the prev PNG is copied to the new image id);
-    a fresh paint stays absent (clean facade); nothing surfaces to the agent
-    turn (the reflex already succeeded at resolution time).
+  * the repaint fallback — when every lane misses OR the fetch is load-shed
+    (dropped at drain with the semaphore saturated, or dropped by the
+    create_task→run semaphore race), a paint_surface REPAINT keeps the
+    previous artwork (the prev PNG is copied to the new image id); a fresh
+    paint stays absent (clean facade); nothing surfaces to the agent turn
+    (the reflex already succeeded at resolution time).
   * world seam — action_paint_surface annotates the parked fetch entry with
     `prev_image_id` ONLY on a repaint; the transient outbox is never
     serialized, so replay/snapshot surfaces are untouched.
@@ -121,6 +126,25 @@ async def test_failed_attempts_do_not_consume_cap_slots(fake_httpx):
     # And now the budget is spent: no further HTTP calls.
     assert await provider.fetch_png("d") is None
     assert len(fake_httpx.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_billed_but_rejected_200_still_consumes_a_cap_slot(fake_httpx):
+    """An HTTP 200 whose payload yields no usable image (no image part, or a
+    body that isn't even JSON) was still a BILLED generation — its slot must
+    stay consumed, or real spend could exceed the cap."""
+    responses = [
+        _FakeResp(200, payload={"candidates": []}),  # billed, no image part
+        _FakeResp(200, payload=None, text="not json"),  # billed, json() raises
+        _FakeResp(200, payload=_GEMINI_OK),  # would serve — must never be reached
+    ]
+    fake_httpx.handler = lambda m, u, **kw: responses.pop(0)
+    provider = GeminiImageProvider("gkey", max_per_run=2)
+    assert await provider.fetch_png("a") is None  # slot 1 spent (billed miss)
+    assert await provider.fetch_png("b") is None  # slot 2 spent (billed miss)
+    # The whole budget went to billed-but-rejected calls: no third HTTP call.
+    assert await provider.fetch_png("c") is None
+    assert len(fake_httpx.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -323,6 +347,94 @@ def test_repaint_keeps_the_existing_artwork_when_every_lane_misses(tmp_path):
     assert second_png.read_bytes() == first_png.read_bytes()
     # And the decal mapping points at the new id (sim state untouched by I/O).
     assert world.surface_decals == {"b1": second}
+
+
+class _MustNotFetch:
+    """A provider the load-shed drop paths must NEVER reach."""
+
+    async def fetch_png(self, prompt):
+        raise AssertionError("a dropped fetch must not reach the provider")
+
+
+def _paint_first_mural(loop, world, images_dir):
+    """First paint via the conftest-mocked provider → its PNG lands on disk."""
+    ada = world.agents["agent_ada"]
+    world.buildings["b1"] = Building(
+        id="b1", name="Wall", kind="workshop", location="plaza",
+        status="operational", owner_id="public", health=100)
+    first = world.action_paint_surface(ada, "b1", "v1")["payload"]["image_id"]
+    _drain(loop)
+    first_png = images_dir / f"{first}.png"
+    assert first_png.exists()
+    return ada, first_png
+
+
+def test_repaint_dropped_at_drain_under_load_keeps_existing_artwork(tmp_path):
+    """Load-shed path 1: the semaphore is already saturated when the drain
+    runs — the repaint entry is dropped WITHOUT spawning a task, and the
+    facade still keeps the previous artwork."""
+    loop, world, images_dir = _loop(tmp_path, _params())
+    ada, first_png = _paint_first_mural(loop, world, images_dir)
+
+    loop._image_provider = _MustNotFetch()
+    second = world.action_paint_surface(ada, "b1", "v2")["payload"]["image_id"]
+
+    async def _go():
+        loop._image_semaphore = asyncio.Semaphore(1)
+        await loop._image_semaphore.acquire()  # saturate: drain load-sheds
+        loop._drain_image_fetches()
+        assert loop._image_fetch_tasks == set()  # dropped — never spawned
+
+    asyncio.run(_go())
+    second_png = images_dir / f"{second}.png"
+    assert second_png.exists()
+    assert second_png.read_bytes() == first_png.read_bytes()
+
+
+def test_repaint_dropped_by_semaphore_race_keeps_existing_artwork(tmp_path):
+    """Load-shed path 2: the semaphore was FREE at drain (the task WAS
+    created) but filled before the task ran — the spawned fetch must also
+    fall back to keeping the current image instead of silently dropping."""
+    loop, world, images_dir = _loop(tmp_path, _params())
+    ada, first_png = _paint_first_mural(loop, world, images_dir)
+
+    loop._image_provider = _MustNotFetch()
+    second = world.action_paint_surface(ada, "b1", "v2")["payload"]["image_id"]
+
+    async def _go():
+        loop._image_semaphore = asyncio.Semaphore(1)
+        loop._drain_image_fetches()  # sem free → the task is created
+        assert len(loop._image_fetch_tasks) == 1
+        # Semaphore.acquire on a free semaphore never yields, so the sem fills
+        # BEFORE the spawned task gets its first slice — the exact race.
+        await loop._image_semaphore.acquire()
+        for task in list(loop._image_fetch_tasks):
+            await task
+
+    asyncio.run(_go())
+    second_png = images_dir / f"{second}.png"
+    assert second_png.exists()
+    assert second_png.read_bytes() == first_png.read_bytes()
+
+
+def test_fresh_paint_dropped_under_load_stays_absent(tmp_path):
+    """A load-shed FRESH paint (no prev mural) still renders a clean facade —
+    the drop paths never invent a PNG."""
+    loop, world, images_dir = _loop(tmp_path, _params())
+    ada = world.agents["agent_ada"]
+    world.buildings["b1"] = Building(
+        id="b1", name="Wall", kind="workshop", location="plaza",
+        status="operational", owner_id="public", health=100)
+    loop._image_provider = _MustNotFetch()
+    image_id = world.action_paint_surface(ada, "b1", "v1")["payload"]["image_id"]
+
+    async def _go():
+        loop._image_semaphore = asyncio.Semaphore(1)
+        await loop._image_semaphore.acquire()
+        loop._drain_image_fetches()
+
+    asyncio.run(_go())
+    assert not (images_dir / f"{image_id}.png").exists()
 
 
 def test_fresh_paint_miss_stays_absent_clean_facade(tmp_path):

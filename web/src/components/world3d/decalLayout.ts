@@ -13,7 +13,9 @@
  *
  * THE FIX: place the plane AT the measured front face plus a small
  * surface-normal epsilon (the plane's normal is +z, so the epsilon is applied
- * along +z), and clamp/shrink the canvas vertically to the measured height.
+ * along +z), center it on the measured facade x (x-offset GLBs like the dock
+ * hull or industrial-h would otherwise hang the mural half off the wall),
+ * and clamp/shrink the canvas vertically to the measured height.
  * Front faces come from `GLB_DECAL_BOUNDS` — RAW model-space AABBs measured
  * from the vendored GLBs (decalLayout.test.ts re-measures the files and fails
  * if this table drifts, the models.test.ts discipline) — scaled by the SAME
@@ -186,7 +188,24 @@ export function rotatedFrontExtent(box: DecalBounds, rotationY: number): number 
   return front;
 }
 
+/**
+ * The x-center of a model's XZ footprint after a Y-rotation (three.js
+ * convention: x' = x·cosθ + z·sinθ). The footprint corners are symmetric
+ * about the AABB center, so rotating the center point IS the midpoint of the
+ * rotated x-extent — the mural centers on the facade the camera sees, not on
+ * the group origin (x-offset GLBs like the dock hull or industrial-h would
+ * otherwise hang the mural half off the wall).
+ */
+export function rotatedXCenter(box: DecalBounds, rotationY: number): number {
+  const cx = (box.minX + box.maxX) / 2;
+  const cz = (box.minZ + box.maxZ) / 2;
+  return cx * Math.cos(rotationY) + cz * Math.sin(rotationY);
+}
+
 export interface DecalPlacement {
+  /** Mural center along the facade — the measured (rotated) footprint
+   * x-center, 0 for the origin-centered procedural/legacy fallbacks. */
+  x: number;
   /** Mural center height (world units above the lot). */
   y: number;
   /** Plane z — the measured front face + DECAL_EPSILON along the +z normal. */
@@ -221,19 +240,20 @@ export function decalPlacement(
 ): DecalPlacement {
   // damaged renders the scorched procedural box (GLBs are operational/offline only).
   if (building.status === 'damaged') {
-    return { y: DECAL_BASE_Y, z: DAMAGED_FRONT_Z + DECAL_EPSILON, scale: 1 };
+    return { x: 0, y: DECAL_BASE_Y, z: DAMAGED_FRONT_Z + DECAL_EPSILON, scale: 1 };
   }
   if (building.status !== 'operational' && building.status !== 'offline') {
     // planned / under_construction / abandoned / destroyed: no finished facade
     // to measure — keep the legacy plane (rising walls sit at z≈1.0).
-    return { y: DECAL_BASE_Y, z: LEGACY_DECAL_Z, scale: 1 };
+    return { x: 0, y: DECAL_BASE_Y, z: LEGACY_DECAL_Z, scale: 1 };
   }
   const { variant, spec } = resolveStructureModel(building.kind, building.id);
   if (!spec) {
     const front = Object.prototype.hasOwnProperty.call(PROCEDURAL_FRONT_Z, variant)
       ? PROCEDURAL_FRONT_Z[variant]
       : LEGACY_DECAL_Z;
-    return { y: DECAL_BASE_Y, z: front + DECAL_EPSILON, scale: 1 };
+    // Procedural silhouettes are authored centered on the group origin — x=0.
+    return { x: 0, y: DECAL_BASE_Y, z: front + DECAL_EPSILON, scale: 1 };
   }
   const box = Object.prototype.hasOwnProperty.call(GLB_DECAL_BOUNDS, spec.url)
     ? GLB_DECAL_BOUNDS[spec.url]
@@ -241,11 +261,12 @@ export function decalPlacement(
   if (!box) {
     // An unmeasured GLB (decalLayout.test.ts makes this unreachable for the
     // vendored registry) — keep the legacy plane rather than guessing.
-    return { y: DECAL_BASE_Y, z: LEGACY_DECAL_Z, scale: 1 };
+    return { x: 0, y: DECAL_BASE_Y, z: LEGACY_DECAL_Z, scale: 1 };
   }
   const rotation = (spec.rotation ?? 0) + modelRotationY(variant);
+  const x = rotatedXCenter(box, rotation) * spec.scale;
   const z = rotatedFrontExtent(box, rotation) * spec.scale + DECAL_EPSILON;
   const topY = box.maxY * spec.scale + spec.yOffset;
   const { y, scale } = fitVertically(topY);
-  return { y, z, scale };
+  return { x, y, z, scale };
 }

@@ -57,7 +57,7 @@ describe('SurfaceDecal (EM-302b placement)', () => {
     const { container } = renderDecal({ x: 4, z: -2, url: URL, building });
     expect(container.querySelector('meshToonMaterial')).not.toBeNull();
     const [px, py, pz] = meshPosition(container);
-    expect(px).toBeCloseTo(0, 6);
+    expect(px).toBeCloseTo(want.x, 6);
     expect(py).toBeCloseTo(want.y, 6);
     expect(pz).toBeCloseTo(want.z, 6);
     // The defect: the old fixed plane sat at 1.06 INSIDE this deep facade.
@@ -65,6 +65,15 @@ describe('SurfaceDecal (EM-302b placement)', () => {
     // The outer group carries the lot-spot world position.
     const group = container.querySelector('group');
     expect(group?.getAttribute('position')).toBe('4,0,-2');
+  });
+
+  it('offsets the plane to the measured facade x-center (x-offset GLB)', () => {
+    const building = { id: 'd1', kind: 'dock', status: 'operational' as const };
+    const want = decalPlacement(building);
+    expect(Math.abs(want.x)).toBeGreaterThan(0.5); // sanity: dock IS x-offset
+    const { container } = renderDecal({ x: 0, z: 0, url: URL, building });
+    const [px] = meshPosition(container);
+    expect(px).toBeCloseTo(want.x, 6);
   });
 
   it('shrinks the canvas on a short model (garden bed)', () => {

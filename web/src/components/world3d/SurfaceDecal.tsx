@@ -14,8 +14,10 @@
  * deep GLBs like the theater, z-fought shallow ones, and floated in front of
  * the dock) — decalLayout.decalPlacement resolves the SAME GLB the Structure
  * renderer picked (kind+id) and places the plane at that model's MEASURED
- * front face + a surface-normal epsilon, shrinking/lowering the canvas on
- * short models so the mural stays on the facade instead of hovering over it.
+ * front face + a surface-normal epsilon, centered on the measured facade
+ * x (x-offset GLBs like the dock hull would otherwise hang the mural half
+ * off the wall), shrinking/lowering the canvas on short models so the mural
+ * stays on the facade instead of hovering over it.
  *
  * UNLIKE PlazaBanner there is NO procedural fallback: a facade with no decal
  * simply renders nothing (CozyWorld skips it), and a decal that is still
@@ -49,7 +51,7 @@ function TexturedDecal({ url, placement }: { url: string; placement: DecalPlacem
   const map = useTexture(url);
   return (
     <mesh
-      position={[0, placement.y, placement.z]}
+      position={[placement.x, placement.y, placement.z]}
       scale={[placement.scale, placement.scale, 1]}
     >
       <planeGeometry args={DECAL_SIZE} />

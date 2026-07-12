@@ -1966,9 +1966,12 @@ class TickLoop:
             self._image_semaphore = asyncio.Semaphore(self._image_max_concurrent())
         for entry in entries:
             # Skip-under-load: at cap, drop the fetch (the gallery entry + event
-            # already exist; the PNG is simply absent → frontend fallback). Never
-            # an unbounded queue.
+            # already exist; the PNG is simply absent → frontend fallback) — but
+            # a dropped REPAINT still keeps the existing artwork (the same
+            # fallback as an all-lanes miss: load-shed must not blank a wall
+            # that already shows art). Never an unbounded queue.
             if self._image_semaphore.locked():
+                self._keep_previous_decal_image(entry)
                 continue
             try:
                 task = asyncio.create_task(self._spawn_image_fetch(entry))
@@ -1982,11 +1985,15 @@ class TickLoop:
         Emits NOTHING; swallows ALL exceptions (a failed fetch must never surface
         or stall a tick). Bounded by the semaphore (acquired only if free)."""
         sem = self._image_semaphore
-        if sem is None or sem.locked():
-            return
         image_id = str(entry.get("image_id") or "").strip()
         prompt = str(entry.get("prompt") or "")
         if not image_id:
+            return
+        if sem is None or sem.locked():
+            # Load-shed race: the semaphore filled between create_task and this
+            # task running. Same drop semantics as the drain-side skip — a
+            # dropped REPAINT keeps the existing artwork.
+            self._keep_previous_decal_image(entry)
             return
         try:
             async with sem:
@@ -1995,7 +2002,7 @@ class TickLoop:
                     # EM-302c — a total miss (every free lane failed AND the
                     # paid backstop refused over its per-run cap) on a REPAINT
                     # keeps the existing artwork instead of blanking the wall.
-                    self._keep_previous_decal_image(entry, image_id)
+                    self._keep_previous_decal_image(entry)
                     return
                 target = self._assets_images_dir()
                 target.mkdir(parents=True, exist_ok=True)
@@ -2008,18 +2015,21 @@ class TickLoop:
         except Exception as exc:  # pragma: no cover - best-effort, swallow all
             log.debug("image fetch failed for %s: %s", image_id, exc)
 
-    def _keep_previous_decal_image(self, entry: dict, image_id: str) -> None:
+    def _keep_previous_decal_image(self, entry: dict) -> None:
         """EM-302c — the repaint fallback: when a paint_surface fetch entry
-        carries `prev_image_id` (the mural this repaint replaced) and every
-        provider lane missed, copy the PREVIOUS image's PNG to the NEW image
-        id's path so the facade keeps showing art (never an error surfaced to
-        the agent turn — the reflex already succeeded). Pure side-artifact I/O
-        off the replay surface: sim state is untouched, nothing is emitted,
-        everything is swallowed. A fresh paint (no prev) stays absent → the
-        frontend's clean-facade fallback, exactly as before."""
+        carries `prev_image_id` (the mural this repaint replaced) and the fetch
+        can't land — every provider lane missed OR the fetch was load-shed
+        (dropped at drain / by the semaphore race) — copy the PREVIOUS image's
+        PNG to the NEW image id's path so the facade keeps showing art (never
+        an error surfaced to the agent turn — the reflex already succeeded).
+        Pure side-artifact I/O off the replay surface: sim state is untouched,
+        nothing is emitted, everything is swallowed. A fresh paint (no prev)
+        stays absent → the frontend's clean-facade fallback, exactly as
+        before."""
         try:
+            image_id = str(entry.get("image_id") or "").strip()
             prev = str(entry.get("prev_image_id") or "").strip()
-            if not prev or prev == image_id:
+            if not image_id or not prev or prev == image_id:
                 return
             target = self._assets_images_dir()
             src = target / f"{prev}.png"

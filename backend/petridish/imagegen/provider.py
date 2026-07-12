@@ -273,7 +273,10 @@ class GeminiImageProvider:
     the caller's keep-the-existing-image fallback takes over. A slot is
     reserved BEFORE the awaited call (check+increment is atomic on the
     single-threaded event loop), so concurrent fetches can never overshoot the
-    cap; a miss releases its slot (a failed attempt doesn't bill)."""
+    cap. The slot is released ONLY when the attempt provably never billed (no
+    HTTP 200 came back: network failure / non-200); a billed-but-REJECTED 200
+    (unusable payload) keeps its slot consumed — Google charged for that
+    generation, so releasing it would let real spend exceed the cap."""
 
     def __init__(
         self,
@@ -304,16 +307,25 @@ class GeminiImageProvider:
                     self._max_per_run)
                 return None
             self._paid_served += 1  # reserve before the await (never overshoot)
-        png: bytes | None = None
+        billed = True  # conservative: an unexpected raise keeps the slot
         try:
-            png = await self._generate(prompt)
+            png, billed = await self._generate(prompt)
+        except Exception:  # pragma: no cover - _generate never raises (defensive)
+            png = None
         finally:
-            if capped and png is None:
-                self._paid_served -= 1  # a miss doesn't bill — release the slot
+            if capped and png is None and not billed:
+                # The attempt provably never billed (no HTTP 200 came back) —
+                # release the reserved slot. A billed-but-rejected 200 keeps
+                # its slot: the generation was charged, so releasing would let
+                # real spend exceed the cap.
+                self._paid_served -= 1
         return png
 
-    async def _generate(self, prompt: str) -> bytes | None:
-        """The uncapped network call (the pre-EM-302 fetch_png body)."""
+    async def _generate(self, prompt: str) -> tuple[bytes | None, bool]:
+        """The uncapped network call (the pre-EM-302 fetch_png body). Returns
+        (png, billed) — `billed` flips True the moment an HTTP 200 response
+        arrives, whether or not its payload yields a usable image (Google
+        bills the generation on a 200; a rejected payload is still spend)."""
         url = _GEMINI_URL.format(model=self._model)
         # Key travels in the x-goog-api-key header, never the URL query string
         # (parity with the text GeminiAdapter — query params leak into logs).
@@ -324,13 +336,15 @@ class GeminiImageProvider:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
         }
+        billed = False
         try:
             import httpx
             async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
                 resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code != 200:
                 log.debug("gemini image http %s: %s", resp.status_code, resp.text[:200])
-                return None
+                return None, billed
+            billed = True  # a 200 is a BILLED generation, usable payload or not
             data = resp.json()
             candidates = data.get("candidates") or []
             parts = (
@@ -343,10 +357,10 @@ class GeminiImageProvider:
                 if inline.get("data"):
                     png = _valid_image(base64.b64decode(inline["data"]))
                     if png is not None:
-                        return png
+                        return png, billed
         except Exception as exc:  # pragma: no cover - network defensive
             log.debug("gemini image fetch failed: %s", exc)
-        return None
+        return None, billed
 
 
 class CloudflareProvider:
