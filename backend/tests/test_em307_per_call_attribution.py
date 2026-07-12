@@ -39,6 +39,8 @@ from petridish.config.loader import (
 )
 from petridish.engine.world import AgentState, PlaceState, World
 from petridish.agents.runtime import AgentRuntime
+from petridish.animals.runtime import AnimalRuntime
+from petridish.engine.loop import TickLoop
 from petridish.providers.base import ProviderError
 from petridish.providers.router import Router
 
@@ -288,14 +290,15 @@ class _AttributedFakeRouter:
     """Duck-typed router WITH the EM-307 channel: returns a bounced
     attribution and records what note_parse_outcome receives."""
 
-    def __init__(self):
+    def __init__(self, text: str = '{"action": "idle", "args": {}}'):
+        self.text = text
         self.noted: list[dict] = []
 
     async def chat_attributed(self, profile_name, messages, *,
                               max_tokens, temperature, require_json=False):
-        # EM-306 — the agent turn is strict-JSON and must say so.
+        # EM-306 — the agent/animal turn is strict-JSON and must say so.
         assert require_json is True
-        return '{"action": "idle", "args": {}}', {
+        return self.text, {
             "routed_via": "routed/sub",
             "usage": {"input_tokens": 7, "output_tokens": 3,
                       "latency_ms": 5.0, "finish_reason": "stop",
@@ -323,11 +326,12 @@ class _LegacyFakeRouter:
     """Duck-typed router WITHOUT chat_attributed and with the pre-EM-307
     note_parse_outcome signature — the historical path must still work."""
 
-    def __init__(self):
+    def __init__(self, text: str = '{"action": "idle", "args": {}}'):
+        self.text = text
         self.noted: list[dict] = []
 
     async def chat(self, profile_name, messages, *, max_tokens, temperature):
-        return '{"action": "idle", "args": {}}'
+        return self.text
 
     def note_parse_outcome(self, profile_name, *, parsed, truncated,
                            timed_out=False):
@@ -363,3 +367,188 @@ async def test_agent_runtime_falls_back_for_legacy_duck_typed_routers():
     assert err is None and action is not None
     assert meta["routed_via"] == "routed/legacy"        # profile-level reads
     assert router.noted == [{"profile": "lane", "parsed": True}]
+
+
+_ANIMAL_JSON = '{"animal_thought": "zzz", "action": "nap", "args": {}}'
+
+
+async def test_animal_runtime_consumes_the_per_call_attribution():
+    # Mirror of the agent-runtime test (W30 review gap): animal turns are the
+    # canonical concurrent background caller, so they must ride the same
+    # per-call channel — meta from the attribution record, served_by into
+    # note_parse_outcome, profile-level reads never consulted.
+    _agent, world = _agent_world()
+    router = _AttributedFakeRouter(_ANIMAL_JSON)
+    runtime = AnimalRuntime(world, router)
+    action, meta = await runtime._call_and_parse(
+        "lane", _MESSAGES, 256, 0.8, attempt=1)
+    assert action is not None and action["action"] == "nap"
+    assert meta["routed_via"] == "routed/sub"
+    assert meta["usage"]["bounced_to"] == "sub"
+    assert router.noted == [{"profile": "lane", "parsed": True,
+                             "served_by": "sub"}]
+
+
+async def test_animal_runtime_falls_back_for_legacy_duck_typed_routers():
+    _agent, world = _agent_world()
+    router = _LegacyFakeRouter(_ANIMAL_JSON)
+    runtime = AnimalRuntime(world, router)
+    action, meta = await runtime._call_and_parse(
+        "lane", _MESSAGES, 256, 0.8, attempt=1)
+    assert action is not None and action["action"] == "nap"
+    assert meta["routed_via"] == "routed/legacy"        # profile-level reads
+    assert router.noted == [{"profile": "lane", "parsed": True}]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# (F) cache HIT of a BOUNCED call — the CURRENT attribution design, pinned
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def test_cache_hit_from_a_bounced_call_attributes_served_by_to_the_pin():
+    # A bounced MISS stores the substitute's routed_via/usage in the cache.
+    # CURRENT design (pinned by the W30 review, not necessarily final): a
+    # later HIT is served by the CACHE on the requested profile — served_by is
+    # the PIN, even though the cached text was produced by the bounced-to
+    # lane. The substitute's truth survives in routed_via; the HIT snapshot
+    # drops the bounce keys (tokens null, cached=true). A health credit for a
+    # HIT therefore lands on the pin, which never called a provider.
+    home = _OkAdapter("home", text="home (never called — sick)")
+    sub = _OkAdapter("sub", text="sub served")
+    r = _router([("sub", "m-sub", sub), ("home", "m-home", home)],
+                cache_enabled=True)
+    _sicken(r, "home")
+
+    text1, attr1 = await r.chat_attributed(
+        "home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert text1 == "sub served" and attr1["served_by"] == "sub"
+
+    text2, attr2 = await r.chat_attributed(
+        "home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert sub.calls == 1 and home.calls == 0   # second call: pure cache HIT
+    assert text2 == "sub served"
+    assert attr2["served_by"] == "home"         # the pin — CURRENT design
+    assert attr2["routed_via"] == "routed/sub"  # the substitute's routed truth
+    assert attr2["usage"]["cached"] is True
+    assert "bounced_to" not in attr2["usage"]   # HIT snapshot drops bounce keys
+
+
+async def test_attribution_usage_is_isolated_from_snapshot_and_cache():
+    # W30 review — attribution["usage"] must be a COPY: a consumer mutating
+    # its per-call record must not leak into the staged pending snapshot (the
+    # single-caller profile reads) or the decision-cache entry a later HIT is
+    # served from.
+    home = _OkAdapter("home", text="home (never called — sick)")
+    sub = _OkAdapter("sub", text="sub served")
+    r = _router([("sub", "m-sub", sub), ("home", "m-home", home)],
+                cache_enabled=True)
+    _sicken(r, "home")
+
+    _, attr = await r.chat_attributed(
+        "home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert attr["usage"]["bounced_to"] == "sub"
+    attr["usage"]["output_tokens"] = 10 ** 9    # consumer mutates its record
+    attr["usage"]["poisoned"] = True
+    # the pending snapshot (single-caller profile reads) is unharmed…
+    assert r.last_usage("home")["output_tokens"] == 5
+    assert "poisoned" not in r.last_usage("home")
+    # …and so is the cache entry the next HIT is served from
+    _, attr_hit = await r.chat_attributed(
+        "home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert attr_hit["usage"]["cached"] is True
+    assert "poisoned" not in attr_hit["usage"]
+    assert attr_hit["routed_via"] == "routed/sub"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# (G) the loop's EM-307 branches — narrator + deep-dive consume the channel
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CHAPTER = "The town stirred, and the schemes began anew."
+
+
+class _FakeRepo:
+    """Duck-typed repository: no history, records every persisted event."""
+
+    def __init__(self):
+        self.saved: list[dict] = []
+
+    def get_events(self, run_id, **kwargs):
+        return []
+
+    def save_event(self, run_id, evt, tick):
+        self.saved.append(evt)
+
+
+class _ProseAttrRouter:
+    """Offers chat_attributed for prose calls; the profile-level reads RAISE,
+    proving the loop's EM-307 branches never consult them."""
+
+    def __init__(self, prose: str = _CHAPTER):
+        self.prose = prose
+        self.attributed_calls = 0
+        self.plain_calls = 0
+
+    def get_profile(self, name):
+        return None
+
+    def profile_names(self):
+        return []
+
+    async def chat_attributed(self, profile_name, messages, *,
+                              max_tokens, temperature, require_json=False):
+        self.attributed_calls += 1
+        assert require_json is False            # prose turns stay non-strict
+        return self.prose, {
+            "routed_via": "routed/sub",
+            "usage": {"input_tokens": 9, "output_tokens": 9,
+                      "latency_ms": 3.0, "finish_reason": "stop",
+                      "cached": False,
+                      "bounced_from": profile_name, "bounced_to": "sub"},
+            "served_by": "sub",
+        }
+
+    async def chat(self, profile_name, messages, *, max_tokens, temperature):
+        # deep-dive DIMENSION passes (analytical notes) use the plain façade
+        self.plain_calls += 1
+        return "Ada passed the ubi law. Mox schemed in the plaza."
+
+    def last_usage(self, name):
+        raise AssertionError("EM-307: the loop must consume the per-call attribution")
+
+    def last_routed_via(self, name):
+        raise AssertionError("EM-307: the loop must consume the per-call attribution")
+
+
+def _tick_loop(router) -> tuple[TickLoop, _FakeRepo]:
+    _agent, world = _agent_world()
+    repo = _FakeRepo()
+    loop = TickLoop(world, runtime=None, repo=repo, router=router,
+                    broadcaster=lambda _msg: None, animal_runtime=object())
+    return loop, repo
+
+
+async def test_narrator_consumes_the_per_call_attribution():
+    # The narrator swallows every exception and emits NOTHING on failure, so
+    # a fallback to the raising profile-level reads shows up as zero events.
+    router = _ProseAttrRouter()
+    loop, repo = _tick_loop(router)
+    await loop._run_narrator(0, 20, "lane")
+    assert router.attributed_calls == 1
+    assert len(repo.saved) == 1
+    evt = repo.saved[0]
+    assert evt["kind"] == "narrator_summary"
+    assert evt["text"].startswith("The town stirred")
+    assert evt["payload"]["routed_via"] == "routed/sub"   # per-call truth
+
+
+async def test_deepdive_synthesis_consumes_the_per_call_attribution():
+    router = _ProseAttrRouter()
+    loop, repo = _tick_loop(router)
+    await loop._run_deepdive("lane")
+    assert router.attributed_calls == 1         # the SYNTHESIS call
+    assert router.plain_calls == 3              # one per deep-dive dimension
+    assert len(repo.saved) == 1
+    evt = repo.saved[0]
+    assert evt["kind"] == "narrator_summary"
+    assert evt["payload"]["mode"] == "deepdive"
+    assert evt["payload"]["routed_via"] == "routed/sub"   # per-call truth
