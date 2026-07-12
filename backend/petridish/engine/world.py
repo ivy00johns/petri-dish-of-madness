@@ -2937,13 +2937,15 @@ class World:
 
     def _can_teach(self, teacher: AgentState, student: AgentState, skill: str) -> bool:
         """EM-230 — would a teach of `skill` from teacher→student actually transfer
-        a level right now? Mirrors action_teach_skill's gates (co-located + the
-        teacher STRICTLY outranks) WITHOUT mutating, so the atomic accept_trade
-        pre-check can reject a skill arm that would otherwise fail mid-swap (e.g.
-        the pair drifted apart after the offer was parked) — guaranteeing no partial
-        swap."""
+        a level right now? Mirrors action_teach_skill's gates (co-located + a gap
+        wide enough for the bounded step to actually move a level: the student
+        lands at min(s+1, t-1), so a transfer needs t >= s+2 — the EM-272 no-op
+        gate) WITHOUT mutating, so the atomic accept_trade pre-check can reject a
+        skill arm that would otherwise fail mid-swap (e.g. the pair drifted apart
+        after the offer was parked, or the gap is only +1 and the teach would
+        no-op AFTER the credits already moved) — guaranteeing no partial swap."""
         return (teacher.location == student.location
-                and teacher.skill_level(skill) > student.skill_level(skill))
+                and teacher.skill_level(skill) >= student.skill_level(skill) + 2)
 
     def action_accept_trade(self, accepter: AgentState) -> tuple[bool, str, dict | None]:
         """EM-230 — ATOMICALLY settle the open offer addressed to `accepter`. The
@@ -2981,11 +2983,12 @@ class World:
         if give_skill and not self._can_teach(offerer, accepter, give_skill):
             return False, (
                 f"{offerer.name} cannot teach you {give_skill} now (not co-located "
-                f"or they do not outrank you)"), None
+                f"or the skill gap is too narrow for a lesson to transfer a level)"
+            ), None
         if get_skill and not self._can_teach(accepter, offerer, get_skill):
             return False, (
-                f"you cannot teach {get_skill} now (not co-located or you do not "
-                f"outrank {offerer.name})"), None
+                f"you cannot teach {get_skill} now (not co-located or your skill "
+                f"gap over {offerer.name} is too narrow to transfer a level)"), None
         # ── All arms validated → perform the swap (no further failure path) ──
         if give_credits:
             offerer.credits -= give_credits
@@ -5528,6 +5531,14 @@ class World:
             self.surface_decals.pop(building.id, None)
         else:
             building.status = "damaged"
+            # Restart the abandon clock: advance_buildings measures stall-rot
+            # staleness from last_progress_tick, which only construction paths
+            # write — without this refresh, a mature building damaged long after
+            # completion reads as stale-since-construction and flips straight to
+            # abandoned at the next round boundary, skipping the documented
+            # abandon_after_ticks repair window. Deterministic (engine tick, no
+            # clock); last_progress_tick is already snapshot-serialized.
+            building.last_progress_tick = self.tick
         return self._structure_state_changed_event(
             building, frm, building.status, reason, actor_id)
 

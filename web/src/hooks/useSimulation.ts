@@ -164,6 +164,17 @@ export function useSimulation(): SimulationState & SimulationControls {
   // After this many failed reconnects, fall back to mock so the UI is never
   // dead. A recovered live socket still tears the mock loop down on open/msg.
   const MAX_RECONNECTS_BEFORE_MOCK = 3;
+  // MOCK-FALLBACK PURGE: set when a WS outage actually started the mock loop.
+  // The generator stamps POSITIVE monotonic seqs — the same id space as the
+  // backend's DB event_ids — so on live recovery the fallback's fake events
+  // must be dropped: left in place they linger in the feed/history AND their
+  // seqs shadow real backend events out of the seq-dedupe (the C10 negative
+  // seqs cover only client-synthesized control events, not the generator).
+  const mockFallbackRanRef = useRef(false);
+  // Bumped by the purge so the mount backfill effect re-runs and repopulates
+  // the cleared feed/history from GET /api/events (the real run) — future WS
+  // events alone would leave the pre-outage history empty.
+  const [backfillNonce, setBackfillNonce] = useState(0);
 
   // ── Rolling history (inspector annex) ──────────────────────────────────────
   // Prepend newly-arrived events (newest-first), de-duped on seq, capped at
@@ -225,6 +236,24 @@ export function useSimulation(): SimulationState & SimulationControls {
       }
       return [...fresh, ...prev].sort((a, b) => b.seq - a.seq).slice(0, MAX_EVENTS);
     });
+  }, []);
+
+  // ── Mock-fallback purge (on live recovery) ─────────────────────────────────
+  // Runs from ws.onopen and the defensive onmessage branch when a WS-loss
+  // fallback previously started the mock loop: drop the same run-scoped local
+  // state reset() clears (the fake feed/history and the flags derived from
+  // them), then re-trigger the backfill so the REAL run repopulates. The mock
+  // world snapshot stays on screen only until the next live world_state
+  // broadcast replaces it. No-op unless the fallback actually ran.
+  const purgeMockFallbackState = useCallback(() => {
+    if (!mockFallbackRanRef.current) return;
+    mockFallbackRanRef.current = false;
+    setEvents([]);
+    setHistory([]);
+    setHistoryTruncated(false);
+    setHistoryTotal(null);
+    setHistoryLoading(true);
+    setBackfillNonce(n => n + 1);
   }, []);
 
   // ── Backfill on mount (EM-069 → wave F EM-194: TAIL-FIRST) ─────────────────
@@ -308,7 +337,9 @@ export function useSimulation(): SimulationState & SimulationControls {
     return () => {
       cancelled = true;
     };
-  }, [pushHistory, appendHistory, pushFeed]);
+    // backfillNonce: bumped by purgeMockFallbackState so a live recovery after
+    // a mock fallback re-runs this whole backfill against the real run.
+  }, [pushHistory, appendHistory, pushFeed, backfillNonce]);
 
   // ── Mock mode ─────────────────────────────────────────────────────────────
 
@@ -348,6 +379,7 @@ export function useSimulation(): SimulationState & SimulationControls {
       ws = new WebSocket(wsUrl);
     } catch {
       // Fallback to mock
+      mockFallbackRanRef.current = true;
       setMockMode(true);
       startMockLoop();
       return;
@@ -359,6 +391,9 @@ export function useSimulation(): SimulationState & SimulationControls {
       // A live socket is open: kill any running mock loop so the two
       // event sources can never push (and collide on seq) at once.
       stopMockLoop();
+      // …and if a fallback DID run, drop everything it synthesized (fake
+      // events would linger and shadow real seqs) — the backfill re-runs.
+      purgeMockFallbackState();
       reconnectAttemptsRef.current = 0;
       setConnected(true);
       setMockMode(false);
@@ -374,6 +409,10 @@ export function useSimulation(): SimulationState & SimulationControls {
           stopMockLoop();
           setMockMode(false);
         }
+        // Same recovery contract as onopen: a live message after a fallback
+        // purges the fake local state before this message is folded in (the
+        // purge setter is queued first, so the event below lands post-purge).
+        purgeMockFallbackState();
         if (msg.type === 'world_state') {
           // Wave I (EM-210/213): the per-tick world_state snapshot now also
           // carries `gallery` + `plaza_banner_ref`. They ride this same
@@ -414,6 +453,9 @@ export function useSimulation(): SimulationState & SimulationControls {
       // already running (and a live socket recovering will tear it down via
       // onopen/onmessage).
       if (reconnectAttemptsRef.current >= MAX_RECONNECTS_BEFORE_MOCK && !mockTimerRef.current) {
+        // Remember the fallback ran: its fake (positive-seq) events must be
+        // purged the moment a live socket recovers (onopen / first message).
+        mockFallbackRanRef.current = true;
         setMockMode(true);
         startMockLoop();
       }
@@ -446,7 +488,7 @@ export function useSimulation(): SimulationState & SimulationControls {
       }
       ws.close();
     };
-  }, [startMockLoop, stopMockLoop, pushHistory]);
+  }, [startMockLoop, stopMockLoop, pushHistory, purgeMockFallbackState]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
 

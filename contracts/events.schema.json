@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "petri-dish-of-madness/events/v1.1.0",
   "title": "WebSocket message protocol",
-  "description": "Messages pushed over WS /ws. On connect, server sends one `world_state` snapshot, then a stream of incremental messages. Every message has seq (monotonic) + type. Frontend color-codes by `profile_color` where present. v1.1.0 (W5) adds turn_id/actor_type/sim_time and the per-turn decision-trace kinds (perceived, memory_retrieved, llm_call, reasoning, action_chosen, action_resolved). The `kind` enum is INTENTIONALLY OPEN-ENDED going forward (W6-W8 add more kinds); consumers MUST gracefully ignore unknown kinds rather than error.",
+  "description": "Messages pushed over WS /ws. On connect, server sends one `world_state` snapshot, then a stream of incremental messages. Every message has seq (monotonic) + type; an `event` message's seq is the persisted DB event_id (see $defs.event.properties.seq), while world_state uses a per-boot counter. Frontend color-codes by `profile_color` where present. v1.1.0 (W5) adds turn_id/actor_type/sim_time and the per-turn decision-trace kinds (perceived, memory_retrieved, llm_call, reasoning, action_chosen, action_resolved). The `kind` enum is INTENTIONALLY OPEN-ENDED going forward (W6-W8 add more kinds); consumers MUST gracefully ignore unknown kinds rather than error.",
   "oneOf": [
     { "$ref": "#/$defs/world_state" },
     { "$ref": "#/$defs/event" }
@@ -30,7 +30,7 @@
       "required": ["type", "seq", "tick", "kind"],
       "properties": {
         "type": { "const": "event" },
-        "seq": { "type": "integer" },
+        "seq": { "type": "integer", "description": "The persisted DB event_id (events.seq AUTOINCREMENT, event-log.md §1) — the SAME id the REST event reads return, stable across backend restarts/forks. Clients may dedupe/evict live events against fetched history on it. world_state seq is a separate per-boot counter (snapshots are never persisted)." },
         "tick": { "type": "integer" },
         "kind": {
           "type": "string",

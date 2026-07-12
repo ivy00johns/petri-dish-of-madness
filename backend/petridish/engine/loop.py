@@ -601,7 +601,23 @@ class TickLoop:
                     self._resolve_step_waiter()
                 continue
 
-            await self._execute_turn(agent)
+            try:
+                await self._execute_turn(agent)
+            except asyncio.CancelledError:
+                # reset/fork teardown cancels the task through this await —
+                # cancellation MUST propagate, never turn into a pause.
+                raise
+            except Exception as exc:
+                # An unhandled turn exception used to kill this task silently
+                # while /api/health kept reporting running=true (the world just
+                # froze). Mirror the EM-226 auto-pause instead: log it, emit a
+                # best-effort world_paused {reason: internal_error}, pause, and
+                # broadcast — the task stays alive so resume/step still work.
+                log.exception(
+                    "turn crashed (agent=%s tick=%s) — auto-pausing",
+                    agent.id, self._world.tick,
+                )
+                self._pause_for_internal_error(agent, exc)
 
             if consumed_step:
                 self._resolve_step_waiter()
@@ -2101,6 +2117,44 @@ class TickLoop:
             },
         })
 
+    def _pause_for_internal_error(self, agent: AgentState, exc: BaseException) -> None:
+        """A turn crashed with an unhandled exception (guard in _run). Mirror
+        the EM-226 provider auto-pause: emit world_paused {reason:
+        internal_error}, pause, and broadcast so clients see running=false
+        immediately. Every step is best-effort — recovery itself must never
+        kill the just-rescued loop task. Unlike the provider pause this does
+        NOT arm _auto_paused_for_provider: an internal error won't heal with
+        connectivity, so there is no auto-resume probing — a human resumes."""
+        # The crash may have skipped _execute_turn's finally; never leak the
+        # dead turn's correlation id onto later standalone events.
+        self._current_turn_id = None
+        try:
+            self._emit_event({
+                "kind": "world_paused",
+                "actor_id": None,
+                "actor_type": "system",
+                "turn_id": None,
+                "text": (
+                    f"⏸ Auto-paused — {agent.name}'s turn crashed with an "
+                    f"internal error ({type(exc).__name__}). The loop is "
+                    f"intact; resume or step to continue (see backend logs)."
+                ),
+                "payload": {
+                    "tick": self._world.tick,
+                    "reason": "internal_error",
+                    "agent_id": agent.id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "auto_paused": True,
+                },
+            })
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to emit the internal_error world_paused")
+        self.pause()
+        try:
+            self._broadcast_world_state()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to broadcast after the internal_error pause")
+
     async def _maybe_auto_resume(self) -> bool:
         """EM-226 network-down grace — while auto-paused for a provider/network
         outage, cheaply probe connectivity every `_PROVIDER_PROBE_EVERY`
@@ -2332,7 +2386,9 @@ class TickLoop:
 
         stamped = {
             "type": "event",
-            "seq": self._next_seq(),
+            # Finalized below: the broadcast copy carries the persisted row's
+            # AUTOINCREMENT event_id, NOT the per-boot counter (see save_event).
+            "seq": 0,
             "tick": tick,
             "kind": evt.get("kind", "agent_action"),
             "actor_id": evt.get("actor_id"),
@@ -2350,11 +2406,24 @@ class TickLoop:
             "payload": evt.get("payload", {}),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        self._repo.save_event(run_id, stamped, tick)
+        # WS/DB seq unification (feed-freeze root, likely EM-305): a live
+        # `event` message's seq IS the persisted events.seq (event-log.md §1).
+        # The old per-boot counter restarted at 0 on every backend restart/fork
+        # and diverged from the REST-served event_ids, so clients deduping live
+        # events against fetched history silently dropped fresh events. The
+        # counter (_next_seq) now numbers ONLY the never-persisted world_state
+        # snapshots. Fallback: a duck-typed repo without a rowid return keeps
+        # the counter so a broadcast never carries a null seq.
+        row_seq = self._repo.save_event(run_id, stamped, tick)
+        stamped["seq"] = row_seq if isinstance(row_seq, int) else self._next_seq()
         self._broadcaster(stamped)
 
     def _broadcast_world_state(self) -> None:
-        """Send a fresh world_state snapshot over WS."""
+        """Send a fresh world_state snapshot over WS.
+
+        world_state seq stays the per-boot counter: snapshots are ephemeral
+        projections that are never persisted, so there is no DB id to carry —
+        unlike `event` messages, whose seq is the events.seq event_id."""
         profile_colors = {
             p["name"]: p["color"] for p in self._router.legend()
         }

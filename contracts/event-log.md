@@ -84,6 +84,13 @@ query methods the `/inspector` views consume.
 
 - The `events` table is **append-only**. Rows are never updated or deleted.
 - `seq` (INTEGER PK AUTOINCREMENT) is the monotonic **event_id** and the total order.
+- **Live WS `event` messages carry this same DB `seq` (the event_id).** The engine
+  stamps the broadcast copy with `save_event`'s AUTOINCREMENT rowid, so the live
+  socket and the REST reads share ONE id space that is stable across backend
+  restarts and forks — clients may dedupe/evict on it. (Historically the broadcast
+  `seq` was a per-boot counter restarting at 0, which collided with fetched history
+  after a restart and froze feeds.) Only `world_state` snapshot messages keep a
+  per-boot counter: they are ephemeral projections, never persisted.
 - **Current world state is a projection** of the event stream. The live `world_state`
   WS message is that projection materialized; the DB never needs it to be authoritative.
 - **Snapshots bound replay cost.** `replay(T)` = load the nearest `snapshots` row with
