@@ -204,18 +204,27 @@ def _incremental_uuid_run():
 def test_uuid4_same_tick_incremental_is_append_only():
     # The EM-303c regression: pre-STORED-WINS, bld_0badbeef (sorting before the
     # already-built bld_f00dcafe) made place_one recompute the town from scratch
-    # and disagree with what bld_f00dcafe had stored.
-    snapshots: list[dict] = []
+    # and disagree with what bld_f00dcafe had stored. Non-vacuous form (W30
+    # review): at every step the FULL derive over the current set (place_all —
+    # exactly what place_one consults) must reproduce each earlier build's
+    # position AS RECORDED AT ITS OWN BUILD TIME. The old snapshot-vs-final
+    # comparison could never fail — positions are write-once attributes, so
+    # every snapshot trivially agreed with the final one.
+    at_build_time: dict[str, tuple[float, float]] = {}
     built: list[B] = []
     for bid, tick in _UUID_BUILDS:
         b = B(bid, tick)
         built.append(b)
-        b.position = place_one(b, built, ANCHOR, SEED)
-        snapshots.append({x.id: x.position for x in built})
-    final = snapshots[-1]
-    for snap in snapshots:
-        for bid, pos in snap.items():
-            assert final[bid] == pos            # nobody ever moved
+        derived = place_all(built, ANCHOR, SEED)
+        for prev in built[:-1]:
+            assert derived[prev.id] == at_build_time[prev.id]   # nobody moved
+        b.position = derived[bid]               # store, as the live run does
+        at_build_time[bid] = b.position
+    # Non-vacuity guard: the scenario is REAL — strip the stored positions and
+    # the same derive DOES move the first tick-5 build (bld_0badbeef now sorts
+    # before it), i.e. without STORED-WINS the loop above fails.
+    bare = place_all([B(bid, tick) for bid, tick in _UUID_BUILDS], ANCHOR, SEED)
+    assert bare["bld_f00dcafe"] != at_build_time["bld_f00dcafe"]
 
 
 def test_uuid4_same_tick_incremental_respects_stored_spacing():
