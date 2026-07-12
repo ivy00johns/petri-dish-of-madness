@@ -94,6 +94,17 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   faction_dissolved:    '⚑',
   god_miracle:          '🌧',
   miracle_expired:      '☀',
+  // Wave O (EM-256–259) — organized violence reads with the ⚔ crossed-swords
+  // prefix the backend already stamps on every war line; peace_signed answers
+  // it with the 🕊 dove (the war is over). One lane, the red conflict register.
+  war_declared:         '⚔',
+  grievance_accrued:    '⚔',
+  war_band_joined:      '⚔',
+  war_clash:            '⚔',
+  war_siege:            '⚔',
+  war_exhausted:        '⚔',
+  exiled:               '⚔',
+  peace_signed:         '🕊',
   // EM-123 — a zoned district matured a tier (megaproject completed).
   district_grew:        '🏙',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
@@ -130,6 +141,20 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   faction_dissolved:    'var(--faction-tint)',
   god_miracle:          'var(--marker-miracle)',
   miracle_expired:      'var(--marker-miracle)',
+  // Wave O (EM-256–259) — war reads in the crime-red conflict register (the
+  // SAME --marker-crime the social graph's rival/enemy edges wear), so the
+  // whole war narrative pops red in the feed. peace_signed reads in the
+  // faction tint — the war is settled, not another blow. Token var()s only
+  // (design-token-guard); a war event carries no model profile_color (it's an
+  // actor_type:"system" faction event) so these fallbacks always win.
+  war_declared:         'var(--marker-crime)',
+  grievance_accrued:    'var(--marker-crime)',
+  war_band_joined:      'var(--marker-crime)',
+  war_clash:            'var(--marker-crime)',
+  war_siege:            'var(--marker-crime)',
+  war_exhausted:        'var(--marker-crime)',
+  exiled:               'var(--marker-crime)',
+  peace_signed:         'var(--faction-tint)',
 };
 
 // W8 — the animal chaos magenta, referenced as the shared --marker-animal token
@@ -351,8 +376,11 @@ export const CATEGORIES: FeedCategory[] = [
   { key: 'actions', label: 'Actions', icon: '◆', kinds: ['agent_action', 'agent_moved'] },
   { key: 'economy', label: 'Economy', icon: '¢', kinds: ['economy'] },
   // Wave E: the social fabric grows typed-bond shifts, births, and the
-  // faction lifecycle — all social-texture kinds, one chip.
-  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'relationship_changed', 'conflict', 'agent_died', 'agent_spawned', 'child_spawned', 'agent_starving', 'world_extinct', 'faction_formed', 'faction_joined', 'faction_left', 'faction_dissolved'] },
+  // faction lifecycle — all social-texture kinds, one chip. Wave O (EM-256–259)
+  // folds the war narrative into the SAME lane the crime `conflict` kind lives
+  // in — the red conflict register — so filtering Social surfaces the whole
+  // grievance → war → peace arc alongside the crime it grows from.
+  { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'relationship_changed', 'conflict', 'agent_died', 'agent_spawned', 'child_spawned', 'agent_starving', 'world_extinct', 'faction_formed', 'faction_joined', 'faction_left', 'faction_dissolved', 'war_declared', 'grievance_accrued', 'war_band_joined', 'war_clash', 'war_siege', 'peace_signed', 'war_exhausted', 'exiled'] },
   { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
   // W11b (EM-091): the notice board gets its own chip — also the contract's
   // suggested feed-filter affordance for billboard traffic.

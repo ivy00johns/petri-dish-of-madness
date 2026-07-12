@@ -258,6 +258,46 @@ export interface Rule {
   created_tick: number;
 }
 
+// ============================================================
+// Faction (Wave E / EM-120) — the mutual-trust circles the engine clusters
+// each round (recompute_factions). Serialized into world_state ONLY when
+// non-empty (a faction-free world omits the key), keyed by faction id. The
+// live UI never rendered these directly before Wave O; the war panel reads
+// them for belligerent names. Wave O (EM-256) adds the optional war_band /
+// treasury_pledged keys, written only-when-set (absent ⇒ not at war), so a
+// peacetime faction keeps the exact pre-war record shape.
+// ============================================================
+
+export interface Faction {
+  name: string;
+  founded_tick: number;
+  members: string[];        // agent ids
+  // EM-256 (additive): the mustered war band + pledged treasury. Present only
+  // while the faction is at war; absent ⇒ peacetime.
+  war_band?: string[];
+  treasury_pledged?: number;
+}
+
+// ============================================================
+// War (Wave O / EM-256–259) — a declared conflict between exactly two
+// belligerent factions. Mirrors WarState.to_dict EXACTLY: the scalar core
+// always rides; casualties/exhaustion ride ONLY when non-empty (a fresh war
+// omits them). Serialized into world_state under `wars` only when the world
+// has at least one war (a peaceful world omits the key ⇒ tolerate absent).
+// ============================================================
+
+export interface War {
+  id: string;                          // seeded war_<8hex>
+  belligerents: [string, string] | string[]; // exactly 2 faction ids, sorted
+  aggressor_id: string;                // the declaring faction (one of belligerents)
+  start_tick: number;
+  aims: string;
+  status: 'active' | 'settled' | (string & {});
+  // Only-when-non-empty (WarState.to_dict): a fresh war omits both.
+  casualties?: string[];               // agent ids fallen in this war
+  exhaustion?: Record<string, number>; // faction id → 0..100 war-weariness
+}
+
 export interface ModelProfile {
   name: string;
   adapter: string;
@@ -380,6 +420,17 @@ export interface WorldState {
   // center (the "plaza", at the layout origin), so a town that never relocates is
   // unchanged. The 3D world re-anchors its orbit home target on this place.
   town_center_id?: string | null;
+  // Wave E (EM-120, additive): the mutual-trust circles, keyed by faction id.
+  // Serialized ONLY when non-empty (a faction-free world omits it), so absent ⇒
+  // {}. Wave O reads these for belligerent names on the war panel.
+  factions?: Record<string, Faction>;
+  // Wave O (EM-256, additive): active + settling wars, keyed by war id, and the
+  // directional grievance ledger keyed `"{srcFactionId}->{dstFactionId}"` → heat
+  // (0..100). Both serialized ONLY when non-empty (a peaceful world — and every
+  // pre-Wave-O snapshot — omits them ⇒ absent means peace). The war panel and
+  // the red conflict feed lane read them; the golden peacetime UI is unchanged.
+  wars?: Record<string, War>;
+  grievances?: Record<string, number>;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -466,6 +517,26 @@ export type EventKind =
   | 'faction_dissolved'
   | 'god_miracle'
   | 'miracle_expired'
+  // Wave O (EM-256–259) — organized violence. All actor_type:"system" faction
+  // events (anchored on the aggrieved/belligerent circle's lowest member).
+  // war_declared {war_id, aggressor, target, aims, grievance_snapshot,
+  // proposal_id}; grievance_accrued {src, dst, amount, total, reason};
+  // war_band_joined {action:"muster", faction_id, band_size}; war_clash
+  // {action:"clash", war_id, attacker, defender, winner, loser, swing, margin,
+  // damage_loser, damage_winner, retreated_to?}; war_siege {action:"siege",
+  // war_id, building_id, damage, health}; peace_signed / war_exhausted
+  // {war_id, loser, winner, reparations, proposal_id?}; exiled {war_id,
+  // faction_id, notoriety, proposal_id?}. Emitted only when world.war.enabled —
+  // absent histories are the peacetime norm. Death/building damage reuse the
+  // existing agent_died / building_damaged / building_destroyed kinds.
+  | 'war_declared'
+  | 'grievance_accrued'
+  | 'war_band_joined'
+  | 'war_clash'
+  | 'war_siege'
+  | 'peace_signed'
+  | 'war_exhausted'
+  | 'exiled'
   // EM-123 — a zoned district matured a tier when a megaproject completed.
   // actor_type:"system" (actor_id null), payload {neighborhood_id, zone_kind,
   // tier, building_id, reason:"megaproject_completed"}. Only emitted when
