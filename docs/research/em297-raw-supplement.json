@@ -1,0 +1,43 @@
+{
+  "probe": "EM-297 model-divergence probe",
+  "date": "2026-07-11",
+  "base_url": "http://localhost:3001/v1",
+  "temperature": 0.8,
+  "max_tokens": 1024,
+  "system_prompt": "You are the town architect. You design buildings as strict JSON recipes.\n\nFields (ALL required; values MUST come from the allowed lists):\n- \"footprint\": one of ['tiny', 'small', 'medium', 'large', 'grand']  (ground-plan size)\n- \"floors\": integer 1-8\n- \"roof\": one of ['flat', 'shed', 'gable', 'hip', 'dome', 'spire']\n- \"material\": one of ['wood', 'timber_frame', 'brick', 'stone', 'marble', 'plaster', 'mud_brick']  (main wall material)\n- \"palette\": one of ['warm', 'cool', 'earthy', 'pastel', 'vivid', 'muted', 'monochrome']  (colour mood)\n- \"window_density\": one of ['none', 'sparse', 'regular', 'dense']\n- \"trim\": one of ['none', 'simple', 'ornate', 'gilded']  (decorative detail level)\n\nExample (a blacksmith's forge):\n{\"footprint\": \"small\", \"floors\": 1, \"roof\": \"shed\", \"material\": \"brick\", \"palette\": \"muted\", \"window_density\": \"sparse\", \"trim\": \"none\"}\n\nDesign a recipe that FITS the requested building. Respond with a single JSON object only — no prose, no markdown, no extra keys.",
+  "example_recipe": {
+    "footprint": "small",
+    "floors": 1,
+    "roof": "shed",
+    "material": "brick",
+    "palette": "muted",
+    "window_density": "sparse",
+    "trim": "none"
+  },
+  "models": {
+    "llama-canonical": "llama-3.3-70b"
+  },
+  "prompts": {
+    "bakery": "Design a building recipe for: the village bakery, warm bread smell at dawn, run by a cheerful family.",
+    "temple": "Design a building recipe for: the grand temple at the heart of the city, where processions end.",
+    "watchtower": "Design a building recipe for: a watchtower on the city wall, scanning the horizon for raiders.",
+    "fisherman_hut": "Design a building recipe for: a weathered fisherman's hut by the docks, nets drying outside.",
+    "wealthy_manor": "Design a building recipe for: a wealthy merchant's manor on the hill, built to impress rivals.",
+    "slum_shack": "Design a building recipe for: a cramped shack in the poorest alley of the slums.",
+    "bathhouse": "Design a building recipe for: the public bathhouse, steamy and social, tiled and echoing.",
+    "library": "Design a building recipe for: the scholars' library, quiet halls stacked with scrolls."
+  },
+  "results": [],
+  "sanity": {
+    "http_status": 429,
+    "latency_ms": 26.3,
+    "routed_via": null,
+    "json_mode": true,
+    "error": "{\"error\":{\"message\":\"All models exhausted. Add more API keys or wait for rate limits to reset.\",\"type\":\"routing_error\"}}",
+    "attempts": 2,
+    "first_attempt_error": {
+      "http_status": 429,
+      "error": "{\"error\":{\"message\":\"All models rate-limited. Last error: OpenRouter API error 429: Provider returned error\",\"type\":\"rate_limit_error\"}}"
+    }
+  }
+}
