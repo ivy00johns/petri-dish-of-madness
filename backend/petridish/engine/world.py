@@ -5866,15 +5866,32 @@ class World:
 
     def _decal_district_of(self, surface_id: str) -> str:
         """The per-district bucket key for a painted surface. Mirrors the EM-123
-        neighborhood grouping unit (place.neighborhood_id or place.district); a
-        building whose place is ungrouped/missing falls into a stable "" bucket so
-        the cap still bounds it. Deterministic (pure f(state)) — replay-safe."""
+        neighborhood grouping unit (place.neighborhood_id or place.district) when
+        the place IS tagged — tagged buckets are the raw district string, exactly
+        as before EM-302a, so tagged-district capacity is unchanged.
+
+        EM-302a: an UNTAGGED place used to collapse into a single "" bucket with
+        every other untagged place, so a town with no district tags shared ONE
+        flat town-wide cap and ungrouped places evicted each other's murals.
+        Untagged (or unresolvable) places now fall back to a stable PER-PLACE
+        bucket ("__place__:<place_id>"), so the cap still bounds every bucket
+        but only genuinely co-grouped surfaces compete. The "__place__:" /
+        "__surface__:" prefixes cannot collide with a real district name.
+        Deterministic (pure f(state)) — replay-safe."""
         building = self.buildings.get(surface_id)
-        place = self.places.get(building.location) if building is not None else None
-        if place is None:
-            return ""
-        return str(getattr(place, "neighborhood_id", None)
-                   or getattr(place, "district", None) or "")
+        if building is None:
+            # Defensive (destroy/demolish clear decals, so this shouldn't
+            # happen): a surface with no building is its own bucket.
+            return f"__surface__:{surface_id}"
+        place = self.places.get(building.location)
+        if place is not None:
+            tagged = str(getattr(place, "neighborhood_id", None)
+                         or getattr(place, "district", None) or "")
+            if tagged:
+                return tagged
+        # Untagged place — or a location missing from self.places — buckets
+        # per-place, keyed by the building's location string (stable either way).
+        return f"__place__:{building.location}"
 
     def _evict_decals_over_cap(self, surface_id: str) -> None:
         """Enforce the per-district decal cap after inserting `surface_id`. Gathers
@@ -5920,9 +5937,19 @@ class World:
         image_id = minted["image_id"]
         # Record the mapping with insertion-order recency: pop-then-set moves a
         # re-painted surface to the most-recent (tail) position before capping.
-        self.surface_decals.pop(target, None)
+        prev_image_id = self.surface_decals.pop(target, None)
         self.surface_decals[target] = image_id
         self._evict_decals_over_cap(target)
+        if prev_image_id and prev_image_id != image_id:
+            # EM-302c — annotate the just-parked fetch (transient outbox, NEVER
+            # serialized — off the replay surface) with the mural this repaint
+            # replaced, so the loop can keep the existing artwork when every
+            # provider lane misses (e.g. the paid backstop is over its per-run
+            # cap). Sim state and events are byte-identical with or without it.
+            for entry in reversed(self.pending_image_fetches):
+                if entry.get("image_id") == image_id:
+                    entry["prev_image_id"] = prev_image_id
+                    break
         return {
             "kind": "image_posted",
             "actor_id": agent.id,

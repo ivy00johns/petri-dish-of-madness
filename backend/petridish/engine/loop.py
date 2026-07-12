@@ -402,6 +402,10 @@ class TickLoop:
             self._image_fetch_tasks.clear()
         # The semaphore is rebuilt lazily on next drain so a reset honors a new cap.
         self._image_semaphore = None
+        # EM-302c — the provider is rebuilt lazily too: the paid-backstop budget
+        # is PER RUN (the counter lives on the provider instance), so a fresh
+        # run re-arms it (and picks up any config/env change) here.
+        self._image_provider = None
         # W9 / EM-073 B2: properly await the cancelled tick task. A tick mid-LLM
         # call (30s timeout) could otherwise keep running and mutate the world we
         # are about to rebuild. (The old `asyncio.shield(asyncio.sleep(0.1))` was
@@ -1938,6 +1942,18 @@ class TickLoop:
         except (TypeError, ValueError):
             return 2
 
+    def _image_paid_backstop_max(self) -> int | None:
+        """EM-302c — the paid-backstop per-run cap from config (`world.image_gen.
+        paid_backstop_max_per_run`). None (absent/garbage cfg) defers to the
+        provider's module default; 0 disables the paid lane; negative =
+        unlimited. Mirrors _image_max_concurrent's defensive shape."""
+        cfg = self._image_gen_cfg()
+        try:
+            value = getattr(cfg, "paid_backstop_max_per_run", None)
+            return None if value is None else int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _assets_images_dir(self) -> Path:
         """data/assets/images at the repo root (parents[3] from this module),
         matching the StaticFiles mount in api/app.py."""
@@ -1955,7 +1971,10 @@ class TickLoop:
         pending.clear()
         if self._image_provider is None:
             try:
-                self._image_provider = build_provider()
+                # EM-302c — thread the config'd paid-backstop cap into the chain
+                # (the counter lives on this instance; reset() nulls it per run).
+                self._image_provider = build_provider(
+                    paid_backstop_max_per_run=self._image_paid_backstop_max())
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("image provider build failed: %s", exc)
                 return
@@ -1963,9 +1982,12 @@ class TickLoop:
             self._image_semaphore = asyncio.Semaphore(self._image_max_concurrent())
         for entry in entries:
             # Skip-under-load: at cap, drop the fetch (the gallery entry + event
-            # already exist; the PNG is simply absent → frontend fallback). Never
-            # an unbounded queue.
+            # already exist; the PNG is simply absent → frontend fallback) — but
+            # a dropped REPAINT still keeps the existing artwork (the same
+            # fallback as an all-lanes miss: load-shed must not blank a wall
+            # that already shows art). Never an unbounded queue.
             if self._image_semaphore.locked():
+                self._keep_previous_decal_image(entry)
                 continue
             try:
                 task = asyncio.create_task(self._spawn_image_fetch(entry))
@@ -1979,16 +2001,24 @@ class TickLoop:
         Emits NOTHING; swallows ALL exceptions (a failed fetch must never surface
         or stall a tick). Bounded by the semaphore (acquired only if free)."""
         sem = self._image_semaphore
-        if sem is None or sem.locked():
-            return
         image_id = str(entry.get("image_id") or "").strip()
         prompt = str(entry.get("prompt") or "")
         if not image_id:
+            return
+        if sem is None or sem.locked():
+            # Load-shed race: the semaphore filled between create_task and this
+            # task running. Same drop semantics as the drain-side skip — a
+            # dropped REPAINT keeps the existing artwork.
+            self._keep_previous_decal_image(entry)
             return
         try:
             async with sem:
                 png = await self._image_provider.fetch_png(prompt)
                 if not png:
+                    # EM-302c — a total miss (every free lane failed AND the
+                    # paid backstop refused over its per-run cap) on a REPAINT
+                    # keeps the existing artwork instead of blanking the wall.
+                    self._keep_previous_decal_image(entry)
                     return
                 target = self._assets_images_dir()
                 target.mkdir(parents=True, exist_ok=True)
@@ -2000,6 +2030,35 @@ class TickLoop:
             raise
         except Exception as exc:  # pragma: no cover - best-effort, swallow all
             log.debug("image fetch failed for %s: %s", image_id, exc)
+
+    def _keep_previous_decal_image(self, entry: dict) -> None:
+        """EM-302c — the repaint fallback: when a paint_surface fetch entry
+        carries `prev_image_id` (the mural this repaint replaced) and the fetch
+        can't land — every provider lane missed OR the fetch was load-shed
+        (dropped at drain / by the semaphore race) — copy the PREVIOUS image's
+        PNG to the NEW image id's path so the facade keeps showing art (never
+        an error surfaced to the agent turn — the reflex already succeeded).
+        Pure side-artifact I/O off the replay surface: sim state is untouched,
+        nothing is emitted, everything is swallowed. A fresh paint (no prev)
+        stays absent → the frontend's clean-facade fallback, exactly as
+        before."""
+        try:
+            image_id = str(entry.get("image_id") or "").strip()
+            prev = str(entry.get("prev_image_id") or "").strip()
+            if not image_id or not prev or prev == image_id:
+                return
+            target = self._assets_images_dir()
+            src = target / f"{prev}.png"
+            if not src.exists():
+                return
+            target.mkdir(parents=True, exist_ok=True)
+            tmp = target / f".{image_id}.png.tmp"
+            tmp.write_bytes(src.read_bytes())
+            tmp.replace(target / f"{image_id}.png")
+            log.debug("kept previous decal art %s for %s (fetch missed)",
+                      prev, image_id)
+        except Exception as exc:  # pragma: no cover - best-effort, swallow all
+            log.debug("keep-previous decal copy failed for %s: %s", image_id, exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # W9 / EM-070+071 — survival pressure + extinction

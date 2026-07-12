@@ -593,12 +593,21 @@ class ImageGenParams:
                        (default False ⇒ the em161 protagonist prompt stays
                        byte-identical; the world action + snapshot round-trip are
                        always available regardless). Flip true to let agents paint.
+      paid_backstop_max_per_run
+                     — EM-302c: HARD cap on PAID backstop image generations
+                       (Gemini, the chain's last member) per run. Over the cap
+                       the paid lane returns None with zero network calls (the
+                       free lanes are never capped; a repainted facade keeps its
+                       existing artwork). 0 = paid lane disabled; negative =
+                       unlimited (pre-EM-302). Default 25 ≈ $1/run — mirrors
+                       imagegen.provider._PAID_BACKSTOP_DEFAULT_MAX.
     """
     enabled: bool = True
     max_concurrent: int = 2
     max_gallery: int = 30
     max_decals_per_district: int = 6
     facades_enabled: bool = False
+    paid_backstop_max_per_run: int = 25
 
 
 @dataclass
@@ -1933,12 +1942,20 @@ def _parse_image_gen(raw: dict | None) -> ImageGenParams:
             1, int(raw.get("max_decals_per_district", d.max_decals_per_district)))
     except (TypeError, ValueError):
         max_decals_per_district = d.max_decals_per_district
+    # EM-302c — NO floor: 0 (paid lane off) and negatives (unlimited) are
+    # first-class values; only a non-int falls back to the default.
+    try:
+        paid_backstop_max_per_run = int(
+            raw.get("paid_backstop_max_per_run", d.paid_backstop_max_per_run))
+    except (TypeError, ValueError):
+        paid_backstop_max_per_run = d.paid_backstop_max_per_run
     return ImageGenParams(
         enabled=bool(raw.get("enabled", d.enabled)),
         max_concurrent=max_concurrent,
         max_gallery=max_gallery,
         max_decals_per_district=max_decals_per_district,
         facades_enabled=bool(raw.get("facades_enabled", d.facades_enabled)),
+        paid_backstop_max_per_run=paid_backstop_max_per_run,
     )
 
 
