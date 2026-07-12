@@ -404,6 +404,7 @@ class Router:
         max_tokens: int,
         temperature: float,
         require_json: bool = False,
+        boosted: bool = False,
     ) -> str:
         """Text-only façade over chat_attributed() (the historical interface).
         EM-307 — callers that consume routing/usage attribution should use
@@ -414,7 +415,7 @@ class Router:
         text, _attribution = await self.chat_attributed(
             profile_name, messages,
             max_tokens=max_tokens, temperature=temperature,
-            require_json=require_json,
+            require_json=require_json, boosted=boosted,
         )
         return text
 
@@ -426,6 +427,7 @@ class Router:
         max_tokens: int,
         temperature: float,
         require_json: bool = False,
+        boosted: bool = False,
     ) -> tuple[str, dict]:
         """chat() returning (text, attribution) — the EM-307 per-call channel.
 
@@ -456,7 +458,16 @@ class Router:
         `require_json` (spec P1): True marks a strict-JSON turn so the adaptive
         bounce loop skips reasoning-tagged lanes (the #77 lesson). It is READ
         ONLY inside the adaptive-enabled except-branch below, so callers that
-        omit it (default False) keep the exact pre-spec path."""
+        omit it (default False) keep the exact pre-spec path.
+
+        `boosted` (#91): True marks THIS max_tokens as a truncation-mitigation
+        BOOST (the runtime's first_attempt_max_tokens bump or the
+        _retry_max_tokens length-retry), not a genuine floor. The bounce
+        loop's #77 token clamp keys on this EXPLICIT signal (see _bounce_call);
+        inferring the boost from the home lane's window mis-attributes, because
+        the W30 redirect credits a bounced truncation to the SERVING lane. Also
+        read only inside the adaptive except-branch; default False keeps every
+        existing caller byte-identical."""
         adapter = self._adapters.get(profile_name)
         if adapter is None:
             raise ProviderError(profile_name, None, "no adapter for profile")
@@ -535,7 +546,7 @@ class Router:
                 text, served_by = await self._bounce_call(
                     profile_name, probe_exc,
                     messages, max_tokens=max_tokens, temperature=temperature,
-                    require_json=require_json,
+                    require_json=require_json, boosted=boosted,
                 )
             else:
                 text, served_by = await self._bounce_call(
@@ -545,7 +556,7 @@ class Router:
                         "sick-pin recovery probe timed out" if probed
                         else "pinned lane pre-skipped (health-sick)"),
                     messages, max_tokens=max_tokens, temperature=temperature,
-                    require_json=require_json, pre_skip=True,
+                    require_json=require_json, pre_skip=True, boosted=boosted,
                 )
         else:
             try:
@@ -561,7 +572,7 @@ class Router:
                     text, served_by = await self._bounce_call(
                         profile_name, exc, messages,
                         max_tokens=max_tokens, temperature=temperature,
-                        require_json=require_json,
+                        require_json=require_json, boosted=boosted,
                     )
                 else:
                     # EM-205 — retry the SAME call ONCE on the proxy's `auto`
@@ -818,6 +829,7 @@ class Router:
         temperature: float,
         require_json: bool = False,
         pre_skip: bool = False,
+        boosted: bool = False,
     ) -> tuple[str, str]:
         """Adaptive Lane Routing bounce loop (spec §6). Reached two ways:
         (a) the pinned `home` lane just FAILED (`pre_skip=False`) — its error is
@@ -828,11 +840,13 @@ class Router:
         re-hits it.
 
         Walk the registry in priority order; for each candidate lane SKIP if it
-        is the home lane / already tried this turn, health-sick (EM-135 window),
-        its output ceiling can't fit the request's genuine FLOOR (the #77
-        lesson), or it is reasoning-tagged on a strict-JSON turn. Try up to
-        `max_attempts` HEALTHY lanes, each bounded by `per_attempt_timeout_s`.
-        Returns (text, served_by=lane.profile) on the first success; if every
+        is the home lane / already tried this turn, health-sick (EM-135
+        window — but every probe_every-th would-be sick-skip PROBES the lane
+        instead; see the bounce-latch fix below), its output ceiling can't fit
+        the request's genuine FLOOR (the #77 lesson), or it is reasoning-tagged
+        on a strict-JSON turn. Try up to `max_attempts` HEALTHY lanes, each
+        bounded by `per_attempt_timeout_s`. Returns
+        (text, served_by=lane.profile) on the first success; if every
         candidate fails/times out, re-raises the last provider error so the
         runtime's EM-173 idle fallback stays the last resort.
 
@@ -845,11 +859,25 @@ class Router:
         to burn every attempt before reaching `auto`, so the documented "last
         resort" was structurally unreachable. The reservation is forfeited
         when `auto` is absent from the order, IS the home lane / already
-        tried, or is itself health-sick — then the curated walk keeps the
-        full budget, as before. An ordinary lane that merely sorts last is
-        NOT reserved; only the `auto` backstop gets the guarantee. A failing
-        `auto` ("All models exhausted") is an ordinary lane failure whose
-        error surfaces to EM-173 like any other terminal failure."""
+        tried — then the curated walk keeps the full budget, as before. An
+        ordinary lane that merely sorts last is NOT reserved; only the `auto`
+        backstop gets the guarantee. A failing `auto` ("All models
+        exhausted") is an ordinary lane failure whose error surfaces to
+        EM-173 like any other terminal failure.
+
+        BOUNCE-LATCH fix (2026-07-11): the reservation is deliberately NOT
+        gated on `auto`'s own sick window. `auto` is bounce-only in the
+        shipped config — never anyone's pin — so failed reserved attempts
+        were the ONLY thing writing to its window, and the chat() sick-pin
+        recovery probe never fires for it: once 3 demerits landed in the
+        6-window, the old sick-gate forfeited the reservation on every later
+        turn, no path ever attempted `auto` again, and the W30 guaranteed
+        backstop was silently gone for the rest of the run. Same rationale
+        as _detour_target: a per-lane demerit window is a poor proxy for the
+        whole-pool picker. A reserved success is credited to `auto` by the
+        W30 bounced_to redirect in note_parse_outcome, aging the demerits
+        out automatically; a failure costs one bounded attempt that only
+        fires after every curated candidate already failed."""
         if not pre_skip:
             self.note_lane_error(home)
         tried: set[str] = {home}
@@ -858,35 +886,43 @@ class Router:
         timeout = self._ar_per_attempt_timeout_s()
         last_exc: ProviderError = first_exc
 
-        # #77 token-clamp lesson (the churn fix): when the home lane is
-        # TRUNCATION-BOOSTED (its EM-135 window flagged, so the runtime handed us
-        # a boosted max_tokens like 4096), that boost is a mitigation HINT, not a
-        # hard requirement — a DIFFERENT model may not truncate at all. Its
-        # genuine floor is the home lane's own configured output ceiling. Skipping
-        # every healthy 1024-ceiling free lane because 4096 > 1024 collapsed the
-        # walk to auto-only and died as "All models exhausted" → idle churn. So we
-        # skip a lane only when it can't fit that genuine FLOOR, and CLAMP the
+        # #77 token-clamp lesson (the churn fix): when THIS request's max_tokens
+        # is TRUNCATION-BOOSTED (the caller said so via `boosted` — the runtime's
+        # first_attempt bump or length-retry — or the home lane's EM-135 window
+        # is flagged), that boost is a mitigation HINT, not a hard requirement —
+        # a DIFFERENT model may not truncate at all. Its genuine floor is the
+        # home lane's own configured output ceiling. Skipping every healthy
+        # 1024-ceiling free lane because 4096 > 1024 collapsed the walk to
+        # auto-only and died as "All models exhausted" → idle churn. So we skip
+        # a lane only when it can't fit that genuine FLOOR, and CLAMP the
         # boosted hint down to each attempted lane's ceiling (a truncation-retry
         # beats an idle fallback). An UN-boosted request is genuine: its floor IS
         # max_tokens (so a too-small lane is still skipped — the #77 regression
-        # test stays green).
+        # test stays green). The EXPLICIT signal matters because window
+        # inference mis-attributes: the W30 redirect credits a bounced
+        # truncation to the SERVING lane, so a boosted length-retry can arrive
+        # while the pin's window is clean (_lane_boosted(home) False) — the
+        # window check stays only as a fallback for callers that don't thread
+        # the signal (narrator / animals / duck-typed harnesses).
         base_need = max_tokens
-        if self._lane_boosted(home):
+        if boosted or self._lane_boosted(home):
             home_out = getattr(self._profiles.get(home), "max_tokens", None)
             if home_out is not None:
                 base_need = min(max_tokens, int(home_out))
 
         # W30 reserved backstop — see the docstring. `reserved` is the terminal
         # `auto` entry when it qualifies; the curated walk then keeps one
-        # attempt back for it.
+        # attempt back for it. Deliberately NOT gated on auto's own sick
+        # window (bounce-latch fix — a sick-gate here latched the backstop
+        # off permanently, since bounce-only `auto` has no other recovery
+        # path; see the docstring).
         ordered = self._lane_registry.ordered()
         terminal = ordered[-1] if ordered else None
         reserved: Lane | None = None
         if (terminal is not None
                 and terminal.profile == self._auto_backup
                 and terminal.profile not in tried
-                and self._adapters.get(terminal.profile) is not None
-                and not self.lane_sick(terminal.profile)):
+                and self._adapters.get(terminal.profile) is not None):
             reserved = terminal
         curated_budget = max_attempts - 1 if reserved is not None else max_attempts
 
@@ -899,7 +935,29 @@ class Router:
             if self._adapters.get(prof) is None:
                 continue  # P4: direct-provider lanes without a built adapter
             if self.lane_sick(prof):
-                continue  # health-sick (EM-135 window) — the auto-blind skip
+                if reserved is not None and prof == reserved.profile:
+                    # The reserved backstop is attempted post-loop regardless
+                    # of its window — no cadence bookkeeping needed here.
+                    continue
+                # BOUNCE-LATCH fix (2026-07-11) — a bounce-only lane (one
+                # that is never anyone's pin, e.g. gpt-oss-120b, the #1
+                # curated target) never gets chat()'s sick-pin recovery
+                # probe: failed bounce attempts append demerits, but nothing
+                # ever attempted the lane again, so one bad ~3-turn rate
+                # window latched it sick for the rest of the run. Mirror the
+                # W30 pin-probe cadence: every probe_every-th time a sick
+                # lane would be skipped here, attempt it as this bounce's
+                # candidate instead. A success serves the turn and the W30
+                # bounced_to redirect then credits the runtime's clean
+                # outcomes to THIS lane, aging the demerits out; a failure
+                # appends ONE fresh demerit and the walk continues.
+                # Counters only — no clock reads; a chronically dead lane
+                # costs one bounded attempt per probe_every bounces, never
+                # the whole budget.
+                n = self._lane_detour_counter.get(prof, 0) + 1
+                self._lane_detour_counter[prof] = n
+                if n % self._probe_every() != 0:
+                    continue  # health-sick (EM-135 window) — the auto-blind skip
             if not lane.fits(base_need):
                 continue  # #77: ceiling can't fit even the genuine floor
             if require_json and "reasoning" in lane.tags:

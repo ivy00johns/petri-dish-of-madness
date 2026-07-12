@@ -402,6 +402,10 @@ class TickLoop:
             self._image_fetch_tasks.clear()
         # The semaphore is rebuilt lazily on next drain so a reset honors a new cap.
         self._image_semaphore = None
+        # EM-302c — the provider is rebuilt lazily too: the paid-backstop budget
+        # is PER RUN (the counter lives on the provider instance), so a fresh
+        # run re-arms it (and picks up any config/env change) here.
+        self._image_provider = None
         # W9 / EM-073 B2: properly await the cancelled tick task. A tick mid-LLM
         # call (30s timeout) could otherwise keep running and mutate the world we
         # are about to rebuild. (The old `asyncio.shield(asyncio.sleep(0.1))` was
@@ -601,7 +605,23 @@ class TickLoop:
                     self._resolve_step_waiter()
                 continue
 
-            await self._execute_turn(agent)
+            try:
+                await self._execute_turn(agent)
+            except asyncio.CancelledError:
+                # reset/fork teardown cancels the task through this await —
+                # cancellation MUST propagate, never turn into a pause.
+                raise
+            except Exception as exc:
+                # An unhandled turn exception used to kill this task silently
+                # while /api/health kept reporting running=true (the world just
+                # froze). Mirror the EM-226 auto-pause instead: log it, emit a
+                # best-effort world_paused {reason: internal_error}, pause, and
+                # broadcast — the task stays alive so resume/step still work.
+                log.exception(
+                    "turn crashed (agent=%s tick=%s) — auto-pausing",
+                    agent.id, self._world.tick,
+                )
+                self._pause_for_internal_error(agent, exc)
 
             if consumed_step:
                 self._resolve_step_waiter()
@@ -1970,6 +1990,18 @@ class TickLoop:
         except (TypeError, ValueError):
             return 2
 
+    def _image_paid_backstop_max(self) -> int | None:
+        """EM-302c — the paid-backstop per-run cap from config (`world.image_gen.
+        paid_backstop_max_per_run`). None (absent/garbage cfg) defers to the
+        provider's module default; 0 disables the paid lane; negative =
+        unlimited. Mirrors _image_max_concurrent's defensive shape."""
+        cfg = self._image_gen_cfg()
+        try:
+            value = getattr(cfg, "paid_backstop_max_per_run", None)
+            return None if value is None else int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _assets_images_dir(self) -> Path:
         """data/assets/images at the repo root (parents[3] from this module),
         matching the StaticFiles mount in api/app.py."""
@@ -1987,7 +2019,10 @@ class TickLoop:
         pending.clear()
         if self._image_provider is None:
             try:
-                self._image_provider = build_provider()
+                # EM-302c — thread the config'd paid-backstop cap into the chain
+                # (the counter lives on this instance; reset() nulls it per run).
+                self._image_provider = build_provider(
+                    paid_backstop_max_per_run=self._image_paid_backstop_max())
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug("image provider build failed: %s", exc)
                 return
@@ -1995,9 +2030,12 @@ class TickLoop:
             self._image_semaphore = asyncio.Semaphore(self._image_max_concurrent())
         for entry in entries:
             # Skip-under-load: at cap, drop the fetch (the gallery entry + event
-            # already exist; the PNG is simply absent → frontend fallback). Never
-            # an unbounded queue.
+            # already exist; the PNG is simply absent → frontend fallback) — but
+            # a dropped REPAINT still keeps the existing artwork (the same
+            # fallback as an all-lanes miss: load-shed must not blank a wall
+            # that already shows art). Never an unbounded queue.
             if self._image_semaphore.locked():
+                self._keep_previous_decal_image(entry)
                 continue
             try:
                 task = asyncio.create_task(self._spawn_image_fetch(entry))
@@ -2011,16 +2049,24 @@ class TickLoop:
         Emits NOTHING; swallows ALL exceptions (a failed fetch must never surface
         or stall a tick). Bounded by the semaphore (acquired only if free)."""
         sem = self._image_semaphore
-        if sem is None or sem.locked():
-            return
         image_id = str(entry.get("image_id") or "").strip()
         prompt = str(entry.get("prompt") or "")
         if not image_id:
+            return
+        if sem is None or sem.locked():
+            # Load-shed race: the semaphore filled between create_task and this
+            # task running. Same drop semantics as the drain-side skip — a
+            # dropped REPAINT keeps the existing artwork.
+            self._keep_previous_decal_image(entry)
             return
         try:
             async with sem:
                 png = await self._image_provider.fetch_png(prompt)
                 if not png:
+                    # EM-302c — a total miss (every free lane failed AND the
+                    # paid backstop refused over its per-run cap) on a REPAINT
+                    # keeps the existing artwork instead of blanking the wall.
+                    self._keep_previous_decal_image(entry)
                     return
                 target = self._assets_images_dir()
                 target.mkdir(parents=True, exist_ok=True)
@@ -2032,6 +2078,35 @@ class TickLoop:
             raise
         except Exception as exc:  # pragma: no cover - best-effort, swallow all
             log.debug("image fetch failed for %s: %s", image_id, exc)
+
+    def _keep_previous_decal_image(self, entry: dict) -> None:
+        """EM-302c — the repaint fallback: when a paint_surface fetch entry
+        carries `prev_image_id` (the mural this repaint replaced) and the fetch
+        can't land — every provider lane missed OR the fetch was load-shed
+        (dropped at drain / by the semaphore race) — copy the PREVIOUS image's
+        PNG to the NEW image id's path so the facade keeps showing art (never
+        an error surfaced to the agent turn — the reflex already succeeded).
+        Pure side-artifact I/O off the replay surface: sim state is untouched,
+        nothing is emitted, everything is swallowed. A fresh paint (no prev)
+        stays absent → the frontend's clean-facade fallback, exactly as
+        before."""
+        try:
+            image_id = str(entry.get("image_id") or "").strip()
+            prev = str(entry.get("prev_image_id") or "").strip()
+            if not image_id or not prev or prev == image_id:
+                return
+            target = self._assets_images_dir()
+            src = target / f"{prev}.png"
+            if not src.exists():
+                return
+            target.mkdir(parents=True, exist_ok=True)
+            tmp = target / f".{image_id}.png.tmp"
+            tmp.write_bytes(src.read_bytes())
+            tmp.replace(target / f"{image_id}.png")
+            log.debug("kept previous decal art %s for %s (fetch missed)",
+                      prev, image_id)
+        except Exception as exc:  # pragma: no cover - best-effort, swallow all
+            log.debug("keep-previous decal copy failed for %s: %s", image_id, exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # W9 / EM-070+071 — survival pressure + extinction
@@ -2148,6 +2223,44 @@ class TickLoop:
                 "auto_paused": True,
             },
         })
+
+    def _pause_for_internal_error(self, agent: AgentState, exc: BaseException) -> None:
+        """A turn crashed with an unhandled exception (guard in _run). Mirror
+        the EM-226 provider auto-pause: emit world_paused {reason:
+        internal_error}, pause, and broadcast so clients see running=false
+        immediately. Every step is best-effort — recovery itself must never
+        kill the just-rescued loop task. Unlike the provider pause this does
+        NOT arm _auto_paused_for_provider: an internal error won't heal with
+        connectivity, so there is no auto-resume probing — a human resumes."""
+        # The crash may have skipped _execute_turn's finally; never leak the
+        # dead turn's correlation id onto later standalone events.
+        self._current_turn_id = None
+        try:
+            self._emit_event({
+                "kind": "world_paused",
+                "actor_id": None,
+                "actor_type": "system",
+                "turn_id": None,
+                "text": (
+                    f"⏸ Auto-paused — {agent.name}'s turn crashed with an "
+                    f"internal error ({type(exc).__name__}). The loop is "
+                    f"intact; resume or step to continue (see backend logs)."
+                ),
+                "payload": {
+                    "tick": self._world.tick,
+                    "reason": "internal_error",
+                    "agent_id": agent.id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "auto_paused": True,
+                },
+            })
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to emit the internal_error world_paused")
+        self.pause()
+        try:
+            self._broadcast_world_state()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to broadcast after the internal_error pause")
 
     async def _maybe_auto_resume(self) -> bool:
         """EM-226 network-down grace — while auto-paused for a provider/network
@@ -2380,7 +2493,9 @@ class TickLoop:
 
         stamped = {
             "type": "event",
-            "seq": self._next_seq(),
+            # Finalized below: the broadcast copy carries the persisted row's
+            # AUTOINCREMENT event_id, NOT the per-boot counter (see save_event).
+            "seq": 0,
             "tick": tick,
             "kind": evt.get("kind", "agent_action"),
             "actor_id": evt.get("actor_id"),
@@ -2398,11 +2513,24 @@ class TickLoop:
             "payload": evt.get("payload", {}),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        self._repo.save_event(run_id, stamped, tick)
+        # WS/DB seq unification (feed-freeze root, likely EM-305): a live
+        # `event` message's seq IS the persisted events.seq (event-log.md §1).
+        # The old per-boot counter restarted at 0 on every backend restart/fork
+        # and diverged from the REST-served event_ids, so clients deduping live
+        # events against fetched history silently dropped fresh events. The
+        # counter (_next_seq) now numbers ONLY the never-persisted world_state
+        # snapshots. Fallback: a duck-typed repo without a rowid return keeps
+        # the counter so a broadcast never carries a null seq.
+        row_seq = self._repo.save_event(run_id, stamped, tick)
+        stamped["seq"] = row_seq if isinstance(row_seq, int) else self._next_seq()
         self._broadcaster(stamped)
 
     def _broadcast_world_state(self) -> None:
-        """Send a fresh world_state snapshot over WS."""
+        """Send a fresh world_state snapshot over WS.
+
+        world_state seq stays the per-boot counter: snapshots are ephemeral
+        projections that are never persisted, so there is no DB id to carry —
+        unlike `event` messages, whose seq is the events.seq event_id."""
         profile_colors = {
             p["name"]: p["color"] for p in self._router.legend()
         }

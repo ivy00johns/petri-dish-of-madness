@@ -488,6 +488,43 @@ def test_arson_drops_health_to_damaged_then_destroyed_repair_restores():
     assert sc["payload"]["to"] == "destroyed"
 
 
+def test_arson_on_mature_building_restarts_abandon_window():
+    """Arson on a long-operational building must NOT rot it to abandoned at the
+    next round boundary. _damage_building refreshes last_progress_tick when the
+    building survives (health > 0), restarting the documented abandon_after_ticks
+    repair window — previously staleness was measured from construction
+    completion, so a mature damaged building skipped the window entirely."""
+    world, agents = _world()
+    a, bram = agents[0], agents[1]
+    a.location = bram.location = "plaza"
+    bid = _operationalize(world, a, "Hall", "monument")
+    bld = world.buildings[bid]
+    window = world.params.buildings.abandon_after_ticks
+
+    # The building matures far past the abandon window, THEN gets torched.
+    arson_tick = bld.last_progress_tick + window + 100
+    world.tick = arson_tick
+    world.action_arson(bram, bid)
+    assert bld.status == "damaged"
+    assert bld.last_progress_tick == arson_tick  # the repair window restarts
+
+    # Next round boundary: still inside the repair window — NOT abandoned.
+    world.tick = arson_tick + 1
+    assert world.advance_buildings() == []
+    assert bld.status == "damaged"
+
+    # At the window edge: still repairable.
+    world.tick = arson_tick + window
+    assert world.advance_buildings() == []
+    assert bld.status == "damaged"
+
+    # Only past the FULL un-repaired window does the ruin rot to abandoned.
+    world.tick = arson_tick + window + 1
+    evts = world.advance_buildings()
+    assert [e["payload"]["to"] for e in evts] == ["abandoned"]
+    assert bld.status == "abandoned"
+
+
 def test_arson_on_destroyed_is_a_noop_failure():
     world, agents = _world()
     a, bram = agents[0], agents[1]

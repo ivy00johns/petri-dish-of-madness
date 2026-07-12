@@ -416,6 +416,128 @@ def test_snapshot_keeps_surviving_decal_after_partial_clear(monkeypatch):
            json.dumps(snap, sort_keys=True)
 
 
+# ── (b2) EM-302a — the untagged-district fallback bucket ─────────────────────
+# The defect: places with NO district/neighborhood tag all collapsed into one
+# "" bucket, so an untagged town shared a single flat town-wide cap and
+# ungrouped places evicted each other's murals. Untagged places now bucket
+# PER PLACE; tagged districts keep their exact pre-EM-302 buckets.
+
+def _untagged_places():
+    """The _places() town with every district tag stripped (an untagged world)."""
+    return [
+        PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social"),
+        PlaceState(id="market", name="Market", x=1, y=0, kind="work"),
+        PlaceState(id="commons", name="Commons", x=2, y=0, kind="social"),
+    ]
+
+
+def test_untagged_places_do_not_share_a_town_wide_bucket():
+    """cap=1 across two UNTAGGED places: each place is its own bucket, so both
+    murals survive (pre-EM-302a the second paint evicted the first)."""
+    a = _agent(location="market")
+    w = _world([a], params=_params(
+        image_gen=ImageGenParams(max_decals_per_district=1)),
+        places=_untagged_places())
+    _add_building(w, "m1", location="market")
+    _add_building(w, "c1", location="commons")
+
+    w.action_paint_surface(a, "m1", "market mural")
+    a.location = "commons"
+    w.action_paint_surface(a, "c1", "commons mural")
+
+    assert set(w.surface_decals.keys()) == {"m1", "c1"}
+
+
+def test_untagged_place_is_still_capped_within_itself():
+    """The fallback bucket is not unbounded: three paints at ONE untagged place
+    under cap=2 still evict the oldest (same LRU semantics as a tagged district)."""
+    a = _agent(location="market")
+    w = _world([a], params=_params(
+        image_gen=ImageGenParams(max_decals_per_district=2)),
+        places=_untagged_places())
+    for bid in ("b1", "b2", "b3"):
+        _add_building(w, bid, location="market")
+
+    w.action_paint_surface(a, "b1", "one")
+    w.action_paint_surface(a, "b2", "two")
+    w.action_paint_surface(a, "b3", "three")
+
+    assert list(w.surface_decals.keys()) == ["b2", "b3"]
+
+
+def test_tagged_and_untagged_buckets_never_interact():
+    """A mixed world: painting inside a TAGGED district neither evicts nor is
+    evicted by an UNTAGGED place's decal (distinct buckets, cap=1 each)."""
+    places = [
+        PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social",
+                   district="core"),
+        PlaceState(id="market", name="Market", x=1, y=0, kind="work"),  # untagged
+    ]
+    a = _agent(location="plaza")
+    w = _world([a], params=_params(
+        image_gen=ImageGenParams(max_decals_per_district=1)), places=places)
+    _add_building(w, "p1", location="plaza")
+    _add_building(w, "m1", location="market")
+
+    w.action_paint_surface(a, "p1", "civic mural")
+    a.location = "market"
+    w.action_paint_surface(a, "m1", "market mural")
+
+    assert set(w.surface_decals.keys()) == {"p1", "m1"}
+
+
+def test_tagged_district_still_shares_one_bucket_across_places():
+    """EM-302a must NOT change tagged capacity: two places in the SAME district
+    ("core": plaza + commons) still share one bucket — cap=1 evicts the older."""
+    a = _agent(location="plaza")
+    w = _world([a], params=_params(
+        image_gen=ImageGenParams(max_decals_per_district=1)))
+    _add_building(w, "p1", location="plaza")     # district "core"
+    _add_building(w, "c1", location="commons")   # district "core"
+
+    w.action_paint_surface(a, "p1", "first")
+    a.location = "commons"
+    w.action_paint_surface(a, "c1", "second")
+
+    assert list(w.surface_decals.keys()) == ["c1"]
+
+
+def test_building_with_unknown_location_gets_a_stable_per_place_bucket():
+    """Defensive: a building whose location is missing from world.places still
+    lands in a bounded per-location bucket (not the old shared "" bucket)."""
+    a = _agent(location="market")
+    w = _world([a], params=_params(
+        image_gen=ImageGenParams(max_decals_per_district=1)),
+        places=_untagged_places())
+    _add_building(w, "m1", location="market")
+    _add_building(w, "ghost", location="nowhere")  # location not in places
+
+    w.action_paint_surface(a, "m1", "market mural")
+    w.action_paint_surface(a, "ghost", "ghost mural")
+
+    # Distinct buckets (market vs nowhere) → both survive under cap=1.
+    assert set(w.surface_decals.keys()) == {"m1", "ghost"}
+    # And the bucket keys themselves are the prefixed fallbacks (no collision
+    # with a real district literal).
+    assert w._decal_district_of("m1") == "__place__:market"
+    assert w._decal_district_of("ghost") == "__place__:nowhere"
+
+
+def test_neighborhood_tag_still_wins_over_district_and_fallback():
+    """The EM-123 grouping precedence is untouched: neighborhood_id beats
+    district beats the per-place fallback."""
+    places = [
+        PlaceState(id="plaza", name="Plaza", x=0, y=0, kind="social",
+                   district="core", neighborhood_id="old-town"),
+    ]
+    a = _agent(location="plaza")
+    w = _world([a], params=_params(), places=places)
+    _add_building(w, "p1", location="plaza")
+    w.action_paint_surface(a, "p1", "mural")
+
+    assert w._decal_district_of("p1") == "old-town"
+
+
 # ── the runtime seam — schema + co-location gate ─────────────────────────────
 
 def test_action_schema_accepts_paint_surface():

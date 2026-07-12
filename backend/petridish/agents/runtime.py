@@ -167,6 +167,9 @@ ACTION_SCHEMA = {
                 # EM-243 (S2) — extend the road graph one axis-aligned block from
                 # the node nearest you, paid in energy (grow-only).
                 "build_road",
+                # EM-269 (F2) — found a settlement centered at your current
+                # place (a free-placement cluster seed; reflex, free).
+                "found_settlement",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -233,6 +236,8 @@ ACTION_SCHEMA = {
                             "set_building_skin",
                             # EM-243 (S2) — extend the road graph one block.
                             "build_road",
+                            # EM-269 (F2) — found a settlement here.
+                            "found_settlement",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -491,6 +496,10 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # EM-243 (S2) — extend the road graph one block; offered anywhere (the real
     # gate is energy + an open direction, computed in _assemble_context).
     "build_road":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-269 (F2) — found a settlement at your current place; offered anywhere
+    # (the real gates — settlements.enabled + unclaimed ground — are computed in
+    # _assemble_context and re-enforced at resolution in action_found_settlement).
+    "found_settlement": {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -2589,6 +2598,7 @@ def _assemble_context(
 
     valid_actions: list[str] = []
     nearby_layout_block = ""  # EM-243 (S2) — set when build_road is offered (below)
+    settlement_block = ""     # EM-269 (F2) — set when settlements are enabled (below)
     valid_actions.append("idle, forage, recharge, remember")
     # EM-140 — move_to's arg was undocumented, so models guessed key names
     # (destination/to/null) and burned turns on 'unknown place' world errors.
@@ -2999,6 +3009,48 @@ def _assemble_context(
         if _road_affordable and _layout is not None and _layout.startswith("Nearby layout:"):
             valid_actions.append(
                 "build_road (direction: north|south|east|west) - extend a street one block")
+
+    # ── EM-269 (F2) — settlement-scoped perception + the found_settlement entry.
+    # GATED on world.settlements.enabled (default OFF ⇒ NOTHING renders — the
+    # prompt is byte-identical pre-EM-269, law §0.1). One compact line, always
+    # scoped to the agent (their settlement, or the join-able roster) — never a
+    # coordinate dump (prompt-diet). The menu entry is offered ONLY on unclaimed
+    # ground, in lock-step with action_found_settlement's too_close gate (EM-108:
+    # menu and resolution must agree — no dead turns).
+    _stl_enabled = bool(getattr(world, "_settlements_enabled", None)
+                        and world._settlements_enabled())
+    if _stl_enabled:
+        _stls = getattr(world, "settlements", {}) or {}
+        _mine_id = world.settlement_of(agent.id) if _stls else None
+        _stl_line = ""
+        if _mine_id is not None:
+            _mine = _stls[_mine_id]
+            _n = len(_mine.get('members') or [])
+            _stl_line = (f"Your settlement: {_mine.get('name', _mine_id)} "
+                         f"({_n} member{'s' if _n != 1 else ''}) — your "
+                         f"builds cluster there.")
+            _others = [str(_stls[s].get("name", s))
+                       for s in sorted(_stls) if s != _mine_id]
+            if _others:
+                _stl_line += (" Elsewhere: " + ", ".join(_others[:3])
+                              + ("…" if len(_others) > 3 else "") + ".")
+        elif _stls:
+            _roster = [f"{_stls[s].get('name', s)} "
+                       f"({len(_stls[s].get('members') or [])})"
+                       for s in sorted(_stls)]
+            _stl_line = ("Settlements: " + ", ".join(_roster[:4])
+                         + ("…" if len(_roster) > 4 else "")
+                         + ". Build near one to join it, or found your own.")
+        if _stl_line:
+            settlement_block = f"\n=== 🏘 SETTLEMENTS ===\n  {_stl_line}\n"
+        if _here is not None:
+            from ..engine.citygraph import logical_to_world as _stl_l2w
+            from ..engine.placement import SETTLEMENT_R as _STL_R
+            _wx, _wz = _stl_l2w(float(_here.x), float(_here.y))
+            if world.nearest_settlement(_wx, _wz, _STL_R) is None:
+                valid_actions.append(
+                    "found_settlement (name?) - found a new settlement centered "
+                    "here; your future builds cluster around it")
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
     # Offered to EVERY agent (no location gate) whenever a decree is live, so the
@@ -3708,7 +3760,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === ACTIVE PROJECTS YOU COULD CONTRIBUTE TO ===
 {project_text}
-{nearby_layout_block}{constitution_block}
+{nearby_layout_block}{settlement_block}{constitution_block}
 === ACTIVE RULES ===
 {chr(10).join(f"  [{r.effect}] {r.text}" for r in active_rules) or "  (none)"}
 
@@ -4801,8 +4853,12 @@ class AgentRuntime:
         first_budget = getattr(self.router, "first_attempt_max_tokens", None)
         if callable(first_budget):
             attempt_tokens = first_budget(call_profile, max_tokens)
+        # The EXPLICIT boost signal: True exactly when first_attempt_max_tokens
+        # raised the budget above the profile's configured base — the bounce
+        # clamp must not have to re-infer this from the lane window.
         action_dict, parse_error, llm_meta = await self._call_and_parse(
-            call_profile, messages, attempt_tokens, temperature, agent, attempt=1
+            call_profile, messages, attempt_tokens, temperature, agent, attempt=1,
+            boosted=attempt_tokens > max_tokens,
         )
         llm_attempts.append(self._lane_stamped_span(
             call_profile, llm_meta, profile_name, lane_reason
@@ -4838,8 +4894,14 @@ class AgentRuntime:
                     ),
                 },
             ]
+            # boosted: True whenever the retry budget exceeds the profile's
+            # configured base — covers both the fresh length-retry boost and a
+            # carried-over attempt-1 boost. The window can NOT stand in for
+            # this signal: a bounced-truncated attempt 1 was credited to the
+            # SERVING lane (W30), leaving the pin's window clean.
             action_dict, parse_error, llm_meta = await self._call_and_parse(
-                call_profile, retry_messages, retry_tokens, temperature, agent, attempt=2
+                call_profile, retry_messages, retry_tokens, temperature, agent,
+                attempt=2, boosted=retry_tokens > max_tokens,
             )
             llm_attempts.append(self._lane_stamped_span(
                 call_profile, llm_meta, profile_name, lane_reason
@@ -5304,10 +5366,16 @@ class AgentRuntime:
         temperature: float,
         agent: AgentState,
         attempt: int = 1,
+        boosted: bool = False,
     ) -> tuple[dict | None, str | None, dict]:
         """
         Call the model and parse+validate the response.
         Returns (action_dict, error_string, llm_meta).
+        `boosted=True` marks max_tokens as a truncation-mitigation boost (the
+        EM-135 first-attempt bump or the length-retry), not a genuine floor —
+        threaded to router.chat() so the adaptive bounce clamp keys on the
+        EXPLICIT signal instead of inferring it from the home lane's window
+        (which the W30 bounce-attribution redirect can leave clean).
         action_dict is None on failure. llm_meta carries the per-attempt
         decision-trace metadata for ONE `llm_call` span. Captured PER ATTEMPT
         because the adapter's `last_routed_via`/`last_usage` are overwritten by
@@ -5350,14 +5418,23 @@ class AgentRuntime:
                 # else dead-turns the agent), so mark it require_json: the
                 # adaptive bounce loop then skips reasoning-tagged lanes,
                 # whose chain-of-thought truncates before the object appears
-                # (the #77/#78 lesson). Only the real router offers
-                # chat_attributed, so the kwarg is safe here; the duck-typed
-                # fallback below keeps the historical chat() signature.
-                chat_coro = chat_attr(
-                    profile_name, messages,
-                    max_tokens=max_tokens, temperature=temperature,
-                    require_json=True,
-                )
+                # (the #77/#78 lesson). `boosted` (#91) threads the truncation-
+                # boost signal so the bounce loop's #77 token clamp keys on the
+                # explicit flag. The real router accepts both kwargs; duck-typed
+                # attributed routers (test harnesses) may lack `boosted`, so it
+                # is advisory — drop it on TypeError, keep the attribution.
+                try:
+                    chat_coro = chat_attr(
+                        profile_name, messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                        require_json=True, boosted=boosted,
+                    )
+                except TypeError:
+                    chat_coro = chat_attr(
+                        profile_name, messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                        require_json=True,
+                    )
             else:
                 chat_coro = self.router.chat(
                     profile_name, messages,
@@ -6454,6 +6531,12 @@ class AgentRuntime:
         # ── EM-243 (S2) — extend the road graph one axis-aligned block ──────────
         elif action == "build_road":
             result = self.world.action_build_road(agent, args)
+            return _emit_world_result(result, base, thought)
+
+        # ── EM-269 (F2) — found a settlement at the agent's current place ───────
+        elif action == "found_settlement":
+            result = self.world.action_found_settlement(
+                agent, str(args.get("name") or ""))
             return _emit_world_result(result, base, thought)
 
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────

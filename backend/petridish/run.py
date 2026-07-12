@@ -260,13 +260,19 @@ async def run_headless(ticks: int, profile_override: str | None) -> None:
             evt = {k: v for k, v in evt.items() if k != "_trace"}
             stamped = {
                 "type": "event",
-                "seq": i,
+                # Finalized below: the message carries the persisted row's
+                # AUTOINCREMENT event_id (parity with TickLoop._emit_event).
+                "seq": 0,
                 "tick": world.tick,
                 **evt,
             }
+            # Persist FIRST so the printed/pushed message carries the DB
+            # events.seq event_id — one id space (event-log.md §1), not the
+            # old per-tick loop index that collided across boots.
+            row_seq = repo.save_event(loop_ctrl._run_id or 1, stamped, world.tick)
+            stamped["seq"] = row_seq if isinstance(row_seq, int) else i
             collector(stamped)
             runtime.push_event({**stamped, "tick": world.tick})
-            repo.save_event(loop_ctrl._run_id or 1, stamped, world.tick)
 
         died = world.check_death(agent)
         if died:

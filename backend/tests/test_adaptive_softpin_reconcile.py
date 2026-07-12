@@ -35,6 +35,20 @@ W30 remediation additions (2026-07-09):
       zero-call skipping, a clean probe serves from home and opens the
       window-aging path back.
 
+Bounce-latch additions (2026-07-11):
+
+  (9) BOUNCE-ONLY LANES MUST NOT LATCH SICK — the (8) probe only covers lanes
+      that are someone's PIN. Bounce-only lanes (the RESERVED terminal `auto`
+      backstop and curated-only lanes like gpt-oss-120b) accumulate demerits
+      from failed bounce attempts but had NO recovery path, latching sick
+      permanently and silently removing the (6) guaranteed backstop. Two
+      fixes: (a) the reserved `auto` slot is no longer gated on auto's own
+      sick window (the _detour_target rationale — the per-lane window is a
+      poor proxy for the whole-pool picker); (b) the curated walk mirrors the
+      (8) cadence — every probe_every-th would-be sick-skip attempts the lane
+      as that bounce's candidate, and a success heals it via the (7)
+      bounced_to redirect.
+
 Style-matches test_adaptive_lane_routing.py: a REAL Router over fake adapters
 that count calls / record the max_tokens they saw.
 
@@ -283,6 +297,143 @@ async def test_unboosted_genuine_large_request_still_skips_a_too_small_lane():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# (3b) Explicit boost signal — the clamp keys on chat(boosted=True), not on
+#      inferring boost from the home lane's window (which the W30 bounce
+#      attribution redirect can leave CLEAN after a bounced truncation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ScriptedAdapter:
+    """Returns a scripted sequence of texts (last one repeats). Records the
+    max_tokens of every call, like _OkAdapter."""
+
+    def __init__(self, name: str, texts: list[str]):
+        self.name = name
+        self.texts = list(texts)
+        self.calls = 0
+        self.seen_max_tokens: list[int] = []
+        self.last_routed_via = f"routed/{name}"
+        self.last_usage: dict | None = None
+
+    async def chat(self, messages, *, max_tokens, temperature):
+        text = self.texts[min(self.calls, len(self.texts) - 1)]
+        self.calls += 1
+        self.seen_max_tokens.append(max_tokens)
+        self.last_usage = {
+            "input_tokens": 10, "output_tokens": 5,
+            "latency_ms": 12.0, "finish_reason": "stop", "cached": False,
+        }
+        return text
+
+
+# Fails to parse (repair cannot salvage it: no comma to backtrack to) but is
+# structurally TRUNCATED — exactly the shape that triggers the runtime's
+# _retry_max_tokens length-retry boost. Mirrors test_em281_retry_budget.py.
+_UNPARSEABLE_TRUNCATED = 'Let me reason about my options first {"acti'
+
+
+@pytest.mark.asyncio
+async def test_explicit_boost_kwarg_clamps_when_home_window_shows_no_boost():
+    """The core defect: the clamp used to key ONLY on _lane_boosted(home).
+    A caller that KNOWS it boosted (the runtime's length-retry) must be able
+    to say so explicitly — even when the home window shows zero truncations
+    (the W30 redirect credits bounced truncations to the SERVING lane, so the
+    pin's window stays clean)."""
+    home = _FailAdapter("home")
+    small = _OkAdapter("small", text="small served")   # out_hint 1024
+    r = _router(
+        [("home", "m-home", home, 1024), ("small", "m-small", small, 1024)],
+        [LaneOrderEntry("freellmapi", "*")],
+    )
+    # The home window is CLEAN — inference alone would treat 4096 as genuine.
+    assert r._lane_boosted("home") is False
+
+    text = await r.chat("home", _MESSAGES, max_tokens=4096, temperature=0.8,
+                        boosted=True)
+
+    assert text == "small served"
+    assert small.calls == 1                      # attempted, not skipped
+    assert small.seen_max_tokens == [1024]       # boost clamped to the ceiling
+
+
+@pytest.mark.asyncio
+async def test_boosted_length_retry_clamps_to_serving_small_lane_end_to_end():
+    """The verifier-confirmed mis-attribution, end-to-end through AgentRuntime:
+    attempt 1 bounces off the failing pin to a small lane whose reply is
+    TRUNCATED; the W30 redirect credits that truncation to the SERVING lane,
+    so _lane_boosted(home) stays False. The length-retry then calls with a
+    boosted 4096 — pre-fix the bounce read the clean home window, treated
+    4096 as a genuine floor, skipped the healthy 1024-ceiling lane that had
+    just served, and collapsed to 'all lanes exhausted' → idle churn. With
+    the explicit signal the retry is clamped and the small lane serves."""
+    from petridish.agents.runtime import AgentRuntime
+
+    home = _FailAdapter("home")
+    small = _ScriptedAdapter(
+        "small", [_UNPARSEABLE_TRUNCATED, _VALID_ACTION_JSON])
+    r = _router(
+        [("home", "m-home", home, 1024), ("small", "m-small", small, 1024)],
+        [LaneOrderEntry("freellmapi", "*")],
+    )
+    params = WorldParams(
+        energy_decay_per_turn=0.0, starting_energy=88.0, starting_credits=10,
+        recharge_cost=2, recharge_amount=20.0, work_reward=4, forage_reward=1,
+        steal_max=5, death_after_zero_turns=10, memory_window=5,
+    )
+    places = [PlaceState(id="plaza", name="Central Plaza", x=0, y=0, kind="social")]
+    agent = AgentState(
+        id="cleo", name="Cleo", personality="curious", profile="home",
+        location="plaza", energy=88.0, credits=10,
+    )
+    world = World(params=params, places=places, agents=[agent])
+    runtime = AgentRuntime(world, r)
+
+    await runtime.run_turn(agent)
+
+    # Attempt 1: home fails → bounce serves the truncated reply from `small`;
+    # the truncation is credited to the SERVING lane (W30), pin stays clean.
+    assert r._lane_boosted("small") is True
+    assert r._lane_boosted("home") is False
+    # Attempt 2 (the boosted length-retry): home fails again and the bounce
+    # must RE-ATTEMPT the healthy small lane with the boost CLAMPED to its
+    # 1024 ceiling — not skip it into an idle fallback.
+    assert home.calls == 2
+    assert small.calls == 2, (
+        "the boosted length-retry skipped the healthy small lane "
+        f"(small saw {small.calls} call(s)) — the #77 collapse is back")
+    assert small.seen_max_tokens == [1024, 1024]
+
+
+@pytest.mark.asyncio
+async def test_default_unboosted_call_keeps_bounce_attribution_byte_identical():
+    """No boost anywhere (default boosted=False, clean windows): the genuine-
+    floor skip and the single-caller EM-198 attribution events are exactly the
+    pre-signal bytes — the new kwarg must be invisible when unused."""
+    home = _FailAdapter("home")
+    small = _OkAdapter("small")                        # out_hint 1024
+    big = _OkAdapter("big", text="big served")         # out_hint 4096
+    r = _router(
+        [("home", "m-home", home, 1024), ("small", "m-small", small, 1024),
+         ("big", "m-big", big, 4096)],
+        [LaneOrderEntry("freellmapi", "*")],
+    )
+
+    text = await r.chat("home", _MESSAGES, max_tokens=4096, temperature=0.8)
+
+    assert text == "big served"
+    assert small.calls == 0        # genuine 4096 floor still skips the #77 lane
+    assert big.seen_max_tokens == [4096]
+    # Exact attribution snapshot — byte-identical to the pre-kwarg contract.
+    assert r.last_usage("home") == {
+        "input_tokens": 10, "output_tokens": 5, "latency_ms": 12.0,
+        "finish_reason": "stop", "cached": False,
+        "bounced_from": "home", "bounced_to": "big",
+    }
+    assert r.last_routed_via("home") == "routed/big"
+    assert r.lane_health()["home"]["window"] == [
+        {"parsed": False, "truncated": False, "error": True}]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # (4) Every sorted lane rate-limited → auto attempted LAST, terminal fail surfaces
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -449,9 +600,17 @@ async def test_reserved_auto_attempted_when_curated_lanes_outnumber_attempts():
 
 
 @pytest.mark.asyncio
-async def test_sick_auto_forfeits_the_reservation():
-    """A health-sick `auto` gives its reserved slot back to the curated walk
-    (full max_attempts budget, exactly the pre-W30 semantics)."""
+async def test_sick_auto_keeps_the_reservation():
+    """Bounce-latch fix (9a) — UPDATED CONTRACT (was
+    test_sick_auto_forfeits_the_reservation): a health-sick `auto` NO LONGER
+    forfeits the reserved final slot. `auto` is bounce-only in the shipped
+    config — never anyone's pin — so failed reserved attempts were the ONLY
+    thing writing to its window; once 3 demerits landed, the old sick-gate
+    removed the reservation on every later turn, nothing ever attempted
+    `auto` again, and the W30 guaranteed backstop was silently gone for the
+    rest of the run. The budget shape is unchanged: the curated walk keeps
+    max_attempts-1 slots and `auto` takes the reserved final one; its
+    terminal failure still surfaces to EM-173 exactly as before."""
     call_log: list[str] = []
     home = _FailAdapter("home", 429, "home 429", log=call_log)
     frees = {
@@ -472,9 +631,115 @@ async def test_sick_auto_forfeits_the_reservation():
     with pytest.raises(ProviderError) as exc_info:
         await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
 
-    assert call_log == ["home", "free1", "free2", "free3"]
-    assert auto.calls == 0
-    assert exc_info.value.detail == "free3 429"
+    # Curated walk keeps max_attempts-1 = 2 slots; the sick `auto` still gets
+    # the reserved final attempt (pre-fix: free3 got it and auto.calls == 0).
+    assert call_log == ["home", "free1", "free2", "auto"]
+    assert auto.calls == 1
+    assert frees["free3"].calls == 0 and frees["free4"].calls == 0
+    assert exc_info.value.detail == "All models exhausted"
+
+
+@pytest.mark.asyncio
+async def test_sick_auto_backstop_serves_and_heals_via_bounced_credit():
+    """Bounce-latch fix (9a) end-to-end: a latched-sick `auto` whose pool has
+    recovered SERVES the reserved attempt, and the W30 bounced_to redirect
+    credits the runtime's clean outcomes to `auto`, aging the demerits out of
+    the 6-window — the recovery path a bounce-only lane never had. Pre-fix
+    the first chat() re-raised (idle fallback) with zero auto calls."""
+    home = _FailAdapter("home", 429, "home 429")
+    auto = _OkAdapter("auto", text="auto served")
+    r = _router(
+        [("home", "m-home", home, 512)],
+        [LaneOrderEntry("freellmapi", "*"), LaneOrderEntry("freellmapi", "auto")],
+        auto=auto, max_attempts=4,
+    )
+    for _ in range(3):
+        r.note_lane_error("auto")
+    assert r.lane_sick("auto") is True
+
+    # Window [e,e,e] → +4 clean bounced credits → [e,e,c,c,c,c] ⇒ healthy.
+    for turn in range(4):
+        text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+        assert text == "auto served"
+        assert r.last_usage("home")["bounced_to"] == "auto"
+        r.note_parse_outcome("home", parsed=True, truncated=False)
+
+    assert auto.calls == 4
+    assert r.lane_sick("auto") is False
+
+
+@pytest.mark.asyncio
+async def test_sick_bounce_only_curated_lane_probed_on_cadence_and_heals():
+    """Bounce-latch fix (9b): a curated bounce-only lane (gpt-oss-120b, the #1
+    sorted target — explicitly NOT pinned to any agent) latches sick with no
+    recovery: the (8) probe only fires for pins. The walk now mirrors that
+    cadence — every probe_every-th would-be sick-skip attempts the lane as
+    the bounce's candidate; successes serve the turn and the bounced_to
+    redirect heals the window until the lane rejoins the walk outright."""
+    home = _FailAdapter("home", 429, "home 429")
+    gpt = _OkAdapter("gpt-oss-120b", text="gpt served")   # recovered upstream
+    server = _OkAdapter("server", text="server served")
+    r = _router(
+        [("home", "m-home", home, 512),
+         ("gpt-oss-120b", "gpt-oss-120b", gpt, 512),
+         ("server", "m-server", server, 512)],
+        [LaneOrderEntry("freellmapi", "gpt-oss-120b*"),
+         LaneOrderEntry("freellmapi", "*")],
+        lane_failover={"probe_every": 3},
+    )
+    for _ in range(3):
+        r.note_lane_error("gpt-oss-120b")
+    assert r.lane_sick("gpt-oss-120b") is True
+
+    served: list[str] = []
+    for turn in range(12):
+        text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+        served.append(text)
+        r.note_parse_outcome("home", parsed=True, truncated=False)
+
+    # Every 3rd would-be skip probes gpt instead (turns 3, 6, 9, 12); the
+    # other turns keep bouncing to the healthy server lane. Pre-fix: gpt
+    # received ZERO calls forever (the permanent latch).
+    assert served == (["server served"] * 2 + ["gpt served"]) * 4
+    assert gpt.calls == 4
+    # Window [e,e,e] + 4 clean bounced credits → [e,e,c,c,c,c] ⇒ healed.
+    assert r.lane_sick("gpt-oss-120b") is False
+    # Healed, the lane rejoins the walk as the top sorted candidate directly.
+    text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert text == "gpt served"
+    assert gpt.calls == 5
+
+
+@pytest.mark.asyncio
+async def test_failed_walk_probe_records_one_demerit_and_walk_continues():
+    """Bounce-latch fix (9b), failure path: a still-dead sick lane's walk
+    probe appends exactly ONE fresh demerit and the walk continues to the
+    next candidate — the turn is never lost, and a chronically dead lane
+    costs one bounded attempt per probe_every bounces, never the budget."""
+    home = _FailAdapter("home", 429, "home 429")
+    gpt = _FailAdapter("gpt", 429, "gpt still capped")
+    server = _OkAdapter("server", text="server served")
+    r = _router(
+        [("home", "m-home", home, 512), ("gpt", "m-gpt", gpt, 512),
+         ("server", "m-server", server, 512)],
+        [LaneOrderEntry("freellmapi", "gpt*"), LaneOrderEntry("freellmapi", "*")],
+        lane_failover={"probe_every": 2},
+    )
+    for _ in range(3):
+        r.note_lane_error("gpt")
+    assert r.lane_sick("gpt") is True
+
+    gpt_calls_after_turn: list[int] = []
+    for turn in range(4):
+        text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+        assert text == "server served"       # every turn is still served
+        gpt_calls_after_turn.append(gpt.calls)
+
+    # Skips 1 and 3 cost zero gpt calls; skips 2 and 4 convert to probes.
+    assert gpt_calls_after_turn == [0, 1, 1, 2]
+    # 3 seeded + 2 failed probes, capped by the 6-wide window.
+    assert r.lane_health()["gpt"]["errors"] == 5
+    assert r.lane_sick("gpt") is True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
