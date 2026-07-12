@@ -23,7 +23,9 @@ EM-303 (a) — world-extent sprawl clamp: MAX_EXTENT caps how far accretion may
 wander from the anchor. A derived position beyond the cap degrades GRACEFULLY —
 it falls back to a seeded in-extent spiral that prefers a clear spot near the
 center and, when the town is choked, accepts the least-crowded candidate seen
-(densify, never error, never gate the build). None ⇒ unclamped (pre-EM-303).
+(densify, never error, never gate the build). None — the SHIPPED default,
+flag-gated OFF per EM-155 — ⇒ unclamped (byte-identical pre-EM-303); the 32.5
+go-live flip is a config decision left to sign-off.
 """
 from __future__ import annotations
 
@@ -40,10 +42,13 @@ _GOLDEN_ANGLE: float = 2.399963229728653   # radians; deterministic spiral sprea
 _TAU: float = 2.0 * math.pi
 
 # EM-303 (a) — the sprawl clamp (compile-time config, the FREE_PLACEMENT_ENABLED
-# pattern). 32.5 = the world half-span, so the clamp is a no-op for every
-# placement that stays on the map — it only redirects accretion that would leave
-# the world (~1300+ unbounded builds). None ⇒ unclamped (pre-EM-303 behavior).
-MAX_EXTENT: float | None = 32.5
+# pattern). Flag-gated DEFAULT OFF (EM-155): None ⇒ unclamped, byte-identical
+# pre-EM-303 placement. Go-live value: 32.5 — the world half-span, where the
+# clamp is a no-op for every placement that stays on the map and only redirects
+# accretion that would leave the world (~1300+ unbounded builds). The flip is a
+# one-line config change left to a ratified sign-off, exactly like
+# FREE_PLACEMENT_ENABLED's go-live.
+MAX_EXTENT: float | None = None
 _CLAMP_CAP: int = 64   # in-extent fallback spiral candidates before densifying
 
 
