@@ -245,6 +245,23 @@ export interface Prop {
   owner_id?: string | null;     // agent who placed it; null/absent for god/seeded
 }
 
+// ============================================================
+// Settlement (EM-269 F2) — an agent-founded cluster seed for free placement
+// (never a container that gates building). Lives in world.settlements keyed by
+// an opaque seeded id; len > 1 IS emergent multi-city. `center` is already the
+// WORLD frame (±33) — rendered directly, no logical conversion (the anti-EM-243
+// discipline). Every field beyond name/center is optional so older backends and
+// partial snapshots stay valid.
+// ============================================================
+
+export interface Settlement {
+  name: string;                 // humanized display name (seeded pool fallback)
+  center: [number, number];     // WORLD-frame [x, z] (±33) — no conversion
+  founded_tick?: number;
+  founder_id?: string;
+  members?: string[];           // loose membership (agent ids)
+}
+
 export type RuleEffect = 'ban_stealing' | 'ubi' | 'recharge_subsidy' | 'work_bonus';
 export type RuleStatus = 'proposed' | 'active' | 'rejected';
 
@@ -431,6 +448,12 @@ export interface WorldState {
   // the red conflict feed lane read them; the golden peacetime UI is unchanged.
   wars?: Record<string, War>;
   grievances?: Record<string, number>;
+  // EM-269 (F2, additive): agent-founded settlements keyed by opaque seeded id.
+  // Present ONLY once one is founded (only-when-non-empty, like factions); a
+  // pre-EM-269 backend — and every settlement-free world — omits it and the 3D
+  // world renders no markers. SettlementLabels renders a floating name at each
+  // world-frame center.
+  settlements?: Record<string, Settlement> | null;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds

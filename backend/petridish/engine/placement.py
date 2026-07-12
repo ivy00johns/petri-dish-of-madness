@@ -102,3 +102,51 @@ def place_one(building, all_buildings, anchor: tuple[float, float],
     Equivalent to place_all — the newest build sorts last — so live-incremental
     and migration-batch agree (the R3 equivalence)."""
     return place_all(all_buildings, anchor, city_seed)[str(building.id)]
+
+
+# ── EM-269 (F2) — settlement-anchored placement ────────────────────────────────
+# A settlement's reach (world units): the parent pool for an anchored build, AND
+# the "build near it, get associated" join radius. One constant keeps growth and
+# membership in lock-step — what clusters at a settlement is what joins it.
+SETTLEMENT_R: float = 8.0
+
+
+def place_one_anchored(building, all_buildings, anchor: tuple[float, float],
+                       city_seed: int) -> tuple[float, float]:
+    """EM-269 F2 — position ONE new building around a settlement `anchor`,
+    attaching to the STORED positions of the existing set.
+
+    Deliberately NOT place_all with a different anchor: place_all RECOMPUTES
+    every prior position from its anchor, so a settlement anchor would attach
+    the build to a phantom layout and let it stack on real structures. Stored
+    positions are the city's truth once written (EM-268 store-primary); this
+    fn only reads them. Pure fn of (stored set, anchor, seed); the seeded draw
+    purposes (jx/jz/ang/dist/…) match place_all, so a given building id rolls
+    the same dice either way.
+
+    - Parent pool = stored buildings within SETTLEMENT_R of the anchor, in
+      canonical (created_tick, id) order (never a set/dict — no hash drift).
+    - Empty pool ⇒ seeded jitter around the anchor (the hamlet's first hut).
+    - Overlap resolves against ALL stored positions (an outpost build never
+      stacks on the old town either). Deterministic + terminating.
+    """
+    bid = str(building.id)
+    ax, az = float(anchor[0]), float(anchor[1])
+    ordered = sorted(
+        (b for b in all_buildings
+         if str(b.id) != bid and getattr(b, "position", None) is not None),
+        key=lambda b: (int(b.created_tick), str(b.id)))
+    placed: list[tuple[str, float, float]] = [
+        (str(b.id), float(b.position[0]), float(b.position[1])) for b in ordered]
+    r2 = SETTLEMENT_R * SETTLEMENT_R
+    pool = [(pid, px, pz) for (pid, px, pz) in placed
+            if (px - ax) * (px - ax) + (pz - az) * (pz - az) <= r2]
+    if not pool:
+        x = ax + (_u(city_seed, bid, "jx") - 0.5) * MIN_SPACING
+        z = az + (_u(city_seed, bid, "jz") - 0.5) * MIN_SPACING
+        return _resolve_overlap((x, z), placed, city_seed, bid)
+    px, pz = _pref_attach(pool, city_seed, bid)
+    ang = _u(city_seed, bid, "ang") * _TAU
+    dist = MIN_SPACING * (1.0 + _u(city_seed, bid, "dist"))
+    return _resolve_overlap((px + math.cos(ang) * dist, pz + math.sin(ang) * dist),
+                            placed, city_seed, bid)
