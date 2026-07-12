@@ -166,6 +166,13 @@ ACTION_SCHEMA = {
                 # EM-243 (S2) — extend the road graph one axis-aligned block from
                 # the node nearest you, paid in energy (grow-only).
                 "build_road",
+                # EM-258/EM-259 — the war verbs (Wave O War stage C), all reflex:
+                # muster joins your faction's war band; clash is the seeded combat
+                # contest against a co-located enemy belligerent; siege routes
+                # building damage through the shared _damage_building path.
+                # Offered only while the agent's faction is at war (peacetime
+                # golden intact — see _assemble_context).
+                "muster", "clash", "siege",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -232,6 +239,8 @@ ACTION_SCHEMA = {
                             "set_building_skin",
                             # EM-243 (S2) — extend the road graph one block.
                             "build_road",
+                            # EM-258/EM-259 — the war verbs (reflex).
+                            "muster", "clash", "siege",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -336,6 +345,17 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "build_road"}}},
          "then": {"properties": {"args": {"required": ["direction"],
                   "properties": {"direction": {"enum": ["north", "south", "east", "west"]}}}}}},
+        # EM-258 — clash requires a target (the co-located enemy belligerent,
+        # name or id — resolved like attack). muster takes no args.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "clash"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
+         }}}}},
+        # EM-259 — siege requires the enemy building's id (like vandalize/arson).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "siege"}}},
+         "then": {"properties": {"args": {"required": ["building_id"], "properties": {
+             "building_id": {"type": "string"},
+         }}}}},
     ],
 }
 
@@ -490,6 +510,17 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # EM-243 (S2) — extend the road graph one block; offered anywhere (the real
     # gate is energy + an open direction, computed in _assemble_context).
     "build_road":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-258/EM-259 — the war verbs 🟢, all REFLEX (zero extra LLM calls — the
+    # engine resolves the seeded contest deterministically; MAX-call-rate ethos).
+    # muster/clash carry no location_gate (the co-location + at-war gates are
+    # war-specific, enforced by the world action exactly like recruit); siege
+    # gates to the building's OWN place ("@building", resolved per-turn like
+    # vandalize/arson). No agreement_gate — a war is already a ratified vote.
+    # Offered ONLY while the agent's faction is at war (see _assemble_context),
+    # so the peacetime prompt/menu — and the em161 golden — never change.
+    "muster":           {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "clash":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "siege":            {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -1530,7 +1561,11 @@ _TARGETED_ACTIONS = frozenset(
      # (resolved to an id, like give). accept_cooperation takes NO target (the offer
      # is keyed by the accepting agent's id) and co_build takes a building_id, not an
      # agent — so both are EXCLUDED here.
-     "offer_cooperation"}
+     "offer_cooperation",
+     # EM-258 — clash targets a co-located enemy belligerent name in
+     # args["target"] (resolved to an id before dispatch, like attack). muster
+     # takes NO target and siege takes a building_id — both EXCLUDED here.
+     "clash"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -1822,9 +1857,17 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     # and think until they are released (a release tick frees them in the world's
     # per-round advance). Checked BEFORE every other gate so no jailed agent can
     # move, work, or commit a crime — only say/whisper/idle/remember get through.
+    # EM-258 — the gate WIDENS to `exiled` (a war loser's leader is cast out of
+    # public life — permanent: advance_crime's release path never frees exiled)
+    # and explicitly NOT to `belligerent` (the war-band marker is a status, not
+    # a restriction — a mustered soldier keeps every action; plan §Feature 3).
     JAIL_ALLOWED = {"say", "whisper", "idle", "remember"}
-    if getattr(agent, "crime_status", None) in ("detained", "jailed") and \
+    _status_now = getattr(agent, "crime_status", None)
+    if _status_now in ("detained", "jailed", "exiled") and \
             action not in JAIL_ALLOWED:
+        if _status_now == "exiled":
+            return ("you are exiled — cast out after your faction's defeat; "
+                    "you can only talk, whisper, and think")
         return ("you are jailed — you can only talk, whisper, and think until "
                 "you are released")
 
@@ -1941,6 +1984,17 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # unless an open pact is addressed to this agent.
         if agent.id not in getattr(world, "pending_crime_offers", {}):
             return "no criminal pact has been offered to you"
+
+    elif action == "clash":
+        # EM-258 — clash targets a co-located agent (resolved like attack). The
+        # world action re-checks self-target + the at-war + mustered gates and
+        # returns a clear fail event, so this front gate only ensures a
+        # reachable target — the feedback names who IS here so the model can
+        # self-correct. muster/siege need no front gate (no agent target;
+        # action_muster / action_siege own every war-specific check).
+        target_error = _validate_target(args, agent, world, "clash")
+        if target_error:
+            return target_error
 
     elif action in ("teach_skill", "request_skill"):
         # EM-228 — both verbs target a co-located agent (resolved like steal). The
@@ -2764,6 +2818,53 @@ def _assemble_context(
         valid_actions.append(f"investigate (target) - question witnesses about: {tnames}")
         valid_actions.append(f"accuse (target) - publicly accuse: {tnames}")
         valid_actions.append(f"detain (target) - jail a wanted suspect: {tnames}")
+    # EM-258/EM-259 — the war menu, surfaced ONLY while the agent's faction is
+    # actually AT WAR (the EM-257 peacetime-golden guarantee: war disabled, a
+    # factionless agent, or a quiet world adds NO line — the full prompt stays
+    # byte-identical). Gates mirror the world actions' own checks (EM-108
+    # menu/resolution agreement): muster only when not yet banded; clash/siege
+    # only when mustered (or clash_requires_band is off) AND a concrete
+    # co-located enemy target exists — names/ids in every line (the
+    # promote_image FINDING 1(b) recipe) so the model is offered targets that
+    # actually resolve. getattr keeps callers safe if the seam is ever absent.
+    if getattr(world, "war_enabled", None) and world.war_enabled():
+        _wfct = world.faction_of(agent.id) if hasattr(world, "faction_of") else None
+        _my_wars = world.active_wars_for(_wfct["id"]) if _wfct is not None else []
+        if _my_wars:
+            _wfid = _wfct["id"]
+            _band = set(world._war_band_of(_wfid))
+            _enemy_fids = {fid for w in _my_wars
+                           for fid in w.belligerents} - {_wfid}
+            _fname = (str((world.factions.get(_wfid) or {}).get("name", ""))
+                      or _wfid)
+            if agent.id not in _band:
+                _enemies = ", ".join(
+                    str(world.factions[f].get("name", "")) or f
+                    for f in sorted(_enemy_fids) if f in world.factions)
+                valid_actions.append(
+                    f"muster - join {_fname}'s war band (you are at war with "
+                    f"{_enemies or 'a dissolved circle'})")
+            if agent.id in _band or \
+                    not bool(world._war_param("clash_requires_band", True)):
+                _foes = [
+                    a for a in co_located
+                    if (tf := world.faction_of(a.id)) is not None
+                    and tf["id"] in _enemy_fids
+                ]
+                if _foes:
+                    valid_actions.append(
+                        "clash (target) - fight an enemy belligerent here: "
+                        + ", ".join(a.name for a in _foes))
+                for b in here_buildings:
+                    if _building_field(b, "status") == "destroyed":
+                        continue
+                    _owner = str(_building_field(b, "owner_id", "") or "")
+                    _of = world.faction_of(_owner) if _owner else None
+                    if _of is not None and _of["id"] in _enemy_fids:
+                        valid_actions.append(
+                            f"siege (building_id={_building_field(b, 'id')}) - "
+                            f"lay siege to the enemy structure "
+                            f"{_building_field(b, 'name')}")
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -3353,6 +3454,21 @@ def _assemble_context(
         _crime_lines.append(
             f"You are in JAIL for {_left} more ticks. You can only talk, whisper, "
             "and think — no moving, working, or crime until you are released."
+        )
+    # EM-258/EM-259 — the war statuses. belligerent is a MARKER, not a
+    # restriction (the jail-gate ignores it); exiled is the permanent price of
+    # a lost war. Both only ever exist in a war-enabled world, so the peacetime
+    # prompt — and the em161 golden — never carries these lines.
+    elif _status == "belligerent":
+        _crime_lines.append(
+            "You march with your faction's war band. Clash with co-located "
+            "enemy belligerents or lay siege to their structures — the war "
+            "ends by peace treaty or collapse."
+        )
+    elif _status == "exiled":
+        _crime_lines.append(
+            "You are EXILED — cast out after your faction's defeat. You can "
+            "only talk, whisper, and think; the town goes on without you."
         )
     _offers = getattr(world, "pending_crime_offers", {})
     _offer = _offers.get(agent.id) if isinstance(_offers, dict) else None
@@ -5978,6 +6094,30 @@ class AgentRuntime:
         elif action == "vandalize":
             result = self.world.action_vandalize(agent, args.get("building_id", ""))
             return _emit_world_result(result, base, thought)
+
+        # EM-258/EM-259 — the war verbs. All three world actions return ready
+        # event dicts (war_band_joined / war_clash / war_siege on success, a
+        # clear parse_failure fail event otherwise) or a {"_multi": [...]}
+        # chain (a clash kill appends agent_died + inheritance; a siege
+        # appends the building state transition) — _emit_world_result consumes
+        # both shapes, exactly like vandalize/recruit.
+        elif action == "muster":
+            return _emit_world_result(
+                self.world.action_muster(agent), base, thought)
+
+        elif action == "clash":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to clash but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_clash(agent, target), base, thought)
+
+        elif action == "siege":
+            return _emit_world_result(
+                self.world.action_siege(agent, args.get("building_id", "")),
+                base, thought)
 
         # EM-240 — economy & corruption verbs (Task 7). launder takes NO target
         # and returns (ok, reason, fee); bribe resolves an enforcer target and
