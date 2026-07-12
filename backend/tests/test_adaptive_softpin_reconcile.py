@@ -35,6 +35,20 @@ W30 remediation additions (2026-07-09):
       zero-call skipping, a clean probe serves from home and opens the
       window-aging path back.
 
+Bounce-latch additions (2026-07-11):
+
+  (9) BOUNCE-ONLY LANES MUST NOT LATCH SICK — the (8) probe only covers lanes
+      that are someone's PIN. Bounce-only lanes (the RESERVED terminal `auto`
+      backstop and curated-only lanes like gpt-oss-120b) accumulate demerits
+      from failed bounce attempts but had NO recovery path, latching sick
+      permanently and silently removing the (6) guaranteed backstop. Two
+      fixes: (a) the reserved `auto` slot is no longer gated on auto's own
+      sick window (the _detour_target rationale — the per-lane window is a
+      poor proxy for the whole-pool picker); (b) the curated walk mirrors the
+      (8) cadence — every probe_every-th would-be sick-skip attempts the lane
+      as that bounce's candidate, and a success heals it via the (7)
+      bounced_to redirect.
+
 Style-matches test_adaptive_lane_routing.py: a REAL Router over fake adapters
 that count calls / record the max_tokens they saw.
 
@@ -586,9 +600,17 @@ async def test_reserved_auto_attempted_when_curated_lanes_outnumber_attempts():
 
 
 @pytest.mark.asyncio
-async def test_sick_auto_forfeits_the_reservation():
-    """A health-sick `auto` gives its reserved slot back to the curated walk
-    (full max_attempts budget, exactly the pre-W30 semantics)."""
+async def test_sick_auto_keeps_the_reservation():
+    """Bounce-latch fix (9a) — UPDATED CONTRACT (was
+    test_sick_auto_forfeits_the_reservation): a health-sick `auto` NO LONGER
+    forfeits the reserved final slot. `auto` is bounce-only in the shipped
+    config — never anyone's pin — so failed reserved attempts were the ONLY
+    thing writing to its window; once 3 demerits landed, the old sick-gate
+    removed the reservation on every later turn, nothing ever attempted
+    `auto` again, and the W30 guaranteed backstop was silently gone for the
+    rest of the run. The budget shape is unchanged: the curated walk keeps
+    max_attempts-1 slots and `auto` takes the reserved final one; its
+    terminal failure still surfaces to EM-173 exactly as before."""
     call_log: list[str] = []
     home = _FailAdapter("home", 429, "home 429", log=call_log)
     frees = {
@@ -609,9 +631,115 @@ async def test_sick_auto_forfeits_the_reservation():
     with pytest.raises(ProviderError) as exc_info:
         await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
 
-    assert call_log == ["home", "free1", "free2", "free3"]
-    assert auto.calls == 0
-    assert exc_info.value.detail == "free3 429"
+    # Curated walk keeps max_attempts-1 = 2 slots; the sick `auto` still gets
+    # the reserved final attempt (pre-fix: free3 got it and auto.calls == 0).
+    assert call_log == ["home", "free1", "free2", "auto"]
+    assert auto.calls == 1
+    assert frees["free3"].calls == 0 and frees["free4"].calls == 0
+    assert exc_info.value.detail == "All models exhausted"
+
+
+@pytest.mark.asyncio
+async def test_sick_auto_backstop_serves_and_heals_via_bounced_credit():
+    """Bounce-latch fix (9a) end-to-end: a latched-sick `auto` whose pool has
+    recovered SERVES the reserved attempt, and the W30 bounced_to redirect
+    credits the runtime's clean outcomes to `auto`, aging the demerits out of
+    the 6-window — the recovery path a bounce-only lane never had. Pre-fix
+    the first chat() re-raised (idle fallback) with zero auto calls."""
+    home = _FailAdapter("home", 429, "home 429")
+    auto = _OkAdapter("auto", text="auto served")
+    r = _router(
+        [("home", "m-home", home, 512)],
+        [LaneOrderEntry("freellmapi", "*"), LaneOrderEntry("freellmapi", "auto")],
+        auto=auto, max_attempts=4,
+    )
+    for _ in range(3):
+        r.note_lane_error("auto")
+    assert r.lane_sick("auto") is True
+
+    # Window [e,e,e] → +4 clean bounced credits → [e,e,c,c,c,c] ⇒ healthy.
+    for turn in range(4):
+        text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+        assert text == "auto served"
+        assert r.last_usage("home")["bounced_to"] == "auto"
+        r.note_parse_outcome("home", parsed=True, truncated=False)
+
+    assert auto.calls == 4
+    assert r.lane_sick("auto") is False
+
+
+@pytest.mark.asyncio
+async def test_sick_bounce_only_curated_lane_probed_on_cadence_and_heals():
+    """Bounce-latch fix (9b): a curated bounce-only lane (gpt-oss-120b, the #1
+    sorted target — explicitly NOT pinned to any agent) latches sick with no
+    recovery: the (8) probe only fires for pins. The walk now mirrors that
+    cadence — every probe_every-th would-be sick-skip attempts the lane as
+    the bounce's candidate; successes serve the turn and the bounced_to
+    redirect heals the window until the lane rejoins the walk outright."""
+    home = _FailAdapter("home", 429, "home 429")
+    gpt = _OkAdapter("gpt-oss-120b", text="gpt served")   # recovered upstream
+    server = _OkAdapter("server", text="server served")
+    r = _router(
+        [("home", "m-home", home, 512),
+         ("gpt-oss-120b", "gpt-oss-120b", gpt, 512),
+         ("server", "m-server", server, 512)],
+        [LaneOrderEntry("freellmapi", "gpt-oss-120b*"),
+         LaneOrderEntry("freellmapi", "*")],
+        lane_failover={"probe_every": 3},
+    )
+    for _ in range(3):
+        r.note_lane_error("gpt-oss-120b")
+    assert r.lane_sick("gpt-oss-120b") is True
+
+    served: list[str] = []
+    for turn in range(12):
+        text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+        served.append(text)
+        r.note_parse_outcome("home", parsed=True, truncated=False)
+
+    # Every 3rd would-be skip probes gpt instead (turns 3, 6, 9, 12); the
+    # other turns keep bouncing to the healthy server lane. Pre-fix: gpt
+    # received ZERO calls forever (the permanent latch).
+    assert served == (["server served"] * 2 + ["gpt served"]) * 4
+    assert gpt.calls == 4
+    # Window [e,e,e] + 4 clean bounced credits → [e,e,c,c,c,c] ⇒ healed.
+    assert r.lane_sick("gpt-oss-120b") is False
+    # Healed, the lane rejoins the walk as the top sorted candidate directly.
+    text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+    assert text == "gpt served"
+    assert gpt.calls == 5
+
+
+@pytest.mark.asyncio
+async def test_failed_walk_probe_records_one_demerit_and_walk_continues():
+    """Bounce-latch fix (9b), failure path: a still-dead sick lane's walk
+    probe appends exactly ONE fresh demerit and the walk continues to the
+    next candidate — the turn is never lost, and a chronically dead lane
+    costs one bounded attempt per probe_every bounces, never the budget."""
+    home = _FailAdapter("home", 429, "home 429")
+    gpt = _FailAdapter("gpt", 429, "gpt still capped")
+    server = _OkAdapter("server", text="server served")
+    r = _router(
+        [("home", "m-home", home, 512), ("gpt", "m-gpt", gpt, 512),
+         ("server", "m-server", server, 512)],
+        [LaneOrderEntry("freellmapi", "gpt*"), LaneOrderEntry("freellmapi", "*")],
+        lane_failover={"probe_every": 2},
+    )
+    for _ in range(3):
+        r.note_lane_error("gpt")
+    assert r.lane_sick("gpt") is True
+
+    gpt_calls_after_turn: list[int] = []
+    for turn in range(4):
+        text = await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
+        assert text == "server served"       # every turn is still served
+        gpt_calls_after_turn.append(gpt.calls)
+
+    # Skips 1 and 3 cost zero gpt calls; skips 2 and 4 convert to probes.
+    assert gpt_calls_after_turn == [0, 1, 1, 2]
+    # 3 seeded + 2 failed probes, capped by the 6-wide window.
+    assert r.lane_health()["gpt"]["errors"] == 5
+    assert r.lane_sick("gpt") is True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
