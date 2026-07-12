@@ -31,6 +31,7 @@ import { EventFeed } from './components/feed/EventFeed';
 import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
+import { WarPanel } from './components/panels/WarPanel';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
@@ -262,6 +263,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
               villagers paint + vote onto the plaza. Collapsible so the feed keeps
               its vertical budget. */}
           <GalleryPanel world={world} history={sim.history} />
+          {/* Wave O (EM-256–259): the war panel — belligerent factions + the
+              grievances driving them. Renders NOTHING in peacetime (no wars,
+              no grievances ⇒ null), so it adds zero chrome until war fires. */}
+          <WarPanel world={world} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}

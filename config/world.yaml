@@ -165,6 +165,41 @@ world:
     accuser_acquittal_penalty: 8   # accuser trust hit from onlookers
     released_notoriety_relief: 10  # notoriety cleared on release
 
+  # EM-250 — Communication & Culture (Wave O keystone). DEFAULT OFF: with
+  # enabled false the meme/rumor/letter machinery is fully inert — no prompt
+  # line, no menu entry, no event, byte-identical pre-Wave-O (EM-155 + the
+  # em161 golden). Absent ⇒ engine defaults (these same values). MUST stay in
+  # sync with the CommunicationParams mirror in
+  # backend/petridish/config/loader.py.
+  comm:
+    enabled: false            # master gate for Wave-O transmission verbs + diffusion
+    diffusion_chance: 0.20    # per-carrier co-located passive-hop chance (seeded)
+    max_diffusions: 12        # per-round ceiling on passive hops
+    half_life_ticks: 30       # ticks without a spread before virality halves
+    decay_ticks: 80           # ticks without a spread before a zero-carrier meme dies
+    letter_cap: 8             # undelivered letters parked per mailbox (FIFO)
+    held_meme_cap: 12         # memes an agent carries (FIFO, oldest dropped)
+    distortion_strength: 1    # text-mutation passes per transmission hop
+    meme_images: true         # create_image auto-registers an image meme (EM-253)
+    dominance_threshold: 6    # carriers needed for a meme_dominant event
+    camp_min_shared: 2        # shared memes that bind a culture-camp edge
+    camp_min_size: 3          # minimum members for a culture camp
+
+  # EM-256/EM-257 — organized violence (Wave O War track). DEFAULT OFF: with
+  # enabled false the grievance ledger, the advance_war round boundary, and the
+  # declare_war/peace_treaty governance lane are fully inert — no prompt line,
+  # no menu entry, no event, byte-identical pre-Wave-O (EM-155 + the em161
+  # golden). Absent ⇒ engine defaults (these same values). MUST stay in sync
+  # with the WarParams mirror in backend/petridish/config/loader.py.
+  war:
+    enabled: false            # master gate for the whole war layer
+    casus_belli_threshold: 50 # faction grievance needed before declare_war opens
+    grievance_per_act: 6      # base grievance a cross-faction crime feeds the victim's faction
+    grievance_per_witness: 2  # extra grievance per co-located witness (word spreads)
+    grievance_decay: 1        # per-round cool-off (advance_war; 0 entries drop)
+    reparations_base: 25      # default peace_treaty reparations when unspecified
+    war_notoriety: 10         # notoriety stamped on the exiled loser leader
+
   # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
   # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
   # every agent (floats 0..100, default 100). They decay every turn at these
