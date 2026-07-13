@@ -380,6 +380,19 @@ world:
     enabled: false
     strategy: annotate
 
+  # EM-310 — Chimera Twins. Opt-in gate for the marquee "same persona, different
+  # brain" pair: POST /api/agents with twin_models=[modelA, modelB] spawns a
+  # LINKED pair sharing byte-identical persona/memory-seed/starting state,
+  # differing ONLY in model, named by the Vesper / Vesper II dedup convention.
+  # The feed derives the twin lens + the auto-pinned divergence-point card
+  # CLIENT-SIDE off the additive `twin` link (feed-only chrome, off the replay
+  # surface). DEFAULT OFF so the snapshot key set + prompt golden stay byte-
+  # identical and the twin-spawn endpoint is rejected; flip enabled:true to allow
+  # the within-one-city A/B pair. MUST stay in sync with the ChimeraTwinsParams
+  # mirror in backend/petridish/config/loader.py.
+  chimera_twins:
+    enabled: false
+
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
   # the B1 consent mechanic) co-located at a home-kind place for a birth.

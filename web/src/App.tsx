@@ -32,6 +32,7 @@ import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
 import { WarPanel } from './components/panels/WarPanel';
+import { TwinLens } from './components/panels/TwinLens';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
@@ -267,6 +268,12 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* EM-310 (Chimera Twins): the twin lens — a synchronized dual-strand
+              thread + an auto-pinned divergence-point card for a linked
+              same-persona/different-model pair. Renders NOTHING until such a
+              pair is spawned behind world.chimera_twins.enabled, so it adds zero
+              chrome to every ordinary run. Feed-only chrome (off replay). */}
+          <TwinLens world={world} history={sim.history} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}

@@ -133,6 +133,29 @@ def _coerce_mailbox(value: Any, cap: int = 8) -> list[dict]:
     return out
 
 
+def _coerce_twin(value: Any) -> dict | None:
+    """EM-310 — coerce a restored twin link into a canonical
+    {group, of, model} dict, or None. A valid link REQUIRES a non-blank peer
+    agent id (`of`); `group` / `model` are optional labels that default to "".
+    Absent (None) or malformed (non-dict, missing/blank `of`) → None (fail-safe:
+    a tampered or pre-EM-310 snapshot restores a twinless agent). Pure/total:
+    never raises, no clock, no RNG. Byte-stable round-trip (EM-155): to_dict
+    emits the SAME three keys in the same shape, so a legit link re-emits
+    verbatim, and a twinless agent (None) is never emitted at all."""
+    if not isinstance(value, dict):
+        return None
+    of = value.get("of")
+    if not isinstance(of, str) or not of.strip():
+        return None
+    group = value.get("group")
+    model = value.get("model")
+    return {
+        "group": group.strip() if isinstance(group, str) else "",
+        "of": of.strip(),
+        "model": model.strip() if isinstance(model, str) else "",
+    }
+
+
 def _coerce_skills(value: Any) -> dict:
     """EM-227 — coerce a restored/seed skills map into {str: int>=0}. Absent
     (None) or malformed (non-dict, non-str keys, non-int/negative levels) →
@@ -579,6 +602,19 @@ class AgentState:
     # defensively, so a letter-free agent — and every pre-EM-250 snapshot —
     # keeps the exact prior dict shape.
     mailbox: list[dict] = field(default_factory=list)
+    # EM-310 — Chimera Twins link: {group, of, model}. Present ONLY on an agent
+    # that is half of a deliberately linked twin pair (a within-one-city A/B of
+    # the same persona/memory-seed/starting state across two models). `of` is
+    # the peer twin's agent id, `group` the shared base name (Vesper), `model`
+    # this twin's profile. The FEED derives the twin lens + divergence card
+    # CLIENT-SIDE off this link — the engine NEVER reads it into a prompt or a
+    # turn (feed-only chrome, off the replay surface). ADDITIVE with default
+    # None → serialized in to_dict ONLY when set and restored defensively
+    # (absent/garbage → None via _coerce_twin), so a twinless agent — and every
+    # pre-EM-310 snapshot — keeps the exact prior dict shape (the EM-155
+    # byte-identical guarantee + the em161 golden, since it surfaces no prompt
+    # block). A linked pair survives a fork/resume like any durable agent state.
+    twin: dict | None = None
 
     def skill_level(self, skill: str) -> int:
         """EM-227 — this agent's level in `skill` (0 if unknown/unheld). The
@@ -702,6 +738,16 @@ class AgentState:
             d["held_memes"] = list(self.held_memes)
         if self.mailbox:
             d["mailbox"] = [dict(e) for e in self.mailbox]
+        # EM-310 — the twin link rides along ONLY for a linked twin (present),
+        # so a twinless agent (and every pre-EM-310 snapshot) keeps the exact
+        # prior dict shape. The three keys are emitted in a fixed shape for a
+        # byte-stable round-trip (_coerce_twin restores the same shape).
+        if self.twin:
+            d["twin"] = {
+                "group": str(self.twin.get("group", "")),
+                "of": str(self.twin.get("of", "")),
+                "model": str(self.twin.get("model", "")),
+            }
         return d
 
 
@@ -9216,6 +9262,25 @@ class World:
             self._turn_order.append(agent_id)
         return agent
 
+    def link_twins(self, a_id: str, b_id: str, group: str) -> bool:
+        """EM-310 — cross-link an already-spawned pair of agents as Chimera
+        Twins: each gets a `twin` = {group, of, model} pointing at the other.
+        `group` is the shared base name (Vesper); `model` is copied from each
+        agent's own profile. No-op returning False when either id is missing or
+        they are the same agent (a twin must have a DISTINCT peer). The link is
+        pure feed metadata — it changes no prompt, no scheduling, no economy
+        (feed-only chrome, off the replay surface); it merely rides the snapshot
+        so the client twin lens can find the pair. Idempotent: relinking the
+        same pair rewrites the same values."""
+        a = self.agents.get(a_id)
+        b = self.agents.get(b_id)
+        if a is None or b is None or a_id == b_id:
+            return False
+        grp = str(group or "").strip()
+        a.twin = {"group": grp, "of": b_id, "model": str(a.profile or "")}
+        b.twin = {"group": grp, "of": a_id, "model": str(b.profile or "")}
+        return True
+
     def kill_agent(self, agent_id: str) -> None:
         agent = self.agents.get(agent_id)
         if agent:
@@ -9987,6 +10052,12 @@ class World:
                     d.get("mailbox"),
                     _block_get(getattr(params, "comm", None), "letter_cap", 8),
                 ),
+                # EM-310 — twin link: additive. Pre-EM-310 snapshots lack the
+                # key and restore None; a present value is coerced to the
+                # canonical {group, of, model} (a missing/blank peer id → None,
+                # fail-safe). Byte-stable round-trip (EM-155): a twinless agent
+                # is never re-emitted, so the agent's dict is unchanged.
+                twin=_coerce_twin(d.get("twin")),
             )
             a.relationships = {
                 str(aid): RelationshipState(

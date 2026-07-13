@@ -918,6 +918,12 @@ class SpawnBody(BaseModel):
     # labeled contestants. Each entry must be a known profile name. Only valid
     # in god mode; governance + ab_models is a 400.
     ab_models: list[str] | None = None
+    # EM-310 — Chimera Twins opt-in: a LINKED pair (EXACTLY two known profiles)
+    # sharing byte-identical persona/memory-seed/starting state, differing ONLY
+    # in model, named by the Vesper / Vesper II dedup convention. Gated on
+    # world.chimera_twins.enabled (else 400); god mode only; mutually exclusive
+    # with ab_models. Absent ⇒ byte-identical pre-EM-310 spawn behavior.
+    twin_models: list[str] | None = None
 
 
 def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str, str, str]:
@@ -972,10 +978,120 @@ def _ab_tag(profile_name: str) -> str:
     return profile_name.split("-")[0]
 
 
+def _chimera_twins_enabled() -> bool:
+    """EM-310 — read the `world.chimera_twins.enabled` flag defensively
+    (dataclass OR dict OR absent), with the IDENTICAL default (False) as the
+    config, so a world without the block behaves as OFF."""
+    ct = getattr(_config.world, "chimera_twins", None) if _config else None
+    return bool(getattr(ct, "enabled", False)) if ct is not None else False
+
+
 @app.post("/api/agents")
 async def spawn_agent(body: SpawnBody, response: Response):
     if _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
+
+    # EM-310 — Chimera Twins: a LINKED pair (EXACTLY two models) sharing
+    # byte-identical persona/memory-seed/starting state, named by the Vesper /
+    # Vesper II dedup convention. Gated on world.chimera_twins.enabled; god mode
+    # only; mutually exclusive with ab_models. Runs BEFORE the ab_models branch.
+    if body.twin_models:
+        if body.ab_models:
+            raise HTTPException(
+                400, "twin_models and ab_models are mutually exclusive")
+        if not _chimera_twins_enabled():
+            raise HTTPException(
+                400,
+                "chimera_twins is disabled "
+                "(set world.chimera_twins.enabled: true to spawn twins)",
+            )
+        mode = _spawn_mode(body)
+        if mode != "god":
+            raise HTTPException(400, "twin_models is only supported in god mode")
+        if len(body.twin_models) != 2:
+            raise HTTPException(
+                400, "twin_models must name EXACTLY two profiles (one per twin)")
+        if body.twin_models[0] == body.twin_models[1]:
+            raise HTTPException(
+                400, "twin_models must name two DISTINCT models "
+                     "(the whole point is same persona, different brain)")
+        # Resolve the shared base name / personality (persona card fills gaps).
+        name = body.name
+        personality = body.personality
+        if body.persona:
+            wanted = body.persona.strip().lower()
+            card = next(
+                (c for c in load_personas() if c["name"].strip().lower() == wanted),
+                None,
+            )
+            if card is None:
+                raise HTTPException(400, f"Unknown persona: {body.persona!r}")
+            name = name or card["name"]
+            personality = personality or card["personality"]
+        personality = personality or "A generic agent."
+        if not name:
+            raise HTTPException(400, "name is required (directly or via persona)")
+        # Validate both profiles before touching the world.
+        for prof_name in body.twin_models:
+            if _router.get_profile(prof_name) is None:
+                raise HTTPException(400, f"Unknown profile: {prof_name!r}")
+        cadence_tier = body.cadence_tier or "protagonist"
+        if cadence_tier not in _VALID_CADENCE_TIERS:
+            raise HTTPException(
+                400,
+                f"Unknown cadence_tier: {body.cadence_tier!r} "
+                "(protagonist|supporting|background)",
+            )
+        # Spawn both twins with the SAME base name — the world's Vesper / Vesper
+        # II dedup renames the second. Byte-identical starting state (spawn_agent
+        # gives identical energy/credits/location); only the model differs.
+        agents = []
+        for prof_name in body.twin_models:
+            agent = _world.spawn_agent(
+                name=name,
+                personality=personality,
+                profile=prof_name,
+                location=body.location,
+                cadence_tier=cadence_tier,
+            )
+            _router.reassign(agent.id, prof_name)
+            agents.append(agent)
+        # Cross-link the pair (each points at the other; model copied per twin).
+        _world.link_twins(agents[0].id, agents[1].id, group=name)
+        spawned: list[dict] = []
+        if _loop and _repo:
+            run_id = _loop._run_id or 1
+            for agent in agents:
+                # save AFTER linking so the persisted row carries the twin key.
+                _repo.save_agent(run_id, agent, _world.tick)
+                peer = agents[1] if agent is agents[0] else agents[0]
+                _loop._emit_event({
+                    "kind": "agent_spawned",
+                    "actor_id": agent.id,
+                    "actor_type": "god",
+                    "profile": agent.profile,
+                    "profile_color": _loop._get_profile_color(agent),
+                    "text": f"{agent.name} spawned "
+                            f"(Chimera Twin of {name} on {agent.profile}).",
+                    "payload": {
+                        "agent_id": agent.id,
+                        "name": agent.name,
+                        "method": "god",
+                        # correlates the pair in the feed twin lens (client-side).
+                        "twin_group": name,
+                        "twin_of": peer.id,
+                    },
+                })
+        for agent in agents:
+            spawned.append({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "profile": agent.profile,
+            })
+        if _loop:
+            _loop._broadcast_world_state()
+        response.status_code = 201
+        return {"status": "ok", "mode": "god", "twins": spawned}
 
     # run-663 — A/B opt-in: when ab_models is present and non-empty (god mode
     # only) spawn one agent per model using the shared name/personality.
