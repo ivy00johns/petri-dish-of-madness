@@ -277,12 +277,21 @@ async def test_curated_terminal_that_is_the_pin_forfeits_the_reservation():
 # Shipped lanes.yaml wiring
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_shipped_lanes_yaml_sets_curated_terminal_fallback():
+def test_shipped_lanes_yaml_terminal_fallback_reverted_to_auto():
+    # EM-319 (2026-07-13) REVERTED EM-318's curated `gpt-oss-120b` terminal back
+    # to blind `auto`. EM-318's premise ("`auto` returns All models exhausted in
+    # a storm") was empirically false: during a real rate storm every SPECIFIC
+    # lane (incl. gpt-oss-120b) 429s while `auto` still routes to a live model —
+    # so a specific terminal death-spiraled the sim (~93% idle → starvation). The
+    # blind pool is the only storm-proof last attempt; feed-noise is handled by
+    # the retained EM-318 feed-silence, not by avoiding `auto`.
     cfg = load_config()
     ar = cfg.world.adaptive_routing
-    assert ar.enabled is True and ar.max_attempts == 4
-    # The LIVE fix: a deterministic free lane holds the reserved terminal slot.
-    assert ar.terminal_fallback == "gpt-oss-120b"
+    # EM-323 widened max_attempts 4→5; EM-324 rebuilt `order` to probe-verified
+    # clean lanes (dropped command-a-2 the truncator). Terminal stays `auto`
+    # (EM-319) — the only storm-proof last attempt.
+    assert ar.enabled is True and ar.max_attempts == 5
+    assert ar.terminal_fallback == "auto"
     # Still $0-first, paid anthropic opt-in stays dead last.
     assert ar.allow_paid is False
     assert ar.order[-1].source == "anthropic" and ar.order[-1].free is False

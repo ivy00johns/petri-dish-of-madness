@@ -41,7 +41,10 @@ profiles:
     adapter: openai           # routed through FreeLLMAPI's OpenAI-compatible interface
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
-    model_id: qwen/qwen3-next-80b-a3b-instruct:free
+    # EM-323 (2026-07-13): `qwen/qwen3-next-80b-a3b-instruct:free` is not in the
+    # FreeLLMAPI catalog (the OpenRouter-style id) — 404/exhausted. Corrected to
+    # the plain catalogued id so the proxy can route it across any qwen provider.
+    model_id: qwen3-next-80b
     max_tokens: 1024
     temperature: 0.8
     color: "#f5a623"
@@ -88,7 +91,11 @@ profiles:
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
-    model_id: mistral-small-latest
+    # EM-321 (2026-07-13): `mistral-small-latest` is NOT in the FreeLLMAPI catalog
+    # ("Model not in the catalog") — Vesper's pinned lane ALWAYS 404'd and fell to
+    # the fallback, even with no rate storm. Corrected to a catalogued, has-key,
+    # currently-live id (resolves to mistralai/mistral-small-4-119b-2603).
+    model_id: mistral-small-4-119b
     max_tokens: 1024
     temperature: 0.8
     color: "#7bc950"
@@ -97,10 +104,97 @@ profiles:
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
-    model_id: "@cf/moonshotai/kimi-k2.6"
+    # EM-323 (2026-07-13): `@cf/moonshotai/kimi-k2.6` pins to the CLOUDFLARE-only
+    # kimi upstream, which exhausts constantly (Mox's chronic fallback). The
+    # plain catalogued id lets the proxy route kimi across any provider.
+    model_id: kimi-k2.6
     max_tokens: 1024
     temperature: 0.8
     color: "#d4a017"
+
+  # ── EM-323 (2026-07-13) — rich-voice additions. Verified live on the proxy:
+  # mistral-large-3-675b returns clean, vivid, in-character prose (no CoT leak);
+  # command-a-2 (Cohere Command A+) is a strong distinct voice. Added as profiles
+  # (assignable to agents / reassign / A-B) AND wired into the config/lanes.yaml
+  # bounce walk as high-priority fallbacks so a failed pin lands on a RICH model
+  # (not the small gpt-oss:20b) during rate storms — the fix for flat storm chat.
+  - name: mistral-large
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: mistral-large-3-675b
+    max_tokens: 1024
+    temperature: 0.85
+    color: "#e0533d"
+
+  # EM-324 (2026-07-13): command-a-2 resolves to cohere/command-a-plus-05-2026,
+  # which — verified against run 1388 — emits a PLAINTEXT reasoning preamble on
+  # strict-JSON agent turns and is output-capped at 1024 tokens, so it truncates
+  # (finish_reason=length, no JSON) 32/32 times before emitting an action. It is
+  # therefore REMOVED from the config/lanes.yaml bounce order and NOT a pin; the
+  # profile stays only so any legacy reference still resolves. The Cohere *R*
+  # series (command-r, below) is clean — only the *A+* series preambles.
+  - name: command-a
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: command-a-2
+    max_tokens: 1024
+    temperature: 0.85
+    color: "#9b59d0"
+
+  # ── EM-324 (2026-07-13) — deliberate agent repin. The prior pins (gemini-flash
+  # =gemini-3.5-flash, groq-llama=llama-3.3-70b-versatile, kimi=kimi-k2.6) all
+  # point at chronically rate-limited native endpoints, so nearly every turn was
+  # SILENTLY rerouted by the proxy — often onto the truncating command-a-plus
+  # (Ada/Bram/Mox idled 10-16×/run). These three replacements were verified LIVE
+  # (probe, mid rate-storm): each is currently REACHABLE and returns clean
+  # strict-JSON (finish=stop), and they keep lab diversity (Google / Meta /
+  # Cohere). Reachability shifts hourly, so the adaptive bounce loop + the EM-324
+  # detour fix (a chronic length/no-JSON lane goes sick → routes around it) cover
+  # a pin that later rate-limits.
+  - name: gemini-flash-lite   # Ada — Google; the lite tier has real free headroom
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: gemini-3.1-flash-lite
+    max_tokens: 1024
+    temperature: 0.8
+    color: "#3ddc84"
+    rpd: 1500
+
+  - name: llama-fast          # Bram — Meta; the fp8-fast endpoint, not groq's exhausted one
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: llama-3.3-70b-fp8-fast
+    max_tokens: 1024
+    temperature: 0.8
+    color: "#5aa9e6"
+
+  - name: command-r           # Cohere R series (clean JSON; NOT the A+ truncator) — bounce lane
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: command-r-2
+    max_tokens: 1024
+    temperature: 0.8
+    color: "#d96fd0"
+
+  # EM-324 follow-up — Mox's pin moved off command-r (Cohere native is heavily
+  # rate-limited right now, so it reroutes almost every turn — onto gpt-oss-120b,
+  # which CoT-truncates on the heavy agent prompt, recovering only via the retry
+  # boost). minimax-m3 (MiniMax) has a currently-LIVE native + clean strict-JSON
+  # (probe-verified finish=stop) and a distinct exotic voice — a 5th lab across
+  # the cast (Google / Meta / MiniMax / Mistral / Cerebras).
+  - name: minimax             # Mox — MiniMax; live native, clean JSON, distinct voice
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: minimax-m3
+    max_tokens: 1024
+    temperature: 0.85
+    color: "#e8a13c"
 
   # ── Adaptive Lane Routing (2026-07-08) — bounce-only healthy lane ──
   # NOT pinned to any agent: it exists so the config/lanes.yaml sorting list's

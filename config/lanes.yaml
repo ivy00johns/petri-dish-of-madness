@@ -33,13 +33,24 @@
 
 adaptive_routing:
   enabled: true                # go-live 2026-07-08 — ordered health-aware bounce loop
-  max_attempts: 4              # 3 curated healthy lanes + the RESERVED terminal slot
+  max_attempts: 5              # EM-323: 4 curated healthy lanes + the RESERVED terminal
+                               # (was 3+1; widened to keep llama/qwen after the two
+                               #  new rich-voice lanes jumped to the top of `order`)
   per_attempt_timeout_s: 12    # per-lane wall-clock cap (no 86s doomed cascades)
   allow_paid: false            # $0-first: `free: false` lanes stay off unless true
   # W31/EM-318 — the curated terminal fallback: the reserved final-attempt lane.
-  # A DETERMINISTIC free profile (NOT the proxy's blind `auto` pool router).
-  # Set to `auto` (+ move `auto` last in `order`) to restore the W30 backstop.
-  terminal_fallback: gpt-oss-120b
+  # 2026-07-13 HOTFIX (EM-319): reverted to `auto`. EM-318's premise ("`auto`
+  # returns All models exhausted during a rate storm") is empirically FALSE —
+  # live probes during a rate storm show `auto` reliably routes to a live model
+  # (e.g. gpt-oss:20b) while EVERY specific-model lane (gemini/groq/qwen and the
+  # gpt-oss-120b terminal itself) can be individually rate-limited and return
+  # "All models exhausted". With a specific terminal, ~93% of turns idled →
+  # agents stopped eating → starvation death spiral (tick ~3600). `auto` is the
+  # only lane that survives a partial rate storm, so it must be the GUARANTEED
+  # last attempt. The feed-noise reason EM-318 moved away from `auto` is already
+  # solved by the retained feed-silence (EM-318 part 1) — `auto` here is a SILENT
+  # working backstop, not a source of chat error cards.
+  terminal_fallback: auto
 
   # P1 is STATIC — lanes come from this file matched against configured
   # profiles. Discovery/refresh (poll FreeLLMAPI /v1/models + detect direct
@@ -48,22 +59,35 @@ adaptive_routing:
   # priority order, best-headroom-first. matcher = source + model glob.
   # a glob `model: "*"` sweeps every remaining lane of that source.
   # matcher globs run against each lane's ACTUAL model_id (profiles.yaml), NOT
-  # the profile name. The three specific entries below are verified to resolve:
-  #   gpt-oss-120b*    -> profile gpt-oss-120b  (model_id gpt-oss-120b)
-  #   *llama-3.3-70b*  -> profile groq-llama    (model_id llama-3.3-70b-versatile)
-  #   *qwen3-next-80b* -> profile qwen-next     (model_id qwen/qwen3-next-80b-a3b-instruct:free)
-  # Pre-2026-07-08 these were `gpt-oss-120b*` (no such profile — ghost) and bare
-  # `qwen3-next-80b*` (the id is prefixed `qwen/`, so it matched nothing); the
-  # curated priority silently collapsed to config-order with `auto` last.
-  # priority order (top = tried first). `gpt-oss-120b` is DEMOTED from #1 to the
-  # terminal slot (see terminal_fallback): as the cleanest-JSON free lane it is
-  # the ideal GUARANTEED last resort. It is reserved post-walk, so it does NOT
-  # consume a curated-walk attempt (the walk still gets max_attempts-1 lanes and
-  # the reserved terminal makes max_attempts total — call-rate unchanged).
+  # the profile name. Every specific entry below is verified to resolve:
+  #   mistral-large-3-675b   -> profile mistral-large
+  #   mistral-small-4-119b   -> profile mistral-small
+  #   llama-3.3-70b-fp8-fast -> profile llama-fast       (EM-324)
+  #   gemini-3.1-flash-lite  -> profile gemini-flash-lite (EM-324)
+  #   minimax-m3             -> profile minimax          (EM-324)
+  #   command-r-2            -> profile command-r        (EM-324)
+  #   gpt-oss-120b*          -> profile gpt-oss-120b
+  #
+  # EM-324 (2026-07-13) — the bounce pool is the set of PROBE-VERIFIED clean
+  # lanes (each returned finish=stop + valid JSON live, mid rate-storm). Removed
+  # `command-a-2` (=cohere/command-a-plus preambles + truncates 32/32 on strict-
+  # JSON, run 1388) and `*qwen3-next-80b*` (OpenRouter :free 50 rpd). Order is
+  # by OBSERVED direct-clean reliability from live run 1389: the mistral/llama/
+  # gemini/minimax instruct lanes serve finish=stop directly; `gpt-oss-120b` is
+  # DEMOTED to just above the sweep — it is a REASONING model whose CoT truncates
+  # (finish=length) on the heavy ~4900-token agent prompt (run 1389 caught what
+  # the short-prompt probe missed), recoverable only via the retry boost, so it
+  # is a last-resort clean lane, not a preferred one. The GUARANTEED last slot
+  # stays `auto` (terminal_fallback, EM-319). A pin that later rate-limits trips
+  # the EM-324 detour (chronic length/no-JSON → lane_sick) and walks THIS list.
   order:
-    - { source: freellmapi, model: "*llama-3.3-70b*",  free: true }   # #1 walk — strong, healthy
-    - { source: freellmapi, model: "*qwen3-next-80b*", free: true }   # #2 walk
-    - { source: freellmapi, model: "*",                free: true }   # remaining free lanes (sweep)
-    - { source: freellmapi, model: "auto" }                           # proxy picker — low-priority blind resort (no longer terminal)
-    - { source: freellmapi, model: "gpt-oss-120b*",    free: true }   # RESERVED terminal — clean JSON, deterministic last resort
-    - { source: anthropic,  model: "claude-sonnet-5",  free: false }  # paid, opt-in, dead last
+    - { source: freellmapi, model: "mistral-large-3-675b",   free: true }  # mistral-large — premium rich voice (when up)
+    - { source: freellmapi, model: "mistral-small-4-119b",   free: true }  # mistral-small — verified direct-clean (finish=stop)
+    - { source: freellmapi, model: "llama-3.3-70b-fp8-fast", free: true }  # llama-fast — Meta/Cloudflare, verified direct-clean
+    - { source: freellmapi, model: "gemini-3.1-flash-lite",  free: true }  # gemini-flash-lite — Google, verified direct-clean
+    - { source: freellmapi, model: "minimax-m3",             free: true }  # minimax — MiniMax, clean JSON
+    - { source: freellmapi, model: "command-r-2",            free: true }  # command-r — Cohere R (clean when its native is up)
+    - { source: freellmapi, model: "gpt-oss-120b*",          free: true }  # gpt-oss-120b — DEMOTED: reasoning, CoT-truncates on heavy turns (recoverable)
+    - { source: freellmapi, model: "*",                      free: true }  # remaining free lanes (sweep)
+    - { source: freellmapi, model: "auto" }                                # blind proxy picker — low-priority resort
+    - { source: anthropic,  model: "claude-sonnet-5",        free: false } # paid, opt-in, dead last

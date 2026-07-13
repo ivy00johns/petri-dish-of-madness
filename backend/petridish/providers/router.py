@@ -1166,6 +1166,7 @@ class Router:
         truncated: bool,
         timed_out: bool = False,
         served_by: str | None = None,
+        errored: bool = False,
     ) -> None:
         """Record one runtime parse outcome for this profile's lane (EM-135).
 
@@ -1209,7 +1210,8 @@ class Router:
                 if isinstance(bounced_to, str) and bounced_to:
                     target = bounced_to
         self._record_parse_outcome(
-            target, parsed=parsed, truncated=truncated, timed_out=timed_out)
+            target, parsed=parsed, truncated=truncated, timed_out=timed_out,
+            errored=errored)
 
     def _record_parse_outcome(
         self,
@@ -1218,19 +1220,29 @@ class Router:
         parsed: bool,
         truncated: bool,
         timed_out: bool = False,
+        errored: bool = False,
     ) -> None:
         """Raw window append for a KNOWN-attributed lane — the internal path
         the bounce loop's own demerits use, where `profile_name` is already
         the lane that was actually attempted. It must bypass the bounce
         redirect above: a stale pending snapshot for that lane (staged when
         it was itself a bounced-FROM pin on an earlier turn) must never
-        re-route a demerit it just earned directly."""
+        re-route a demerit it just earned directly.
+
+        EM-324 — `errored=True` records this outcome as an `error` demerit (the
+        same key note_lane_error uses, counted by lane_sick), for a lane that
+        returned a 200 but ZERO usable content — a finish_reason=length with no
+        parseable JSON. That is functionally an error, not a mere content-quibble
+        (the token boost can't cure an output-capped preamble), so a lane that
+        does it chronically must go sick and be detoured, not fed forever."""
         window = self._lane_outcomes.setdefault(
             profile_name, deque(maxlen=_LANE_WINDOW)
         )
         entry = {"parsed": bool(parsed), "truncated": bool(truncated)}
         if timed_out:
             entry["timed_out"] = True
+        if errored:
+            entry["error"] = True
         window.append(entry)
         # routed_via at the time of the outcome — introspection only.
         self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
