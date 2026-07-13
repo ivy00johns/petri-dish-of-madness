@@ -574,6 +574,14 @@ export type EventKind =
   | 'peace_signed'
   | 'war_exhausted'
   | 'exiled'
+  // EM-317 — The Prophecy Board (god-channel). prophecy_posted {prophecy_id,
+  // predicate, params, posted_tick, deadline_tick, horizon, omen} (actor 'god',
+  // the omen on the replay surface); prophecy_resolved {prophecy_id, predicate,
+  // params, status, fulfilled, posted_tick, deadline_tick, resolved_tick, omen}
+  // stamps PROPHECY FULFILLED / BROKEN. Emitted only when
+  // world.prophecy_board.enabled — absent histories are the pre-EM-317 norm.
+  | 'prophecy_posted'
+  | 'prophecy_resolved'
   // EM-123 — a zoned district matured a tier when a megaproject completed.
   // actor_type:"system" (actor_id null), payload {neighborhood_id, zone_kind,
   // tier, building_id, reason:"megaproject_completed"}. Only emitted when
