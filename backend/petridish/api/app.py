@@ -1645,6 +1645,56 @@ async def post_proclamation(body: ProclaimBody):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# EM-317 — The Prophecy Board (a new god-channel verb, default OFF behind
+# world.prophecy_board.enabled). The watcher posts a prophecy from a CONSTRAINED
+# enum-predicate menu; it lands as a `prophecy_posted` god event ON the replay
+# surface (like a proclamation) and the omen begins riding every agent's prompt.
+# Resolution is deterministic (the engine's per-tick projection) — this endpoint
+# only POSTS. Mirrors /api/proclaim: engine seam does all validation, its
+# ValueError maps to 422.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ProphesyBody(BaseModel):
+    # The enum predicate: agent_convicted {agent_id} | building_falls {district}
+    # | agents_reconcile {agent_a, agent_b}. Free text is REJECTED by the engine
+    # (deterministic scoring needs the enum) — never validated loosely here.
+    predicate: str = Field(min_length=1, max_length=64)
+    # Predicate params (agent ids / district). Validated + normalized by the seam.
+    params: dict = Field(default_factory=dict)
+    # Countdown horizon in ticks (clamped to [horizon_min, horizon_max] by the
+    # seam); None ⇒ the seam's max horizon.
+    horizon: int | None = Field(default=None, ge=1)
+
+
+@app.post("/api/prophesy", status_code=201)
+async def post_prophecy(body: ProphesyBody):
+    """God posts a prophecy from the enum-predicate menu. Calls the engine seam
+    `world.post_prophecy_as_god(predicate, params, horizon)` and emits
+    `prophecy_posted` (actor_type 'god'). 503 not initialized / seam absent; 422
+    when the board is disabled, the per-run cap is reached, the predicate/horizon
+    is invalid, or the predicate is already true (the seam's ValueError)."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    post_fn = getattr(_world, "post_prophecy_as_god", None)
+    if post_fn is None:
+        raise HTTPException(
+            503, "engine prophecy support (world.post_prophecy_as_god) not available yet"
+        )
+    try:
+        evt = post_fn(body.predicate.strip(), dict(body.params or {}), body.horizon)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    prophecy_id = None
+    if isinstance(evt, dict) and evt.get("kind") == "prophecy_posted":
+        e = dict(evt)
+        e.setdefault("actor_type", "god")
+        _loop._emit_event(e)
+        prophecy_id = e.get("payload", {}).get("prophecy_id")
+    _loop._broadcast_world_state()
+    return {"status": "ok", "prophecy_id": prophecy_id}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Wave A.2 — god console: targeted interventions (EM-136) + one-shot whispers
 # (EM-137). The world-wide levers above (inject/billboard/proclaim) can't save
 # ONE starving agent; these target a single soul. Free-scale law: pure state

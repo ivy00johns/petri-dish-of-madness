@@ -105,6 +105,10 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   war_exhausted:        '⚔',
   exiled:               '⚔',
   peace_signed:         '🕊',
+  // EM-317 — the Prophecy Board: the 🔮 omen crystal on both the posting and
+  // the FULFILLED/BROKEN resolution (the backend stamps the verdict in .text).
+  prophecy_posted:      '🔮',
+  prophecy_resolved:    '🔮',
   // EM-123 — a zoned district matured a tier (megaproject completed).
   district_grew:        '🏙',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
@@ -155,6 +159,10 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   war_exhausted:        'var(--marker-crime)',
   exiled:               'var(--marker-crime)',
   peace_signed:         'var(--faction-tint)',
+  // EM-317 — the Prophecy Board reads in god-gold (the SAME --marker-miracle the
+  // god's miracles wear), so an omen and its verdict pop as the god's voice.
+  prophecy_posted:      'var(--marker-miracle)',
+  prophecy_resolved:    'var(--marker-miracle)',
 };
 
 // W8 — the animal chaos magenta, referenced as the shared --marker-animal token
@@ -391,7 +399,7 @@ export const CATEGORIES: FeedCategory[] = [
   // Wave E: god miracles live with the other world-scale levers (random_event
   // is the closest sibling — god_intervention itself is uncategorized ON
   // PURPOSE, but miracles are filterable world events, not feedback receipts).
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked', 'world_paused', 'district_grew'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'prophecy_posted', 'prophecy_resolved', 'memory', 'run_forked', 'world_paused', 'district_grew'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },

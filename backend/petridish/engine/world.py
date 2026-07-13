@@ -1498,6 +1498,14 @@ class World:
         # reach the whole world. Each entry: {id, tick, text, replies:[]}; the
         # NEWEST entry is the active decree. Serialized in to_snapshot().
         self.proclamations: list[dict] = []
+        # EM-317 — The Prophecy Board. Each entry is a watcher-posted prophecy:
+        # {id, tick, deadline_tick, predicate, params, baseline, omen, status,
+        # resolved_tick}. `status` walks pending → fulfilled|broken via the
+        # per-tick resolve_prophecies() projection. The list is PER-RUN capped
+        # (never evicted — resolved prophecies stay on the board) and serialized
+        # ONLY when non-empty (the factions/active_miracles pattern), so a
+        # default / flag-off world keeps the exact pre-EM-317 snapshot bytes.
+        self.prophecies: list[dict] = []
         # PROTOTYPE (god-channel) — the town's name, set by CONSENSUS: an agent
         # proposes a `name_town` rule (propose_rule) and it takes effect when the
         # vote passes (_on_rule_activated). Empty = unnamed. Serialized in
@@ -6535,6 +6543,257 @@ class World:
         }
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-317 — THE PROPHECY BOARD (a new god-channel verb).
+    # The watcher posts a prophecy from a CONSTRAINED enum-predicate menu; it is
+    # logged as a god event ON the replay surface exactly like a proclamation,
+    # and agents perceive a one-line omen (active_prophecy_omen, injected in
+    # runtime._assemble_context). RESOLUTION is a deterministic per-tick
+    # projection over DURABLE world state (crime_status / building status /
+    # relationship trust) — enum predicates only, NO fuzzy judging — driven by
+    # resolve_prophecies() in the loop's per-tick sweep (beside expire_miracles).
+    # Everything gates on `world.prophecy_board.enabled` (default OFF): a default
+    # world posts no prophecy, injects no omen, runs no sweep, writes no snapshot
+    # key ⇒ byte-identical pre-EM-317 (the em161 golden + EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # The enum predicate menu (load-bearing: free-text predicates would wreck
+    # deterministic scoring). Each maps to a durable-state check in
+    # _prophecy_satisfied; the tuple is the api's allow-list.
+    PROPHECY_PREDICATES = ("agent_convicted", "building_falls", "agents_reconcile")
+
+    def _prophecy_param(self, name: str, default: Any) -> Any:
+        """EM-317 — defensive accessor for the `world.prophecy_board` config
+        block (ProphecyBoardParams dataclass OR dict OR absent — EM-155
+        conventions, like _war_param). An absent block ⇒ every default ⇒
+        pre-EM-317 worlds run unchanged (enabled defaults FALSE). Keep these
+        call-site defaults == ProphecyBoardParams defaults."""
+        return _block_get(getattr(self.params, "prophecy_board", None), name, default)
+
+    def prophecy_board_enabled(self) -> bool:
+        """EM-317 — config gate `world.prophecy_board.enabled` (default OFF).
+        Disabled ⇒ no /api/prophesy verb, no omen prompt line, no resolution
+        sweep, no snapshot key — byte-identical pre-EM-317. PUBLIC (the api +
+        runtime injection gate on it)."""
+        return bool(self._prophecy_param("enabled", False))
+
+    def _prophecy_districts(self) -> set[str]:
+        """The set of district tags a building could sit in (for building_falls
+        validation). Derived from places, so no hardcoded enum drifts."""
+        return {p.district for p in self.places.values() if p.district}
+
+    def _destroyed_in_district(self, district: str) -> int:
+        """Count buildings currently `destroyed` whose place sits in `district`.
+        A prophecy fires when this rises above its post-time baseline — so a
+        building already down when the omen was spoken never counts."""
+        n = 0
+        for b in self.buildings.values():
+            if b.status != "destroyed":
+                continue
+            place = self.places.get(b.location)
+            if place is not None and place.district == district:
+                n += 1
+        return n
+
+    def _mutual_trust(self, aid: str, bid: str) -> int:
+        """The WEAKER of the two directional trust edges between aid and bid
+        (a missing edge reads 0). Reconciliation needs BOTH sides warm."""
+        a = self.agents.get(aid)
+        b = self.agents.get(bid)
+        ta = a.relationships[bid].trust if a and bid in a.relationships else 0
+        tb = b.relationships[aid].trust if b and aid in b.relationships else 0
+        return min(int(ta), int(tb))
+
+    def _prophecy_satisfied(self, p: dict) -> bool:
+        """Deterministic predicate projection over DURABLE world state. True the
+        instant the prophecy has come to pass (checked every sweep until the
+        countdown expires). Enum-only — never an LLM judgment."""
+        pred = p.get("predicate")
+        params = p.get("params") or {}
+        baseline = p.get("baseline") or {}
+        if pred == "agent_convicted":
+            a = self.agents.get(str(params.get("agent_id") or ""))
+            # "convicted" = a guilty town-hall trial verdict (crime_status jailed).
+            return bool(a and a.crime_status == "jailed")
+        if pred == "building_falls":
+            district = str(params.get("district") or "")
+            return self._destroyed_in_district(district) > int(baseline.get("destroyed", 0))
+        if pred == "agents_reconcile":
+            floor = int(self._prophecy_param("reconcile_trust", 20))
+            return self._mutual_trust(
+                str(params.get("agent_a") or ""), str(params.get("agent_b") or "")
+            ) >= floor
+        return False
+
+    def _prepare_prophecy(
+        self, predicate: str, params: dict, horizon: int
+    ) -> tuple[dict, dict, str]:
+        """Validate + NORMALIZE a predicate's params, capture its post-time
+        BASELINE (serialized so a fork/restore resolves identically), and mint
+        the ONE-line omen. Raises ValueError (api → 422) on an unknown target,
+        an unrecognized district, or an ALREADY-satisfied predicate (a degenerate
+        prophecy that would fulfill on the very next sweep)."""
+        floor = int(self._prophecy_param("reconcile_trust", 20))
+        if predicate == "agent_convicted":
+            aid = str(params.get("agent_id") or "")
+            a = self.agents.get(aid)
+            if a is None:
+                raise ValueError(f"unknown agent: {aid!r}")
+            if a.crime_status == "jailed":
+                raise ValueError(f"{a.name} is already convicted")
+            norm = {"agent_id": aid}
+            omen = (f"An omen speaks: {a.name} will answer for their crimes "
+                    f"within {horizon} ticks.")
+            return norm, {}, omen
+        if predicate == "building_falls":
+            district = str(params.get("district") or "")
+            known = self._prophecy_districts()
+            if district not in known:
+                raise ValueError(
+                    f"unknown district: {district!r} (known: {sorted(known)})")
+            norm = {"district": district}
+            baseline = {"destroyed": self._destroyed_in_district(district)}
+            omen = (f"An omen speaks: a building will fall in the {district} "
+                    f"quarter within {horizon} ticks.")
+            return norm, baseline, omen
+        if predicate == "agents_reconcile":
+            aid = str(params.get("agent_a") or "")
+            bid = str(params.get("agent_b") or "")
+            a, b = self.agents.get(aid), self.agents.get(bid)
+            if a is None:
+                raise ValueError(f"unknown agent: {aid!r}")
+            if b is None:
+                raise ValueError(f"unknown agent: {bid!r}")
+            if aid == bid:
+                raise ValueError("a prophecy needs two different souls to reconcile")
+            if self._mutual_trust(aid, bid) >= floor:
+                raise ValueError(f"{a.name} and {b.name} are already at peace")
+            norm = {"agent_a": aid, "agent_b": bid}
+            omen = (f"An omen speaks: {a.name} and {b.name} will make peace "
+                    f"within {horizon} ticks.")
+            return norm, {}, omen
+        raise ValueError(f"unknown predicate: {predicate!r}")
+
+    def post_prophecy_as_god(
+        self, predicate: str, params: dict | None = None, horizon: int | None = None
+    ) -> dict:
+        """God-mode: post a prophecy from the enum menu. The api layer (POST
+        /api/prophesy) emits the returned `prophecy_posted` event through the
+        normal pipeline (actor_type 'god'); it lands on the replay surface and
+        the omen begins riding every agent's prompt (one line) until it resolves.
+        Raises ValueError (api → 422) when the board is disabled, the per-run cap
+        is reached, the predicate/horizon is invalid, or the predicate is already
+        true (see _prepare_prophecy)."""
+        if not self.prophecy_board_enabled():
+            raise ValueError("the prophecy board is disabled")
+        cap = int(self._prophecy_param("cap", 8))
+        if len(self.prophecies) >= cap:
+            raise ValueError(f"prophecy cap reached ({cap} per run)")
+        predicate = str(predicate or "").strip()
+        if predicate not in self.PROPHECY_PREDICATES:
+            raise ValueError(
+                f"unknown predicate: {predicate!r} "
+                f"(choose one of {list(self.PROPHECY_PREDICATES)})")
+        hmin = int(self._prophecy_param("horizon_min", 5))
+        hmax = int(self._prophecy_param("horizon_max", 200))
+        if horizon is None:
+            horizon = hmax
+        try:
+            horizon = int(horizon)
+        except (TypeError, ValueError):
+            raise ValueError("horizon must be an integer")
+        if not (hmin <= horizon <= hmax):
+            raise ValueError(f"horizon must be within [{hmin}, {hmax}] ticks")
+        norm, baseline, omen = self._prepare_prophecy(predicate, params or {}, horizon)
+        entry = {
+            "id": f"prophecy-{self.tick}-{len(self.prophecies)}",
+            "tick": self.tick,
+            "deadline_tick": self.tick + horizon,
+            "predicate": predicate,
+            "params": norm,
+            "baseline": baseline,
+            "omen": omen,
+            "status": "pending",
+            "resolved_tick": None,
+        }
+        self.prophecies.append(entry)
+        return {
+            "kind": "prophecy_posted",
+            "actor_id": "god",
+            "actor_type": "god",
+            "turn_id": None,
+            "text": f"🔮 {omen}",
+            "payload": {
+                "prophecy_id": entry["id"],
+                "predicate": predicate,
+                "params": dict(norm),
+                "posted_tick": entry["tick"],
+                "deadline_tick": entry["deadline_tick"],
+                "horizon": horizon,
+                "omen": omen,
+            },
+        }
+
+    def active_prophecy_omen(self) -> str | None:
+        """The ONE omen line injected into every agent's prompt while a prophecy
+        is pending (runtime._assemble_context). HARD-CAPPED at one line: with
+        several pending, only the NEWEST speaks (the prompt-diet constraint). The
+        live tick countdown rides the same line so the dread sharpens as the
+        deadline nears. None ⇒ nothing injected (flag off, or none pending)."""
+        if not self.prophecy_board_enabled():
+            return None
+        for p in reversed(self.prophecies):
+            if p.get("status") == "pending" and p.get("omen"):
+                remaining = max(0, int(p.get("deadline_tick", 0)) - self.tick)
+                return f"{p['omen']} ({remaining} ticks remain.)"
+        return None
+
+    def _prophecy_resolved_event(self, p: dict, fulfilled: bool) -> dict:
+        """Build the on-surface `prophecy_resolved` god event (turn_id null, like
+        miracle_expired) stamping PROPHECY FULFILLED / PROPHECY BROKEN."""
+        verdict = "FULFILLED" if fulfilled else "BROKEN"
+        return {
+            "kind": "prophecy_resolved",
+            "actor_id": "god",
+            "actor_type": "god",
+            "turn_id": None,
+            "text": f"🔮 PROPHECY {verdict} — {p.get('omen', '')}",
+            "payload": {
+                "prophecy_id": p.get("id"),
+                "predicate": p.get("predicate"),
+                "params": dict(p.get("params") or {}),
+                "status": p.get("status"),
+                "fulfilled": fulfilled,
+                "posted_tick": p.get("tick"),
+                "deadline_tick": p.get("deadline_tick"),
+                "resolved_tick": p.get("resolved_tick"),
+                "omen": p.get("omen", ""),
+            },
+        }
+
+    def resolve_prophecies(self) -> list[dict]:
+        """EM-317 — the per-tick resolution sweep (called beside expire_miracles).
+        Walks every PENDING prophecy: satisfied ⇒ fulfilled, else the countdown
+        elapsed ⇒ broken. Returns ready-to-emit `prophecy_resolved` events (empty
+        when the board is off or nothing changed). Deterministic — a pure
+        projection over durable world state + tick, so a replay/fork resolves
+        every prophecy identically."""
+        if not self.prophecy_board_enabled():
+            return []
+        events: list[dict] = []
+        for p in self.prophecies:
+            if p.get("status") != "pending":
+                continue
+            if self._prophecy_satisfied(p):
+                p["status"] = "fulfilled"
+                p["resolved_tick"] = self.tick
+                events.append(self._prophecy_resolved_event(p, True))
+            elif self.tick >= int(p.get("deadline_tick", 0)):
+                p["status"] = "broken"
+                p["resolved_tick"] = self.tick
+                events.append(self._prophecy_resolved_event(p, False))
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Wave A.2 (god console) — targeted interventions (EM-136) + one-shot
     # whispers (EM-137). The world-wide levers (RANDOM_EVENTS, proclamations)
     # could never save ONE starving agent; these target a single soul. Free-scale
@@ -9608,6 +9867,29 @@ class World:
                  "until_tick": int(m.get("until_tick", 0))}
                 for m in self.active_miracles
             ]
+        # EM-317 — the Prophecy Board. Serialized ONLY when non-empty (the
+        # active_miracles pattern), so a prophecy-free / flag-off world — and
+        # every pre-EM-317 snapshot — keeps the exact prior key set (absent ⇒ []
+        # on restore). The whole record round-trips (incl. `baseline`) so a
+        # fork/restore resolves every pending prophecy byte-identically (EM-155).
+        if self.prophecies:
+            snap["prophecies"] = [
+                {
+                    "id": str(p.get("id", "")),
+                    "tick": int(p.get("tick", 0)),
+                    "deadline_tick": int(p.get("deadline_tick", 0)),
+                    "predicate": str(p.get("predicate", "")),
+                    "params": {str(k): v for k, v in (p.get("params") or {}).items()},
+                    "baseline": {str(k): v for k, v in (p.get("baseline") or {}).items()},
+                    "omen": str(p.get("omen", "")),
+                    "status": str(p.get("status", "pending")),
+                    "resolved_tick": (
+                        int(p["resolved_tick"])
+                        if p.get("resolved_tick") is not None else None
+                    ),
+                }
+                for p in self.prophecies
+            ]
         # EM-228 — open skill-learning requests {teacher_id: {asker_id, skill,
         # tick}}. Serialized ONLY when non-empty (the cap_demotions pattern), so a
         # request-free world — and every pre-EM-228 snapshot — keeps the exact
@@ -10317,6 +10599,36 @@ class World:
             for m in (state.get("active_miracles") or [])
             if isinstance(m, dict) and m.get("kind")
         ]
+        # EM-317 — restore the Prophecy Board (round-trips to_snapshot exactly).
+        # Additive: pre-EM-317 snapshots lack the key and restore [] ⇒ byte-
+        # identical. Defensive: drop non-dict / id-less / unknown-predicate rows,
+        # coerce scalar types, and hold the list to the per-run cap so a tampered
+        # snapshot can never crash or grow the board unbounded.
+        _proph_cap = int(world._prophecy_param("cap", 8))
+        _restored_prophecies: list[dict] = []
+        for p in (state.get("prophecies") or []):
+            if not isinstance(p, dict):
+                continue
+            pid = str(_block_get(p, "id", ""))
+            predicate = str(_block_get(p, "predicate", ""))
+            if not pid or predicate not in cls.PROPHECY_PREDICATES:
+                continue
+            status = str(_block_get(p, "status", "pending"))
+            if status not in ("pending", "fulfilled", "broken"):
+                status = "pending"
+            rt = _block_get(p, "resolved_tick", None)
+            _restored_prophecies.append({
+                "id": pid,
+                "tick": _int(_block_get(p, "tick", 0)),
+                "deadline_tick": _int(_block_get(p, "deadline_tick", 0)),
+                "predicate": predicate,
+                "params": {str(k): v for k, v in (_block_get(p, "params", {}) or {}).items()},
+                "baseline": {str(k): v for k, v in (_block_get(p, "baseline", {}) or {}).items()},
+                "omen": str(_block_get(p, "omen", "")),
+                "status": status,
+                "resolved_tick": (_int(rt) if rt is not None else None),
+            })
+        world.prophecies = _restored_prophecies[-_proph_cap:]
         # Wave I / EM-210+213 — restore the gallery + the voted plaza banner
         # (additive: pre-Wave-I snapshots lack the keys and restore [] / "", so a
         # fork/replay of an Atelier world re-hangs the same banner and re-lists the
