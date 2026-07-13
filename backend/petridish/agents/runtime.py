@@ -3846,6 +3846,21 @@ def _assemble_context(
   carry on — but you have heard it, and so has everyone else.
 """
 
+    # ── EM-317 (Prophecy Board) — the ONE omen line rides every prompt while a
+    # prophecy is pending. HARD-CAPPED at a single line (active_prophecy_omen
+    # returns only the newest pending omen — the prompt-diet constraint), so the
+    # agent perceives the foretelling but the prompt never bloats. Flag OFF /
+    # none pending ⇒ None ⇒ no block ⇒ byte-identical (getattr keeps callers safe
+    # if the engine seam is ever absent).
+    prophecy_block = ""
+    _omen_fn = getattr(world, "active_prophecy_omen", None)
+    _omen = _omen_fn() if callable(_omen_fn) else None
+    if _omen:
+        prophecy_block = f"""
+=== 🔮 AN OMEN ===
+  {_omen}
+"""
+
     # ── EM-137 (god console) — one-shot god whisper, consumed RIGHT HERE. ─────
     # Popping the queue IS the delivery: the line rides only THIS prompt and the
     # next turn carries no trace (the same consume-once pattern as
@@ -4048,7 +4063,7 @@ Mood: {agent.mood}{faction_line}{crime_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{stage_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{stage_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{prophecy_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 

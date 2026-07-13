@@ -692,6 +692,19 @@ class TickLoop:
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("miracle expiry failed: %s", exc)
 
+        # EM-317 — resolve the Prophecy Board in the SAME per-tick path: a pending
+        # prophecy that has come to pass stamps PROPHECY FULFILLED, one whose
+        # countdown elapsed stamps PROPHECY BROKEN (prophecy_resolved, standalone
+        # god events, turn_id null). Flag OFF (default) ⇒ no-op, no events.
+        try:
+            resolve_prophecies = getattr(self._world, "resolve_prophecies", None)
+            if callable(resolve_prophecies):
+                for evt in resolve_prophecies():
+                    evt.setdefault("turn_id", None)
+                    self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("prophecy resolution failed: %s", exc)
+
         # EM-245 (S3b) — advance an active master-plan morph (deterministic k
         # edges/tick, standalone system events, turn_id null). An INACTIVE plan
         # (None) is a no-op, so existing runs stay byte-identical.

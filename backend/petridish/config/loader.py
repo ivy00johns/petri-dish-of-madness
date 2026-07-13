@@ -1373,6 +1373,39 @@ class SettlementParams:
 
 
 @dataclass
+class ProphecyBoardParams:
+    """EM-317 — The Prophecy Board (config `world.prophecy_board`). The watcher
+    posts a prophecy from a CONSTRAINED enum-predicate menu ("X convicted within
+    N ticks", "a building falls in district Y", "X and Z reconcile") — logged as
+    a god event ON the replay surface exactly like a proclamation, and agents
+    perceive a one-line omen. Resolution is a DETERMINISTIC per-tick projection
+    over durable world state (enum predicates only, NO fuzzy judging): the
+    countdown expires into PROPHECY FULFILLED / PROPHECY BROKEN.
+
+    DEFAULT OFF: a world.yaml WITHOUT the `prophecy_board` block — and every
+    pre-EM-317 snapshot — is byte-identical (no /api/prophesy verb, no omen
+    prompt line, no snapshot key, no resolution sweep). The engine reads this
+    block via the defensive `_prophecy_param` accessor with IDENTICAL defaults.
+
+      enabled          — offer the god /api/prophesy verb, inject the one omen
+                         line, and run the per-tick resolution sweep. false ⇒
+                         complete no-op (byte-identical pre-EM-317).
+      cap              — max prophecies a single run may post (PER-RUN cap so
+                         watchers can't steer every run the same way; resolved
+                         prophecies stay on the board and still count).
+      horizon_min      — min countdown ticks a prophecy may name.
+      horizon_max      — max countdown ticks a prophecy may name.
+      reconcile_trust  — the mutual trust floor that counts as "reconciled"
+                         (both directions ≥ this ⇒ the reconcile predicate fires).
+    """
+    enabled: bool = False
+    cap: int = 8
+    horizon_min: int = 5
+    horizon_max: int = 200
+    reconcile_trust: int = 20
+
+
+@dataclass
 class ConstitutionParams:
     """EM-236 — Living constitution (config `world.constitution`). An amendable,
     ARTICLED foundational document layered over today's flat rule list.
@@ -1821,6 +1854,10 @@ class WorldParams:
     # (no menu line, no prompt line, no snapshot key, F1 city-origin anchoring).
     # `enabled: true` turns on found_settlement + settlement-anchored placement.
     settlements: SettlementParams = field(default_factory=SettlementParams)
+    # EM-317 — The Prophecy Board. Additive, DEFAULT OFF, so a world.yaml without
+    # the `prophecy_board` block is byte-identical to pre-EM-317 (no omen prompt
+    # line, no snapshot key, no resolution sweep, no /api/prophesy verb).
+    prophecy_board: ProphecyBoardParams = field(default_factory=ProphecyBoardParams)
     # EM-236 — living constitution. Additive with engine-matching defaults; the
     # constitution is empty until an amendment RATIFIES (a governance act), so a
     # world.yaml without the `constitution` block — and every pre-EM-236 snapshot —
@@ -2944,6 +2981,36 @@ def _parse_settlements(raw: dict | None) -> SettlementParams:
     return SettlementParams(enabled=bool(raw.get("enabled", False)))
 
 
+def _parse_prophecy_board(raw: dict | None) -> ProphecyBoardParams:
+    """Parse the optional `world.prophecy_board` block (EM-317).
+    Absent/empty/malformed -> engine-matching defaults (enabled False ⇒ a
+    complete no-op, byte-identical pre-EM-317). Each numeric key falls back to
+    its default individually and clamps sanely (a malformed value never breaks
+    the block); horizon_min is held ≤ horizon_max so the horizon window is
+    always valid."""
+    if not isinstance(raw, dict):
+        return ProphecyBoardParams()
+    d = ProphecyBoardParams()
+
+    def _int(key: str, default: int, lo: int) -> int:
+        try:
+            return max(lo, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    cap = _int("cap", d.cap, 1)
+    horizon_min = _int("horizon_min", d.horizon_min, 1)
+    horizon_max = _int("horizon_max", d.horizon_max, 1)
+    if horizon_min > horizon_max:
+        horizon_min = horizon_max
+    reconcile_trust = _int("reconcile_trust", d.reconcile_trust, 1)
+    return ProphecyBoardParams(
+        enabled=bool(raw.get("enabled", False)),
+        cap=cap, horizon_min=horizon_min, horizon_max=horizon_max,
+        reconcile_trust=reconcile_trust,
+    )
+
+
 def _parse_constitution(raw: dict | None) -> ConstitutionParams:
     """Parse the optional `world.constitution` block (EM-236).
     Absent/empty/malformed -> engine-matching defaults (the un-amended world is a
@@ -3212,6 +3279,7 @@ def _parse_world(
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
         boost=_parse_boost(w.get("boost")),
         settlements=_parse_settlements(w.get("settlements")),
+        prophecy_board=_parse_prophecy_board(w.get("prophecy_board")),
         constitution=_parse_constitution(w.get("constitution")),
         governance=_parse_governance(w.get("governance")),
         children=_parse_children(w.get("children")),
