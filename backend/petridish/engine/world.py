@@ -367,6 +367,106 @@ PLAN_STEP_CAP = 120
 PLAN_MAX_STEPS = 8
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-311 — Self-Authored Charters (Tier 1 divergence amplifier).
+#
+# A CHARTER is an agent's self-declared identity: a TIGHT enum of ambition kinds
+# (the model may only pick from this grammar — EM-297 schema-probe discipline) +
+# one short free-text creed line. Unlike the persona (a static, immutable input),
+# the charter is a compounding OUTPUT the agent itself rewrites in an ordinary
+# turn; it is injected ABOVE the persona so identity drift feeds forward. The
+# persona stays the immutable floor. Hard caps below keep weak free models from
+# ballooning or looping the self-prompt. Charters are SIM STATE — serialized,
+# event-sourced, replay-safe — never off-replay chrome.
+#
+# The enum → human-phrase map is the SINGLE source of truth: the runtime renders
+# the phrases in the prompt and validates the model's choice against the keys.
+# Keep the register EW-dense (gritty, ambitious) — these are the seeds of "I will
+# own this street and everyone on it", not cozy hobbies.
+AMBITION_GRAMMAR: dict[str, str] = {
+    "keep_the_peace": "keep the peace on these streets",
+    "amass_wealth": "amass a fortune, whatever it takes",
+    "seize_power": "seize power over this town",
+    "claim_territory": "own this street and everyone on it",
+    "found_a_dynasty": "found a lasting bloodline",
+    "expose_a_conspiracy": "expose the rot I know is hidden here",
+    "master_a_craft": "master a craft and be known for it",
+    "avenge_a_wrong": "avenge the wrongs done to me",
+    "spread_my_belief": "spread my belief through the town",
+    "sow_chaos": "sow chaos and watch it burn",
+    "protect_the_weak": "shield the weak from the strong",
+    "escape_this_place": "get out of this place for good",
+}
+# The tight enum the schema + validator gate on (the ONLY legal ambition kinds).
+AMBITION_KINDS: tuple[str, ...] = tuple(AMBITION_GRAMMAR)
+# EM-311 — hard charter bounds (mirrored by the runtime sanitizer + ACTION_SCHEMA
+# so a normalized revision always passes validation). The self-prompt loop guard.
+CHARTER_MAX_AMBITIONS = 3
+CHARTER_CREED_CAP = 140
+
+
+def normalize_charter(
+    raw: Any,
+    *,
+    max_ambitions: int = CHARTER_MAX_AMBITIONS,
+    creed_cap: int = CHARTER_CREED_CAP,
+) -> dict | None:
+    """EM-311 — coerce a raw charter into the canonical, bounded shape, or None if
+    it holds no valid ambition. Pure/total: never raises, no clock reads, no RNG
+    (the caller supplies revised_tick/revisions at write; restore preserves them).
+    Used on BOTH the write path (runtime charter_revision) and the restore path
+    (World.from_snapshot / seed_charter), so a charter round-trips byte-stably
+    (fork/replay, EM-155).
+
+    Shape: {ambitions:[kind], creed:str, revised_tick:int, revisions:int}.
+    - ambitions: de-duplicated, order-preserving, INVALID kinds dropped (fail-safe
+      against a tampered snapshot or an off-grammar model), truncated to
+      `max_ambitions`. Returns None when NONE survive — a charter with no ambition
+      is not a charter (⇒ the write path rejects it, the restore path drops it).
+    - creed: trimmed + truncated to `creed_cap`; missing/blank ⇒ "".
+    - revised_tick / revisions: non-negative ints (garbage ⇒ 0)."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        max_ambitions = max(1, int(max_ambitions))
+    except (TypeError, ValueError):
+        max_ambitions = CHARTER_MAX_AMBITIONS
+    try:
+        creed_cap = max(0, int(creed_cap))
+    except (TypeError, ValueError):
+        creed_cap = CHARTER_CREED_CAP
+    ambitions_raw = raw.get("ambitions")
+    if not isinstance(ambitions_raw, list):
+        return None
+    ambitions: list[str] = []
+    for a in ambitions_raw:
+        if not isinstance(a, str):
+            continue
+        kind = a.strip()
+        if kind in AMBITION_GRAMMAR and kind not in ambitions:
+            ambitions.append(kind)
+        if len(ambitions) >= max_ambitions:
+            break
+    if not ambitions:
+        return None
+    creed_raw = raw.get("creed")
+    creed = creed_raw.strip()[:creed_cap] if isinstance(creed_raw, str) else ""
+    try:
+        revised_tick = max(0, int(raw.get("revised_tick", 0)))
+    except (TypeError, ValueError):
+        revised_tick = 0
+    try:
+        revisions = max(0, int(raw.get("revisions", 0)))
+    except (TypeError, ValueError):
+        revisions = 0
+    return {
+        "ambitions": ambitions,
+        "creed": creed,
+        "revised_tick": revised_tick,
+        "revisions": revisions,
+    }
+
+
 def normalize_plan(raw: Any) -> dict | None:
     """Wave L / EM-223 — coerce a raw plan into the canonical, bounded shape, or
     None if it lacks a usable goal + steps. Pure/total: never raises, no clock
@@ -579,6 +679,17 @@ class AgentState:
     # defensively, so a letter-free agent — and every pre-EM-250 snapshot —
     # keeps the exact prior dict shape.
     mailbox: list[dict] = field(default_factory=list)
+    # EM-311 — self-authored charter: the agent's DECLARED identity (a tight enum
+    # of ambition kinds + one short creed line), rewritten by the agent itself in
+    # an ordinary turn and injected ABOVE the persona. UNLIKE the persona (a static
+    # input) this is a compounding OUTPUT. ADDITIVE with default None → serialized
+    # in to_dict ONLY when set and restored defensively via normalize_charter
+    # (absent/garbage → None, off-grammar ambitions dropped, over-cap truncated),
+    # so a charterless agent — and every pre-EM-311 snapshot — keeps the exact
+    # prior dict shape (the EM-155 byte-identical guarantee + the em161 golden,
+    # since an absent charter yields no prompt block and gates nothing). Set only
+    # when world.charters.enabled (seed_charter at boot, charter_revision per turn).
+    charter: dict | None = None
 
     def skill_level(self, skill: str) -> int:
         """EM-227 — this agent's level in `skill` (0 if unknown/unheld). The
@@ -702,6 +813,19 @@ class AgentState:
             d["held_memes"] = list(self.held_memes)
         if self.mailbox:
             d["mailbox"] = [dict(e) for e in self.mailbox]
+        # EM-311 — charter serialized ONLY when set, so a charterless agent (and
+        # every pre-EM-311 snapshot) keeps the exact prior dict shape (the em161
+        # golden + the byte-identical guarantee). The stored form is already
+        # canonical (normalize_charter owns the shape on both write + restore) so
+        # the round-trip is byte-stable. Surfacing it here also flows the current
+        # charter into world_state → the inspector charter-diff spectacle.
+        if self.charter:
+            d["charter"] = {
+                "ambitions": list(self.charter.get("ambitions", [])),
+                "creed": self.charter.get("creed", ""),
+                "revised_tick": int(self.charter.get("revised_tick", 0)),
+                "revisions": int(self.charter.get("revisions", 0)),
+            }
         return d
 
 
@@ -6940,6 +7064,59 @@ class World:
         gate on it."""
         return bool(self._war_param("enabled", False))
 
+    def _charter_param(self, name: str, default: Any) -> Any:
+        """EM-311 — defensive accessor for the `world.charters` config block
+        (CharterParams dataclass OR dict OR absent — EM-155 conventions, like
+        _comm_param). An absent block ⇒ every default ⇒ pre-EM-311 worlds run
+        unchanged (enabled defaults FALSE). `default` is only a fallback for a key
+        missing from the block, so keep these call-site defaults == CharterParams
+        defaults."""
+        return _block_get(getattr(self.params, "charters", None), name, default)
+
+    def charters_enabled(self) -> bool:
+        """EM-311 — config gate `world.charters.enabled` (default OFF). Disabled ⇒
+        no charter seeding, no charter prompt block, charter_revision ignored, no
+        charter_revised event — byte-identical pre-EM-311 behavior (the em161
+        golden). PUBLIC (like war_enabled) — the runtime prompt/apply gate on it."""
+        return bool(self._charter_param("enabled", False))
+
+    def seed_charter(self, agent: AgentState) -> None:
+        """EM-311 — assign the configured uniform STARTING charter to `agent` when
+        charters are enabled and the agent has none yet. Idempotent (an existing
+        charter is never overwritten) and deterministic (no RNG, no clock beyond
+        the current tick stamp). The uniform seed is the marquee control: hand
+        every model the SAME starting charter and watch who they each become.
+        A no-op when disabled or when the seed normalizes to None (misconfigured
+        grammar), so it is always safe to call."""
+        if not self.charters_enabled() or agent.charter:
+            return
+        seeded = normalize_charter(
+            {
+                "ambitions": list(
+                    self._charter_param("seed_ambitions", ["keep_the_peace"])),
+                "creed": self._charter_param(
+                    "seed_creed", "I am still finding my place here."),
+                "revised_tick": self.tick,
+                "revisions": 0,
+            },
+            max_ambitions=self._charter_param(
+                "max_ambitions", CHARTER_MAX_AMBITIONS),
+            creed_cap=self._charter_param("creed_cap", CHARTER_CREED_CAP),
+        )
+        if seeded is not None:
+            agent.charter = seeded
+
+    def seed_all_charters(self) -> None:
+        """EM-311 — seed every living, charterless agent at boot (deterministic id
+        order) with the uniform starting charter. A no-op when charters are
+        disabled (pre-EM-311 / golden worlds), so it is always safe to call.
+        Idempotent: already-chartered agents are skipped, so a re-seed never
+        clobbers a self-authored charter."""
+        if not self.charters_enabled():
+            return
+        for aid in sorted(self.agents):
+            self.seed_charter(self.agents[aid])
+
     def _needs_param(self, name: str, default: Any) -> Any:
         """EM-229 — defensive accessor for the `world.needs` config block
         (NeedsParams dataclass OR dict OR absent — EM-155 conventions, like
@@ -9986,6 +10163,21 @@ class World:
                 mailbox=_coerce_mailbox(
                     d.get("mailbox"),
                     _block_get(getattr(params, "comm", None), "letter_cap", 8),
+                ),
+                # EM-311 — charter: additive. Pre-EM-311 snapshots lack the key
+                # and restore None; a present charter is coerced by normalize_charter
+                # (off-grammar ambitions dropped, over-cap truncated, garbage → None),
+                # so a tampered/legacy charter never re-injects invalid ambitions.
+                # Byte-stable round-trip (EM-155): the canonical write form restores
+                # verbatim, and an absent charter is never re-emitted.
+                charter=normalize_charter(
+                    d.get("charter"),
+                    max_ambitions=_block_get(
+                        getattr(params, "charters", None),
+                        "max_ambitions", CHARTER_MAX_AMBITIONS),
+                    creed_cap=_block_get(
+                        getattr(params, "charters", None),
+                        "creed_cap", CHARTER_CREED_CAP),
                 ),
             )
             a.relationships = {

@@ -26,7 +26,11 @@ from typing import Any
 
 import jsonschema
 
-from ..engine.world import World, AgentState, BUILD_TYPES, normalize_plan
+from ..engine.world import (
+    World, AgentState, BUILD_TYPES, normalize_plan,
+    normalize_charter, AMBITION_GRAMMAR, AMBITION_KINDS,
+    CHARTER_MAX_AMBITIONS, CHARTER_CREED_CAP,
+)
 from ..providers.base import ProviderError
 from ..providers.router import Router
 from .memory_retrieval import (
@@ -87,6 +91,28 @@ ACTION_SCHEMA = {
                     "maxItems": 8,
                     "items": {"type": "string", "maxLength": 120},
                 },
+                "reason": {"type": "string", "maxLength": 200},
+            },
+        },
+        # EM-311 — OPTIONAL self-authored charter rewrite, parsed from the SAME
+        # single response (zero extra calls). The TIGHT enum grammar (EM-297
+        # schema-probe discipline): `ambitions` items are constrained to the legal
+        # AMBITION_KINDS, so an off-grammar kind fails the schema — but the
+        # sanitizer (_sanitize_charter_revision) runs FIRST and normalizes/strips a
+        # malformed revision so a bad charter can never fail the turn. Honored only
+        # when world.charters.enabled.
+        "charter_revision": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["ambitions"],
+            "properties": {
+                "ambitions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": CHARTER_MAX_AMBITIONS,
+                    "items": {"type": "string", "enum": list(AMBITION_KINDS)},
+                },
+                "creed": {"type": "string", "maxLength": CHARTER_CREED_CAP},
                 "reason": {"type": "string", "maxLength": 200},
             },
         },
@@ -1516,6 +1542,45 @@ def _sanitize_plan_revision(action_dict: dict) -> str | None:
     if isinstance(reason, str) and reason.strip():
         clean["reason"] = reason.strip()[:_PLAN_GOAL_CAP]
     action_dict["plan_revision"] = clean
+    return None
+
+
+def _sanitize_charter_revision(action_dict: dict) -> str | None:
+    """EM-311 — pre-validate the optional `charter_revision` IN PLACE so a
+    malformed/off-grammar one can never fail the turn (the _sanitize_plan_revision
+    leniency rule). A usable revision (>=1 legal AMBITION_KINDS ambition) is
+    rewritten to a clean, bounded {ambitions, creed?, reason?} that passes the
+    schema; anything else is POPPED before validation and the reason returned for
+    the decision trace. Off-grammar ambitions are DROPPED (never rejected wholesale)
+    so a model that names one bad kind among good ones still lands its charter —
+    the EM-297 'meet the model where it is' rule."""
+    if "charter_revision" not in action_dict:
+        return None
+    rev = action_dict.pop("charter_revision")
+    if not isinstance(rev, dict):
+        return "malformed charter_revision object"
+    ambitions_raw = rev.get("ambitions")
+    if not isinstance(ambitions_raw, list):
+        return "charter_revision missing ambitions"
+    ambitions: list[str] = []
+    for a in ambitions_raw:
+        if not isinstance(a, str):
+            continue
+        kind = a.strip()
+        if kind in AMBITION_GRAMMAR and kind not in ambitions:
+            ambitions.append(kind)
+        if len(ambitions) >= CHARTER_MAX_AMBITIONS:
+            break
+    if not ambitions:
+        return "charter_revision has no valid ambition"
+    clean: dict = {"ambitions": ambitions}
+    creed = rev.get("creed")
+    if isinstance(creed, str) and creed.strip():
+        clean["creed"] = creed.strip()[:CHARTER_CREED_CAP]
+    reason = rev.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        clean["reason"] = reason.strip()[:200]
+    action_dict["charter_revision"] = clean
     return None
 
 
@@ -3430,6 +3495,48 @@ def _assemble_context(
                 "Optional; act freely regardless."
             )
 
+    # ── EM-311 — self-authored charter (injected ABOVE the persona). Empty
+    # (⇒ byte-identical prompt) unless world.charters.enabled — so the em161
+    # golden and every charter-off world are unaffected. When enabled it shows the
+    # agent's DECLARED identity (or invites one) plus the rewrite grammar; rides
+    # this turn — zero extra LLM calls. (getattr keeps callers safe if the engine
+    # seam is ever absent ⇒ no block.) The legal-kinds line is the EM-297 tight
+    # grammar the model must choose from.
+    charter_block = ""
+    _charters_enabled = getattr(world, "charters_enabled", None)
+    if callable(_charters_enabled) and _charters_enabled():
+        _legal_kinds = ", ".join(AMBITION_KINDS)
+        _charter = getattr(agent, "charter", None)
+        _rewrite = (
+            '  Rewrite it whenever your experiences change who you are — add '
+            '"charter_revision": {"ambitions": ["<kind>", ...up to '
+            f'{CHARTER_MAX_AMBITIONS}], "creed": "<one line in your voice>", '
+            '"reason": "..."} to this turn\'s JSON.\n'
+            f"  Legal ambition kinds: {_legal_kinds}."
+        )
+        if isinstance(_charter, dict) and _charter.get("ambitions"):
+            _amb_lines = "\n".join(
+                f"  - {a} ({AMBITION_GRAMMAR.get(a, a)})"
+                for a in _charter["ambitions"]
+            )
+            _creed = _charter.get("creed", "")
+            _creed_line = f'\n  Creed: "{_creed}"' if _creed else ""
+            charter_block = (
+                "\n=== YOUR CHARTER (self-authored — who you have DECIDED to be) "
+                "===\n"
+                f"{_amb_lines}{_creed_line}\n"
+                "  This is the identity YOU chose; it stands ABOVE your given "
+                "nature below.\n"
+                f"{_rewrite}\n"
+            )
+        else:
+            charter_block = (
+                "\n=== YOUR CHARTER ===\n"
+                "  You have not declared a charter — who you have DECIDED to "
+                "become, beyond your given nature. Set one this turn:\n"
+                f"{_rewrite}\n"
+            )
+
     # ── W11b / EM-081 — overheard speech (context injection only, no calls) ───
     overheard_block = ""
     if overheard:
@@ -3931,7 +4038,7 @@ def _assemble_context(
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-{clock_header}Personality: {agent.personality}
+{clock_header}{charter_block}Personality: {agent.personality}
 
 === YOUR STATUS ===
 Location: {place_name} (kind={place_kind})
@@ -5475,6 +5582,53 @@ class AgentRuntime:
                 })
         if plan_rev_rejected is not None:
             trace["plan_revision_rejected"] = plan_rev_rejected
+
+        # EM-311 — self-authored charter rewrite (mirrors plan_revised — rides
+        # _multi, the loop tick-stamps + persists + broadcasts, zero extra calls).
+        # The sanitizer already normalized the revision to legal AMBITION_KINDS +
+        # a capped creed; here it becomes the agent's new charter (bumping the
+        # revision counter + stamping the tick) and emits ONE charter_revised event
+        # carrying the exact old→new diff — the inspector-diff spectacle. Gated on
+        # world.charters.enabled: a disabled world ignores the field and stays
+        # byte-silent (the em161 golden). The caps default to the module hard
+        # ceiling the schema/sanitizer enforce (== the config defaults).
+        charter_rev_rejected = action_dict.pop("_charter_revision_rejected", None)
+        charter_revision = action_dict.get("charter_revision")
+        if self.world.charters_enabled() and isinstance(charter_revision, dict):
+            old_charter = agent.charter if isinstance(agent.charter, dict) else None
+            prev_revisions = (
+                int(old_charter.get("revisions", 0)) if old_charter else 0)
+            new_charter = normalize_charter({
+                "ambitions": charter_revision.get("ambitions", []),
+                "creed": charter_revision.get("creed", ""),
+                "revised_tick": self.world.tick,
+                "revisions": prev_revisions + 1,
+            })
+            if new_charter is not None:
+                agent.charter = new_charter
+                vow = "; ".join(
+                    AMBITION_GRAMMAR[a] for a in new_charter["ambitions"])
+                extra_events.append({
+                    "kind": "charter_revised",
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "text": f"{agent.name} now vows to {vow}.",
+                    "payload": {
+                        "ambitions": list(new_charter["ambitions"]),
+                        "creed": new_charter["creed"],
+                        "revisions": new_charter["revisions"],
+                        "reason": charter_revision.get("reason", ""),
+                        "old_ambitions": (
+                            list(old_charter.get("ambitions", []))
+                            if old_charter else []),
+                        "old_creed": (
+                            old_charter.get("creed", "") if old_charter else ""),
+                    },
+                })
+        if charter_rev_rejected is not None:
+            trace["charter_revision_rejected"] = charter_rev_rejected
+
         # EM-223 — deterministic v1 step pointer: a turn that resolved its plan's
         # work (not a fresh revision) nudges current_step forward. Zero-call,
         # plan-state only (the floor is untouched).
@@ -5736,6 +5890,9 @@ class AgentRuntime:
         # EM-223 — a malformed plan_revision is normalized or popped HERE (same
         # rule as the bond): a bad plan can never fail the turn.
         plan_rev_rejected = _sanitize_plan_revision(action_dict)
+        # EM-311 — a malformed/off-grammar charter_revision is normalized or popped
+        # HERE (same rule): a bad charter can never fail the turn.
+        charter_rev_rejected = _sanitize_charter_revision(action_dict)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
@@ -5760,6 +5917,9 @@ class AgentRuntime:
         if plan_rev_rejected is not None:
             # EM-223 — same after-validation stamping as the bond rejection.
             action_dict["_plan_revision_rejected"] = plan_rev_rejected
+        if charter_rev_rejected is not None:
+            # EM-311 — same after-validation stamping as the plan rejection.
+            action_dict["_charter_revision_rejected"] = charter_rev_rejected
         return action_dict, None, meta
 
     def _forget_response(self, profile_name: str, messages: list[dict]) -> None:
