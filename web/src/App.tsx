@@ -32,6 +32,9 @@ import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
 import { WarPanel } from './components/panels/WarPanel';
+import { StorylinesRail } from './components/feed/StorylinesRail';
+import { STORYLINES_RAIL_ENABLED } from './lib/featureFlags';
+import type { Storyline } from './lib/storylines';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
@@ -176,6 +179,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
   // EM-095: camera focus (follow/zoom target) + the reset-view signal.
   const [focus, setFocus] = useState<FocusTarget | null>(null);
   const [resetNonce, setResetNonce] = useState(0);
+  // EM-312: the selected storyline — drives the feed thread filter + the 3-D
+  // tether. Display-only state; never touches the sim. Ignored when the flag is
+  // off (the rail isn't mounted, so it can never be set).
+  const [selectedStory, setSelectedStory] = useState<Storyline | null>(null);
 
   // EM-105: feed-column width — persisted, drag-handle driven.
   const [feedWidth, setFeedWidth] = useState<number>(loadFeedWidth);
@@ -267,10 +274,30 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* EM-312 (Storylines Rail): the feed's drama index — recurring
+              rivalries / redemptions / power grabs, promoted from the event log
+              with zero LLM. Gated OFF by default; renders nothing until a thread
+              is promoted, so peacetime chrome stays byte-identical. Clicking a
+              thread filters the feed (below) + tethers its principals in 3-D. */}
+          {STORYLINES_RAIL_ENABLED && (
+            <StorylinesRail
+              world={world}
+              history={sim.history}
+              selectedId={selectedStory?.id ?? null}
+              onSelect={setSelectedStory}
+            />
+          )}
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}
-            <EventFeed events={events} onGrantReply={sim.postBillboard} />
+            <EventFeed
+              events={events}
+              onGrantReply={sim.postBillboard}
+              threadFilter={STORYLINES_RAIL_ENABLED && selectedStory
+                ? { id: selectedStory.id, title: selectedStory.title, principals: selectedStory.principals }
+                : null}
+              onClearThread={() => setSelectedStory(null)}
+            />
           </div>
         </aside>
 
@@ -368,6 +395,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
                   resetNonce={resetNonce}
                   onPick={handleFocus}
                   onFocusBreak={() => setFocus(null)}
+                  tetherPrincipals={STORYLINES_RAIL_ENABLED && selectedStory
+                    ? selectedStory.principals
+                    : null}
                 />
               ) : (
                 <WorldMap world={world} events={events} animalModels={animalModels} />

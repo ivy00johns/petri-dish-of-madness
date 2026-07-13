@@ -124,6 +124,12 @@ interface CozyWorldProps {
   onPick?: (target: FocusTarget) => void;
   /** EM-095: the user's drag broke a follow — the caller clears its selection. */
   onFocusBreak?: () => void;
+  /**
+   * EM-312 (Storylines Rail): the selected storyline's principal agent ids. A
+   * red tether is drawn between the first two whose place resolves. Absent/null
+   * (feature off / nothing selected) ⇒ no tether, so the scene is byte-identical.
+   */
+  tetherPrincipals?: string[] | null;
 }
 
 const BUBBLE_LIFETIME_MS = 5200;
@@ -368,6 +374,7 @@ export function CozyWorld({
   resetNonce = 0,
   onPick,
   onFocusBreak,
+  tetherPrincipals = null,
 }: CozyWorldProps) {
   // ── Chat bubble lifecycle ──────────────────────────────────────────────
   const lastSeqRef = useRef<number>(-1);
@@ -679,6 +686,7 @@ export function CozyWorld({
           decalsBySurface={decalsBySurface}
           focus={focus}
           onPick={onPick}
+          tetherPrincipals={tetherPrincipals}
         />
         {/* EM-188: painted street-name labels — proximity-gated (EM-102
             threshold), flat on the roads so they never collide with the
@@ -741,6 +749,7 @@ function Scene({
   decalsBySurface,
   focus,
   onPick,
+  tetherPrincipals,
 }: {
   world: WorldState;
   bubblesByAgent: Map<string, BubbleData[]>;
@@ -763,6 +772,8 @@ function Scene({
   decalsBySurface: Map<string, string>;
   focus: FocusTarget | null;
   onPick?: (target: FocusTarget) => void;
+  /** EM-312: principal agent ids for the storyline tether (null = none). */
+  tetherPrincipals?: string[] | null;
 }) {
   const { places, agents } = world;
   const animals = world.animals ?? [];
@@ -954,6 +965,16 @@ function Scene({
         );
       })}
 
+      {/* EM-312: the storyline tether — a taut red line between the selected
+          thread's first two principals, tracking their live animated positions
+          each frame. Null/under-two-resolvable ⇒ renders nothing. */}
+      <StorylineTether
+        principals={tetherPrincipals ?? null}
+        agents={agents}
+        placeCenters={placeCenters}
+        animMap={animMap}
+      />
+
       {/* W8: the roaming chaos critters (cat + dog), each wandering near its
           place; chaotic ones wear the magenta accent. 3D stays primary. */}
       {/* Wave H4 (EM-209): owned pets follow their owner. We resolve the owner's
@@ -996,5 +1017,83 @@ function Scene({
         );
       })}
     </>
+  );
+}
+
+// EM-312: the storyline tether. A WebGL material color (not a DOM style), so it
+// is exempt from design-token-guard — this is the crime-red the feed rail marks
+// a RIVALRY/POWER GRAB with (--marker-crime = #ff3333).
+const TETHER_COLOR = '#ff3333';
+/** Tether height — above heads so it reads as a line drawn "across the plaza". */
+const TETHER_Y = 1.6;
+
+/**
+ * StorylineTether (EM-312) — a taut red line between the selected storyline's
+ * first two principals. Endpoints track the agents' LIVE animated positions
+ * (the same `animMap` refs the villagers lerp) each frame, so the tether snaps
+ * across the plaza and follows them as they move. Falls back to each agent's
+ * place-center before its villager has an animated position. Renders nothing
+ * unless at least two principals resolve to known agents — so with the feature
+ * off (principals null) the scene graph is byte-identical.
+ */
+function StorylineTether({
+  principals,
+  agents,
+  placeCenters,
+  animMap,
+}: {
+  principals: string[] | null;
+  agents: WorldState['agents'];
+  placeCenters: Map<string, { x: number; z: number }>;
+  animMap: React.MutableRefObject<Map<string, AnimPos>>;
+}) {
+  const geomRef = useRef<THREE.BufferGeometry>(null);
+
+  // The first two principals that are actually known agents (dead or alive).
+  const pair = useMemo<readonly [string, string] | null>(() => {
+    if (!principals) return null;
+    const valid = principals.filter((id) => agents.some((a) => a.id === id));
+    return valid.length >= 2 ? [valid[0], valid[1]] : null;
+  }, [principals, agents]);
+
+  // Static place-center fallback per endpoint (used until the villager anim
+  // ref exists, and every frame if it never does).
+  const fallback = useMemo<readonly [{ x: number; z: number }, { x: number; z: number }] | null>(() => {
+    if (!pair) return null;
+    const at = (id: string) => {
+      const a = agents.find((x) => x.id === id);
+      return (a && placeCenters.get(a.location)) ?? { x: 0, z: 0 };
+    };
+    return [at(pair[0]), at(pair[1])];
+  }, [pair, agents, placeCenters]);
+
+  const initial = useMemo(() => {
+    const p0 = fallback?.[0] ?? { x: 0, z: 0 };
+    const p1 = fallback?.[1] ?? { x: 0, z: 0 };
+    return new Float32Array([p0.x, TETHER_Y, p0.z, p1.x, TETHER_Y, p1.z]);
+  }, [fallback]);
+
+  useFrame(() => {
+    const g = geomRef.current;
+    if (!g || !pair) return;
+    const p0 = animMap.current.get(pair[0]) ?? fallback?.[0] ?? { x: 0, z: 0 };
+    const p1 = animMap.current.get(pair[1]) ?? fallback?.[1] ?? { x: 0, z: 0 };
+    const attr = g.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!attr) return;
+    attr.setXYZ(0, p0.x, TETHER_Y, p0.z);
+    attr.setXYZ(1, p1.x, TETHER_Y, p1.z);
+    attr.needsUpdate = true;
+  });
+
+  if (!pair) return null;
+
+  return (
+    // Keyed by the pair so a new selection rebuilds the buffer cleanly.
+    <line key={pair.join('~')}>
+      <bufferGeometry ref={geomRef}>
+        <bufferAttribute attach="attributes-position" args={[initial, 3]} />
+      </bufferGeometry>
+      <lineBasicMaterial color={TETHER_COLOR} transparent opacity={0.85} />
+    </line>
   );
 }
