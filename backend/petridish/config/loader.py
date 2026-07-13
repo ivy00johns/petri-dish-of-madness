@@ -872,6 +872,37 @@ class CapGovernorParams:
 
 
 @dataclass
+class FingerprintTickerParams:
+    """EM-313 — Fingerprint Ticker (config `world.fingerprint_ticker`).
+
+    Gates the behavioral-stylometry ticker: a zero-LLM, read-only classifier
+    that guesses which model an agent runs from its event-log behavior and
+    surfaces a converging live guess in the feed margin vs the X-Routed-Via
+    ground truth. FEED/VIEWER chrome ONLY — it never writes events, never
+    touches the tick loop, and yields zero sim feedback, so it sits entirely
+    off the replay/determinism surface.
+
+      enabled           — master toggle. Default OFF: the GET /api/fingerprints
+                          endpoint returns {enabled: false} and the frontend
+                          ticker renders nothing (byte-identical, zero chrome).
+      reference_runs    — max OTHER runs mined for per-model reference
+                          fingerprints (the retroactive corpus).
+      temperature       — softmax sharpness over centroid distances (smaller ⇒
+                          the guess locks harder/faster).
+      lock_threshold    — confidence at which the guess is reported "locked".
+      min_turns         — below this an agent shows "gathering", no guess.
+      max_series_points — cap on the converging-series points returned per agent.
+    """
+
+    enabled: bool = False
+    reference_runs: int = 25
+    temperature: float = 0.15
+    lock_threshold: float = 0.9
+    min_turns: int = 3
+    max_series_points: int = 150
+
+
+@dataclass
 class DistrictGrowthParams:
     """EM-123 — zoned districts that DEEPEN as megaprojects complete (config
     `world.district_growth`). A completed collective building advances its
@@ -1921,6 +1952,11 @@ class WorldParams:
     # initial CityGraph via citygraph.template() at World.__init__. Absent/empty
     # ⇒ grid (byte-identical pre-EM-246: classic_grid(city_seed)).
     city: CityProfileParams = field(default_factory=CityProfileParams)
+    # EM-313 — Fingerprint Ticker (config `world.fingerprint_ticker`). VIEWER-only
+    # behavioral-stylometry chrome, default OFF; read-only over the event log, so
+    # an absent block is byte-identical pre-EM-313 (no sim-surface effect at all).
+    fingerprint_ticker: FingerprintTickerParams = field(
+        default_factory=FingerprintTickerParams)
 
 
 @dataclass
@@ -2507,6 +2543,22 @@ def _load_lanes_yaml_adaptive_routing(config_dir: Path | None) -> dict | None:
         block = data.get("adaptive_routing")
         return block if isinstance(block, dict) else None
     return None
+
+
+def _parse_fingerprint_ticker(raw: dict | None) -> FingerprintTickerParams:
+    """Parse the optional `world.fingerprint_ticker` block (EM-313). Absent/empty
+    ⇒ defaults (enabled OFF). VIEWER-only; no engine consumer."""
+    d = FingerprintTickerParams()
+    if not raw:
+        return d
+    return FingerprintTickerParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        reference_runs=int(raw.get("reference_runs", d.reference_runs)),
+        temperature=float(raw.get("temperature", d.temperature)),
+        lock_threshold=float(raw.get("lock_threshold", d.lock_threshold)),
+        min_turns=int(raw.get("min_turns", d.min_turns)),
+        max_series_points=int(raw.get("max_series_points", d.max_series_points)),
+    )
 
 
 def _parse_cap_governor(raw: dict | None) -> CapGovernorParams:
@@ -3291,6 +3343,7 @@ def _parse_world(
         miracles=_parse_miracles(w.get("miracles")),
         district_growth=_parse_district_growth(w.get("district_growth")),
         city=_parse_city_profile(w.get("city")),
+        fingerprint_ticker=_parse_fingerprint_ticker(w.get("fingerprint_ticker")),
     )
 
     places = [

@@ -33,6 +33,7 @@ import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
 import { WarPanel } from './components/panels/WarPanel';
+import FingerprintTicker from './components/panels/FingerprintTicker';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
@@ -215,6 +216,13 @@ function LiveLayout({ sim }: { sim: Sim }) {
   // the latest animal llm_call in the DEEP history (the 200-cap feed would
   // lose it between slow animal cadences). Empty until an animal has consulted
   // the LLM — the labels omit the chip until then (graceful degradation).
+  // EM-313: id → name for the fingerprint ticker's spotlighted agent.
+  const agentNames = useMemo<Record<string, string>>(() => {
+    const m: Record<string, string> = {};
+    for (const a of world?.agents ?? []) m[a.id] = a.name;
+    return m;
+  }, [world?.agents]);
+
   const animalModels = useMemo(
     () => animalModelMap(sim.history, world?.animals ?? [], world?.profiles ?? []),
     [sim.history, world],
@@ -276,6 +284,15 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* EM-313: the fingerprint ticker — a converging live model guess vs
+              the X-Routed-Via ground truth. Renders NOTHING unless the backend
+              has fingerprint_ticker.enabled (default OFF), so it adds zero
+              chrome until switched on. */}
+          <FingerprintTicker
+            tick={world?.tick}
+            activeAgentId={focus?.type === 'agent' ? focus.id : null}
+            names={agentNames}
+          />
           {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
               scores typed events and breaks its own news into rate-capped red
               cards; clicking one flies the shipped zoom-to-place camera. Gated
