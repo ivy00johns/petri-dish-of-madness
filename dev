@@ -170,13 +170,46 @@ start_backend() {
   PIDS+=($!)
 }
 
+# ── Resolve a REAL node binary (nvm-shim-proof) ───────────────────────────────
+# Some shells wrap `node` in an nvm "lazy loader" function; on a broken/partial
+# nvm install that function recurses (_load_nvm → "maximum nested function
+# level") and silently kills whatever invoked it. `npm run dev` goes through that
+# shim, so vite dies on startup and the UI falls back to mock mode (the classic
+# "everyone's on claude-haiku at tick 60" fake feed). Resolve the actual node
+# executable by absolute path instead, so the frontend launch never depends on
+# the shim. Prefers the active nvm node, then the common Homebrew/system installs.
+resolve_node() {
+  local c
+  for c in \
+    "${NVM_BIN:-}/node" \
+    /usr/local/bin/node \
+    /opt/homebrew/bin/node \
+    "${HOME}"/.nvm/versions/node/*/bin/node; do
+    if [[ -x "$c" ]] && "$c" --version >/dev/null 2>&1; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ── Start frontend ────────────────────────────────────────────────────────────
 start_frontend() {
   check_frontend
-  info "Starting frontend on http://localhost:5173 …"
+  local node_bin
+  if ! node_bin="$(resolve_node)"; then
+    err "No usable node binary found (the nvm shim can't be relied on)."
+    err "Install Node 18+ (e.g. \`nvm install --lts\`) or ensure /usr/local/bin/node exists."
+    exit 1
+  fi
+  info "Starting frontend on http://localhost:5173 … (node: ${node_bin})"
   (
     cd "${REPO_ROOT}/web"
-    npm run dev 2>&1
+    # Invoke the vite CLI entry DIRECTLY with the resolved node binary — NOT
+    # `npm run dev` — so the nvm `node` shim can never recurse and kill it.
+    # Mirrors the package.json "dev" script (bare vite); the explicit flags
+    # guarantee the expected :5173 even if vite.config changes.
+    exec "${node_bin}" node_modules/vite/bin/vite.js --host --port 5173 --strictPort
   ) | prefix_stream "frontend" "${GREEN}" &
   PIDS+=($!)
 }
