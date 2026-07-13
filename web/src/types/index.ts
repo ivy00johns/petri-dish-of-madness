@@ -147,6 +147,20 @@ export interface Agent {
   // Wave E (EM-114, additive) — parent agent ids (births only). Optional so
   // pre-E backends stay valid; absent ⇒ not a born child.
   parents?: string[] | null;
+  // EM-310 (Chimera Twins, additive) — present ONLY on an agent that is half of
+  // a deliberately linked twin pair (same persona/seed/start, different model).
+  // The feed twin lens reads this to pair the strands + find the divergence.
+  // Optional so pre-EM-310 backends/snapshots stay valid; absent ⇒ not a twin.
+  twin?: TwinLink | null;
+}
+
+// EM-310 — the twin link carried on each half of a Chimera pair. `of` is the
+// peer twin's agent id, `group` the shared base name (Vesper), `model` this
+// twin's profile.
+export interface TwinLink {
+  group: string;
+  of: string;
+  model: string;
 }
 
 // ============================================================
@@ -560,6 +574,14 @@ export type EventKind =
   | 'peace_signed'
   | 'war_exhausted'
   | 'exiled'
+  // EM-317 — The Prophecy Board (god-channel). prophecy_posted {prophecy_id,
+  // predicate, params, posted_tick, deadline_tick, horizon, omen} (actor 'god',
+  // the omen on the replay surface); prophecy_resolved {prophecy_id, predicate,
+  // params, status, fulfilled, posted_tick, deadline_tick, resolved_tick, omen}
+  // stamps PROPHECY FULFILLED / BROKEN. Emitted only when
+  // world.prophecy_board.enabled — absent histories are the pre-EM-317 norm.
+  | 'prophecy_posted'
+  | 'prophecy_resolved'
   // EM-123 — a zoned district matured a tier when a megaproject completed.
   // actor_type:"system" (actor_id null), payload {neighborhood_id, zone_kind,
   // tier, building_id, reason:"megaproject_completed"}. Only emitted when
@@ -640,6 +662,14 @@ export interface SpawnSpec {
    * path (each variant supplies its own model).
    */
   ab_models?: string[];
+  /**
+   * EM-310 (Chimera Twins): EXACTLY two profile names. Gated on
+   * world.chimera_twins.enabled, the backend (god mode only) spawns a LINKED
+   * pair sharing this spec's name/personality/starting state, named by the
+   * Vesper / Vesper II dedup convention and cross-linked via each agent's
+   * `twin` key. Mutually exclusive with ab_models. Optional/additive.
+   */
+  twin_models?: string[];
 }
 
 // ============================================================

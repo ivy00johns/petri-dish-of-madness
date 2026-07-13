@@ -19,6 +19,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldState, WorldEvent, BillboardPost } from '../../types';
+import { useBlindLineup } from '../blind/BlindLineupContext';
 import '../../inspector/inspector-tokens.css';
 
 interface BillboardPanelProps {
@@ -150,6 +151,8 @@ function PostRow({
   post: BillboardPost;
   authorOf: Map<string, { name: string; profile: string | null; color: string | null }>;
 }) {
+  // EM-309 (Blind Lineup): mask the poster's model chip while a round is live.
+  const { maskName } = useBlindLineup();
   const god = post.actor_type === 'god';
   const author = god ? null : authorOf.get(post.actor_id);
   const name = god ? 'THE WATCHERS' : author?.name ?? post.actor_id;
@@ -182,9 +185,9 @@ function PostRow({
               <span
                 className="px-1 py-px border rounded-sm whitespace-nowrap"
                 style={{ color: author.color, borderColor: author.color + '50' }}
-                title={`posted by a ${author.profile} villager`}
+                title={`posted by a ${maskName(author.profile)} villager`}
               >
-                {author.profile}
+                {maskName(author.profile)}
               </span>
             )}
           </>

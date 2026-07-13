@@ -24,6 +24,7 @@ import { useMemo } from 'react';
 import type { Agent, Animal, FocusTarget, WorldEvent, WorldState } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 import { speciesEmoji } from '../world3d/worldSpace';
+import { useBlindLineup } from '../blind/BlindLineupContext';
 // Declares the --rel-* relationship registers (plus reuses the shared :root
 // tokens WorldMap/inspector already declare) — token-only colors, no literals.
 import './roster-tokens.css';
@@ -191,6 +192,10 @@ function AgentCard({
   selected: boolean;
   onSelect: (t: FocusTarget | null) => void;
 }) {
+  // EM-309 (Blind Lineup): mask the model NAME behind ??? while a round is
+  // live. The card's left-border + avatar COLOR stays — the viewer still sees
+  // the slot, just not its model until reveal.
+  const { maskName } = useBlindLineup();
   const color = agent.profile_color ?? 'var(--inspector-node-neutral)';
   const turnsLeft = agent.turns_until_death;
   const dying =
@@ -235,7 +240,7 @@ function AgentCard({
               // distinction — so the A/B siblings scan as one group.
               <span
                 className="font-mono text-[11px] font-semibold text-lab-text truncate"
-                title={`A/B variant of "${ab.base}" — running ${agent.profile}`}
+                title={`A/B variant of "${ab.base}" — running ${maskName(agent.profile)}`}
               >
                 {ab.base}
                 <span className="text-lab-muted">·{ab.tag}</span>
@@ -277,9 +282,9 @@ function AgentCard({
                 borderColor: `color-mix(in srgb, ${color} 50%, transparent)`,
                 color,
               }}
-              title={agent.profile}
+              title={maskName(agent.profile)}
             >
-              {agent.profile}
+              {maskName(agent.profile)}
             </span>
           </span>
         </div>
@@ -350,6 +355,9 @@ function CritterCard({
   selected: boolean;
   onSelect: (t: FocusTarget | null) => void;
 }) {
+  // EM-309 (Blind Lineup): a critter's model chip is also part of the lineup —
+  // mask its name while a round is live.
+  const { maskName } = useBlindLineup();
   const placeName = world.places.find((p) => p.id === animal.location)?.name ?? animal.location;
   const emoji = speciesEmoji(animal.species);
   // Wave H4 (EM-209): resolve the owner name when this pet is owned by a
@@ -410,9 +418,9 @@ function CritterCard({
                   ? `color-mix(in srgb, ${model.color} 50%, transparent)`
                   : 'var(--lab-border-bright)',
               }}
-              title={`LLM decisions route to ${model.profile}`}
+              title={`LLM decisions route to ${maskName(model.profile)}`}
             >
-              🧠 {model.profile}
+              🧠 {maskName(model.profile)}
             </span>
           ) : (
             <span className="font-mono text-[8px] text-lab-dim shrink-0" title="No LLM decision yet — reflex-only so far">
