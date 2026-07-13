@@ -498,8 +498,10 @@ def test_shipped_lanes_yaml_loads_enabled_by_default():
     cfg = load_config()
     ar = cfg.world.adaptive_routing
     assert ar.enabled is True            # go-live 2026-07-08 — ordered bounce loop
-    # W30: 4 = 3 curated healthy lanes + the RESERVED final slot for `auto`.
-    assert ar.max_attempts == 4 and ar.allow_paid is False
+    # W30 shipped 4 (3 curated + reserved terminal); EM-323 widened to 5. EM-324
+    # rebuilt `order` to the probe-verified clean lanes (dropped command-a-2 the
+    # truncator + qwen :free); 5 keeps a 4-lane clean walk + the reserved `auto`.
+    assert ar.max_attempts == 5 and ar.allow_paid is False
     assert len(ar.order) >= 1
     # The last order entry is the paid anthropic opt-in (dead last).
     assert ar.order[-1].source == "anthropic" and ar.order[-1].free is False
@@ -544,9 +546,10 @@ def test_real_config_glob_matchers_resolve_against_real_profiles():
             if ln.source == source and fnmatch.fnmatch(ln.model_id, model_glob)
         ]
 
-    # (a) the three specific globs called out by the go-live diff must each
-    # resolve to a real, live profile.
-    named_globs = ["gpt-oss-120b*", "*llama-3.3-70b*", "*qwen3-next-80b*"]
+    # (a) the EM-324 pin globs must each resolve to a real, live profile (the
+    # deliberate new cast: command-r / llama-fast / gemini-flash-lite added to
+    # profiles.yaml alongside the existing gpt-oss-120b / mistral-* lanes).
+    named_globs = ["command-r-2", "llama-3.3-70b-fp8-fast", "gemini-3.1-flash-lite"]
     for glob in named_globs:
         matches = _matches("freellmapi", glob)
         assert matches, (

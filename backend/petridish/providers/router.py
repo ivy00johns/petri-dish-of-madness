@@ -753,6 +753,21 @@ class Router:
     def _ar_allow_paid(self) -> bool:
         return bool(self._ar_value("allow_paid", False))
 
+    def _terminal_fallback_profile(self) -> str | None:
+        """W31/EM-318 — the profile that holds the RESERVED final-attempt slot
+        in the bounce loop (the curated terminal fallback). Config
+        `adaptive_routing.terminal_fallback` names a DETERMINISTIC free lane so
+        the guaranteed last resort is a known model, not the proxy's blind
+        `auto` whole-pool router (which returns "All models exhausted" during a
+        rate storm). UNSET/empty ⇒ the W30 default: `auto` (self._auto_backup),
+        BYTE-IDENTICAL. A configured name with no built adapter falls through to
+        None in _bounce_call (the reserved slot is simply not offered; the
+        curated walk keeps the full budget)."""
+        configured = self._ar_value("terminal_fallback", None)
+        if isinstance(configured, str) and configured:
+            return configured
+        return self._auto_backup
+
     def _ar_order(self) -> tuple:
         order = self._ar_value("order", ())
         if isinstance(order, (list, tuple)):
@@ -850,10 +865,15 @@ class Router:
         candidate fails/times out, re-raises the last provider error so the
         runtime's EM-173 idle fallback stays the last resort.
 
-        W30 — RESERVED BACKSTOP: when the terminal sorting-list entry is the
-        universal `auto` lane (FreeLLMAPI's whole-pool router), it is
+        W30 — RESERVED BACKSTOP / W31 — CURATED TERMINAL FALLBACK: one lane is
         guaranteed the FINAL attempt slot — the curated walk gets
-        max_attempts-1 attempts and the last one is reserved for `auto`. With
+        max_attempts-1 attempts and the last one is reserved for it. Which lane
+        is `adaptive_routing.terminal_fallback` (default `auto`, byte-identical);
+        the live fix names a DETERMINISTIC free lane instead of the proxy's
+        blind `auto` whole-pool router, so the guaranteed last attempt is a
+        known model rather than `auto`'s "All models exhausted". Everything
+        below reads for the reserved lane whether it is `auto` or a curated
+        free lane. With
         the shipped 9-lane order, an intermittent rate window that 429s the
         top curated lanes while they are all still sub-threshold HEALTHY used
         to burn every attempt before reaching `auto`, so the documented "last
@@ -910,20 +930,26 @@ class Router:
             if home_out is not None:
                 base_need = min(max_tokens, int(home_out))
 
-        # W30 reserved backstop — see the docstring. `reserved` is the terminal
-        # `auto` entry when it qualifies; the curated walk then keeps one
-        # attempt back for it. Deliberately NOT gated on auto's own sick
-        # window (bounce-latch fix — a sick-gate here latched the backstop
-        # off permanently, since bounce-only `auto` has no other recovery
-        # path; see the docstring).
+        # W30 reserved backstop, W31/EM-318 CURATED TERMINAL FALLBACK — see the
+        # docstring. `reserved` is the lane whose profile is the configured
+        # terminal fallback (default `auto`, byte-identical); the curated walk
+        # then keeps one attempt back for it. The W30 shipped config reserved
+        # the proxy's blind `auto` whole-pool router; the live fix names a
+        # DETERMINISTIC free lane instead so the guaranteed last attempt is a
+        # known model, not `auto`'s "All models exhausted". The lane is located
+        # in the registry (curated order) — skipped when it is the pin / already
+        # tried / has no built adapter, exactly the W30 guards. Deliberately NOT
+        # gated on the lane's own sick window (bounce-latch fix — a sick-gate
+        # here latched the backstop off permanently, since a bounce-only
+        # backstop has no other recovery path; see the docstring).
         ordered = self._lane_registry.ordered()
-        terminal = ordered[-1] if ordered else None
+        backstop = self._terminal_fallback_profile()
         reserved: Lane | None = None
-        if (terminal is not None
-                and terminal.profile == self._auto_backup
-                and terminal.profile not in tried
-                and self._adapters.get(terminal.profile) is not None):
-            reserved = terminal
+        if (backstop is not None
+                and backstop not in tried
+                and self._adapters.get(backstop) is not None):
+            reserved = next(
+                (ln for ln in ordered if ln.profile == backstop), None)
         curated_budget = max_attempts - 1 if reserved is not None else max_attempts
 
         for lane in ordered:
@@ -993,11 +1019,12 @@ class Router:
             )
             if text is not None:
                 log.info(
-                    "adaptive-routing: %s %s, reserved `auto` backstop served "
-                    "the call",
+                    "adaptive-routing: %s %s, reserved terminal-fallback lane "
+                    "`%s` served the call",
                     home,
                     "pre-skipped (sick)" if pre_skip
                     else f"failed ({(first_exc.detail or '')[:120]})",
+                    reserved.profile,
                 )
                 return text, reserved.profile
             if exc is not None:
@@ -1139,6 +1166,7 @@ class Router:
         truncated: bool,
         timed_out: bool = False,
         served_by: str | None = None,
+        errored: bool = False,
     ) -> None:
         """Record one runtime parse outcome for this profile's lane (EM-135).
 
@@ -1182,7 +1210,8 @@ class Router:
                 if isinstance(bounced_to, str) and bounced_to:
                     target = bounced_to
         self._record_parse_outcome(
-            target, parsed=parsed, truncated=truncated, timed_out=timed_out)
+            target, parsed=parsed, truncated=truncated, timed_out=timed_out,
+            errored=errored)
 
     def _record_parse_outcome(
         self,
@@ -1191,19 +1220,29 @@ class Router:
         parsed: bool,
         truncated: bool,
         timed_out: bool = False,
+        errored: bool = False,
     ) -> None:
         """Raw window append for a KNOWN-attributed lane — the internal path
         the bounce loop's own demerits use, where `profile_name` is already
         the lane that was actually attempted. It must bypass the bounce
         redirect above: a stale pending snapshot for that lane (staged when
         it was itself a bounced-FROM pin on an earlier turn) must never
-        re-route a demerit it just earned directly."""
+        re-route a demerit it just earned directly.
+
+        EM-324 — `errored=True` records this outcome as an `error` demerit (the
+        same key note_lane_error uses, counted by lane_sick), for a lane that
+        returned a 200 but ZERO usable content — a finish_reason=length with no
+        parseable JSON. That is functionally an error, not a mere content-quibble
+        (the token boost can't cure an output-capped preamble), so a lane that
+        does it chronically must go sick and be detoured, not fed forever."""
         window = self._lane_outcomes.setdefault(
             profile_name, deque(maxlen=_LANE_WINDOW)
         )
         entry = {"parsed": bool(parsed), "truncated": bool(truncated)}
         if timed_out:
             entry["timed_out"] = True
+        if errored:
+            entry["error"] = True
         window.append(entry)
         # routed_via at the time of the outcome — introspection only.
         self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)

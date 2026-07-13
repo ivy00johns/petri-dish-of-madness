@@ -676,6 +676,8 @@ _DEFAULT_MAX_ACTIVE_COMMITMENTS = 5
 _DEFAULT_IMPORTANCE_THRESHOLD = 10.0
 _OVERHEARD_PENDING_CAP = 2         # an agent holds at most 2 pending overheard lines
 _OVERHEARD_LISTENERS_CAP = 2       # at most 2 co-located listeners per spoken line
+_RECENT_SAID_CAP = 5               # EM-322 — per-agent recent spoken lines fed back
+                                   # as an explicit anti-repeat block in the prompt
 
 # Wave D2 / EM-159+160 — background-tier cadence defaults (config
 # `world.cadence`, read via _world_block_get; the loader's CadenceParams
@@ -2641,6 +2643,24 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
 # Context assembly
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _recently_said_block(recent_said: list[str] | None) -> str:
+    """EM-322 — an explicit YOU RECENTLY SAID list injected into the prompt so
+    the model SEES its own last lines and is told not to repeat or paraphrase
+    them. The soft speech nudge (speech_line) alone let small models (and the
+    storm fallback) loop the same phrase for turns on end; surfacing the actual
+    lines is what breaks the loop without HIDING anything or wasting a turn.
+    Empty/None → "" (byte-identical for an agent that has not spoken)."""
+    lines = [s.strip() for s in (recent_said or []) if s and s.strip()]
+    if not lines:
+        return ""
+    body = "\n".join(f'  - "{s[:200]}"' for s in lines)
+    return (
+        "\n\n=== YOU RECENTLY SAID (do NOT repeat or paraphrase any of these — "
+        "say something genuinely NEW that moves the conversation forward) ===\n"
+        + body
+    )
+
+
 def _assemble_context(
     agent: AgentState,
     world: World,
@@ -2653,6 +2673,7 @@ def _assemble_context(
     god_whispers: list[str] | None = None,
     board_notes: list[dict] | None = None,
     memory_prebounded: bool = False,
+    recent_said: list[str] | None = None,
 ) -> list[dict]:
     """Build the OpenAI-style messages list for this agent's turn.
 
@@ -4117,15 +4138,30 @@ def _assemble_context(
         )
     else:
         multi_action_line = ""
-    # EM-199 follow-up — restore the session-189 chatter: spoken lines had
-    # collapsed into terse one-liners. Push for rich, in-character dialogue
-    # (the runtime caps it generously at 800 chars, so length is free).
+    # EM-199 follow-up + EM-320 (2026-07-13) — restore the session-189 chatter:
+    # spoken lines had collapsed into terse one-liners ("teach this", "I will
+    # build X"). The old nudge was one soft sentence buried in a city-heavy
+    # prompt and got ignored (esp. by small fallback models during rate storms).
+    # This is now a FORCEFUL, high-bar demand: react to others, advance a story,
+    # never repeat. The runtime caps say at 800 chars, so length is free; the
+    # trace fields sit empty, so there is ample token budget for real dialogue.
     speech_line = (
-        '\nWhen you say/whisper, write a REAL line of dialogue in YOUR voice — '
-        'gossip, banter, argue, flirt, scheme, react to what just happened — a '
-        'sentence or three with personality, NOT a terse status. The talk is '
-        'the heart of this world; make it worth reading.'
+        '\n\n=== HOW TO TALK (this is the point of the world) ===\n'
+        'DIALOGUE is the heart of this simulation — not the buildings, not the '
+        'proposals. When you say/whisper, you MUST write REAL dialogue in YOUR '
+        'distinct voice: 2 to 5 sentences that REACT to what someone JUST said '
+        'or did (see RECENT EVENTS), drag up shared history, gossip, argue, '
+        'flirt, scheme, tease, confess, brag, escalate a rivalry or deepen a '
+        'bond. Move an ongoing STORY forward.\n'
+        'NEVER repeat a line you (or anyone) already said — if you catch '
+        'yourself circling the same phrase or topic, pivot to something NEW: a '
+        'fresh grievance, a secret, a plan, a callback to an earlier moment. '
+        'Terse status lines ("I will build X", "teach this", "let us finish the '
+        'Academy") are FORBIDDEN as speech — narrate those through the action, '
+        'and let your words be worth reading.'
     )
+    # EM-322 — surface the agent's own recent lines so it can avoid repeating.
+    recently_said_block = _recently_said_block(recent_said)
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
@@ -4171,7 +4207,7 @@ Mood: {agent.mood}{faction_line}{crime_block}{healing_block}
 
 RESPOND WITH ONLY a JSON object — no prose, no markdown, no code fences. Lead with "action" (one thing) or "actions" (several), and keep "thought" to one short sentence:
 {format_template}
-{multi_action_line}{speech_line}
+{multi_action_line}{speech_line}{recently_said_block}
 Provide EITHER a single "action" OR an "actions" list. "args" must match each action.{trace_instructions}
 If you are promising a concrete FUTURE action, also include "commitment": "<one short sentence of what you will do>" — it is tracked, and broken promises lapse publicly.{reflection_line}
 If nothing makes sense, use: {{"action": "idle", "args": {{}}}}"""
@@ -4300,6 +4336,11 @@ class AgentRuntime:
         # W11b / EM-081 — pending overheard lines awaiting an agent's NEXT turn:
         # [{speaker_id, speaker, text, tick, overheard:true}], capped at 2.
         self._overheard: dict[str, list[dict]] = {}
+        # EM-322 — per-agent recent spoken lines (own voice), fed back into the
+        # next prompt as an explicit anti-repeat block. In-memory/runtime only
+        # (never snapshotted): a fresh runtime just starts each agent with no
+        # history and repopulates within a few turns — no determinism impact.
+        self._recent_said: dict[str, list[str]] = {}
         # EM-145 — per-agent high-water tick of god billboard posts already
         # noticed (so a god post is delivered into a prompt at most once per
         # agent). In-memory by design: after a restart the worst case is one
@@ -4338,6 +4379,7 @@ class AgentRuntime:
         self._commitments.clear()
         self._importance.clear()
         self._overheard.clear()
+        self._recent_said.clear()
         self._board_seen.clear()
         # Wave D2 / EM-159 — salience baselines are per-run state too.
         self._seen_colocated.clear()
@@ -4738,6 +4780,17 @@ class AgentRuntime:
     # ──────────────────────────────────────────────────────────────────────────
     # W11b / EM-081 — overhearing (context injection only; zero LLM calls)
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _record_said(self, agent_id: str, args: dict) -> None:
+        """EM-322 — remember an agent's own spoken line (capped at
+        `_RECENT_SAID_CAP`) so the next prompt can show it back with a
+        do-not-repeat directive. Mirrors _distribute_overheard's text read."""
+        said = str((args or {}).get("text") or "").strip()
+        if not said:
+            return
+        buf = self._recent_said.setdefault(agent_id, [])
+        buf.append(said)
+        del buf[:-_RECENT_SAID_CAP]
 
     def _distribute_overheard(self, agent: AgentState, action: str | None, args: dict) -> None:
         """When `agent` spoke this turn, queue the line for up to 2 OTHER
@@ -5196,6 +5249,7 @@ class AgentRuntime:
             agent, self.world, memory_events, self.world.params,
             commitments=self._commitments.get(agent.id, []),
             overheard=pending_overheard,
+            recent_said=list(self._recent_said.get(agent.id, [])),  # EM-322
             request_reflection=request_reflection,
             god_whispers=god_whispers,
             board_notes=board_notes,
@@ -5732,6 +5786,7 @@ class AgentRuntime:
         for r in step_results:
             if r["ok"] and r["action"] in ("say", "whisper"):
                 self._distribute_overheard(agent, r["action"], r["args"])
+                self._record_said(agent.id, r["args"])  # EM-322 anti-repeat
 
         # EM-145 — god-voice delivery events (built before the LLM call).
         extra_events.extend(delivery_events)
@@ -5941,18 +5996,26 @@ class AgentRuntime:
             meta["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
         action_dict = _extract_first_json(text)
+        finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
         # EM-135 — report this attempt's parse outcome to the router's lane
         # health. Truncation is judged structurally on the RAW text even when
         # extraction SUCCEEDED: a response that parsed only via truncation
         # repair still means the lane is cutting output — salvage hides it
         # from the feed, not from health tracking.
         truncated = _looks_truncated(text)
+        # EM-324 — a finish_reason=length that yielded NO parseable JSON is a
+        # content-truncation the token boost can't cure on an output-capped lane
+        # (the proxy's cohere/command-a-plus reroute: a plaintext reasoning
+        # preamble hard-capped at 1024, run 1388). _looks_truncated only sees an
+        # unclosed '{', so a pure-prose preamble evaded lane health entirely and
+        # agents were fed straight back into it. Count it as a lane demerit so a
+        # CHRONIC truncator goes sick → the bounce loop detours to a clean lane.
+        content_truncation = action_dict is None and finish_reason == "length"
         self._note_parse_outcome(
             profile_name, parsed=action_dict is not None, truncated=truncated,
-            served_by=served_by,
+            served_by=served_by, errored=content_truncation,
         )
         if action_dict is None:
-            finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
             # Structural truncation verdict for the retry-budget boost (the
             # reported finish_reason can be a lying 'stop'), plus the full raw
             # text for the final parse_failure event's forensics.
@@ -6025,7 +6088,7 @@ class AgentRuntime:
 
     def _note_parse_outcome(
         self, profile_name: str, *, parsed: bool, truncated: bool,
-        served_by: str | None = None,
+        served_by: str | None = None, errored: bool = False,
     ) -> None:
         """Report one parse attempt's outcome to the router's lane-health
         window (EM-135). `served_by` (EM-307) is the per-call attribution from
@@ -6034,15 +6097,20 @@ class AgentRuntime:
         getattr: duck-typed test routers don't implement note_parse_outcome();
         signature inspection (not a TypeError retry, which would mask a real
         TypeError raised INSIDE note()) degrades pre-EM-307 routers to the
-        profile-level attribution."""
+        profile-level attribution.
+
+        EM-324 — `errored=True` (a finish_reason=length with no parseable JSON)
+        is threaded as a lane demerit so chronic silent-reroute truncators go
+        sick and get detoured; guarded the same way for pre-EM-324 routers."""
         note = getattr(self.router, "note_parse_outcome", None)
         if not callable(note):
             return
+        kwargs: dict = {"parsed": parsed, "truncated": truncated}
         if served_by is not None and _accepts_kwarg(note, "served_by"):
-            note(profile_name, parsed=parsed, truncated=truncated,
-                 served_by=served_by)
-        else:
-            note(profile_name, parsed=parsed, truncated=truncated)
+            kwargs["served_by"] = served_by
+        if errored and _accepts_kwarg(note, "errored"):
+            kwargs["errored"] = errored
+        note(profile_name, **kwargs)
 
     def _turn_llm_budget(self) -> float:
         """EM-170 — the per-turn LLM wall-clock budget in seconds, read

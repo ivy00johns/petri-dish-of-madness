@@ -205,6 +205,31 @@ function isBenignRejection(e: WorldEvent): boolean {
   return e.kind === 'parse_failure' && e.payload?.rejected === true;
 }
 
+/**
+ * FEED-SILENCE (EM-318, defaults ON) — a routing-EXHAUSTION idle-fallback: the
+ * turn reached NO model (every lane rate-limited/exhausted or the proxy `auto`
+ * returned "All models exhausted", or the connection was down), so the backend
+ * idled the agent with a `payload.reason` starting `provider_error`. During a
+ * free-tier rate window MANY agents idle this way at once and the live feed
+ * used to fill with identical "failed to produce a valid action" cards — pure
+ * noise: nothing the watcher can act on, and the agent already retries next
+ * tick (never muted — the no-throttling law). We SILENCE these from the live
+ * feed; the event still persists in history/DB for forensics AND the loop's
+ * server-side provider-error streak still auto-pauses the run (this is a
+ * viewer-only filter — off the replay surface). CONTENT parse failures
+ * (truncated JSON / finish_reason=length / validation) carry a DIFFERENT reason
+ * and keep their place in the ⚠ errors channel — only the "no model answered"
+ * exhaustion class is silenced.
+ */
+function isSilencedProviderError(e: WorldEvent): boolean {
+  const reason = e.payload?.reason;
+  return (
+    e.kind === 'parse_failure' &&
+    typeof reason === 'string' &&
+    reason.startsWith('provider_error')
+  );
+}
+
 /** True when an event belongs to the animal chaos channel (W8). */
 function isAnimalEvent(e: WorldEvent): boolean {
   return (
@@ -756,8 +781,9 @@ export function EventFeed({ events, onGrantReply, threadFilter, onClearThread }:
 
   // Inclusion filter: with categories focused, show ONLY those; with none
   // focused, show everything except the default-muted trace chain. Benign
-  // action-rejections are dropped first — they're non-actionable clutter, not
-  // real errors, so they never appear (even when the errors channel is focused).
+  // action-rejections AND routing-exhaustion idle-fallbacks (EM-318 feed-
+  // silence) are dropped first — they're non-actionable clutter, not real
+  // errors, so they never appear (even when the errors channel is focused).
   // EM-312: the selected storyline's principals as a fast lookup (null = off).
   const threadPrincipals = useMemo(
     () => (threadFilter ? new Set(threadFilter.principals) : null),
@@ -766,7 +792,8 @@ export function EventFeed({ events, onGrantReply, threadFilter, onClearThread }:
 
   const visibleEvents = useMemo(
     () => {
-      const base = events.filter((e) => !isBenignRejection(e));
+      const base = events.filter(
+        (e) => !isBenignRejection(e) && !isSilencedProviderError(e));
       const byCategory = focus.size === 0
         ? base.filter((e) => !DEFAULT_MUTED.includes(KIND_TO_CATEGORY[e.kind] ?? ''))
         : base.filter((e) => focus.has(KIND_TO_CATEGORY[e.kind] ?? ''));
