@@ -28,13 +28,21 @@ import { TopBannerLayer } from './components/BannerFade';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
+import { DramaWire } from './components/feed/DramaWire';
 import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
 import { WarPanel } from './components/panels/WarPanel';
+import { StorylinesRail } from './components/feed/StorylinesRail';
+import { STORYLINES_RAIL_ENABLED } from './lib/featureFlags';
+import type { Storyline } from './lib/storylines';
+import { TwinLens } from './components/panels/TwinLens';
+import FingerprintTicker from './components/panels/FingerprintTicker';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
+import { BlindLineupProvider } from './components/blind/BlindLineupContext';
+import { BlindLineupPanel } from './components/blind/BlindLineupPanel';
 import { InspectorLayout } from './inspector/InspectorLayout';
 import { ChronicleView } from './components/chronicle/ChronicleView';
 import { DiaryView } from './components/diary/DiaryView';
@@ -176,6 +184,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
   // EM-095: camera focus (follow/zoom target) + the reset-view signal.
   const [focus, setFocus] = useState<FocusTarget | null>(null);
   const [resetNonce, setResetNonce] = useState(0);
+  // EM-312: the selected storyline — drives the feed thread filter + the 3-D
+  // tether. Display-only state; never touches the sim. Ignored when the flag is
+  // off (the rail isn't mounted, so it can never be set).
+  const [selectedStory, setSelectedStory] = useState<Storyline | null>(null);
 
   // EM-105: feed-column width — persisted, drag-handle driven.
   const [feedWidth, setFeedWidth] = useState<number>(loadFeedWidth);
@@ -212,6 +224,13 @@ function LiveLayout({ sim }: { sim: Sim }) {
   // the latest animal llm_call in the DEEP history (the 200-cap feed would
   // lose it between slow animal cadences). Empty until an animal has consulted
   // the LLM — the labels omit the chip until then (graceful degradation).
+  // EM-313: id → name for the fingerprint ticker's spotlighted agent.
+  const agentNames = useMemo<Record<string, string>>(() => {
+    const m: Record<string, string> = {};
+    for (const a of world?.agents ?? []) m[a.id] = a.name;
+    return m;
+  }, [world?.agents]);
+
   const animalModels = useMemo(
     () => animalModelMap(sim.history, world?.animals ?? [], world?.profiles ?? []),
     [sim.history, world],
@@ -238,7 +257,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
   }, [focus, world]);
 
   return (
-    <>
+    // EM-309 (Blind Lineup): the provider owns the reveal state; it masks
+    // NOTHING unless the blind_lineup.enabled flag is on, so with the flag off
+    // this wrapper is inert and the live view is byte-identical to before.
+    <BlindLineupProvider>
       {/* EM-107: the routing-degraded + extinction banners moved to App's
           TopBannerLayer overlay — they no longer mount in flow here, so
           their appearance/clearing can't reflow this layout. */}
@@ -256,6 +278,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
           aria-label="Story digest and live event feed"
         >
           <StorySoFar world={world} history={sim.history} />
+          {/* EM-309 (Blind Lineup): the spectator guess card. Renders NOTHING
+              unless the blind_lineup.enabled flag is on. */}
+          <BlindLineupPanel world={world} />
           {/* W11b (EM-091c): the notice-board panel rides under the digest —
               collapsible so the feed keeps its vertical budget. */}
           <BillboardPanel world={world} history={sim.history} />
@@ -267,10 +292,50 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* EM-312 (Storylines Rail): the feed's drama index — recurring
+              rivalries / redemptions / power grabs, promoted from the event log
+              with zero LLM. Gated OFF by default; renders nothing until a thread
+              is promoted, so peacetime chrome stays byte-identical. Clicking a
+              thread filters the feed (below) + tethers its principals in 3-D. */}
+          {STORYLINES_RAIL_ENABLED && (
+            <StorylinesRail
+              world={world}
+              history={sim.history}
+              selectedId={selectedStory?.id ?? null}
+              onSelect={setSelectedStory}
+            />
+          )}
+          {/* EM-310 (Chimera Twins): the twin lens — a synchronized dual-strand
+              thread + an auto-pinned divergence-point card for a linked
+              same-persona/different-model pair. Renders NOTHING until such a
+              pair is spawned behind world.chimera_twins.enabled, so it adds zero
+              chrome to every ordinary run. Feed-only chrome (off replay). */}
+          <TwinLens world={world} history={sim.history} />
+          {/* EM-313: the fingerprint ticker — a converging live model guess vs
+              the X-Routed-Via ground truth. Renders NOTHING unless the backend
+              has fingerprint_ticker.enabled (default OFF), so it adds zero
+              chrome until switched on. */}
+          <FingerprintTicker
+            tick={world?.tick}
+            activeAgentId={focus?.type === 'agent' ? focus.id : null}
+            names={agentNames}
+          />
+          {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
+              scores typed events and breaks its own news into rate-capped red
+              cards; clicking one flies the shipped zoom-to-place camera. Gated
+              behind VITE_DRAMA_WIRE (default OFF ⇒ renders null, feed unchanged). */}
+          <DramaWire world={world} history={sim.history} onFocus={handleFocus} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}
-            <EventFeed events={events} onGrantReply={sim.postBillboard} />
+            <EventFeed
+              events={events}
+              onGrantReply={sim.postBillboard}
+              threadFilter={STORYLINES_RAIL_ENABLED && selectedStory
+                ? { id: selectedStory.id, title: selectedStory.title, principals: selectedStory.principals }
+                : null}
+              onClearThread={() => setSelectedStory(null)}
+            />
           </div>
         </aside>
 
@@ -368,6 +433,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
                   resetNonce={resetNonce}
                   onPick={handleFocus}
                   onFocusBreak={() => setFocus(null)}
+                  tetherPrincipals={STORYLINES_RAIL_ENABLED && selectedStory
+                    ? selectedStory.principals
+                    : null}
                 />
               ) : (
                 <WorldMap world={world} events={events} animalModels={animalModels} />
@@ -420,6 +488,6 @@ function LiveLayout({ sim }: { sim: Sim }) {
           </div>
         </aside>
       </div>
-    </>
+    </BlindLineupProvider>
   );
 }
