@@ -28,6 +28,7 @@ import { TopBannerLayer } from './components/BannerFade';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
+import { DramaWire } from './components/feed/DramaWire';
 import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
@@ -267,6 +268,11 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
+              scores typed events and breaks its own news into rate-capped red
+              cards; clicking one flies the shipped zoom-to-place camera. Gated
+              behind VITE_DRAMA_WIRE (default OFF ⇒ renders null, feed unchanged). */}
+          <DramaWire world={world} history={sim.history} onFocus={handleFocus} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}
