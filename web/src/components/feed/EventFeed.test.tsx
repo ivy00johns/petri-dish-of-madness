@@ -88,7 +88,7 @@ describe('EventFeed — benign action-rejections are not feed clutter', () => {
     expect(screen.getByText(/let us rebuild the garden/)).toBeInTheDocument();
   });
 
-  it('still shows a GENUINE parse_failure (truncated JSON / provider error — no rejected flag)', () => {
+  it('still shows a GENUINE CONTENT parse_failure (truncated JSON — no rejected flag, not a provider error)', () => {
     render(<EventFeed events={[
       ev({
         kind: 'parse_failure', actor_id: 'a1',
@@ -99,7 +99,7 @@ describe('EventFeed — benign action-rejections are not feed clutter', () => {
     expect(screen.getByText(/no valid JSON/)).toBeInTheDocument();
   });
 
-  it('hides benign rejections even when the Errors channel is focused', () => {
+  it('hides benign rejections even when the Errors channel is focused (a content parse_failure still shows)', () => {
     render(<EventFeed events={[
       ev({
         kind: 'parse_failure', actor_id: 'a1',
@@ -108,12 +108,53 @@ describe('EventFeed — benign action-rejections are not feed clutter', () => {
       }),
       ev({
         kind: 'parse_failure', actor_id: 'a2',
-        text: 'real provider_error: rate limit',
-        payload: { reason: 'provider_error: rate limit' },
+        text: "Bram's turn produced no valid JSON (finish_reason='length')",
+        payload: { reason: "no valid JSON object (finish_reason='length')" },
       }),
     ]} />);
-    // Default view: the benign one is hidden, the real one shows.
+    // Default view: the benign rejection is hidden, the real content failure shows.
     expect(screen.queryByText(/build_step was rejected/)).not.toBeInTheDocument();
-    expect(screen.getByText(/provider_error/)).toBeInTheDocument();
+    expect(screen.getByText(/no valid JSON/)).toBeInTheDocument();
+  });
+});
+
+describe('EventFeed — feed-silence (EM-318): routing-exhaustion idle-fallbacks are not feed clutter', () => {
+  it('hides a provider_error idle-fallback (all lanes exhausted / All models exhausted)', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'agent_speech', actor_id: 'a1', text: 'Ada says: "another fine morning"' }),
+      ev({
+        kind: 'parse_failure', actor_id: 'a2',
+        text: 'Cleo failed to produce a valid action (idle fallback): provider_error: All models exhausted',
+        payload: { reason: 'provider_error: All models exhausted' },
+      }),
+    ]} />);
+    // The exhaustion card is silenced; real chatter stays.
+    expect(screen.queryByText(/All models exhausted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/idle fallback/)).not.toBeInTheDocument();
+    expect(screen.getByText(/another fine morning/)).toBeInTheDocument();
+  });
+
+  it('silences a whole rate-window storm of provider_error idle-fallbacks — zero error cards surface', () => {
+    const storm = Array.from({ length: 6 }, (_, i) =>
+      ev({
+        kind: 'parse_failure', actor_id: `a${i}`,
+        text: `Agent ${i} failed to produce a valid action (idle fallback): provider_error: rate limit`,
+        payload: { reason: 'provider_error: rate limit' },
+      }),
+    );
+    render(<EventFeed events={storm} />);
+    expect(screen.queryByText(/idle fallback/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/provider_error/)).not.toBeInTheDocument();
+  });
+
+  it('silences provider_error idle-fallbacks even when the Errors channel is focused', () => {
+    render(<EventFeed events={[
+      ev({
+        kind: 'parse_failure', actor_id: 'a1',
+        text: 'Ada failed to produce a valid action (idle fallback): provider_error: connection down',
+        payload: { reason: 'provider_error: connection down' },
+      }),
+    ]} />);
+    expect(screen.queryByText(/connection down/)).not.toBeInTheDocument();
   });
 });

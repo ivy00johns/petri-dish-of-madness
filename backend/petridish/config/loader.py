@@ -841,6 +841,17 @@ class AdaptiveRoutingParams:
                              runtime's EM-173 idle fallback. Clamped >= 1.
       per_attempt_timeout_s— per-lane wall-clock bound (no 86s doomed cascades).
       allow_paid           — opt-in for `free: false` lanes ($0-first default).
+      terminal_fallback    — W31/EM-318 CURATED TERMINAL FALLBACK. The profile
+                             that holds the RESERVED final-attempt slot in the
+                             bounce loop: a DETERMINISTIC free lane guaranteed
+                             the last attempt before the runtime's idle
+                             fallback. UNSET (None) ⇒ the W30 default — the
+                             proxy's blind `auto` whole-pool router (which
+                             returns "All models exhausted" during a rate
+                             storm), BYTE-IDENTICAL. The live fix points this
+                             at the most reliable free lane so the last resort
+                             is a known model, not the proxy's blind pick. Set
+                             it back to `auto` to restore the W30 backstop.
       order                — the priority order (top-to-bottom = ascending),
                              a tuple of LaneOrderEntry (spec §3.3).
     """
@@ -848,6 +859,7 @@ class AdaptiveRoutingParams:
     max_attempts: int = 3
     per_attempt_timeout_s: float = 12.0
     allow_paid: bool = False
+    terminal_fallback: str | None = None
     order: tuple[LaneOrderEntry, ...] = ()
 
 
@@ -2405,11 +2417,19 @@ def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
         except (TypeError, ValueError):
             return default
 
+    # W31/EM-318 — the curated terminal-fallback profile name. A non-empty
+    # string names the reserved final-attempt lane; anything else (absent, null,
+    # empty, non-string) falls back to the default (None ⇒ the router's `auto`
+    # backstop), so an old config_json without the key round-trips byte-identical.
+    tf_raw = raw.get("terminal_fallback", d.terminal_fallback)
+    terminal_fallback = tf_raw if isinstance(tf_raw, str) and tf_raw else None
+
     return AdaptiveRoutingParams(
         enabled=bool(raw.get("enabled", d.enabled)),
         max_attempts=_pos_int("max_attempts", d.max_attempts),
         per_attempt_timeout_s=_float("per_attempt_timeout_s", d.per_attempt_timeout_s),
         allow_paid=bool(raw.get("allow_paid", d.allow_paid)),
+        terminal_fallback=terminal_fallback,
         order=_parse_lane_order(raw.get("order")),
     )
 
