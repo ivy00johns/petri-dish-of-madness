@@ -1,23 +1,26 @@
-"""EM-313 — Fingerprint Ticker (behavioral stylometry, zero-LLM).
+"""Fingerprint — the versioned, deterministic feature-extraction layer over the
+event-sourced run.sqlite (EM-314 keystone).
 
-A pure-math, deterministic, VERSIONED classifier that infers which model an
-agent is running from its behavior in the event log alone — verb-mix, build-vs-
-talk ratio, JSON-retry rate, and sentence-length statistics. It compares an
-agent's accumulating behavioral fingerprint against per-model reference
-centroids mined from the event-sourced run.sqlite (historical runs, or — on a
-fresh DB with no history — the other agents in the same run, leave-one-agent-out
-so the inference is never circular).
+This package is the "build the layer once" home flagged at intake for the
+model-lab instruments (#16 Babel Matrix, #21 Epoch Seismograph, #5 Fingerprint
+Ticker). It holds ZERO-LLM, side-effect-free projections of the append-only
+event log — pure functions of a list of EventRow dicts (the shape returned by
+``SQLiteRepository.get_events``). Nothing here writes to the sim, touches the
+replay surface, or calls a model: every instrument reads history and returns a
+JSON-ready summary, so it stays strictly OFF the byte-identity surface.
 
-This is FEED/VIEWER chrome. It is strictly READ-ONLY over the event log: it
-NEVER writes events, never touches the tick loop, and produces zero sim
-feedback, so it sits entirely off the replay/determinism surface. Nothing here
-is consulted by the engine.
+`FEATURE_VERSION` (EM-313) versions the stylometry feature extraction: bump it
+whenever the feature math changes so retro-scores across releases stay
+comparable/auditable (the #1 risk called out in the source design). The whole
+pipeline is a pure function of the event log + FEATURE_VERSION, so it is
+replay-safe / seeded-by-construction.
 
-`FEATURE_VERSION` versions the feature extraction: bump it whenever the feature
-math changes so retro-scores across releases stay comparable/auditable (the #1
-risk called out in the source design). The whole pipeline is a pure function of
-the event log + FEATURE_VERSION, so it is replay-safe / seeded-by-construction.
+Currently shipped:
+  • ``resolve_agent_models`` — agent_id → per-agent model identity (shared).
+  • ``build_babel_matrix``  — EM-314 dyadic (actor-model × target-model) matrix.
+  • EM-313 Fingerprint Ticker — behavioral stylometry classifier (``.classifier``).
 """
+from __future__ import annotations
 
 from .classifier import (
     FEATURE_NAMES,
@@ -28,6 +31,8 @@ from .classifier import (
     features_from_turns,
     turns_from_events,
 )
+from .features import resolve_agent_models
+from .dyadic import BABEL_MATRIX_VERSION, OUTCOME_SPECS, build_babel_matrix
 
 __all__ = [
     "FEATURE_NAMES",
@@ -37,4 +42,8 @@ __all__ = [
     "compute_run_fingerprints",
     "features_from_turns",
     "turns_from_events",
+    "resolve_agent_models",
+    "build_babel_matrix",
+    "BABEL_MATRIX_VERSION",
+    "OUTCOME_SPECS",
 ]

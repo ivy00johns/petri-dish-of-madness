@@ -6,7 +6,27 @@
 **Round 2:** 18 raw → 11 new items — T1: 4 · T2: 4 · T3: 3 — plus 7 proposals folded
 into Round 1 entries (see the Round 2 fold log; both lenses credited on each fold)
 **Combined open items:** 26 — T1: 9 · T2: 11 · T3: 6
-**Status:** UNFILED — nothing below is tracked work. See "How to file" at the bottom.
+**Status:** **PARTIALLY FILED (2026-07-13)** — the 9 Tier-1 candidates below were filed into
+the ledger (`docs/REMAINING-WORK.md`) via `plan-intake`, opening **W31**; a live-experience
+routing fix (`model:auto` feed-silence) was filed alongside them as EM-318. All T2/T3
+candidates and the Round-2 folds remain UNFILED (see "How to file" at the bottom).
+
+> **FILED mapping (2026-07-13) → EM-309..EM-318, all flag-gated default-off:**
+> | Doc item | EM-### | Flag |
+> |---|---|---|
+> | T1 #1 The Blind Lineup | **EM-309** | `blind_lineup.enabled` |
+> | T1 #2 Chimera Twins | **EM-310** | `chimera_twins.enabled` |
+> | T1 #3 Self-Authored Charters | **EM-311** | `charters.enabled` |
+> | T1 #4 Storylines Rail | **EM-312** | `storylines_rail.enabled` |
+> | T1 #5 Fingerprint Ticker | **EM-313** | `fingerprint_ticker.enabled` |
+> | Round-2 T1 #16 The Babel Matrix | **EM-314** | `babel_matrix.enabled` |
+> | Round-2 T1 #17 The Healing House | **EM-315** | `healing_house.enabled` |
+> | Round-2 T1 #18 The Drama Wire | **EM-316** | `drama_wire.enabled` |
+> | Round-2 T1 #19 The Prophecy Board | **EM-317** | `prophecy_board.enabled` |
+> | *(not in this report — live-experience)* `model:auto` feed-silence fix | **EM-318** | *(routing; no flag)* |
+>
+> Tier-2 (#6–12, #20–23), Tier-3 (#13–15, #24–26), and the Round-2 fold log are **NOT**
+> filed — they stay candidates until individually approved through `plan-intake`.
 
 This report dedups, tiers, and constraint-checks the panel's raw proposals against the
 standing laws: **$0-first**, **single-city deepening**, **no throttling / MAX

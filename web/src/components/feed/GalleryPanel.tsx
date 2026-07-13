@@ -28,6 +28,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldState, WorldEvent, GalleryImage } from '../../types';
+import { useBlindLineup } from '../blind/BlindLineupContext';
 import '../../inspector/inspector-tokens.css';
 
 interface GalleryPanelProps {
@@ -341,6 +342,8 @@ function Lightbox({
   painter: Painter;
   onClose: () => void;
 }) {
+  // EM-309 (Blind Lineup): mask the painter's model chip while a round is live.
+  const { maskName } = useBlindLineup();
   const [broken, setBroken] = useState(false);
 
   // Close on Escape — the standard lightbox affordance.
@@ -421,9 +424,9 @@ function Lightbox({
               <span
                 className="px-1 py-px border rounded-sm whitespace-nowrap"
                 style={{ color: chip.color!, borderColor: chip.color! + '50' }}
-                title={`painted by a ${chip.profile} villager`}
+                title={`painted by a ${maskName(chip.profile)} villager`}
               >
-                {chip.profile}
+                {maskName(chip.profile)}
               </span>
             )}
             <span className="text-lab-dim tabular-nums ml-auto">T{img.created_tick}</span>

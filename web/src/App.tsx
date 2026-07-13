@@ -28,6 +28,7 @@ import { TopBannerLayer } from './components/BannerFade';
 import { WorldMap } from './components/map/WorldMap';
 import { CozyWorld } from './components/world3d/CozyWorld';
 import { EventFeed } from './components/feed/EventFeed';
+import { DramaWire } from './components/feed/DramaWire';
 import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
@@ -36,6 +37,8 @@ import FingerprintTicker from './components/panels/FingerprintTicker';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
+import { BlindLineupProvider } from './components/blind/BlindLineupContext';
+import { BlindLineupPanel } from './components/blind/BlindLineupPanel';
 import { InspectorLayout } from './inspector/InspectorLayout';
 import { ChronicleView } from './components/chronicle/ChronicleView';
 import { DiaryView } from './components/diary/DiaryView';
@@ -246,7 +249,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
   }, [focus, world]);
 
   return (
-    <>
+    // EM-309 (Blind Lineup): the provider owns the reveal state; it masks
+    // NOTHING unless the blind_lineup.enabled flag is on, so with the flag off
+    // this wrapper is inert and the live view is byte-identical to before.
+    <BlindLineupProvider>
       {/* EM-107: the routing-degraded + extinction banners moved to App's
           TopBannerLayer overlay — they no longer mount in flow here, so
           their appearance/clearing can't reflow this layout. */}
@@ -264,6 +270,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
           aria-label="Story digest and live event feed"
         >
           <StorySoFar world={world} history={sim.history} />
+          {/* EM-309 (Blind Lineup): the spectator guess card. Renders NOTHING
+              unless the blind_lineup.enabled flag is on. */}
+          <BlindLineupPanel world={world} />
           {/* W11b (EM-091c): the notice-board panel rides under the digest —
               collapsible so the feed keeps its vertical budget. */}
           <BillboardPanel world={world} history={sim.history} />
@@ -284,6 +293,11 @@ function LiveLayout({ sim }: { sim: Sim }) {
             activeAgentId={focus?.type === 'agent' ? focus.id : null}
             names={agentNames}
           />
+          {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
+              scores typed events and breaks its own news into rate-capped red
+              cards; clicking one flies the shipped zoom-to-place camera. Gated
+              behind VITE_DRAMA_WIRE (default OFF ⇒ renders null, feed unchanged). */}
+          <DramaWire world={world} history={sim.history} onFocus={handleFocus} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}
@@ -437,6 +451,6 @@ function LiveLayout({ sim }: { sim: Sim }) {
           </div>
         </aside>
       </div>
-    </>
+    </BlindLineupProvider>
   );
 }

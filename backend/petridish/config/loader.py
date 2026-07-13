@@ -1141,6 +1141,38 @@ class WarParams:
 
 
 @dataclass
+class CharterParams:
+    """EM-311 — Self-Authored Charters (Tier-1 divergence amplifier, config
+    `world.charters`). A charter is the agent's DECLARED identity — a tight enum
+    of ambition kinds + one short creed line — that the agent itself rewrites in
+    an ordinary turn (a `charter_revision` rider on any action, zero extra calls)
+    and that is injected ABOVE the persona in every future prompt. The engine
+    reads this block via its defensive `_charter_param` accessor with IDENTICAL
+    defaults (the CommunicationParams/_comm_param convention), so a world.yaml
+    WITHOUT the `charters` block behaves exactly like these values.
+
+    Like comm/war this block HAS an `enabled` flag defaulting FALSE: seeding, the
+    charter prompt block, the charter_revision apply, and the charter_revised
+    event all gate on it, so a default world seeds no charter, surfaces no prompt
+    line / event, and stays byte-identical (the em161 golden + EM-155).
+
+      enabled          — master gate for the whole charter layer.
+      max_ambitions    — HARD cap on charter ambition slots (the self-prompt
+                         loop guard; mirrored by the runtime sanitizer + schema).
+      creed_cap        — HARD char cap on the free-text creed line.
+      seed_ambitions   — the uniform STARTING ambitions every agent boots with
+                         (the marquee control: same start, divergent ends). Each
+                         must be a legal AMBITION_KINDS kind or it is dropped.
+      seed_creed       — the uniform STARTING creed line.
+    """
+    enabled: bool = False
+    max_ambitions: int = 3
+    creed_cap: int = 140
+    seed_ambitions: list = field(default_factory=lambda: ["keep_the_peace"])
+    seed_creed: str = "I am still finding my place here."
+
+
+@dataclass
 class NeedsParams:
     """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
     — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
@@ -1369,6 +1401,39 @@ class SettlementParams:
                 no-op (byte-identical pre-EM-269).
     """
     enabled: bool = False
+
+
+@dataclass
+class ProphecyBoardParams:
+    """EM-317 — The Prophecy Board (config `world.prophecy_board`). The watcher
+    posts a prophecy from a CONSTRAINED enum-predicate menu ("X convicted within
+    N ticks", "a building falls in district Y", "X and Z reconcile") — logged as
+    a god event ON the replay surface exactly like a proclamation, and agents
+    perceive a one-line omen. Resolution is a DETERMINISTIC per-tick projection
+    over durable world state (enum predicates only, NO fuzzy judging): the
+    countdown expires into PROPHECY FULFILLED / PROPHECY BROKEN.
+
+    DEFAULT OFF: a world.yaml WITHOUT the `prophecy_board` block — and every
+    pre-EM-317 snapshot — is byte-identical (no /api/prophesy verb, no omen
+    prompt line, no snapshot key, no resolution sweep). The engine reads this
+    block via the defensive `_prophecy_param` accessor with IDENTICAL defaults.
+
+      enabled          — offer the god /api/prophesy verb, inject the one omen
+                         line, and run the per-tick resolution sweep. false ⇒
+                         complete no-op (byte-identical pre-EM-317).
+      cap              — max prophecies a single run may post (PER-RUN cap so
+                         watchers can't steer every run the same way; resolved
+                         prophecies stay on the board and still count).
+      horizon_min      — min countdown ticks a prophecy may name.
+      horizon_max      — max countdown ticks a prophecy may name.
+      reconcile_trust  — the mutual trust floor that counts as "reconciled"
+                         (both directions ≥ this ⇒ the reconcile predicate fires).
+    """
+    enabled: bool = False
+    cap: int = 8
+    horizon_min: int = 5
+    horizon_max: int = 200
+    reconcile_trust: int = 20
 
 
 @dataclass
@@ -1777,6 +1842,12 @@ class WorldParams:
     # grievance, opens no war, surfaces no war governance, and keeps the em161
     # golden + every pre-EM-256 snapshot byte-identical.
     war: WarParams = field(default_factory=WarParams)
+    # EM-311 — Self-Authored Charters (Tier-1 divergence amplifier). Additive with
+    # a DEFAULT-OFF `enabled`, so a world.yaml without the `charters` block seeds
+    # no charter, injects no prompt block, ignores charter_revision, and keeps the
+    # em161 golden + every pre-EM-311 snapshot byte-identical. The caps bound both
+    # the runtime sanitizer and the defensive snapshot-restore path.
+    charters: CharterParams = field(default_factory=CharterParams)
     # EM-229 — three-needs psychology tunables. Additive with engine-matching
     # defaults; the decay is always-on but the prompt surfacing is salience-gated
     # so a world.yaml without the `needs` block keeps the em161 golden + restores
@@ -1814,6 +1885,10 @@ class WorldParams:
     # (no menu line, no prompt line, no snapshot key, F1 city-origin anchoring).
     # `enabled: true` turns on found_settlement + settlement-anchored placement.
     settlements: SettlementParams = field(default_factory=SettlementParams)
+    # EM-317 — The Prophecy Board. Additive, DEFAULT OFF, so a world.yaml without
+    # the `prophecy_board` block is byte-identical to pre-EM-317 (no omen prompt
+    # line, no snapshot key, no resolution sweep, no /api/prophesy verb).
+    prophecy_board: ProphecyBoardParams = field(default_factory=ProphecyBoardParams)
     # EM-236 — living constitution. Additive with engine-matching defaults; the
     # constitution is empty until an amendment RATIFIES (a governance act), so a
     # world.yaml without the `constitution` block — and every pre-EM-236 snapshot —
@@ -2724,6 +2799,42 @@ def _parse_war(raw: dict | None) -> WarParams:
     )
 
 
+def _parse_charters(raw: dict | None) -> CharterParams:
+    """Parse the optional `world.charters` block (EM-311).
+    Absent/empty/malformed -> engine-matching defaults (enabled stays FALSE, the
+    inert default). Each key falls back to its default individually (a malformed
+    value never breaks the block). Mirrors `_parse_comm`. `seed_ambitions` is
+    coerced to a list of strings (non-list/garbage → the default); the engine's
+    normalize_charter later drops any off-grammar kind, so a bad seed can never
+    inject an illegal ambition."""
+    if not isinstance(raw, dict):
+        return CharterParams()
+    d = CharterParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    seed_raw = raw.get("seed_ambitions", d.seed_ambitions)
+    seed_ambitions = (
+        [str(a) for a in seed_raw] if isinstance(seed_raw, list)
+        else list(d.seed_ambitions)
+    )
+    seed_creed_raw = raw.get("seed_creed", d.seed_creed)
+    seed_creed = (
+        str(seed_creed_raw) if isinstance(seed_creed_raw, str) else d.seed_creed
+    )
+    return CharterParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_ambitions=_int("max_ambitions", d.max_ambitions),
+        creed_cap=_int("creed_cap", d.creed_cap),
+        seed_ambitions=seed_ambitions,
+        seed_creed=seed_creed,
+    )
+
+
 def _parse_needs(raw: dict | None) -> NeedsParams:
     """Parse the optional `world.needs` block (EM-229).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back to
@@ -2920,6 +3031,36 @@ def _parse_settlements(raw: dict | None) -> SettlementParams:
     if not isinstance(raw, dict):
         return SettlementParams()
     return SettlementParams(enabled=bool(raw.get("enabled", False)))
+
+
+def _parse_prophecy_board(raw: dict | None) -> ProphecyBoardParams:
+    """Parse the optional `world.prophecy_board` block (EM-317).
+    Absent/empty/malformed -> engine-matching defaults (enabled False ⇒ a
+    complete no-op, byte-identical pre-EM-317). Each numeric key falls back to
+    its default individually and clamps sanely (a malformed value never breaks
+    the block); horizon_min is held ≤ horizon_max so the horizon window is
+    always valid."""
+    if not isinstance(raw, dict):
+        return ProphecyBoardParams()
+    d = ProphecyBoardParams()
+
+    def _int(key: str, default: int, lo: int) -> int:
+        try:
+            return max(lo, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    cap = _int("cap", d.cap, 1)
+    horizon_min = _int("horizon_min", d.horizon_min, 1)
+    horizon_max = _int("horizon_max", d.horizon_max, 1)
+    if horizon_min > horizon_max:
+        horizon_min = horizon_max
+    reconcile_trust = _int("reconcile_trust", d.reconcile_trust, 1)
+    return ProphecyBoardParams(
+        enabled=bool(raw.get("enabled", False)),
+        cap=cap, horizon_min=horizon_min, horizon_max=horizon_max,
+        reconcile_trust=reconcile_trust,
+    )
 
 
 def _parse_constitution(raw: dict | None) -> ConstitutionParams:
@@ -3182,6 +3323,7 @@ def _parse_world(
         crime=_parse_crime(w.get("crime")),
         comm=_parse_comm(w.get("comm")),
         war=_parse_war(w.get("war")),
+        charters=_parse_charters(w.get("charters")),
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),
@@ -3189,6 +3331,7 @@ def _parse_world(
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
         boost=_parse_boost(w.get("boost")),
         settlements=_parse_settlements(w.get("settlements")),
+        prophecy_board=_parse_prophecy_board(w.get("prophecy_board")),
         constitution=_parse_constitution(w.get("constitution")),
         governance=_parse_governance(w.get("governance")),
         children=_parse_children(w.get("children")),
