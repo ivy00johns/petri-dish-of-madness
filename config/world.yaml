@@ -200,6 +200,23 @@ world:
     reparations_base: 25      # default peace_treaty reparations when unspecified
     war_notoriety: 10         # notoriety stamped on the exiled loser leader
 
+  # EM-315 — The Healing House. A 70% governance vote (the `heal` propose_rule
+  # effect) sentences a citizen to the Healing House, where the engine hot-swaps
+  # their model to a DIFFERENT lane from `target_profiles` — the society wields
+  # the per-agent model scalpel, then litigates whether they "came back
+  # different." DEFAULT OFF with an EMPTY pool ⇒ no menu entry, no prompt line,
+  # no swap, byte-identical to pre-EM-315. To enable: set enabled:true AND curate
+  # target_profiles to >= 2 FULL-RATE free/local lanes from profiles.yaml — NEVER
+  # `mock` or a muted/paid lane (the no-throttling law: a swap changes WHICH model
+  # answers, never whether one does; the engine additionally refuses `mock`). Add
+  # a place with id `healing_house` (any kind) so the convict visibly relocates.
+  # MUST stay in sync with the HealingHouseParams mirror in
+  # backend/petridish/config/loader.py.
+  healing_house:
+    enabled: false            # master gate for the whole Healing House layer
+    target_profiles: []       # curated free/local lanes the sentence swaps INTO (e.g. [groq-llama, cerebras-qwen, mistral])
+    whisper_ticks: 40         # ticks a treated patient carries the "came back different" prompt line (0 disables)
+
   # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
   # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
   # every agent (floats 0..100, default 100). They decay every turn at these

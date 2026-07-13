@@ -1110,6 +1110,44 @@ class WarParams:
 
 
 @dataclass
+class HealingHouseParams:
+    """EM-315 — The Healing House (config `world.healing_house`). Hands the
+    per-agent model-swap scalpel to the SOCIETY: a 70% governance vote can
+    sentence a citizen to the Healing House, where the engine hot-swaps their
+    model to a DIFFERENT lane from `target_profiles` — therapy, punishment, or
+    political neutering, chosen by the town. The convict's chip morphs and the
+    society then litigates whether they "came back different."
+
+    DEFAULT OFF and, critically, `target_profiles` is EMPTY by default: with the
+    flag off (or no curated targets) the `heal` effect is rejected at propose
+    time, surfaces no menu entry / prompt line / snapshot key, and a world.yaml
+    without the block — and every pre-EM-315 snapshot — is byte-identical (the
+    em161 golden + EM-155). The engine reads this block via the defensive
+    `_healing_param` accessor with IDENTICAL defaults (the WarParams convention).
+
+    STANDING LAW — never swap toward silence: `target_profiles` MUST list only
+    FULL-RATE free/local lanes the operator has vetted (never `mock`, never a
+    muted/paid lane). A swap changes WHICH model answers, never whether one does;
+    call-rate is untouched. The engine additionally refuses to name `mock` as a
+    healing target (see World._pick_healing_profile), a belt-and-braces guard.
+
+      enabled          — master gate for the whole Healing House layer.
+      target_profiles  — the curated pool the sentence swaps INTO (profile names
+                         from config/profiles.yaml). A heal always swaps to a
+                         DIFFERENT profile than the patient currently holds, so a
+                         single-entry pool that equals the patient's model is a
+                         no-op (nothing to change). Curate >= 2 free lanes.
+      whisper_ticks    — how many ticks after a treatment the patient's prompt
+                         carries the "you came back from the Healing House; some
+                         say you're different" salience line (drives the first
+                         post-treatment feed line). 0 disables the whisper.
+    """
+    enabled: bool = False
+    target_profiles: tuple[str, ...] = ()
+    whisper_ticks: int = 40
+
+
+@dataclass
 class NeedsParams:
     """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
     — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
@@ -1746,6 +1784,12 @@ class WorldParams:
     # grievance, opens no war, surfaces no war governance, and keeps the em161
     # golden + every pre-EM-256 snapshot byte-identical.
     war: WarParams = field(default_factory=WarParams)
+    # EM-315 — The Healing House. Additive, DEFAULT OFF with an EMPTY target pool,
+    # so a world.yaml without the `healing_house` block — and every pre-EM-315
+    # snapshot — is byte-identical (no `heal` menu entry, no prompt line, no swap,
+    # no new snapshot key). `enabled: true` + a curated `target_profiles` pool
+    # turns on the society-wielded model-swap sentence (a 70% governance vote).
+    healing_house: HealingHouseParams = field(default_factory=HealingHouseParams)
     # EM-229 — three-needs psychology tunables. Additive with engine-matching
     # defaults; the decay is always-on but the prompt surfacing is salience-gated
     # so a world.yaml without the `needs` block keeps the em161 golden + restores
@@ -2672,6 +2716,38 @@ def _parse_war(raw: dict | None) -> WarParams:
     )
 
 
+def _parse_healing_house(raw: dict | None) -> HealingHouseParams:
+    """Parse the optional `world.healing_house` block (EM-315).
+    Absent/empty/malformed -> engine-matching defaults (enabled FALSE, an EMPTY
+    target pool — the inert default). Each key falls back to its default
+    individually (a malformed value never breaks the block). Mirrors `_parse_war`.
+    `target_profiles` coerces to a tuple of non-blank strings, dropping a literal
+    `mock` (never swap toward silence) and any garbage entry."""
+    if not isinstance(raw, dict):
+        return HealingHouseParams()
+    d = HealingHouseParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    targets_raw = raw.get("target_profiles", ())
+    if isinstance(targets_raw, (list, tuple)):
+        targets = tuple(
+            s for s in (str(t).strip() for t in targets_raw)
+            if s and s != "mock"
+        )
+    else:
+        targets = d.target_profiles
+    return HealingHouseParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        target_profiles=targets,
+        whisper_ticks=max(0, _int("whisper_ticks", d.whisper_ticks)),
+    )
+
+
 def _parse_needs(raw: dict | None) -> NeedsParams:
     """Parse the optional `world.needs` block (EM-229).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back to
@@ -3130,6 +3206,7 @@ def _parse_world(
         crime=_parse_crime(w.get("crime")),
         comm=_parse_comm(w.get("comm")),
         war=_parse_war(w.get("war")),
+        healing_house=_parse_healing_house(w.get("healing_house")),
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),

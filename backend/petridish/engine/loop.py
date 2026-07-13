@@ -1971,8 +1971,44 @@ class TickLoop:
         for evt in events:
             # Standalone system event — not part of any agent turn's chain.
             evt.setdefault("turn_id", None)
+            # EM-315 — the Healing House sentence (World._on_rule_activated) has
+            # ALREADY swapped the patient's serialized `agent.profile` (the
+            # deterministic replay surface). Sync the LIVE router so the very next
+            # turn routes through the transplanted model and the feed chip morphs
+            # — this is off the replay surface (a resume re-registers every agent's
+            # profile at boot, api/app.py). The transplant event carries the new
+            # lane in payload.to_profile (the shared model_reassigned primitive).
+            # Best-effort + guarded: a duck-typed/absent router never breaks the
+            # drain, and we enrich the event's chip color from the router.
+            if evt.get("kind") == "model_reassigned":
+                self._sync_transplant_router(evt)
             self._emit_event(evt)
         self._broadcast_world_state()
+
+    def _sync_transplant_router(self, evt: dict) -> None:
+        """EM-315 — adopt a society-driven model swap on the LIVE router so the
+        next turn routes the new lane (the World already changed agent.profile;
+        this only aligns the router's per-agent override, which boot seeds for
+        every agent). Off the replay surface; swallows every error so a governance
+        drain never dies on a router quirk."""
+        payload = evt.get("payload") or {}
+        patient_id = payload.get("patient_id") or evt.get("target_id")
+        to_profile = payload.get("to_profile") or payload.get("new_profile")
+        if not patient_id or not to_profile:
+            return
+        try:
+            self._router.reassign(str(patient_id), str(to_profile))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("healing-house router sync failed: %s", exc)
+            return
+        # Enrich the sentence card's chip color from the freshly-adopted lane so
+        # the feed shows the transplanted model's color, not the fallback.
+        try:
+            agent = self._world.agents.get(str(patient_id))
+            if agent is not None and not evt.get("profile_color"):
+                evt["profile_color"] = self._get_profile_color(agent)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Wave I / EM-210 — The Atelier: drain the transient image-fetch outbox into

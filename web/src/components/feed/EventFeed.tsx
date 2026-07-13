@@ -60,6 +60,8 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   memory:           '◈',
   parse_failure:    '⚠',
   model_reassigned: '⇄',
+  // EM-315 — the Healing House verdict card (the town votes to remake a mind).
+  sentenced_healing: '⚕',
   // Wave D2 (EM-158) — per-agent cadence tier reassignment receipt.
   cadence_tier_changed: '⇄',
   random_event:     '⊕',
@@ -155,6 +157,11 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   war_exhausted:        'var(--marker-crime)',
   exiled:               'var(--marker-crime)',
   peace_signed:         'var(--faction-tint)',
+  // EM-315 — the Healing House sentence reads in the crime-red register: the
+  // pitch's "lobotomy-grim" note — the town wielding the model scalpel as
+  // punishment. Token var() only (design-token-guard); the system-emitted card
+  // carries no profile_color so this fallback always wins.
+  sentenced_healing:    'var(--marker-crime)',
 };
 
 // W8 — the animal chaos magenta, referenced as the shared --marker-animal token
@@ -381,7 +388,10 @@ export const CATEGORIES: FeedCategory[] = [
   // in — the red conflict register — so filtering Social surfaces the whole
   // grievance → war → peace arc alongside the crime it grows from.
   { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'relationship_changed', 'conflict', 'agent_died', 'agent_spawned', 'child_spawned', 'agent_starving', 'world_extinct', 'faction_formed', 'faction_joined', 'faction_left', 'faction_dissolved', 'war_declared', 'grievance_accrued', 'war_band_joined', 'war_clash', 'war_siege', 'peace_signed', 'war_exhausted', 'exiled'] },
-  { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
+  // EM-315 — the Healing House verdict (`sentenced_healing`) lands with the rule
+  // outcomes it is decided by; the follow-on transplant rides `model_reassigned`
+  // in the System (model-lever) lane.
+  { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected', 'sentenced_healing'] },
   // W11b (EM-091): the notice board gets its own chip — also the contract's
   // suggested feed-filter affordance for billboard traffic.
   { key: 'board',   label: 'Board',   icon: '📌', kinds: ['billboard_posted'] },

@@ -485,6 +485,13 @@ export type EventKind =
   | 'memory'
   | 'parse_failure'
   | 'model_reassigned'
+  // EM-315 — The Healing House: a 70% governance vote sentences a citizen to
+  // the Healing House, where the engine hot-swaps their model. `sentenced_healing`
+  // is the verdict card (payload {patient_id, from_profile, to_profile,
+  // proposal_id}); the actual transplant rides the shared `model_reassigned`
+  // primitive (payload gains reason:"healing_house" + from/to_profile) so the
+  // model chip morphs with no new chip surface.
+  | 'sentenced_healing'
   // Wave D2 (EM-158) — POST /api/agents/{id}/tier reassignment receipt;
   // payload {old_tier, new_tier}. Turn events additionally carry the additive
   // payload keys cadence_tier (every turn event), reflex: true +

@@ -2152,6 +2152,12 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if getattr(world, "war_enabled", None) and world.war_enabled():
             valid_effects.add("declare_war")
             valid_effects.add("peace_treaty")
+        # EM-315 — the Healing House `heal` lane rides ONLY when the flag is on
+        # (the war/set_zone_rule recipe): default OFF ⇒ not in the set ⇒ rejected
+        # as an invalid effect ⇒ agent behavior byte-identical when dormant. The
+        # world method stays directly callable (its own disabled reason).
+        if getattr(world, "healing_house_enabled", None) and world.healing_house_enabled():
+            valid_effects.add("heal")
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -2181,6 +2187,26 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                 return "trial requires args.target = the name or id of a living defendant"
             if getattr(defendant, "crime_status", None) in ("detained", "jailed"):
                 return f"{defendant.name} is already in custody"
+        # EM-315 — heal needs a living PATIENT and a distinct model to transplant
+        # (mirror trial's patient resolution + the world's no-op guard so the gate
+        # AGREES with action_propose_rule — EM-108 menu/resolution rule).
+        if effect == "heal":
+            target = str(args.get("target") or "").strip()
+            patient = world.agents.get(target)
+            if patient is None and target:
+                _wanted = target.lower()
+                patient = next(
+                    (a for a in sorted(world.living_agents(), key=lambda x: x.id)
+                     if str(getattr(a, "name", "")).strip().lower() == _wanted),
+                    None,
+                )
+            if patient is None or not getattr(patient, "alive", True):
+                return ("heal requires args.target = the name or id of a living "
+                        "citizen to send to the Healing House")
+            if getattr(world, "_pick_healing_profile", None) and \
+                    world._pick_healing_profile(patient) is None:
+                return (f"the Healing House has no model to transplant that "
+                        f"{patient.name} does not already run")
         if effect == "name_town" and not str(args.get("name") or "").strip():
             return "name_town requires a name (args.name = the town's new name)"
         if effect == "demolish":
@@ -3028,6 +3054,34 @@ def _assemble_context(
                         f"your side pays>) — suing for peace CONCEDES: your "
                         f"faction pays and its leader is exiled; your faction "
                         f"alone decides, on a 70% vote")
+        # EM-315 — the Healing House `heal` lane surfaces ONLY when the flag is on
+        # AND there is a concrete OTHER living citizen the town could actually
+        # remake (a distinct model exists to transplant — the world's no-op guard),
+        # gated EXACTLY as the validator gates it (EM-108 menu/resolution
+        # agreement). Flag off (the default) ⇒ NO line ⇒ the prompt is
+        # byte-identical (the em161 golden). Names a concrete patient (the
+        # promote_image FINDING 1(b) recipe) so the model is offered a target that
+        # will resolve; prefers a co-located citizen for the "walks into the
+        # asylum" spectacle, else any other living agent.
+        if getattr(world, "healing_house_enabled", None) and world.healing_house_enabled():
+            _pick = getattr(world, "_pick_healing_profile", None)
+
+            def _healable(a: Any) -> bool:
+                return (getattr(a, "id", None) != agent.id
+                        and getattr(a, "alive", True)
+                        and (_pick is None or _pick(a) is not None))
+
+            _patient = next((a for a in co_located if _healable(a)), None)
+            if _patient is None:
+                _patient = next(
+                    (a for a in sorted(world.living_agents(), key=lambda x: x.id)
+                     if _healable(a)), None)
+            if _patient is not None:
+                propose_line += "|heal"
+                propose_tail += (
+                    f"; heal needs target=<a citizen's name or id, e.g. "
+                    f"{_patient.name}> to SENTENCE them to the Healing House, where "
+                    f"the town hot-swaps their model — decided on a 70% vote")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -3536,6 +3590,28 @@ def _assemble_context(
         crime_block = "\n=== ⚖ THE LAW & THE UNDERWORLD ===\n" + "\n".join(
             f"  {ln}" for ln in _crime_lines)
 
+    # ── EM-315 — the Healing House whisper: a RECENTLY-treated patient carries a
+    # salience-gated self-perception line so their "came back different" arc lands
+    # in the feed (the first post-treatment turn). Gated on the flag + a real
+    # treatment + recency (world.healing_house.whisper_ticks), so an untreated
+    # agent — and every flag-off world — carries NO line and the em161 golden is
+    # unaffected. The chip already shows the new lane; this drives the litigation.
+    healing_block = ""
+    if (getattr(world, "healing_house_enabled", None)
+            and world.healing_house_enabled()
+            and getattr(agent, "healings", 0) > 0):
+        _whisper_ticks = int(world._healing_param("whisper_ticks", 40))
+        _since = getattr(world, "tick", 0) - getattr(agent, "treated_at_tick", 0)
+        if _whisper_ticks > 0 and 0 <= _since <= _whisper_ticks:
+            _was = getattr(agent, "pre_healing_profile", None)
+            _was_tail = f" (you used to think as {_was})" if _was else ""
+            healing_block = (
+                "\n=== ⚕ THE HEALING HOUSE ===\n"
+                f"  You returned from the Healing House {_since} ticks ago — the "
+                f"town voted to remake your mind, and a new model now answers for "
+                f"you{_was_tail}. Some say you came back different. Speak, and let "
+                f"them judge whether you are still yourself.")
+
     # ── EM-233 — soul: the agent's IMMUTABLE identity anchors, injected into
     # EVERY prompt as who-you-are context. EMPTY (⇒ byte-identical prompt) when the
     # agent has no soul — so the em161 lawful-citizen golden fixture is unaffected
@@ -3937,7 +4013,7 @@ Agent ID: {agent.id}
 Location: {place_name} (kind={place_kind})
 Energy: {status_energy}/100
 Credits: {agent.credits}
-Mood: {agent.mood}{faction_line}{crime_block}
+Mood: {agent.mood}{faction_line}{crime_block}{healing_block}
 
 === NEEDS ===
 {needs_text}
