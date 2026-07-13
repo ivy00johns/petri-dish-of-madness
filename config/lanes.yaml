@@ -8,15 +8,24 @@
 # healthy lanes, each bounded by per_attempt_timeout_s, before the runtime's
 # idle fallback.
 #
-# RESERVED BACKSTOP (W30): the terminal `auto` entry — the proxy's whole-pool
-# router — is GUARANTEED the final attempt slot: the curated lanes above it get
-# max_attempts-1 attempts and the last one is reserved for `auto`, unless it is
-# the pinned lane, was already tried, or is itself health-sick. Without the
+# RESERVED BACKSTOP (W30) + CURATED TERMINAL FALLBACK (W31/EM-318): ONE lane is
+# GUARANTEED the final attempt slot — the curated lanes above it get
+# max_attempts-1 attempts and the last one is reserved for it, unless it is the
+# pinned lane, was already tried, or has no built adapter. WHICH lane is
+# `terminal_fallback` below (default `auto`, byte-identical to W30). Without the
 # reservation, an intermittent rate window that 429s the top curated lanes
-# (each still sub-threshold healthy) burned every attempt before `auto` was
-# ever consulted — the documented last resort was unreachable. Worst case is
-# max_attempts x per_attempt_timeout_s = 48s of wall clock, but 429s return
+# (each still sub-threshold healthy) burned every attempt before the backstop
+# was ever consulted — the documented last resort was unreachable. Worst case
+# is max_attempts x per_attempt_timeout_s = 48s of wall clock, but 429s return
 # fast, so the realistic cascade stays far below the old 86s doom loops.
+#
+# W31/EM-318 — the terminal slot was the proxy's blind `auto` whole-pool router,
+# which returns "All models exhausted" during a rate storm (idle churn). It now
+# points at a DETERMINISTIC free lane (`gpt-oss-120b`, clean-JSON, the most
+# reliable free model), so the guaranteed last attempt is a KNOWN model, not the
+# proxy's blind pick. `auto` stays in the walk as a low-priority resort but is
+# no longer the terminal. Set `terminal_fallback: auto` (and move `auto` last in
+# `order`) to restore the exact W30 blind-pool backstop.
 #
 # DEFAULT enabled: false ⇒ byte-identical to today (pin → EM-205 `auto` backup).
 # Flip enabled: true to adopt the ordered bounce loop. Config is captured in
@@ -24,9 +33,13 @@
 
 adaptive_routing:
   enabled: true                # go-live 2026-07-08 — ordered health-aware bounce loop
-  max_attempts: 4              # 3 curated healthy lanes + the RESERVED `auto` slot
+  max_attempts: 4              # 3 curated healthy lanes + the RESERVED terminal slot
   per_attempt_timeout_s: 12    # per-lane wall-clock cap (no 86s doomed cascades)
   allow_paid: false            # $0-first: `free: false` lanes stay off unless true
+  # W31/EM-318 — the curated terminal fallback: the reserved final-attempt lane.
+  # A DETERMINISTIC free profile (NOT the proxy's blind `auto` pool router).
+  # Set to `auto` (+ move `auto` last in `order`) to restore the W30 backstop.
+  terminal_fallback: gpt-oss-120b
 
   # P1 is STATIC — lanes come from this file matched against configured
   # profiles. Discovery/refresh (poll FreeLLMAPI /v1/models + detect direct
@@ -42,10 +55,15 @@ adaptive_routing:
   # Pre-2026-07-08 these were `gpt-oss-120b*` (no such profile — ghost) and bare
   # `qwen3-next-80b*` (the id is prefixed `qwen/`, so it matched nothing); the
   # curated priority silently collapsed to config-order with `auto` last.
+  # priority order (top = tried first). `gpt-oss-120b` is DEMOTED from #1 to the
+  # terminal slot (see terminal_fallback): as the cleanest-JSON free lane it is
+  # the ideal GUARANTEED last resort. It is reserved post-walk, so it does NOT
+  # consume a curated-walk attempt (the walk still gets max_attempts-1 lanes and
+  # the reserved terminal makes max_attempts total — call-rate unchanged).
   order:
-    - { source: freellmapi, model: "gpt-oss-120b*",    free: true }   # healthy, clean JSON — #1 bounce target
-    - { source: freellmapi, model: "*llama-3.3-70b*",  free: true }
-    - { source: freellmapi, model: "*qwen3-next-80b*", free: true }
-    - { source: freellmapi, model: "*",                free: true }   # remaining free lanes
-    - { source: freellmapi, model: "auto" }                           # proxy picker — LAST free resort
+    - { source: freellmapi, model: "*llama-3.3-70b*",  free: true }   # #1 walk — strong, healthy
+    - { source: freellmapi, model: "*qwen3-next-80b*", free: true }   # #2 walk
+    - { source: freellmapi, model: "*",                free: true }   # remaining free lanes (sweep)
+    - { source: freellmapi, model: "auto" }                           # proxy picker — low-priority blind resort (no longer terminal)
+    - { source: freellmapi, model: "gpt-oss-120b*",    free: true }   # RESERVED terminal — clean JSON, deterministic last resort
     - { source: anthropic,  model: "claude-sonnet-5",  free: false }  # paid, opt-in, dead last
