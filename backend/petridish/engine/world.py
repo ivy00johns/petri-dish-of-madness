@@ -702,6 +702,25 @@ class AgentState:
     # defensively, so a letter-free agent — and every pre-EM-250 snapshot —
     # keeps the exact prior dict shape.
     mailbox: list[dict] = field(default_factory=list)
+    # EM-315 — The Healing House transplant record. THREE additive scalars carry
+    # the society-wielded model swap:
+    #   healings           — how many times the town has sentenced this citizen to
+    #                        the Healing House (a durable badge; repeat patients
+    #                        pull ahead — the renown inequality story).
+    #   pre_healing_profile — the model this agent held BEFORE the most recent
+    #                        treatment (the viewer's ground truth for "came back
+    #                        different"; None until first treated).
+    #   treated_at_tick    — the tick the most recent treatment landed (drives the
+    #                        recency-gated "you came back different" prompt whisper).
+    # ALL additive with default-zero/None, serialized in to_dict ONLY when set and
+    # restored defensively, so an untreated agent — and every pre-EM-315 snapshot —
+    # keeps the exact prior dict shape (the EM-155 byte-identical guarantee + the
+    # em161 golden, since the flag defaults OFF and no untreated agent surfaces a
+    # line). The swap itself lives in the ALREADY-serialized `profile` field, so a
+    # healed citizen's new model survives a fork/resume with no extra plumbing.
+    healings: int = 0
+    pre_healing_profile: str | None = None
+    treated_at_tick: int = 0
     # EM-310 — Chimera Twins link: {group, of, model}. Present ONLY on an agent
     # that is half of a deliberately linked twin pair (a within-one-city A/B of
     # the same persona/memory-seed/starting state across two models). `of` is
@@ -849,6 +868,15 @@ class AgentState:
             d["held_memes"] = list(self.held_memes)
         if self.mailbox:
             d["mailbox"] = [dict(e) for e in self.mailbox]
+        # EM-315 — Healing House transplant record serialized ONLY when the town
+        # has treated this citizen at least once, so an untreated agent (and every
+        # pre-EM-315 snapshot) keeps the exact prior dict shape (the em161 golden +
+        # the byte-identical guarantee). `pre_healing_profile` rides only when set.
+        if self.healings:
+            d["healings"] = self.healings
+            d["treated_at_tick"] = self.treated_at_tick
+            if self.pre_healing_profile is not None:
+                d["pre_healing_profile"] = self.pre_healing_profile
         # EM-310 — the twin link rides along ONLY for a linked twin (present),
         # so a twinless agent (and every pre-EM-310 snapshot) keeps the exact
         # prior dict shape. The three keys are emitted in a fixed shape for a
@@ -4488,7 +4516,8 @@ class World:
                          "demolish_road", "set_car_policy",  # EM-244 (S3a)
                          "adopt_master_plan",  # EM-245 (S3b)
                          "set_zone_rule",  # EM-265 (SB)
-                         "declare_war", "peace_treaty"}  # EM-257 (Wave O war)
+                         "declare_war", "peace_treaty",  # EM-257 (Wave O war)
+                         "heal"}  # EM-315 (Healing House)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
         # name_town carries the proposed name on the payload (like admit_agent);
@@ -4562,6 +4591,34 @@ class World:
             if defendant.crime_status in ("detained", "jailed"):
                 return False, f"{defendant.name} is already in custody", None
             payload = {"defendant_id": defendant.id, "charges": str(text)[:200]}
+        # EM-315 — heal carries the PATIENT id on the payload (like trial's
+        # defendant). The Healing House is a society-wielded model swap, so it is
+        # gated on the config flag (like war's declare_war) AND on a curated,
+        # non-empty target pool with at least ONE model the patient does not
+        # already run (else the sentence is a guaranteed no-op — reject it before
+        # a vote opens, the demolish already-rubble convention). Patient resolution
+        # mirrors trial (id first, then case-insensitive display name, lowest id on
+        # ties) so an agent who NAMES the patient can actually open the vote.
+        if effect == "heal":
+            if not self.healing_house_enabled():
+                return False, ("the Healing House stands shuttered in this town "
+                               "(healing_house disabled)"), None
+            target = str(target or "").strip()
+            patient = self.agents.get(target)
+            if patient is None and target:
+                wanted = target.lower()
+                patient = next(
+                    (a for a in sorted(self.living_agents(), key=lambda x: x.id)
+                     if str(a.name).strip().lower() == wanted),
+                    None,
+                )
+            if patient is None or not patient.alive:
+                return False, f"heal requires a living patient (got {target!r})", None
+            if self._pick_healing_profile(patient) is None:
+                return False, ("no healer available: the Healing House has no "
+                               "model to transplant that this citizen does not "
+                               "already run"), None
+            payload = {"patient_id": patient.id, "reason": str(text)[:200]}
         # EM-236 — amend_constitution carries {op, article_id?, text} on its payload
         # (op ∈ add|edit|remove). Validate it like demolish's target: a malformed op,
         # a missing text on add/edit, or an edit/remove of an unknown article is
@@ -4779,6 +4836,15 @@ class World:
                 if (rule.payload or {}).get("defendant_id") == payload.get("defendant_id"):
                     return False, f"{payload.get('defendant_id')!r} already has an open trial", None
                 continue
+            # EM-315 — heal is scoped per PATIENT (two distinct patients may have
+            # open commitment votes at once); only a duplicate heal for the SAME
+            # patient is blocked (mirrors trial-per-defendant).
+            if effect == "heal":
+                if (rule.payload or {}).get("patient_id") == payload.get("patient_id"):
+                    return False, (f"a commitment vote for "
+                                   f"{payload.get('patient_id')!r} is already "
+                                   f"open"), None
+                continue
             # EM-236 — amend_constitution is scoped per (op, article_id): two
             # distinct ADD proposals may have open votes at once (each adds a NEW
             # article, so they never collide), but a duplicate EDIT/REMOVE of the
@@ -4837,7 +4903,8 @@ class World:
                               "demolish_road", "set_car_policy",  # EM-244 (S3a) — one-shot acts
                               "adopt_master_plan",  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
                               "set_zone_rule",  # EM-265 (SB) — one-shot per-zone act
-                              "declare_war", "peace_treaty") else None  # EM-257 — one-shot acts per pair/war
+                              "declare_war", "peace_treaty",  # EM-257 — one-shot acts per pair/war
+                              "heal") else None  # EM-315 — one-shot transplant per patient
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
         # can't be renewed for `renewal_cooldown_ticks` after its LAST activation
@@ -5057,6 +5124,50 @@ class World:
                 "text": f"{defendant.name} is led to jail for {sentence} ticks.",
                 "payload": {"until_tick": defendant.crime_status_until_tick},
             })
+            return
+        # EM-315 — heal SENTENCE: a passing 70% vote commits the patient to the
+        # Healing House, where the engine hot-swaps their model to a DIFFERENT
+        # lane from the curated pool (therapy/punishment/neutering — the town
+        # chose). The swap lives in the ALREADY-serialized `profile` field
+        # (deterministic + fork-safe); the additive record (healings /
+        # pre_healing_profile / treated_at_tick) fuels the "came back different"
+        # litigation and the recency-gated prompt whisper. The patient relocates
+        # to the Healing House place if one exists. Two events park in the SAME
+        # outbox name_town/trial use: a `sentenced_healing` card (the SENTENCED
+        # beat) then the shared `model_reassigned` transplant primitive (the chip
+        # morph). The LIVE router is synced by the loop's _flush_spawn_events
+        # (off the replay surface). A vanished patient — or a pool that no longer
+        # offers a distinct model (config changed mid-vote) — is a silent no-op
+        # (the vote still applied), the demolish vanished-target convention.
+        if rule.effect == "heal":
+            rule.applied = True
+            patient = self.agents.get((rule.payload or {}).get("patient_id"))
+            if patient is None or not patient.alive:
+                return
+            new_profile = self._pick_healing_profile(patient)
+            if new_profile is None:
+                return
+            old_profile = patient.profile
+            patient.pre_healing_profile = old_profile
+            patient.profile = new_profile
+            patient.healings += 1
+            patient.treated_at_tick = self.tick
+            house = self._healing_house_place_id()
+            if house is not None:
+                patient.location = house
+            self.pending_spawn_events.append({
+                "kind": "sentenced_healing",
+                "actor_id": "system",
+                "actor_type": "system",
+                "target_id": patient.id,
+                "text": (f"⚕ By vote, {patient.name} is SENTENCED to the Healing "
+                         f"House — the town remakes their mind."),
+                "payload": {"patient_id": patient.id, "from_profile": old_profile,
+                            "to_profile": new_profile, "proposal_id": rule.id},
+            })
+            self.pending_spawn_events.append(self._transplant_event(
+                patient, old_profile, new_profile,
+                reason="healing_house", proposal_id=rule.id))
             return
         # EM-257 — declare_war: a passing faction-scoped 70% vote OPENS the war
         # (World.open_war mints the seeded WarState — EM-256). A belligerent
@@ -5508,7 +5619,8 @@ class World:
                            "demolish_road", "set_car_policy",  # EM-244 (S3a) — irreversible/structural → 0.7
                            "adopt_master_plan",  # EM-245 (S3b) — structural city morph → 0.7
                            "set_zone_rule",  # EM-265 (SB) — structural city policy → 0.7
-                           "declare_war", "peace_treaty"):  # EM-257 — faction-scoped 70% (electorate substituted above)
+                           "declare_war", "peace_treaty",  # EM-257 — faction-scoped 70% (electorate substituted above)
+                           "heal"):  # EM-315 — remaking a mind is a weighty act → 70% supermajority
             if rule.effect == "amend_constitution":
                 try:
                     frac = float(self._constitution_param("ratify_threshold", 0.7))
@@ -7368,6 +7480,98 @@ class World:
         boost_enabled / victory_arch_enabled) — the runtime menu/validator
         gate on it."""
         return bool(self._war_param("enabled", False))
+
+    def _healing_param(self, name: str, default: Any) -> Any:
+        """EM-315 — defensive accessor for the `world.healing_house` config block
+        (HealingHouseParams dataclass OR dict OR absent — EM-155 conventions, like
+        _war_param). An absent block ⇒ every default ⇒ pre-EM-315 worlds run
+        unchanged (enabled defaults FALSE, target pool empty)."""
+        return _block_get(getattr(self.params, "healing_house", None), name, default)
+
+    def healing_target_profiles(self) -> list[str]:
+        """EM-315 — the curated pool the Healing House swaps INTO (config
+        `world.healing_house.target_profiles`). Coerced to a de-duplicated list of
+        non-blank strings, with a literal `mock` dropped (never swap toward
+        silence — the standing no-throttling law). Empty ⇒ the `heal` effect is
+        un-proposable (nothing to swap into). PUBLIC — the runtime menu/validator
+        gate on a non-empty pool (menu/resolution agreement)."""
+        raw = self._healing_param("target_profiles", ())
+        out: list[str] = []
+        try:
+            for t in raw:
+                s = str(t).strip()
+                if s and s != "mock" and s not in out:
+                    out.append(s)
+        except TypeError:  # pragma: no cover - defensive (non-iterable config)
+            return []
+        return out
+
+    def healing_house_enabled(self) -> bool:
+        """EM-315 — config gate `world.healing_house.enabled` (default OFF).
+        Disabled ⇒ no `heal` proposal/menu entry, no swap, no prompt whisper —
+        byte-identical pre-EM-315 behavior (the em161 golden). PUBLIC (like
+        war_enabled) — the runtime menu/validator gate on it."""
+        return bool(self._healing_param("enabled", False))
+
+    def _healing_house_place_id(self) -> str | None:
+        """EM-315 — the town's Healing House: a place with id 'healing_house',
+        else the first civic place, else None (a town with no such place still
+        heals — the model swap is the substance — but the patient does not
+        relocate). Mirrors _jail_place_id."""
+        if "healing_house" in self.places:
+            return "healing_house"
+        for p in self.places.values():
+            if p.kind == "civic":
+                return p.id
+        return None
+
+    def _pick_healing_profile(self, patient: "AgentState") -> str | None:
+        """EM-315 — DETERMINISTICALLY choose the model the Healing House swaps a
+        patient INTO, from the curated `target_profiles` pool, EXCLUDING their
+        current model so the swap always produces a visible change (and never a
+        no-op re-assign). The pick is a pure function of (patient id, tick, prior
+        healings) via a stable sha1 digest — no RNG, no clock — so a fork/replay
+        reproduces the exact same transplant (EM-155). None ⇒ no eligible target
+        (empty pool, or the pool holds only the patient's current model)."""
+        candidates = [p for p in self.healing_target_profiles()
+                      if p != patient.profile]
+        if not candidates:
+            return None
+        seed = hashlib.sha1(
+            f"{patient.id}:{self.tick}:{patient.healings}".encode("utf-8")
+        ).hexdigest()
+        idx = int(seed[:8], 16) % len(candidates)
+        return candidates[idx]
+
+    def _transplant_event(
+        self, patient: "AgentState", from_profile: str, to_profile: str,
+        *, reason: str, proposal_id: str | None = None,
+    ) -> dict:
+        """EM-315 — the SHARED transplant-event primitive (a society- or
+        operator-driven model swap), reused by the Healing House sentence and,
+        later, the Split-Screen Theater (doc #10). Reuses the `model_reassigned`
+        kind the operator hot-swap already emits (frontend-registered ⇄ chip), so
+        the feed morphs the model chip with ZERO new frontend surface. The
+        Healing-House framing rides in the text + payload `reason`. The event's
+        `profile`/`profile_color` reflect the NEW model so the sentence card
+        itself shows the transplanted lane. The loop's _flush_spawn_events reads
+        `to_profile` to sync the live router (off the replay surface)."""
+        payload = {"reason": reason, "patient_id": patient.id,
+                   "from_profile": from_profile, "to_profile": to_profile,
+                   "new_profile": to_profile}
+        if proposal_id is not None:
+            payload["proposal_id"] = proposal_id
+        return {
+            "kind": "model_reassigned",
+            "actor_id": "system",
+            "actor_type": "system",
+            "target_id": patient.id,
+            "profile": to_profile,
+            "text": (f"⚕ {patient.name} emerges from the Healing House — their "
+                     f"mind remade ({from_profile} → {to_profile}). Do they come "
+                     f"back different?"),
+            "payload": payload,
+        }
 
     def _charter_param(self, name: str, default: Any) -> Any:
         """EM-311 — defensive accessor for the `world.charters` config block
@@ -10511,6 +10715,20 @@ class World:
                     d.get("mailbox"),
                     _block_get(getattr(params, "comm", None), "letter_cap", 8),
                 ),
+                # EM-315 — Healing House record: additive. Pre-EM-315 snapshots
+                # lack the keys and restore 0 / None / 0; a present healings count
+                # is clamped >= 0, treated_at_tick clamped >= 0, and a malformed
+                # pre_healing_profile fails safe to None (blank/non-str dropped).
+                # Byte-stable round-trip (EM-155): an untreated agent is never
+                # re-emitted, so its dict is unchanged.
+                healings=max(0, _int(d.get("healings"))),
+                pre_healing_profile=(
+                    str(d["pre_healing_profile"])
+                    if isinstance(d.get("pre_healing_profile"), str)
+                    and str(d.get("pre_healing_profile")).strip()
+                    else None
+                ),
+                treated_at_tick=max(0, _int(d.get("treated_at_tick"))),
                 # EM-310 — twin link: additive. Pre-EM-310 snapshots lack the
                 # key and restore None; a present value is coerced to the
                 # canonical {group, of, model} (a missing/blank peer id → None,
