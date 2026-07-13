@@ -735,6 +735,31 @@ class CoherenceParams:
 
 
 @dataclass
+class ChimeraTwinsParams:
+    """EM-310 — Chimera Twins (config `world.chimera_twins`).
+
+    Opt-in gate for spawning a LINKED pair of agents with byte-identical
+    persona / memory-seed / starting state that differ ONLY in model, named by
+    the existing Vesper / Vesper II dedup convention. The pair carries a small
+    `twin` link on each AgentState (additive serialization); the FEED derives
+    the twin lens + the divergence card CLIENT-SIDE off that link (feed-only
+    chrome, off the replay surface — no sim feedback).
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-310 — the
+    twin-spawn endpoint (POST /api/agents with `twin_models`) is rejected 400,
+    no agent ever grows a `twin` key, and the em161 prompt golden + the
+    snapshot key set are unchanged (EM-310 injects NO prompt block — the link
+    is pure feed metadata, never read into a turn). The API reads the flag via
+    a defensive accessor with the IDENTICAL default, so an absent block behaves
+    the same (config-absent = OFF). Flip `enabled: true` to allow the marquee
+    within-one-city A/B pair.
+
+      enabled — master toggle (default False = zero behavioral change).
+    """
+    enabled: bool = False
+
+
+@dataclass
 class ProcgenParams:
     """W11b / EM-098 — procedural town generation (config `world.procgen`).
     DEFAULT OFF: the hand-authored town stays byte-identical. When enabled, the
@@ -1942,6 +1967,12 @@ class WorldParams:
     # state). `enabled: true` runs the deterministic coherence bottleneck over
     # each turn's resolved actions[] (zero extra LLM calls — rides the turn).
     coherence: CoherenceParams = field(default_factory=CoherenceParams)
+    # EM-310 — Chimera Twins. Additive with a DEFAULT-OFF `enabled`, so a
+    # world.yaml without the `chimera_twins` block is byte-identical to
+    # pre-EM-310 (prompt golden + snapshot key set — the twin link is emitted
+    # ONLY for an explicitly linked pair, and `enabled: false` rejects the
+    # twin-spawn endpoint so no such pair ever exists).
+    chimera_twins: ChimeraTwinsParams = field(default_factory=ChimeraTwinsParams)
     # EM-123 — zoned districts that deepen as megaprojects complete. Additive
     # with engine-matching defaults (default ON); `enabled: false` keeps every
     # district at tier 1 (byte-identical pre-EM-123: no district_grew events,
@@ -2309,6 +2340,20 @@ def _parse_coherence(raw: dict | None) -> CoherenceParams:
     return CoherenceParams(
         enabled=bool(raw.get("enabled", d.enabled)),
         strategy=strategy,
+    )
+
+
+def _parse_chimera_twins(raw: dict | None) -> ChimeraTwinsParams:
+    """Parse the optional `world.chimera_twins` block (EM-310).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-310 (prompt golden +
+    snapshot key set — the twin link is emitted only for an explicit pair, which
+    the disabled endpoint never creates)."""
+    if not isinstance(raw, dict):
+        return ChimeraTwinsParams()
+    d = ChimeraTwinsParams()
+    return ChimeraTwinsParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
     )
 
 
@@ -3340,6 +3385,7 @@ def _parse_world(
         planning=_parse_planning(w.get("planning")),
         universalization=_parse_universalization(w.get("universalization")),
         coherence=_parse_coherence(w.get("coherence")),
+        chimera_twins=_parse_chimera_twins(w.get("chimera_twins")),
         miracles=_parse_miracles(w.get("miracles")),
         district_growth=_parse_district_growth(w.get("district_growth")),
         city=_parse_city_profile(w.get("city")),
