@@ -150,9 +150,22 @@ prefix_stream() {
 start_backend() {
   check_backend
   info "Starting backend on http://localhost:8000 …"
+  # --reload is OFF by default and opt-in via EM_RELOAD=1. This sim is a
+  # stateful, async, long-lived process: every uvicorn reload re-runs lifespan →
+  # resume-on-boot, which FORKS A NEW RUN at the current snapshot tick and boots
+  # PAUSED — resetting the live feed to an almost-empty run and stranding the
+  # frontend (mock-mode fallback). Stale background tick-loop tasks from the
+  # pre-reload worker also survive and emit turns under the OLD run_id. So a
+  # stray file-touch mid-run reads to the user as "everyone died, no chat".
+  # Turn it on ONLY for backend-code development: EM_RELOAD=1 ./dev
+  local reload_flag=""
+  if [[ "${EM_RELOAD:-0}" == "1" ]]; then
+    reload_flag="--reload"
+    warn "EM_RELOAD=1 — uvicorn --reload ON (each backend edit resets the live sim run)"
+  fi
   (
     cd "${REPO_ROOT}/backend"
-    uvicorn petridish.api.app:app --host 0.0.0.0 --port 8000 --reload 2>&1
+    uvicorn petridish.api.app:app --host 0.0.0.0 --port 8000 ${reload_flag} 2>&1
   ) | prefix_stream "backend" "${RED}" &
   PIDS+=($!)
 }
