@@ -1110,6 +1110,38 @@ class WarParams:
 
 
 @dataclass
+class CharterParams:
+    """EM-311 — Self-Authored Charters (Tier-1 divergence amplifier, config
+    `world.charters`). A charter is the agent's DECLARED identity — a tight enum
+    of ambition kinds + one short creed line — that the agent itself rewrites in
+    an ordinary turn (a `charter_revision` rider on any action, zero extra calls)
+    and that is injected ABOVE the persona in every future prompt. The engine
+    reads this block via its defensive `_charter_param` accessor with IDENTICAL
+    defaults (the CommunicationParams/_comm_param convention), so a world.yaml
+    WITHOUT the `charters` block behaves exactly like these values.
+
+    Like comm/war this block HAS an `enabled` flag defaulting FALSE: seeding, the
+    charter prompt block, the charter_revision apply, and the charter_revised
+    event all gate on it, so a default world seeds no charter, surfaces no prompt
+    line / event, and stays byte-identical (the em161 golden + EM-155).
+
+      enabled          — master gate for the whole charter layer.
+      max_ambitions    — HARD cap on charter ambition slots (the self-prompt
+                         loop guard; mirrored by the runtime sanitizer + schema).
+      creed_cap        — HARD char cap on the free-text creed line.
+      seed_ambitions   — the uniform STARTING ambitions every agent boots with
+                         (the marquee control: same start, divergent ends). Each
+                         must be a legal AMBITION_KINDS kind or it is dropped.
+      seed_creed       — the uniform STARTING creed line.
+    """
+    enabled: bool = False
+    max_ambitions: int = 3
+    creed_cap: int = 140
+    seed_ambitions: list = field(default_factory=lambda: ["keep_the_peace"])
+    seed_creed: str = "I am still finding my place here."
+
+
+@dataclass
 class NeedsParams:
     """EM-229 — Three-needs psychology (config `world.needs`). Two decaying drives
     — `knowledge` and `influence` — ride alongside `energy` on every AgentState.
@@ -1746,6 +1778,12 @@ class WorldParams:
     # grievance, opens no war, surfaces no war governance, and keeps the em161
     # golden + every pre-EM-256 snapshot byte-identical.
     war: WarParams = field(default_factory=WarParams)
+    # EM-311 — Self-Authored Charters (Tier-1 divergence amplifier). Additive with
+    # a DEFAULT-OFF `enabled`, so a world.yaml without the `charters` block seeds
+    # no charter, injects no prompt block, ignores charter_revision, and keeps the
+    # em161 golden + every pre-EM-311 snapshot byte-identical. The caps bound both
+    # the runtime sanitizer and the defensive snapshot-restore path.
+    charters: CharterParams = field(default_factory=CharterParams)
     # EM-229 — three-needs psychology tunables. Additive with engine-matching
     # defaults; the decay is always-on but the prompt surfacing is salience-gated
     # so a world.yaml without the `needs` block keeps the em161 golden + restores
@@ -2672,6 +2710,42 @@ def _parse_war(raw: dict | None) -> WarParams:
     )
 
 
+def _parse_charters(raw: dict | None) -> CharterParams:
+    """Parse the optional `world.charters` block (EM-311).
+    Absent/empty/malformed -> engine-matching defaults (enabled stays FALSE, the
+    inert default). Each key falls back to its default individually (a malformed
+    value never breaks the block). Mirrors `_parse_comm`. `seed_ambitions` is
+    coerced to a list of strings (non-list/garbage → the default); the engine's
+    normalize_charter later drops any off-grammar kind, so a bad seed can never
+    inject an illegal ambition."""
+    if not isinstance(raw, dict):
+        return CharterParams()
+    d = CharterParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    seed_raw = raw.get("seed_ambitions", d.seed_ambitions)
+    seed_ambitions = (
+        [str(a) for a in seed_raw] if isinstance(seed_raw, list)
+        else list(d.seed_ambitions)
+    )
+    seed_creed_raw = raw.get("seed_creed", d.seed_creed)
+    seed_creed = (
+        str(seed_creed_raw) if isinstance(seed_creed_raw, str) else d.seed_creed
+    )
+    return CharterParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        max_ambitions=_int("max_ambitions", d.max_ambitions),
+        creed_cap=_int("creed_cap", d.creed_cap),
+        seed_ambitions=seed_ambitions,
+        seed_creed=seed_creed,
+    )
+
+
 def _parse_needs(raw: dict | None) -> NeedsParams:
     """Parse the optional `world.needs` block (EM-229).
     Absent/empty/malformed -> engine-matching defaults. Each key falls back to
@@ -3130,6 +3204,7 @@ def _parse_world(
         crime=_parse_crime(w.get("crime")),
         comm=_parse_comm(w.get("comm")),
         war=_parse_war(w.get("war")),
+        charters=_parse_charters(w.get("charters")),
         needs=_parse_needs(w.get("needs")),
         memory=_parse_memory(w.get("memory")),
         skills=_parse_skills(w.get("skills")),

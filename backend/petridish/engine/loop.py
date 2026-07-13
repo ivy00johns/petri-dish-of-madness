@@ -492,6 +492,13 @@ class TickLoop:
         if callable(seed_all_skills):
             seed_all_skills()
 
+        # EM-311 — seed each agent's uniform STARTING charter (a no-op unless
+        # world.charters.enabled), so the divergence experiment begins from a
+        # common baseline the agents then rewrite for themselves.
+        seed_all_charters = getattr(self._world, "seed_all_charters", None)
+        if callable(seed_all_charters):
+            seed_all_charters()
+
         # Clear agent memories + W11b cognition state (commitments, importance
         # accumulators, pending overheard lines).
         reset_state = getattr(self._runtime, "reset_state", None)
@@ -549,6 +556,12 @@ class TickLoop:
         seed_all_skills = getattr(self._world, "seed_all_skills", None)
         if callable(seed_all_skills):
             seed_all_skills()
+        # EM-311 — seed each agent's uniform STARTING charter BEFORE the tick-0
+        # save (a no-op unless world.charters.enabled), so the persisted base run
+        # carries the common baseline.
+        seed_all_charters = getattr(self._world, "seed_all_charters", None)
+        if callable(seed_all_charters):
+            seed_all_charters()
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)
