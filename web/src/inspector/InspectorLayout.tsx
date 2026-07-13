@@ -72,6 +72,7 @@ import DecisionTrace from './DecisionTrace';
 import GovernanceHistory from './GovernanceHistory';
 import SocialGraph from './SocialGraph';
 import AWIDashboard from './AWIDashboard';
+import BabelMatrix, { BABEL_MATRIX_ENABLED } from './BabelMatrix';
 import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
 
@@ -661,30 +662,41 @@ export function InspectorLayout({
         {tab === 'society' && (
           // Society — the relationship web + the welfare dashboard, with the
           // governance timeline (collapses to a slim strip when no laws yet).
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
-            <div className="flex flex-col gap-2 min-h-0 min-w-0">
-              <PanelCell weight="lg:flex-[4]">
-                <ErrorBoundary name="Social Graph">
-                  <SocialGraph {...panelProps} />
+          // EM-314: when babel_matrix.enabled, the dyadic model-chemistry
+          // heatmap rides beneath the grid (default OFF ⇒ tree unchanged).
+          <div className="flex flex-col gap-2 min-h-0 min-w-0">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
+              <div className="flex flex-col gap-2 min-h-0 min-w-0">
+                <PanelCell weight="lg:flex-[4]">
+                  <ErrorBoundary name="Social Graph">
+                    <SocialGraph {...panelProps} />
+                  </ErrorBoundary>
+                </PanelCell>
+                <CollapsibleCell
+                  title="Governance · Laws"
+                  count={govEventCount}
+                  empty={govEventCount === 0}
+                  zeroNote="no laws yet — proposals from Town Hall appear here"
+                  weight="lg:flex-[3]"
+                >
+                  <ErrorBoundary name="Governance History">
+                    <GovernanceHistory {...panelProps} />
+                  </ErrorBoundary>
+                </CollapsibleCell>
+              </div>
+              <PanelCell weight="">
+                <ErrorBoundary name="AWI Dashboard">
+                  <AWIDashboard {...panelProps} />
                 </ErrorBoundary>
               </PanelCell>
-              <CollapsibleCell
-                title="Governance · Laws"
-                count={govEventCount}
-                empty={govEventCount === 0}
-                zeroNote="no laws yet — proposals from Town Hall appear here"
-                weight="lg:flex-[3]"
-              >
-                <ErrorBoundary name="Governance History">
-                  <GovernanceHistory {...panelProps} />
-                </ErrorBoundary>
-              </CollapsibleCell>
             </div>
-            <PanelCell weight="">
-              <ErrorBoundary name="AWI Dashboard">
-                <AWIDashboard {...panelProps} />
-              </ErrorBoundary>
-            </PanelCell>
+            {BABEL_MATRIX_ENABLED && (
+              <PanelCell weight="min-h-[18rem]">
+                <ErrorBoundary name="Babel Matrix">
+                  <BabelMatrix runId={selectedRunId} profiles={panelProps.profiles} />
+                </ErrorBoundary>
+              </PanelCell>
+            )}
           </div>
         )}
 

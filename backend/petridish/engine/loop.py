@@ -492,6 +492,13 @@ class TickLoop:
         if callable(seed_all_skills):
             seed_all_skills()
 
+        # EM-311 — seed each agent's uniform STARTING charter (a no-op unless
+        # world.charters.enabled), so the divergence experiment begins from a
+        # common baseline the agents then rewrite for themselves.
+        seed_all_charters = getattr(self._world, "seed_all_charters", None)
+        if callable(seed_all_charters):
+            seed_all_charters()
+
         # Clear agent memories + W11b cognition state (commitments, importance
         # accumulators, pending overheard lines).
         reset_state = getattr(self._runtime, "reset_state", None)
@@ -549,6 +556,12 @@ class TickLoop:
         seed_all_skills = getattr(self._world, "seed_all_skills", None)
         if callable(seed_all_skills):
             seed_all_skills()
+        # EM-311 — seed each agent's uniform STARTING charter BEFORE the tick-0
+        # save (a no-op unless world.charters.enabled), so the persisted base run
+        # carries the common baseline.
+        seed_all_charters = getattr(self._world, "seed_all_charters", None)
+        if callable(seed_all_charters):
+            seed_all_charters()
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)
@@ -678,6 +691,19 @@ class TickLoop:
                 self._emit_event(evt)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("miracle expiry failed: %s", exc)
+
+        # EM-317 — resolve the Prophecy Board in the SAME per-tick path: a pending
+        # prophecy that has come to pass stamps PROPHECY FULFILLED, one whose
+        # countdown elapsed stamps PROPHECY BROKEN (prophecy_resolved, standalone
+        # god events, turn_id null). Flag OFF (default) ⇒ no-op, no events.
+        try:
+            resolve_prophecies = getattr(self._world, "resolve_prophecies", None)
+            if callable(resolve_prophecies):
+                for evt in resolve_prophecies():
+                    evt.setdefault("turn_id", None)
+                    self._emit_event(evt)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("prophecy resolution failed: %s", exc)
 
         # EM-245 (S3b) — advance an active master-plan morph (deterministic k
         # edges/tick, standalone system events, turn_id null). An INACTIVE plan
@@ -1971,8 +1997,44 @@ class TickLoop:
         for evt in events:
             # Standalone system event — not part of any agent turn's chain.
             evt.setdefault("turn_id", None)
+            # EM-315 — the Healing House sentence (World._on_rule_activated) has
+            # ALREADY swapped the patient's serialized `agent.profile` (the
+            # deterministic replay surface). Sync the LIVE router so the very next
+            # turn routes through the transplanted model and the feed chip morphs
+            # — this is off the replay surface (a resume re-registers every agent's
+            # profile at boot, api/app.py). The transplant event carries the new
+            # lane in payload.to_profile (the shared model_reassigned primitive).
+            # Best-effort + guarded: a duck-typed/absent router never breaks the
+            # drain, and we enrich the event's chip color from the router.
+            if evt.get("kind") == "model_reassigned":
+                self._sync_transplant_router(evt)
             self._emit_event(evt)
         self._broadcast_world_state()
+
+    def _sync_transplant_router(self, evt: dict) -> None:
+        """EM-315 — adopt a society-driven model swap on the LIVE router so the
+        next turn routes the new lane (the World already changed agent.profile;
+        this only aligns the router's per-agent override, which boot seeds for
+        every agent). Off the replay surface; swallows every error so a governance
+        drain never dies on a router quirk."""
+        payload = evt.get("payload") or {}
+        patient_id = payload.get("patient_id") or evt.get("target_id")
+        to_profile = payload.get("to_profile") or payload.get("new_profile")
+        if not patient_id or not to_profile:
+            return
+        try:
+            self._router.reassign(str(patient_id), str(to_profile))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("healing-house router sync failed: %s", exc)
+            return
+        # Enrich the sentence card's chip color from the freshly-adopted lane so
+        # the feed shows the transplanted model's color, not the fallback.
+        try:
+            agent = self._world.agents.get(str(patient_id))
+            if agent is not None and not evt.get("profile_color"):
+                evt["profile_color"] = self._get_profile_color(agent)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Wave I / EM-210 — The Atelier: drain the transient image-fetch outbox into

@@ -196,6 +196,47 @@ export function eventRowToWorldEvent(row: EventRow): WorldEvent {
   };
 }
 
+// ── EM-314 The Babel Matrix (dyadic inter-model social physics) ──────────────
+
+/** One receipt behind a matrix cell — the exact dyadic outcome event, so a
+ *  finding is quotable/replayable evidence, never a chart alone. */
+export interface BabelReceipt {
+  seq: number;
+  tick: number;
+  kind: string;
+  family: string;
+  positive: boolean;
+  actor_id: string;
+  target_id: string;
+  text: string;
+  /** Ground-truth model that actually answered the actor's turn, when known. */
+  routed_via: string | null;
+}
+
+/** One (actor-model row × target-model col) cell of the matrix. */
+export interface BabelCell {
+  actor: string;   // row model (the agent taking the resolving action)
+  target: string;  // col model (the counterparty it acted upon)
+  total: number;
+  positive: number;
+  rate: number | null;
+  /** Wilson 95% score interval — honest confidence for thin dyad samples. */
+  ci_lo: number | null;
+  ci_hi: number | null;
+  by_family: Record<string, { total: number; positive: number; rate: number | null }>;
+  receipts: BabelReceipt[];
+}
+
+/** GET /api/babel-matrix response (fingerprint.dyadic.build_babel_matrix). */
+export interface BabelMatrix {
+  version: string;
+  family: string | null;
+  families: string[];
+  models: string[];
+  cells: BabelCell[];
+  totals: { outcomes: number; positive: number; cells: number; receipts_capped: boolean };
+}
+
 // ── fetch plumbing ───────────────────────────────────────────────────────────
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -538,6 +579,30 @@ export const inspectorApi = {
   async runAnalytics(runId: number): Promise<Record<string, unknown> | null> {
     const data = await getJsonOrNull(`/api/analytics${qs({ run_id: runId })}`);
     return isObject(data) ? data : null;
+  },
+
+  /**
+   * EM-314 — GET /api/babel-matrix [?run_id&family&lineage]. The dyadic
+   * (actor-model × target-model) outcome heatmap for a run. Returns `null` when
+   * the backend is unreachable OR the feature is disabled (the endpoint 404s
+   * unless PETRIDISH_BABEL_MATRIX_ENABLED is set), so the panel can render its
+   * labeled "disabled / no backend" state instead of an empty grid. WITHIN-run
+   * dyads (distinct from EM-119 cross-run charts); lineage folds one fork chain.
+   */
+  async babelMatrix(
+    runId?: number,
+    opts?: { family?: string; lineage?: boolean },
+  ): Promise<BabelMatrix | null> {
+    const path = `/api/babel-matrix${qs({
+      run_id: runId,
+      family: opts?.family,
+      lineage: opts?.lineage ? 1 : undefined,
+    })}`;
+    const data = await getJsonOrNull(path);
+    if (!isObject(data) || !Array.isArray(data.cells) || !Array.isArray(data.models)) {
+      return null;
+    }
+    return data as unknown as BabelMatrix;
   },
 };
 

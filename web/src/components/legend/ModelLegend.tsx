@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from 'react';
 import type { ModelProfile } from '../../types';
+import { useBlindLineup } from '../blind/BlindLineupContext';
 
 interface ModelLegendProps {
   profiles: ModelProfile[];
@@ -27,6 +28,9 @@ function loadCollapsed(): boolean {
 
 export function ModelLegend({ profiles }: ModelLegendProps) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
+  // EM-309 (Blind Lineup): while a round is live, the model NAME + id read as
+  // ??? — the color swatch stays so the legend still keys the roster slots.
+  const { active, maskName } = useBlindLineup();
 
   useEffect(() => {
     try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
@@ -68,12 +72,12 @@ export function ModelLegend({ profiles }: ModelLegendProps) {
                   className="font-mono text-xs font-semibold tracking-wide"
                   style={{ color: p.color }}
                 >
-                  {p.name}
+                  {maskName(p.name)}
                 </span>
 
-                {/* Model ID */}
+                {/* Model ID — hidden while the Blind Lineup round is live. */}
                 <span className="font-mono text-[10px] text-lab-muted truncate flex-1 text-right">
-                  {p.model_id}
+                  {active ? '' : p.model_id}
                 </span>
 
                 {/* Availability dot */}

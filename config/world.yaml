@@ -200,6 +200,40 @@ world:
     reparations_base: 25      # default peace_treaty reparations when unspecified
     war_notoriety: 10         # notoriety stamped on the exiled loser leader
 
+  # EM-315 — The Healing House. A 70% governance vote (the `heal` propose_rule
+  # effect) sentences a citizen to the Healing House, where the engine hot-swaps
+  # their model to a DIFFERENT lane from `target_profiles` — the society wields
+  # the per-agent model scalpel, then litigates whether they "came back
+  # different." DEFAULT OFF with an EMPTY pool ⇒ no menu entry, no prompt line,
+  # no swap, byte-identical to pre-EM-315. To enable: set enabled:true AND curate
+  # target_profiles to >= 2 FULL-RATE free/local lanes from profiles.yaml — NEVER
+  # `mock` or a muted/paid lane (the no-throttling law: a swap changes WHICH model
+  # answers, never whether one does; the engine additionally refuses `mock`). Add
+  # a place with id `healing_house` (any kind) so the convict visibly relocates.
+  # MUST stay in sync with the HealingHouseParams mirror in
+  # backend/petridish/config/loader.py.
+  healing_house:
+    enabled: false            # master gate for the whole Healing House layer
+    target_profiles: []       # curated free/local lanes the sentence swaps INTO (e.g. [groq-llama, cerebras-qwen, mistral])
+    whisper_ticks: 40         # ticks a treated patient carries the "came back different" prompt line (0 disables)
+
+  # EM-311 — Self-Authored Charters (Tier-1 divergence amplifier). DEFAULT OFF:
+  # with enabled false no charter is seeded, no charter prompt block is injected,
+  # charter_revision is ignored, and no charter_revised event fires — byte-identical
+  # pre-EM-311 (EM-155 + the em161 golden). When enabled, every agent boots with the
+  # SAME uniform charter (the marquee control) and rewrites it for itself in ordinary
+  # turns (a charter_revision rider, zero extra calls), injected ABOVE the persona.
+  # The persona stays the immutable floor. Absent ⇒ engine defaults (these same
+  # values). MUST stay in sync with the CharterParams mirror in
+  # backend/petridish/config/loader.py.
+  charters:
+    enabled: false            # master gate for the whole charter layer
+    max_ambitions: 3          # HARD cap on ambition slots (self-prompt loop guard)
+    creed_cap: 140            # HARD char cap on the free-text creed line
+    seed_ambitions:           # uniform STARTING ambitions (must be legal kinds)
+      - keep_the_peace
+    seed_creed: "I am still finding my place here."   # uniform STARTING creed
+
   # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
   # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
   # every agent (floats 0..100, default 100). They decay every turn at these
@@ -379,6 +413,19 @@ world:
   coherence:
     enabled: false
     strategy: annotate
+
+  # EM-310 — Chimera Twins. Opt-in gate for the marquee "same persona, different
+  # brain" pair: POST /api/agents with twin_models=[modelA, modelB] spawns a
+  # LINKED pair sharing byte-identical persona/memory-seed/starting state,
+  # differing ONLY in model, named by the Vesper / Vesper II dedup convention.
+  # The feed derives the twin lens + the auto-pinned divergence-point card
+  # CLIENT-SIDE off the additive `twin` link (feed-only chrome, off the replay
+  # surface). DEFAULT OFF so the snapshot key set + prompt golden stay byte-
+  # identical and the twin-spawn endpoint is rejected; flip enabled:true to allow
+  # the within-one-city A/B pair. MUST stay in sync with the ChimeraTwinsParams
+  # mirror in backend/petridish/config/loader.py.
+  chimera_twins:
+    enabled: false
 
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,

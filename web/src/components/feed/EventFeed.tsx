@@ -23,6 +23,7 @@ import type { WorldEvent, EventKind } from '../../types';
 import { llmDecidedAnimalTurns, isLlmDecidedAction, animalModelByTurn } from '../../lib/animalIdentity';
 import { inspectorApi } from '../../inspector/api';
 import type { GodInterveneKind, GodMiracleKind } from '../../inspector/api';
+import { useBlindLineup } from '../blind/BlindLineupContext';
 
 interface EventFeedProps {
   events: WorldEvent[];
@@ -33,6 +34,14 @@ interface EventFeedProps {
    * the god channel) the GRANT affordance does not render.
    */
   onGrantReply?: (text: string, inReplyTo?: string) => void;
+  /**
+   * EM-312 (Storylines Rail): when a storyline is selected, restrict the feed to
+   * that thread — events whose actor or target is one of its principals. Absent
+   * (feature off / nothing selected) ⇒ the feed is unchanged. The banner offers
+   * a one-click clear via `onClearThread`.
+   */
+  threadFilter?: { id: string; title: string; principals: string[] } | null;
+  onClearThread?: () => void;
 }
 
 // Icon per event kind. EventKind is permissive (open string union); FeedEntry
@@ -60,6 +69,8 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   memory:           '◈',
   parse_failure:    '⚠',
   model_reassigned: '⇄',
+  // EM-315 — the Healing House verdict card (the town votes to remake a mind).
+  sentenced_healing: '⚕',
   // Wave D2 (EM-158) — per-agent cadence tier reassignment receipt.
   cadence_tier_changed: '⇄',
   random_event:     '⊕',
@@ -105,6 +116,10 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   war_exhausted:        '⚔',
   exiled:               '⚔',
   peace_signed:         '🕊',
+  // EM-317 — the Prophecy Board: the 🔮 omen crystal on both the posting and
+  // the FULFILLED/BROKEN resolution (the backend stamps the verdict in .text).
+  prophecy_posted:      '🔮',
+  prophecy_resolved:    '🔮',
   // EM-123 — a zoned district matured a tier (megaproject completed).
   district_grew:        '🏙',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
@@ -155,6 +170,15 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   war_exhausted:        'var(--marker-crime)',
   exiled:               'var(--marker-crime)',
   peace_signed:         'var(--faction-tint)',
+  // EM-315 — the Healing House sentence reads in the crime-red register: the
+  // pitch's "lobotomy-grim" note — the town wielding the model scalpel as
+  // punishment. Token var() only (design-token-guard); the system-emitted card
+  // carries no profile_color so this fallback always wins.
+  sentenced_healing:    'var(--marker-crime)',
+  // EM-317 — the Prophecy Board reads in god-gold (the SAME --marker-miracle the
+  // god's miracles wear), so an omen and its verdict pop as the god's voice.
+  prophecy_posted:      'var(--marker-miracle)',
+  prophecy_resolved:    'var(--marker-miracle)',
 };
 
 // W8 — the animal chaos magenta, referenced as the shared --marker-animal token
@@ -406,7 +430,10 @@ export const CATEGORIES: FeedCategory[] = [
   // in — the red conflict register — so filtering Social surfaces the whole
   // grievance → war → peace arc alongside the crime it grows from.
   { key: 'social',  label: 'Social',  icon: '♡', kinds: ['relationship', 'relationship_changed', 'conflict', 'agent_died', 'agent_spawned', 'child_spawned', 'agent_starving', 'world_extinct', 'faction_formed', 'faction_joined', 'faction_left', 'faction_dissolved', 'war_declared', 'grievance_accrued', 'war_band_joined', 'war_clash', 'war_siege', 'peace_signed', 'war_exhausted', 'exiled'] },
-  { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected'] },
+  // EM-315 — the Healing House verdict (`sentenced_healing`) lands with the rule
+  // outcomes it is decided by; the follow-on transplant rides `model_reassigned`
+  // in the System (model-lever) lane.
+  { key: 'rules',   label: 'Rules',   icon: '⚖', kinds: ['rule_proposed', 'rule_vote', 'rule_passed', 'rule_rejected', 'sentenced_healing'] },
   // W11b (EM-091): the notice board gets its own chip — also the contract's
   // suggested feed-filter affordance for billboard traffic.
   { key: 'board',   label: 'Board',   icon: '📌', kinds: ['billboard_posted'] },
@@ -416,7 +443,7 @@ export const CATEGORIES: FeedCategory[] = [
   // Wave E: god miracles live with the other world-scale levers (random_event
   // is the closest sibling — god_intervention itself is uncategorized ON
   // PURPOSE, but miracles are filterable world events, not feedback receipts).
-  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'memory', 'run_forked', 'world_paused', 'district_grew'] },
+  { key: 'system',  label: 'System',  icon: '⊕', kinds: ['turn_start', 'control', 'model_reassigned', 'cadence_tier_changed', 'random_event', 'god_miracle', 'miracle_expired', 'prophecy_posted', 'prophecy_resolved', 'memory', 'run_forked', 'world_paused', 'district_grew'] },
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
@@ -478,6 +505,10 @@ interface FeedEntryProps {
 }
 
 function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply }: FeedEntryProps) {
+  // EM-309 (Blind Lineup): the feed is the centerpiece, so its inline model
+  // chips are the loudest identity tell — mask them behind ??? while a round is
+  // live (the profile COLOR / left-border stays as the slot cue).
+  const { maskName } = useBlindLineup();
   // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
   // no model profile_color, and we want them to pop out of the human-agent feed).
   const animal = isAnimalEvent(event);
@@ -596,9 +627,9 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
           <span
             className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
             style={{ color: badgeColor, borderColor: badgeColor + '50' }}
-            title={speech ? `spoken by a ${event.profile} villager` : `decided by ${event.profile}`}
+            title={speech ? `spoken by a ${maskName(event.profile)} villager` : `decided by ${maskName(event.profile)}`}
           >
-            {event.profile}
+            {maskName(event.profile)}
           </span>
         )}
 
@@ -684,9 +715,9 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
           <span
             className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
             style={{ color: ANIMAL_MAGENTA, borderColor: ANIMAL_MAGENTA }}
-            title={`decided by ${animalModel}`}
+            title={`decided by ${maskName(animalModel)}`}
           >
-            {animalModel}
+            {maskName(animalModel)}
           </span>
         )}
 
@@ -722,7 +753,7 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
 // How close to the top counts as "pinned to newest" (px).
 const TOP_THRESHOLD = 8;
 
-export function EventFeed({ events, onGrantReply }: EventFeedProps) {
+export function EventFeed({ events, onGrantReply, threadFilter, onClearThread }: EventFeedProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const highlightLenRef = useRef(0);
   const newEventIdsRef = useRef<Set<number>>(new Set());
@@ -753,15 +784,30 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
   // action-rejections AND routing-exhaustion idle-fallbacks (EM-318 feed-
   // silence) are dropped first — they're non-actionable clutter, not real
   // errors, so they never appear (even when the errors channel is focused).
+  // EM-312: the selected storyline's principals as a fast lookup (null = off).
+  const threadPrincipals = useMemo(
+    () => (threadFilter ? new Set(threadFilter.principals) : null),
+    [threadFilter],
+  );
+
   const visibleEvents = useMemo(
     () => {
       const base = events.filter(
         (e) => !isBenignRejection(e) && !isSilencedProviderError(e));
-      return focus.size === 0
+      const byCategory = focus.size === 0
         ? base.filter((e) => !DEFAULT_MUTED.includes(KIND_TO_CATEGORY[e.kind] ?? ''))
         : base.filter((e) => focus.has(KIND_TO_CATEGORY[e.kind] ?? ''));
+      // EM-312: with a storyline selected, keep only events touching one of its
+      // principals (actor OR target) — "catch up on this beef". Orthogonal to
+      // the category chips; both must pass.
+      if (!threadPrincipals) return byCategory;
+      return byCategory.filter(
+        (e) =>
+          (e.actor_id != null && threadPrincipals.has(e.actor_id)) ||
+          (e.target_id != null && threadPrincipals.has(e.target_id)),
+      );
     },
-    [events, focus],
+    [events, focus, threadPrincipals],
   );
 
   // What actually renders: the live filtered list while pinned, the snapshot
@@ -864,6 +910,27 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
           </span>
         </div>
       </div>
+
+      {/* EM-312: the active storyline filter — the feed is narrowed to one
+          thread's principals. One click clears it. */}
+      {threadFilter && (
+        <div className="flex items-center gap-2 px-2 py-1 border-b border-lab-acid/40 bg-lab-acid/10">
+          <span aria-hidden="true" className="font-mono text-[10px]" style={{ color: 'var(--marker-crime)' }}>✦</span>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-lab-muted shrink-0">Storyline</span>
+          <span className="font-mono text-[11px] text-lab-text font-semibold truncate min-w-0">{threadFilter.title}</span>
+          {onClearThread && (
+            <button
+              type="button"
+              onClick={onClearThread}
+              className="ml-auto font-mono text-[10px] px-1.5 py-0.5 border border-lab-acid text-lab-acid
+                         rounded-sm hover:bg-lab-acid/15 cursor-pointer transition-colors duration-100 shrink-0"
+              title="Clear the storyline filter — show the whole feed"
+            >
+              CLEAR ✕
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Filter bar — click a chip to show ONLY that category; click more to stack
           two or three; click an active one to drop it. Empty = default view. */}

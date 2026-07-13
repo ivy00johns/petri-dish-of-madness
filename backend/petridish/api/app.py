@@ -18,11 +18,13 @@ from pydantic import BaseModel, Field
 
 from ..config.loader import load_config, load_personas, WorldConfig
 from ..engine.world import World, AgentState, PlaceState
+from ..fingerprint import build_babel_matrix
 from ..engine.loop import TickLoop, _run_config_json
 from ..agents.runtime import AgentRuntime
 from ..animals.runtime import ANIMAL_SPECIES_CATALOG, _seed_int
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
+from ..fingerprint import FEATURE_VERSION, compute_run_fingerprints
 
 log = logging.getLogger(__name__)
 
@@ -918,6 +920,12 @@ class SpawnBody(BaseModel):
     # labeled contestants. Each entry must be a known profile name. Only valid
     # in god mode; governance + ab_models is a 400.
     ab_models: list[str] | None = None
+    # EM-310 — Chimera Twins opt-in: a LINKED pair (EXACTLY two known profiles)
+    # sharing byte-identical persona/memory-seed/starting state, differing ONLY
+    # in model, named by the Vesper / Vesper II dedup convention. Gated on
+    # world.chimera_twins.enabled (else 400); god mode only; mutually exclusive
+    # with ab_models. Absent ⇒ byte-identical pre-EM-310 spawn behavior.
+    twin_models: list[str] | None = None
 
 
 def _resolve_spawn_fields(body: SpawnBody) -> tuple[str, str, str, str, str]:
@@ -972,10 +980,120 @@ def _ab_tag(profile_name: str) -> str:
     return profile_name.split("-")[0]
 
 
+def _chimera_twins_enabled() -> bool:
+    """EM-310 — read the `world.chimera_twins.enabled` flag defensively
+    (dataclass OR dict OR absent), with the IDENTICAL default (False) as the
+    config, so a world without the block behaves as OFF."""
+    ct = getattr(_config.world, "chimera_twins", None) if _config else None
+    return bool(getattr(ct, "enabled", False)) if ct is not None else False
+
+
 @app.post("/api/agents")
 async def spawn_agent(body: SpawnBody, response: Response):
     if _world is None or _router is None:
         raise HTTPException(503, "Not initialized")
+
+    # EM-310 — Chimera Twins: a LINKED pair (EXACTLY two models) sharing
+    # byte-identical persona/memory-seed/starting state, named by the Vesper /
+    # Vesper II dedup convention. Gated on world.chimera_twins.enabled; god mode
+    # only; mutually exclusive with ab_models. Runs BEFORE the ab_models branch.
+    if body.twin_models:
+        if body.ab_models:
+            raise HTTPException(
+                400, "twin_models and ab_models are mutually exclusive")
+        if not _chimera_twins_enabled():
+            raise HTTPException(
+                400,
+                "chimera_twins is disabled "
+                "(set world.chimera_twins.enabled: true to spawn twins)",
+            )
+        mode = _spawn_mode(body)
+        if mode != "god":
+            raise HTTPException(400, "twin_models is only supported in god mode")
+        if len(body.twin_models) != 2:
+            raise HTTPException(
+                400, "twin_models must name EXACTLY two profiles (one per twin)")
+        if body.twin_models[0] == body.twin_models[1]:
+            raise HTTPException(
+                400, "twin_models must name two DISTINCT models "
+                     "(the whole point is same persona, different brain)")
+        # Resolve the shared base name / personality (persona card fills gaps).
+        name = body.name
+        personality = body.personality
+        if body.persona:
+            wanted = body.persona.strip().lower()
+            card = next(
+                (c for c in load_personas() if c["name"].strip().lower() == wanted),
+                None,
+            )
+            if card is None:
+                raise HTTPException(400, f"Unknown persona: {body.persona!r}")
+            name = name or card["name"]
+            personality = personality or card["personality"]
+        personality = personality or "A generic agent."
+        if not name:
+            raise HTTPException(400, "name is required (directly or via persona)")
+        # Validate both profiles before touching the world.
+        for prof_name in body.twin_models:
+            if _router.get_profile(prof_name) is None:
+                raise HTTPException(400, f"Unknown profile: {prof_name!r}")
+        cadence_tier = body.cadence_tier or "protagonist"
+        if cadence_tier not in _VALID_CADENCE_TIERS:
+            raise HTTPException(
+                400,
+                f"Unknown cadence_tier: {body.cadence_tier!r} "
+                "(protagonist|supporting|background)",
+            )
+        # Spawn both twins with the SAME base name — the world's Vesper / Vesper
+        # II dedup renames the second. Byte-identical starting state (spawn_agent
+        # gives identical energy/credits/location); only the model differs.
+        agents = []
+        for prof_name in body.twin_models:
+            agent = _world.spawn_agent(
+                name=name,
+                personality=personality,
+                profile=prof_name,
+                location=body.location,
+                cadence_tier=cadence_tier,
+            )
+            _router.reassign(agent.id, prof_name)
+            agents.append(agent)
+        # Cross-link the pair (each points at the other; model copied per twin).
+        _world.link_twins(agents[0].id, agents[1].id, group=name)
+        spawned: list[dict] = []
+        if _loop and _repo:
+            run_id = _loop._run_id or 1
+            for agent in agents:
+                # save AFTER linking so the persisted row carries the twin key.
+                _repo.save_agent(run_id, agent, _world.tick)
+                peer = agents[1] if agent is agents[0] else agents[0]
+                _loop._emit_event({
+                    "kind": "agent_spawned",
+                    "actor_id": agent.id,
+                    "actor_type": "god",
+                    "profile": agent.profile,
+                    "profile_color": _loop._get_profile_color(agent),
+                    "text": f"{agent.name} spawned "
+                            f"(Chimera Twin of {name} on {agent.profile}).",
+                    "payload": {
+                        "agent_id": agent.id,
+                        "name": agent.name,
+                        "method": "god",
+                        # correlates the pair in the feed twin lens (client-side).
+                        "twin_group": name,
+                        "twin_of": peer.id,
+                    },
+                })
+        for agent in agents:
+            spawned.append({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "profile": agent.profile,
+            })
+        if _loop:
+            _loop._broadcast_world_state()
+        response.status_code = 201
+        return {"status": "ok", "mode": "god", "twins": spawned}
 
     # run-663 — A/B opt-in: when ab_models is present and non-empty (god mode
     # only) spawn one agent per model using the shared name/personality.
@@ -1645,6 +1763,56 @@ async def post_proclamation(body: ProclaimBody):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# EM-317 — The Prophecy Board (a new god-channel verb, default OFF behind
+# world.prophecy_board.enabled). The watcher posts a prophecy from a CONSTRAINED
+# enum-predicate menu; it lands as a `prophecy_posted` god event ON the replay
+# surface (like a proclamation) and the omen begins riding every agent's prompt.
+# Resolution is deterministic (the engine's per-tick projection) — this endpoint
+# only POSTS. Mirrors /api/proclaim: engine seam does all validation, its
+# ValueError maps to 422.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ProphesyBody(BaseModel):
+    # The enum predicate: agent_convicted {agent_id} | building_falls {district}
+    # | agents_reconcile {agent_a, agent_b}. Free text is REJECTED by the engine
+    # (deterministic scoring needs the enum) — never validated loosely here.
+    predicate: str = Field(min_length=1, max_length=64)
+    # Predicate params (agent ids / district). Validated + normalized by the seam.
+    params: dict = Field(default_factory=dict)
+    # Countdown horizon in ticks (clamped to [horizon_min, horizon_max] by the
+    # seam); None ⇒ the seam's max horizon.
+    horizon: int | None = Field(default=None, ge=1)
+
+
+@app.post("/api/prophesy", status_code=201)
+async def post_prophecy(body: ProphesyBody):
+    """God posts a prophecy from the enum-predicate menu. Calls the engine seam
+    `world.post_prophecy_as_god(predicate, params, horizon)` and emits
+    `prophecy_posted` (actor_type 'god'). 503 not initialized / seam absent; 422
+    when the board is disabled, the per-run cap is reached, the predicate/horizon
+    is invalid, or the predicate is already true (the seam's ValueError)."""
+    if _world is None or _loop is None:
+        raise HTTPException(503, "Not initialized")
+    post_fn = getattr(_world, "post_prophecy_as_god", None)
+    if post_fn is None:
+        raise HTTPException(
+            503, "engine prophecy support (world.post_prophecy_as_god) not available yet"
+        )
+    try:
+        evt = post_fn(body.predicate.strip(), dict(body.params or {}), body.horizon)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    prophecy_id = None
+    if isinstance(evt, dict) and evt.get("kind") == "prophecy_posted":
+        e = dict(evt)
+        e.setdefault("actor_type", "god")
+        _loop._emit_event(e)
+        prophecy_id = e.get("payload", {}).get("prophecy_id")
+    _loop._broadcast_world_state()
+    return {"status": "ok", "prophecy_id": prophecy_id}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Wave A.2 — god console: targeted interventions (EM-136) + one-shot whispers
 # (EM-137). The world-wide levers above (inject/billboard/proclaim) can't save
 # ONE starving agent; these target a single soul. Free-scale law: pure state
@@ -1789,6 +1957,29 @@ async def list_runs():
     if _repo is None:
         return []
     return _repo.list_runs(active_run_id=_active_run_id())
+
+
+@app.get("/api/fingerprints")
+async def get_fingerprints(run_id: int | None = None):
+    """EM-313 — Fingerprint Ticker. A zero-LLM, READ-ONLY behavioral-stylometry
+    classifier: per agent, a converging guess of which model it runs (from
+    verb-mix / build-vs-talk / JSON-retry / sentence-length) scored against
+    per-model reference fingerprints mined from the event log, alongside the
+    X-Routed-Via ground truth.
+
+    Gated by `world.fingerprint_ticker.enabled` (default OFF) — disabled ⇒
+    {enabled: false} and the frontend renders nothing. Omitted `run_id` scopes
+    to the active run; an unknown id 404s (via _resolve_run_id). This endpoint
+    never mutates state and is off the replay/determinism surface."""
+    ft = getattr(getattr(_world, "params", None), "fingerprint_ticker", None)
+    if ft is None or not getattr(ft, "enabled", False):
+        return {"enabled": False, "feature_version": FEATURE_VERSION, "agents": []}
+    if _repo is None:
+        return {"enabled": True, "feature_version": FEATURE_VERSION, "agents": []}
+    rid = _resolve_run_id(run_id)  # 404 on an explicit unknown id
+    if rid is None:
+        return {"enabled": True, "feature_version": FEATURE_VERSION, "agents": []}
+    return compute_run_fingerprints(_repo, rid, ft)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2092,3 +2283,44 @@ async def get_analytics(
     if _repo is None or run_id is None:
         return {}
     return _repo.get_analytics(run_id, from_tick=from_tick, to_tick=to_tick)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-314 — The Babel Matrix (dyadic inter-model social physics).
+#
+# FEED/VIEWER chrome, strictly OFF the replay surface: a ZERO-LLM projection of
+# the append-only event log into an (actor-model × target-model) outcome matrix.
+# Read-only, no sim feedback. Gated behind `babel_matrix.enabled` — the backend
+# half is the env flag PETRIDISH_BABEL_MATRIX_ENABLED (default OFF → 404), read
+# at request time so a live flip never requires touching world config or the
+# replay surface. The frontend half is the BABEL_MATRIX_ENABLED const. Both
+# default OFF; flip both together for a live sign-off.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _babel_matrix_enabled() -> bool:
+    import os
+    return os.environ.get("PETRIDISH_BABEL_MATRIX_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+@app.get("/api/babel-matrix")
+async def get_babel_matrix(
+    run_id: int | None = None,
+    family: str | None = Query(default=None, description="restrict to one outcome family (trade|teach)"),
+    lineage: bool = Query(default=False,
+                          description="pool a fork/resume lineage's pre-fork slices (still one within-run society)"),
+):
+    """EM-314 — the (actor-model × target-model) dyadic outcome heatmap for a run.
+
+    Same ?run_id scoping as the other read endpoints (omitted → active run;
+    unknown id → 404). `lineage=true` folds a fork/resume chain (one lineage,
+    NOT a cross-run aggregate — distinct from EM-119). Off by default: returns
+    404 unless PETRIDISH_BABEL_MATRIX_ENABLED is set (babel_matrix.enabled)."""
+    if not _babel_matrix_enabled():
+        raise HTTPException(404, "babel matrix disabled")
+    run_id = _resolve_run_id(run_id)
+    if _repo is None or run_id is None:
+        return build_babel_matrix([], family=family)
+    events = _repo.get_events(run_id, order="asc", lineage=lineage)
+    return build_babel_matrix(events, family=family)

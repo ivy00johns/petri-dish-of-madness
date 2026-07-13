@@ -26,7 +26,11 @@ from typing import Any
 
 import jsonschema
 
-from ..engine.world import World, AgentState, BUILD_TYPES, normalize_plan
+from ..engine.world import (
+    World, AgentState, BUILD_TYPES, normalize_plan,
+    normalize_charter, AMBITION_GRAMMAR, AMBITION_KINDS,
+    CHARTER_MAX_AMBITIONS, CHARTER_CREED_CAP,
+)
 from ..providers.base import ProviderError
 from ..providers.router import Router
 from .memory_retrieval import (
@@ -87,6 +91,28 @@ ACTION_SCHEMA = {
                     "maxItems": 8,
                     "items": {"type": "string", "maxLength": 120},
                 },
+                "reason": {"type": "string", "maxLength": 200},
+            },
+        },
+        # EM-311 — OPTIONAL self-authored charter rewrite, parsed from the SAME
+        # single response (zero extra calls). The TIGHT enum grammar (EM-297
+        # schema-probe discipline): `ambitions` items are constrained to the legal
+        # AMBITION_KINDS, so an off-grammar kind fails the schema — but the
+        # sanitizer (_sanitize_charter_revision) runs FIRST and normalizes/strips a
+        # malformed revision so a bad charter can never fail the turn. Honored only
+        # when world.charters.enabled.
+        "charter_revision": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["ambitions"],
+            "properties": {
+                "ambitions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": CHARTER_MAX_AMBITIONS,
+                    "items": {"type": "string", "enum": list(AMBITION_KINDS)},
+                },
+                "creed": {"type": "string", "maxLength": CHARTER_CREED_CAP},
                 "reason": {"type": "string", "maxLength": 200},
             },
         },
@@ -1521,6 +1547,45 @@ def _sanitize_plan_revision(action_dict: dict) -> str | None:
     return None
 
 
+def _sanitize_charter_revision(action_dict: dict) -> str | None:
+    """EM-311 — pre-validate the optional `charter_revision` IN PLACE so a
+    malformed/off-grammar one can never fail the turn (the _sanitize_plan_revision
+    leniency rule). A usable revision (>=1 legal AMBITION_KINDS ambition) is
+    rewritten to a clean, bounded {ambitions, creed?, reason?} that passes the
+    schema; anything else is POPPED before validation and the reason returned for
+    the decision trace. Off-grammar ambitions are DROPPED (never rejected wholesale)
+    so a model that names one bad kind among good ones still lands its charter —
+    the EM-297 'meet the model where it is' rule."""
+    if "charter_revision" not in action_dict:
+        return None
+    rev = action_dict.pop("charter_revision")
+    if not isinstance(rev, dict):
+        return "malformed charter_revision object"
+    ambitions_raw = rev.get("ambitions")
+    if not isinstance(ambitions_raw, list):
+        return "charter_revision missing ambitions"
+    ambitions: list[str] = []
+    for a in ambitions_raw:
+        if not isinstance(a, str):
+            continue
+        kind = a.strip()
+        if kind in AMBITION_GRAMMAR and kind not in ambitions:
+            ambitions.append(kind)
+        if len(ambitions) >= CHARTER_MAX_AMBITIONS:
+            break
+    if not ambitions:
+        return "charter_revision has no valid ambition"
+    clean: dict = {"ambitions": ambitions}
+    creed = rev.get("creed")
+    if isinstance(creed, str) and creed.strip():
+        clean["creed"] = creed.strip()[:CHARTER_CREED_CAP]
+    reason = rev.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        clean["reason"] = reason.strip()[:200]
+    action_dict["charter_revision"] = clean
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Behavioral-arg normalization (EM-140) — meet the models where they are.
 #
@@ -2154,6 +2219,12 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if getattr(world, "war_enabled", None) and world.war_enabled():
             valid_effects.add("declare_war")
             valid_effects.add("peace_treaty")
+        # EM-315 — the Healing House `heal` lane rides ONLY when the flag is on
+        # (the war/set_zone_rule recipe): default OFF ⇒ not in the set ⇒ rejected
+        # as an invalid effect ⇒ agent behavior byte-identical when dormant. The
+        # world method stays directly callable (its own disabled reason).
+        if getattr(world, "healing_house_enabled", None) and world.healing_house_enabled():
+            valid_effects.add("heal")
         if effect not in valid_effects:
             return f"invalid effect '{effect}'. Valid: {sorted(valid_effects)}"
         # EM-183 — relocate_center needs a REAL target place (the menu/resolution-
@@ -2183,6 +2254,26 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                 return "trial requires args.target = the name or id of a living defendant"
             if getattr(defendant, "crime_status", None) in ("detained", "jailed"):
                 return f"{defendant.name} is already in custody"
+        # EM-315 — heal needs a living PATIENT and a distinct model to transplant
+        # (mirror trial's patient resolution + the world's no-op guard so the gate
+        # AGREES with action_propose_rule — EM-108 menu/resolution rule).
+        if effect == "heal":
+            target = str(args.get("target") or "").strip()
+            patient = world.agents.get(target)
+            if patient is None and target:
+                _wanted = target.lower()
+                patient = next(
+                    (a for a in sorted(world.living_agents(), key=lambda x: x.id)
+                     if str(getattr(a, "name", "")).strip().lower() == _wanted),
+                    None,
+                )
+            if patient is None or not getattr(patient, "alive", True):
+                return ("heal requires args.target = the name or id of a living "
+                        "citizen to send to the Healing House")
+            if getattr(world, "_pick_healing_profile", None) and \
+                    world._pick_healing_profile(patient) is None:
+                return (f"the Healing House has no model to transplant that "
+                        f"{patient.name} does not already run")
         if effect == "name_town" and not str(args.get("name") or "").strip():
             return "name_town requires a name (args.name = the town's new name)"
         if effect == "demolish":
@@ -3049,6 +3140,34 @@ def _assemble_context(
                         f"your side pays>) — suing for peace CONCEDES: your "
                         f"faction pays and its leader is exiled; your faction "
                         f"alone decides, on a 70% vote")
+        # EM-315 — the Healing House `heal` lane surfaces ONLY when the flag is on
+        # AND there is a concrete OTHER living citizen the town could actually
+        # remake (a distinct model exists to transplant — the world's no-op guard),
+        # gated EXACTLY as the validator gates it (EM-108 menu/resolution
+        # agreement). Flag off (the default) ⇒ NO line ⇒ the prompt is
+        # byte-identical (the em161 golden). Names a concrete patient (the
+        # promote_image FINDING 1(b) recipe) so the model is offered a target that
+        # will resolve; prefers a co-located citizen for the "walks into the
+        # asylum" spectacle, else any other living agent.
+        if getattr(world, "healing_house_enabled", None) and world.healing_house_enabled():
+            _pick = getattr(world, "_pick_healing_profile", None)
+
+            def _healable(a: Any) -> bool:
+                return (getattr(a, "id", None) != agent.id
+                        and getattr(a, "alive", True)
+                        and (_pick is None or _pick(a) is not None))
+
+            _patient = next((a for a in co_located if _healable(a)), None)
+            if _patient is None:
+                _patient = next(
+                    (a for a in sorted(world.living_agents(), key=lambda x: x.id)
+                     if _healable(a)), None)
+            if _patient is not None:
+                propose_line += "|heal"
+                propose_tail += (
+                    f"; heal needs target=<a citizen's name or id, e.g. "
+                    f"{_patient.name}> to SENTENCE them to the Healing House, where "
+                    f"the town hot-swaps their model — decided on a 70% vote")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -3451,6 +3570,48 @@ def _assemble_context(
                 "Optional; act freely regardless."
             )
 
+    # ── EM-311 — self-authored charter (injected ABOVE the persona). Empty
+    # (⇒ byte-identical prompt) unless world.charters.enabled — so the em161
+    # golden and every charter-off world are unaffected. When enabled it shows the
+    # agent's DECLARED identity (or invites one) plus the rewrite grammar; rides
+    # this turn — zero extra LLM calls. (getattr keeps callers safe if the engine
+    # seam is ever absent ⇒ no block.) The legal-kinds line is the EM-297 tight
+    # grammar the model must choose from.
+    charter_block = ""
+    _charters_enabled = getattr(world, "charters_enabled", None)
+    if callable(_charters_enabled) and _charters_enabled():
+        _legal_kinds = ", ".join(AMBITION_KINDS)
+        _charter = getattr(agent, "charter", None)
+        _rewrite = (
+            '  Rewrite it whenever your experiences change who you are — add '
+            '"charter_revision": {"ambitions": ["<kind>", ...up to '
+            f'{CHARTER_MAX_AMBITIONS}], "creed": "<one line in your voice>", '
+            '"reason": "..."} to this turn\'s JSON.\n'
+            f"  Legal ambition kinds: {_legal_kinds}."
+        )
+        if isinstance(_charter, dict) and _charter.get("ambitions"):
+            _amb_lines = "\n".join(
+                f"  - {a} ({AMBITION_GRAMMAR.get(a, a)})"
+                for a in _charter["ambitions"]
+            )
+            _creed = _charter.get("creed", "")
+            _creed_line = f'\n  Creed: "{_creed}"' if _creed else ""
+            charter_block = (
+                "\n=== YOUR CHARTER (self-authored — who you have DECIDED to be) "
+                "===\n"
+                f"{_amb_lines}{_creed_line}\n"
+                "  This is the identity YOU chose; it stands ABOVE your given "
+                "nature below.\n"
+                f"{_rewrite}\n"
+            )
+        else:
+            charter_block = (
+                "\n=== YOUR CHARTER ===\n"
+                "  You have not declared a charter — who you have DECIDED to "
+                "become, beyond your given nature. Set one this turn:\n"
+                f"{_rewrite}\n"
+            )
+
     # ── W11b / EM-081 — overheard speech (context injection only, no calls) ───
     overheard_block = ""
     if overheard:
@@ -3556,6 +3717,28 @@ def _assemble_context(
     if _crime_lines:
         crime_block = "\n=== ⚖ THE LAW & THE UNDERWORLD ===\n" + "\n".join(
             f"  {ln}" for ln in _crime_lines)
+
+    # ── EM-315 — the Healing House whisper: a RECENTLY-treated patient carries a
+    # salience-gated self-perception line so their "came back different" arc lands
+    # in the feed (the first post-treatment turn). Gated on the flag + a real
+    # treatment + recency (world.healing_house.whisper_ticks), so an untreated
+    # agent — and every flag-off world — carries NO line and the em161 golden is
+    # unaffected. The chip already shows the new lane; this drives the litigation.
+    healing_block = ""
+    if (getattr(world, "healing_house_enabled", None)
+            and world.healing_house_enabled()
+            and getattr(agent, "healings", 0) > 0):
+        _whisper_ticks = int(world._healing_param("whisper_ticks", 40))
+        _since = getattr(world, "tick", 0) - getattr(agent, "treated_at_tick", 0)
+        if _whisper_ticks > 0 and 0 <= _since <= _whisper_ticks:
+            _was = getattr(agent, "pre_healing_profile", None)
+            _was_tail = f" (you used to think as {_was})" if _was else ""
+            healing_block = (
+                "\n=== ⚕ THE HEALING HOUSE ===\n"
+                f"  You returned from the Healing House {_since} ticks ago — the "
+                f"town voted to remake your mind, and a new model now answers for "
+                f"you{_was_tail}. Some say you came back different. Speak, and let "
+                f"them judge whether you are still yourself.")
 
     # ── EM-233 — soul: the agent's IMMUTABLE identity anchors, injected into
     # EVERY prompt as who-you-are context. EMPTY (⇒ byte-identical prompt) when the
@@ -3758,6 +3941,21 @@ def _assemble_context(
   "{_proc['text']}"
   The god's word reaches every soul in the world. You may heed it, defy it, or
   carry on — but you have heard it, and so has everyone else.
+"""
+
+    # ── EM-317 (Prophecy Board) — the ONE omen line rides every prompt while a
+    # prophecy is pending. HARD-CAPPED at a single line (active_prophecy_omen
+    # returns only the newest pending omen — the prompt-diet constraint), so the
+    # agent perceives the foretelling but the prompt never bloats. Flag OFF /
+    # none pending ⇒ None ⇒ no block ⇒ byte-identical (getattr keeps callers safe
+    # if the engine seam is ever absent).
+    prophecy_block = ""
+    _omen_fn = getattr(world, "active_prophecy_omen", None)
+    _omen = _omen_fn() if callable(_omen_fn) else None
+    if _omen:
+        prophecy_block = f"""
+=== 🔮 AN OMEN ===
+  {_omen}
 """
 
     # ── EM-137 (god console) — one-shot god whisper, consumed RIGHT HERE. ─────
@@ -3967,17 +4165,17 @@ def _assemble_context(
 
     system_prompt = f"""You are {agent.name}, a character in a living world simulation.
 Agent ID: {agent.id}
-{clock_header}Personality: {agent.personality}
+{clock_header}{charter_block}Personality: {agent.personality}
 
 === YOUR STATUS ===
 Location: {place_name} (kind={place_kind})
 Energy: {status_energy}/100
 Credits: {agent.credits}
-Mood: {agent.mood}{faction_line}{crime_block}
+Mood: {agent.mood}{faction_line}{crime_block}{healing_block}
 
 === NEEDS ===
 {needs_text}
-{soul_block}{stage_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{whisper_block}{board_block}
+{soul_block}{stage_block}{skills_block}{request_block}{trade_block}{cooperation_block}{universalization_block}{proclamation_block}{prophecy_block}{whisper_block}{board_block}
 === CO-LOCATED AGENTS ===
 {chr(10).join(f"  {a.name} (id={a.id}, energy={_co_energy(a)}, credits={a.credits})" for a in co_located) or "  (none)"}
 
@@ -5529,6 +5727,53 @@ class AgentRuntime:
                 })
         if plan_rev_rejected is not None:
             trace["plan_revision_rejected"] = plan_rev_rejected
+
+        # EM-311 — self-authored charter rewrite (mirrors plan_revised — rides
+        # _multi, the loop tick-stamps + persists + broadcasts, zero extra calls).
+        # The sanitizer already normalized the revision to legal AMBITION_KINDS +
+        # a capped creed; here it becomes the agent's new charter (bumping the
+        # revision counter + stamping the tick) and emits ONE charter_revised event
+        # carrying the exact old→new diff — the inspector-diff spectacle. Gated on
+        # world.charters.enabled: a disabled world ignores the field and stays
+        # byte-silent (the em161 golden). The caps default to the module hard
+        # ceiling the schema/sanitizer enforce (== the config defaults).
+        charter_rev_rejected = action_dict.pop("_charter_revision_rejected", None)
+        charter_revision = action_dict.get("charter_revision")
+        if self.world.charters_enabled() and isinstance(charter_revision, dict):
+            old_charter = agent.charter if isinstance(agent.charter, dict) else None
+            prev_revisions = (
+                int(old_charter.get("revisions", 0)) if old_charter else 0)
+            new_charter = normalize_charter({
+                "ambitions": charter_revision.get("ambitions", []),
+                "creed": charter_revision.get("creed", ""),
+                "revised_tick": self.world.tick,
+                "revisions": prev_revisions + 1,
+            })
+            if new_charter is not None:
+                agent.charter = new_charter
+                vow = "; ".join(
+                    AMBITION_GRAMMAR[a] for a in new_charter["ambitions"])
+                extra_events.append({
+                    "kind": "charter_revised",
+                    "actor_id": agent.id,
+                    "profile": profile_name,
+                    "profile_color": profile_color,
+                    "text": f"{agent.name} now vows to {vow}.",
+                    "payload": {
+                        "ambitions": list(new_charter["ambitions"]),
+                        "creed": new_charter["creed"],
+                        "revisions": new_charter["revisions"],
+                        "reason": charter_revision.get("reason", ""),
+                        "old_ambitions": (
+                            list(old_charter.get("ambitions", []))
+                            if old_charter else []),
+                        "old_creed": (
+                            old_charter.get("creed", "") if old_charter else ""),
+                    },
+                })
+        if charter_rev_rejected is not None:
+            trace["charter_revision_rejected"] = charter_rev_rejected
+
         # EM-223 — deterministic v1 step pointer: a turn that resolved its plan's
         # work (not a fresh revision) nudges current_step forward. Zero-call,
         # plan-state only (the floor is untouched).
@@ -5799,6 +6044,9 @@ class AgentRuntime:
         # EM-223 — a malformed plan_revision is normalized or popped HERE (same
         # rule as the bond): a bad plan can never fail the turn.
         plan_rev_rejected = _sanitize_plan_revision(action_dict)
+        # EM-311 — a malformed/off-grammar charter_revision is normalized or popped
+        # HERE (same rule): a bad charter can never fail the turn.
+        charter_rev_rejected = _sanitize_charter_revision(action_dict)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
@@ -5823,6 +6071,9 @@ class AgentRuntime:
         if plan_rev_rejected is not None:
             # EM-223 — same after-validation stamping as the bond rejection.
             action_dict["_plan_revision_rejected"] = plan_rev_rejected
+        if charter_rev_rejected is not None:
+            # EM-311 — same after-validation stamping as the plan rejection.
+            action_dict["_charter_revision_rejected"] = charter_rev_rejected
         return action_dict, None, meta
 
     def _forget_response(self, profile_name: str, messages: list[dict]) -> None:
