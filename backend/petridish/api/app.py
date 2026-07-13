@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from ..config.loader import load_config, load_personas, WorldConfig
 from ..engine.world import World, AgentState, PlaceState
+from ..fingerprint import build_babel_matrix
 from ..engine.loop import TickLoop, _run_config_json
 from ..agents.runtime import AgentRuntime
 from ..animals.runtime import ANIMAL_SPECIES_CATALOG, _seed_int
@@ -2092,3 +2093,44 @@ async def get_analytics(
     if _repo is None or run_id is None:
         return {}
     return _repo.get_analytics(run_id, from_tick=from_tick, to_tick=to_tick)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-314 — The Babel Matrix (dyadic inter-model social physics).
+#
+# FEED/VIEWER chrome, strictly OFF the replay surface: a ZERO-LLM projection of
+# the append-only event log into an (actor-model × target-model) outcome matrix.
+# Read-only, no sim feedback. Gated behind `babel_matrix.enabled` — the backend
+# half is the env flag PETRIDISH_BABEL_MATRIX_ENABLED (default OFF → 404), read
+# at request time so a live flip never requires touching world config or the
+# replay surface. The frontend half is the BABEL_MATRIX_ENABLED const. Both
+# default OFF; flip both together for a live sign-off.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _babel_matrix_enabled() -> bool:
+    import os
+    return os.environ.get("PETRIDISH_BABEL_MATRIX_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+@app.get("/api/babel-matrix")
+async def get_babel_matrix(
+    run_id: int | None = None,
+    family: str | None = Query(default=None, description="restrict to one outcome family (trade|teach)"),
+    lineage: bool = Query(default=False,
+                          description="pool a fork/resume lineage's pre-fork slices (still one within-run society)"),
+):
+    """EM-314 — the (actor-model × target-model) dyadic outcome heatmap for a run.
+
+    Same ?run_id scoping as the other read endpoints (omitted → active run;
+    unknown id → 404). `lineage=true` folds a fork/resume chain (one lineage,
+    NOT a cross-run aggregate — distinct from EM-119). Off by default: returns
+    404 unless PETRIDISH_BABEL_MATRIX_ENABLED is set (babel_matrix.enabled)."""
+    if not _babel_matrix_enabled():
+        raise HTTPException(404, "babel matrix disabled")
+    run_id = _resolve_run_id(run_id)
+    if _repo is None or run_id is None:
+        return build_babel_matrix([], family=family)
+    events = _repo.get_events(run_id, order="asc", lineage=lineage)
+    return build_babel_matrix(events, family=family)
