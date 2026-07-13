@@ -34,6 +34,14 @@ interface EventFeedProps {
    * the god channel) the GRANT affordance does not render.
    */
   onGrantReply?: (text: string, inReplyTo?: string) => void;
+  /**
+   * EM-312 (Storylines Rail): when a storyline is selected, restrict the feed to
+   * that thread — events whose actor or target is one of its principals. Absent
+   * (feature off / nothing selected) ⇒ the feed is unchanged. The banner offers
+   * a one-click clear via `onClearThread`.
+   */
+  threadFilter?: { id: string; title: string; principals: string[] } | null;
+  onClearThread?: () => void;
 }
 
 // Icon per event kind. EventKind is permissive (open string union); FeedEntry
@@ -710,7 +718,7 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
 // How close to the top counts as "pinned to newest" (px).
 const TOP_THRESHOLD = 8;
 
-export function EventFeed({ events, onGrantReply }: EventFeedProps) {
+export function EventFeed({ events, onGrantReply, threadFilter, onClearThread }: EventFeedProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const highlightLenRef = useRef(0);
   const newEventIdsRef = useRef<Set<number>>(new Set());
@@ -740,14 +748,29 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
   // focused, show everything except the default-muted trace chain. Benign
   // action-rejections are dropped first — they're non-actionable clutter, not
   // real errors, so they never appear (even when the errors channel is focused).
+  // EM-312: the selected storyline's principals as a fast lookup (null = off).
+  const threadPrincipals = useMemo(
+    () => (threadFilter ? new Set(threadFilter.principals) : null),
+    [threadFilter],
+  );
+
   const visibleEvents = useMemo(
     () => {
       const base = events.filter((e) => !isBenignRejection(e));
-      return focus.size === 0
+      const byCategory = focus.size === 0
         ? base.filter((e) => !DEFAULT_MUTED.includes(KIND_TO_CATEGORY[e.kind] ?? ''))
         : base.filter((e) => focus.has(KIND_TO_CATEGORY[e.kind] ?? ''));
+      // EM-312: with a storyline selected, keep only events touching one of its
+      // principals (actor OR target) — "catch up on this beef". Orthogonal to
+      // the category chips; both must pass.
+      if (!threadPrincipals) return byCategory;
+      return byCategory.filter(
+        (e) =>
+          (e.actor_id != null && threadPrincipals.has(e.actor_id)) ||
+          (e.target_id != null && threadPrincipals.has(e.target_id)),
+      );
     },
-    [events, focus],
+    [events, focus, threadPrincipals],
   );
 
   // What actually renders: the live filtered list while pinned, the snapshot
@@ -850,6 +873,27 @@ export function EventFeed({ events, onGrantReply }: EventFeedProps) {
           </span>
         </div>
       </div>
+
+      {/* EM-312: the active storyline filter — the feed is narrowed to one
+          thread's principals. One click clears it. */}
+      {threadFilter && (
+        <div className="flex items-center gap-2 px-2 py-1 border-b border-lab-acid/40 bg-lab-acid/10">
+          <span aria-hidden="true" className="font-mono text-[10px]" style={{ color: 'var(--marker-crime)' }}>✦</span>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-lab-muted shrink-0">Storyline</span>
+          <span className="font-mono text-[11px] text-lab-text font-semibold truncate min-w-0">{threadFilter.title}</span>
+          {onClearThread && (
+            <button
+              type="button"
+              onClick={onClearThread}
+              className="ml-auto font-mono text-[10px] px-1.5 py-0.5 border border-lab-acid text-lab-acid
+                         rounded-sm hover:bg-lab-acid/15 cursor-pointer transition-colors duration-100 shrink-0"
+              title="Clear the storyline filter — show the whole feed"
+            >
+              CLEAR ✕
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Filter bar — click a chip to show ONLY that category; click more to stack
           two or three; click an active one to drop it. Empty = default view. */}
