@@ -36,6 +36,8 @@ import { WarPanel } from './components/panels/WarPanel';
 import { RosterStrip } from './components/panels/RosterStrip';
 import { ControlPanel } from './components/controls/ControlPanel';
 import { ModelLegend } from './components/legend/ModelLegend';
+import { BlindLineupProvider } from './components/blind/BlindLineupContext';
+import { BlindLineupPanel } from './components/blind/BlindLineupPanel';
 import { InspectorLayout } from './inspector/InspectorLayout';
 import { ChronicleView } from './components/chronicle/ChronicleView';
 import { DiaryView } from './components/diary/DiaryView';
@@ -239,7 +241,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
   }, [focus, world]);
 
   return (
-    <>
+    // EM-309 (Blind Lineup): the provider owns the reveal state; it masks
+    // NOTHING unless the blind_lineup.enabled flag is on, so with the flag off
+    // this wrapper is inert and the live view is byte-identical to before.
+    <BlindLineupProvider>
       {/* EM-107: the routing-degraded + extinction banners moved to App's
           TopBannerLayer overlay — they no longer mount in flow here, so
           their appearance/clearing can't reflow this layout. */}
@@ -257,6 +262,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
           aria-label="Story digest and live event feed"
         >
           <StorySoFar world={world} history={sim.history} />
+          {/* EM-309 (Blind Lineup): the spectator guess card. Renders NOTHING
+              unless the blind_lineup.enabled flag is on. */}
+          <BlindLineupPanel world={world} />
           {/* W11b (EM-091c): the notice-board panel rides under the digest —
               collapsible so the feed keeps its vertical budget. */}
           <BillboardPanel world={world} history={sim.history} />
@@ -426,6 +434,6 @@ function LiveLayout({ sim }: { sim: Sim }) {
           </div>
         </aside>
       </div>
-    </>
+    </BlindLineupProvider>
   );
 }

@@ -168,6 +168,21 @@
   animation: phantomDrift 2.4s ease-in-out infinite;
 }
 
+/* EM-309 (Blind Lineup): the reveal flip — each slot row does a quick vertical
+   card-flip as the ??? chips turn into their real models. Rows stagger via an
+   inline animation-delay so they flip one-by-one (the "chips flip one at a
+   time" spectacle). Forced instant under prefers-reduced-motion below. */
+@keyframes blindFlip {
+  0% { transform: rotateX(90deg); opacity: 0; }
+  60% { transform: rotateX(-8deg); opacity: 1; }
+  100% { transform: rotateX(0deg); opacity: 1; }
+}
+
+.blind-flip {
+  animation: blindFlip 0.34s ease-out both;
+  transform-origin: center;
+}
+
 /* W11b (EM-107): top banners fade opacity ONLY — never height/transform (the
    old in-flow mount/unmount reflowed the whole app: the "zoom" feeling).
    Duration mirrors FADE_MS in BannerFade.tsx; the prefers-reduced-motion

@@ -23,6 +23,7 @@ import type { WorldEvent, EventKind } from '../../types';
 import { llmDecidedAnimalTurns, isLlmDecidedAction, animalModelByTurn } from '../../lib/animalIdentity';
 import { inspectorApi } from '../../inspector/api';
 import type { GodInterveneKind, GodMiracleKind } from '../../inspector/api';
+import { useBlindLineup } from '../blind/BlindLineupContext';
 
 interface EventFeedProps {
   events: WorldEvent[];
@@ -453,6 +454,10 @@ interface FeedEntryProps {
 }
 
 function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply }: FeedEntryProps) {
+  // EM-309 (Blind Lineup): the feed is the centerpiece, so its inline model
+  // chips are the loudest identity tell — mask them behind ??? while a round is
+  // live (the profile COLOR / left-border stays as the slot cue).
+  const { maskName } = useBlindLineup();
   // W8: animal events ALWAYS take the magenta border + a critter glyph (they have
   // no model profile_color, and we want them to pop out of the human-agent feed).
   const animal = isAnimalEvent(event);
@@ -571,9 +576,9 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
           <span
             className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
             style={{ color: badgeColor, borderColor: badgeColor + '50' }}
-            title={speech ? `spoken by a ${event.profile} villager` : `decided by ${event.profile}`}
+            title={speech ? `spoken by a ${maskName(event.profile)} villager` : `decided by ${maskName(event.profile)}`}
           >
-            {event.profile}
+            {maskName(event.profile)}
           </span>
         )}
 
@@ -659,9 +664,9 @@ function FeedEntry({ event, isNew, llmDecided = false, animalModel, onGrantReply
           <span
             className="ml-1.5 font-mono text-[9px] px-1 py-px border rounded-sm align-middle whitespace-nowrap"
             style={{ color: ANIMAL_MAGENTA, borderColor: ANIMAL_MAGENTA }}
-            title={`decided by ${animalModel}`}
+            title={`decided by ${maskName(animalModel)}`}
           >
-            {animalModel}
+            {maskName(animalModel)}
           </span>
         )}
 
