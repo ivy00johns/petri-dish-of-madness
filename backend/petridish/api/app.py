@@ -23,6 +23,7 @@ from ..agents.runtime import AgentRuntime
 from ..animals.runtime import ANIMAL_SPECIES_CATALOG, _seed_int
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
+from ..fingerprint import FEATURE_VERSION, compute_run_fingerprints
 
 log = logging.getLogger(__name__)
 
@@ -1789,6 +1790,29 @@ async def list_runs():
     if _repo is None:
         return []
     return _repo.list_runs(active_run_id=_active_run_id())
+
+
+@app.get("/api/fingerprints")
+async def get_fingerprints(run_id: int | None = None):
+    """EM-313 — Fingerprint Ticker. A zero-LLM, READ-ONLY behavioral-stylometry
+    classifier: per agent, a converging guess of which model it runs (from
+    verb-mix / build-vs-talk / JSON-retry / sentence-length) scored against
+    per-model reference fingerprints mined from the event log, alongside the
+    X-Routed-Via ground truth.
+
+    Gated by `world.fingerprint_ticker.enabled` (default OFF) — disabled ⇒
+    {enabled: false} and the frontend renders nothing. Omitted `run_id` scopes
+    to the active run; an unknown id 404s (via _resolve_run_id). This endpoint
+    never mutates state and is off the replay/determinism surface."""
+    ft = getattr(getattr(_world, "params", None), "fingerprint_ticker", None)
+    if ft is None or not getattr(ft, "enabled", False):
+        return {"enabled": False, "feature_version": FEATURE_VERSION, "agents": []}
+    if _repo is None:
+        return {"enabled": True, "feature_version": FEATURE_VERSION, "agents": []}
+    rid = _resolve_run_id(run_id)  # 404 on an explicit unknown id
+    if rid is None:
+        return {"enabled": True, "feature_version": FEATURE_VERSION, "agents": []}
+    return compute_run_fingerprints(_repo, rid, ft)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
