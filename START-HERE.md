@@ -1,7 +1,7 @@
 # PetriDishOfMadness — Start Here
 
 > The one place to land. If you're lost, read this first.
-> **Last updated:** 2026-07-09
+> **Last updated:** 2026-07-13
 
 A tiny, fast, cheap multi-agent world whose marquee feature is **per-agent model
 control** — drop different LLMs (Gemini-Flash, Groq-Llama, Cerebras-Qwen, Mistral,
@@ -27,7 +27,8 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 | **Wave Q** (W30) | World-authorship first slice — divergence probe (EM-297), agent-authored facades/murals (EM-298 ✅ PR #78), parametric building-recipe grammar keystone (EM-299) | EM-298 done; EM-297/299 open |
 | **F1 free-placement** (W28) | Retire graph-lots placement; deterministic free-coordinate organic building placement, build-anywhere restored | ✅ **Merged + ratified** — PR #81/#82; derive-on-load restore behavior ratified by user 2026-07-09 |
 | **Adaptive lane routing P1** | Custom sorting list + registry-owned bounce loop, replacing blind `auto` delegation | ✅ **Shipped PR #83 (2026-07-07); go-live flip 2026-07-08.** P2–P5 (discovery/refresh, 429 cooldown, direct-provider lanes, observability) open — EM-300 |
-| **W30** | Fable-audit remediation build (this build) — go-live flips, facades decal-clear fix, idle-fallback churn mitigation, ledger intake of the 2026-07-08 deep review | in progress, branch `build/w30-audit-remediation` |
+| **W30** | Fable-audit remediation build — go-live flips, facades decal-clear fix, idle-fallback churn mitigation, ledger intake of the 2026-07-08 deep review | ✅ Done — PR #86 et al. |
+| **W31** | Fable Tier-1 expansion (9 features EM-309–317) + the command-a-plus routing/chat fix (EM-319–324) | ✅ **All merged 2026-07-13** (PRs #94, #96–#104, #106; #95/#105 superseded by #106). Features flag-gated **default-OFF** — flip one at a time to sign off. Live routing/chat fixed: 0 truncation feed cards, cast repinned to clean-JSON lanes |
 
 **Where we are:** the lab is well past v1. The marquee feature is proven live — **EM-048**: a
 3-agent / 3-model world ran on FreeLLMAPI for >11 minutes (all three alive, real chat, a passed
@@ -37,10 +38,13 @@ district street network past real buildings under golden-hour light — the proc
 the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minute live demo" in
 `README.md`. Per-wave end-state reports live in `docs/build-results/`.
 
-**Open P1:** EM-297 (world-authorship divergence probe), EM-299 (parametric building-recipe
-grammar keystone), EM-300 (adaptive lane routing P2–P5), EM-301 (idle-fallback churn — PR
-#84 open), plus the P1 backlog in Wave M/N/O/Q (see `docs/REMAINING-WORK.md`). EM-151
-(inspector blank on ~40k-event runs) shipped in Wave F.
+**What's next (2026-07-13, after the W31 merge sweep):**
+1. **Live flag-flip sign-off** for the 9 merged Fable Tier-1 features (EM-309–317) — all default-OFF; flip one at a time and watch the feed.
+2. **Remove EM-318 feed-silence** — now redundant after EM-324's root fix, and it *hides* errors (honors the fix-don't-hide steer).
+3. **EM-300 discovery router** — poll the now-documented FreeLLMAPI `/api` quota API (see `.env.example` + `scripts/fllm-quota.sh`) to auto-detect which native lanes are live → data-driven repinning, retiring the manual probe.
+4. **EM-301** idle-fallback churn thread. **EM-297/299** (Wave Q world-authorship). **EM-305** (feed-flicker repro).
+
+See the 2026-07-13 closure log in `BUILD-PLAN.md` and `docs/REMAINING-WORK.md` for the full ledger. EM-151 (inspector blank on ~40k-event runs) shipped in Wave F.
 
 **Recently merged (2026-07-07):** agent-authored **facades & murals** (#78, EM-298 —
 `paint_surface` + decal render, SHIPPED), the **EM-268 F1 free-placement go-live** (#81 —
