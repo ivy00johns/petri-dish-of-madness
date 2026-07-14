@@ -466,6 +466,15 @@ class TickLoop:
         # the fresh run's first round boundary. (No drain change — faction
         # events ride the existing pending_spawn_events outbox, cleared above.)
         self._world.factions = {}
+        # EM-109/110 — clear settlements for the same reason as factions: a
+        # settlement is a supra-agent grouping that references agent ids by
+        # membership. If the prior run's genesis settlement survives, the
+        # seed_genesis_settlement idempotency guard (settlements non-empty ⇒ no-op)
+        # skips re-seeding — leaving the fresh cast homeless (home_settlement_id
+        # None) and the settlement's members pointing at replaced ids. Clearing it
+        # lets genesis re-seed fresh below. No-op / byte-identical when settlements
+        # are disabled (the dict is always empty then).
+        self._world.settlements = {}
         # Wave E / EM-184 — clear active miracles: tick resets to 0 below, so
         # a stale entry's until_tick would keep its buff alive deep into the
         # fresh run (and its expiry would emit a spurious miracle_expired).
