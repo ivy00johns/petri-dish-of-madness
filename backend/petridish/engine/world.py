@@ -745,6 +745,28 @@ class AgentState:
     # since an absent charter yields no prompt block and gates nothing). Set only
     # when world.charters.enabled (seed_charter at boot, charter_revision per turn).
     charter: dict | None = None
+    # EM-109/EM-110 — multi-city home + travel state. THREE additive fields:
+    #   home_settlement_id — the settlement (city) this agent belongs to, or None
+    #     (unsettled / a settlements-OFF world). Migration = updating this +
+    #     `location` + the settlement's loose membership; credits/skills/memories
+    #     ride ON the agent and move with it (no rebuild).
+    #   in_transit_to      — the settlement id this agent is traveling toward while
+    #     off-board, else None. While set the agent takes 0 LLM calls — the
+    #     scheduler EXCLUDES it (never muted; simply not scheduled) until it
+    #     arrives (a rate SAVING, the free-scale ethos).
+    #   transit_arrival_tick — the tick the trip resolves; None when not traveling.
+    #     resolve_travel_arrivals migrates the agent home at the first round
+    #     boundary at/after this tick.
+    # ALL additive with default None, serialized in to_dict ONLY when set and
+    # restored defensively, so an unsettled agent — and every pre-EM-109 snapshot,
+    # and every settlements-OFF world — keeps the exact prior dict shape (the
+    # EM-155 byte-identical guarantee + the em161 golden, since a disabled world
+    # never sets them). A traveling agent survives a fork/resume verbatim (durable
+    # agent state, not a transient outbox): it resumes off-board and arrives on
+    # schedule.
+    home_settlement_id: str | None = None
+    in_transit_to: str | None = None
+    transit_arrival_tick: int | None = None
 
     def skill_level(self, skill: str) -> int:
         """EM-227 — this agent's level in `skill` (0 if unknown/unheld). The
@@ -900,6 +922,17 @@ class AgentState:
                 "revised_tick": int(self.charter.get("revised_tick", 0)),
                 "revisions": int(self.charter.get("revisions", 0)),
             }
+        # EM-109/EM-110 — home + travel state serialized ONLY when set, so an
+        # unsettled agent (and every settlements-OFF world + pre-EM-109 snapshot)
+        # keeps the exact prior dict shape (the em161 golden + the byte-identical
+        # guarantee). The transit pair rides together (a traveling agent always
+        # has both), so an off-board agent restores mid-trip and arrives on
+        # schedule.
+        if self.home_settlement_id is not None:
+            d["home_settlement_id"] = self.home_settlement_id
+        if self.in_transit_to is not None:
+            d["in_transit_to"] = self.in_transit_to
+            d["transit_arrival_tick"] = int(self.transit_arrival_tick or 0)
         return d
 
 
@@ -1366,6 +1399,22 @@ _SETTLEMENT_NAMES: list[str] = [
     "Thornmere", "Gullhaven", "Larkspur", "Quietwater", "Redbarrow",
     "Stonereach", "Windrow",
 ]
+
+# EM-110 — inter-city travel pacing. `tick` advances once per agent TURN (the
+# loop increments world.tick after each turn), so a round is ~roster-size ticks;
+# these constants are chosen against that turn-clock, not wall time.
+#   TRAVEL_SPEED   — world units crossed per tick. The town spans the ±33 world
+#     frame (WORLD_SIZE 66); settlements sit at PLACES, so the farthest pair is
+#     ~50–70 units apart. At 3.0 units/tick a mid-map hop is ~5–6 rounds and a
+#     cross-map trip ~a few rounds (with the small ~5–10 roster) — a meaningful
+#     off-board stretch, never instant teleport.
+#   TRAVEL_MIN_TICKS — the floor: even adjacent settlements take this many ticks
+#     off-board, so travel is always a real (0-LLM) rate saving.
+# Pure integers/floats — no clock/random. travel_ticks() is a deterministic fn
+# of the two settlement centers, so replay/fork reproduce the same arrival tick
+# (the EM-155 keystone).
+TRAVEL_SPEED: float = 3.0
+TRAVEL_MIN_TICKS: int = 3
 
 _PROCGEN_MAX_PLACES = 12  # hard cap on generated town places (prompt-size gate)
 
@@ -2135,9 +2184,13 @@ class World:
         return every <= 1 or round_no % every == 0
 
     def _due_ids(self, round_no: int) -> list[str]:
-        """The sorted-id due set for round `round_no` (EM-158)."""
+        """The sorted-id due set for round `round_no` (EM-158). EM-110: an agent
+        off-board in transit is EXCLUDED (0 LLM calls while traveling — a rate
+        saving, never a mute); it rejoins once resolve_travel_arrivals migrates
+        it home. With settlements OFF no agent is ever in transit, so this is the
+        byte-identical pre-EM-110 due set."""
         return sorted(a.id for a in self.living_agents()
-                      if self._tier_due(a, round_no))
+                      if self._tier_due(a, round_no) and not self._in_transit(a))
 
     def _rebuild_turn_order(self) -> None:
         """Prune dead agents from the current round's rotation and append any
@@ -2146,25 +2199,34 @@ class World:
         each round start by _start_new_round) — with the default all-
         protagonist cast that is the same full sorted-id rotation as before."""
         alive_ids = {a.id for a in self.living_agents()}
+        # EM-110 — an agent is dropped from the rotation when it dies OR departs
+        # off-board on this turn (in transit). Both shrink the list identically,
+        # so the EM-172 pointer math treats them the same. With settlements OFF
+        # `_in_transit` is always False, so `_keep` collapses to the pre-EM-110
+        # `aid in alive_ids` test — byte-identical.
+        def _keep(aid: str) -> bool:
+            return aid in alive_ids and not self._in_transit(self.agents.get(aid))
         # Wave D3 / EM-172 — mid-round-death scheduler skip (pre-existing since
-        # 58a8e7e): pruning a dead agent that sat BEFORE the rotation pointer
-        # shifts every later entry left by one, so the pointer silently jumped
-        # over the next due agent. Decrement the pointer once per pruned
-        # pre-cursor so it keeps naming the same next-due agent. Dead entries
-        # AT/AFTER the pointer need no shift (the pointer's target is
-        # unaffected); the round-boundary check in next_agent() handles the
-        # shrunken-list edge as before.
+        # 58a8e7e): pruning an agent that sat BEFORE the rotation pointer shifts
+        # every later entry left by one, so the pointer silently jumped over the
+        # next due agent. Decrement the pointer once per pruned pre-cursor so it
+        # keeps naming the same next-due agent. Dead/departed entries AT/AFTER
+        # the pointer need no shift (the pointer's target is unaffected); the
+        # round-boundary check in next_agent() handles the shrunken-list edge as
+        # before.
         self._turn_index -= sum(
             1 for aid in self._turn_order[: self._turn_index]
-            if aid not in alive_ids
+            if not _keep(aid)
         )
-        self._turn_order = [aid for aid in self._turn_order if aid in alive_ids]
-        # Add any newly spawned agents due this round at the end.
+        self._turn_order = [aid for aid in self._turn_order if _keep(aid)]
+        # Add any newly spawned agents due this round at the end (EM-110: an
+        # in-transit agent is not re-added — it rejoins after it arrives).
         for aid in sorted(self.agents.keys()):
             if (
                 aid not in self._turn_order
                 and aid in alive_ids
                 and self._tier_due(self.agents[aid], self.round)
+                and not self._in_transit(self.agents[aid])
             ):
                 self._turn_order.append(aid)
 
@@ -2261,7 +2323,9 @@ class World:
             return 0
         appended = 0
         for agent in self.living_agents():
-            if getattr(agent, "boosted_turns", 0) > 0:
+            # EM-110 — a traveling agent never gets a boosted slot (it is
+            # off-board; the parked boost waits, durable, until it arrives).
+            if getattr(agent, "boosted_turns", 0) > 0 and not self._in_transit(agent):
                 self._turn_order.append(agent.id)
                 agent.boosted_turns -= 1
                 appended += 1
@@ -2338,6 +2402,11 @@ class World:
     def _apply_round_start(self) -> None:
         """Apply per-round effects (UBI etc.)."""
         self.round += 1
+        # EM-110 — resolve inter-city arrivals FIRST, before this round's due set
+        # is computed (in _start_new_round, after this returns), so a just-arrived
+        # traveler migrates home and rejoins THIS round's rotation. No-op +
+        # byte-identical when settlements are disabled (no agent is in transit).
+        self.resolve_travel_arrivals()
         ubi_rule = self._active_rule("ubi")
         if ubi_rule:
             for agent in self.living_agents():
@@ -4183,6 +4252,11 @@ class World:
             "founder_id": agent.id,
             "members": [agent.id],
         }
+        # EM-110 — the founder ADOPTS the new settlement as home, so its durable
+        # home_settlement_id stays in lock-step with its loose membership (the
+        # per-city perception horizon + travel_to's origin read from home). Only
+        # inside the enabled path, so a settlements-OFF world never touches it.
+        agent.home_settlement_id = sid
         return {
             "kind": "settlement_founded",
             "actor_id": agent.id,
@@ -4197,6 +4271,222 @@ class World:
                 "founder_id": agent.id,
             },
         }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-109 / EM-110 — multi-city keystone: a genesis home city + inter-city
+    # travel, realized entirely on the Settlement primitive above. All gated on
+    # `_settlements_enabled()`; a disabled world never seeds a genesis, never
+    # sets a home/transit field, and never schedules an off-board agent, so it
+    # stays byte-identical (the EM-155 keystone).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def seed_genesis_settlement(self) -> None:
+        """EM-109/EM-110 — when settlements are enabled, auto-found ONE genesis
+        settlement at the civic center so the seed cast begins in a shared home
+        city (multi-city then GROWS from here via found_settlement/travel_to).
+        Called at run init + reset (mirrors seed_all_skills / seed_all_charters),
+        NEVER from __init__/from_snapshot — a restore brings its settlements +
+        every agent's home_settlement_id back verbatim, and folding genesis into
+        construction would clobber a restored home. No-op (byte-identical) when
+        settlements are disabled OR one already exists (idempotent). The id is
+        SEEDED (_settlement_id, never uuid4) off the run's city_seed, so same-seed
+        runs mint the identical genesis id (EM-155)."""
+        if not self._settlements_enabled() or self.settlements:
+            return
+        anchor = self.civic_center_id()
+        place = self.places.get(anchor)
+        if place is not None:
+            wx, wz = logical_to_world(float(place.x), float(place.y))
+        else:  # pragma: no cover - an empty world has no center
+            wx, wz = 0.0, 0.0
+        ordinal = 0
+        sid = self._settlement_id("genesis", ordinal)
+        while sid in self.settlements:  # pragma: no cover - collision bump
+            ordinal += 1
+            sid = self._settlement_id("genesis", ordinal)
+        sname = self._settlement_name("", "genesis")
+        self.settlements[sid] = {
+            "name": sname,
+            # round(4) — the _prop_offset discipline: byte-stable snapshots.
+            "center": (round(wx, 4), round(wz, 4)),
+            "founded_tick": self.tick,
+            "founder_id": "genesis",
+            "members": [],
+        }
+        members = self.settlements[sid]["members"]
+        # Sorted ids ⇒ the members list (and so the snapshot) is order-stable
+        # regardless of agent-dict insertion order.
+        for aid in sorted(self.agents):
+            self.agents[aid].home_settlement_id = sid
+            members.append(aid)
+
+    def _resolve_settlement_ref(self, ref: str) -> str | None:
+        """Resolve a settlement id OR a (case-insensitive) name to its id, or
+        None. An exact id match wins; a name match walks sorted ids so a
+        duplicate name resolves deterministically (never dict order)."""
+        ref = str(ref or "").strip()
+        if not ref:
+            return None
+        if ref in self.settlements:
+            return ref
+        fold = ref.casefold()
+        for sid in sorted(self.settlements):
+            if str(self.settlements[sid].get("name", "")).casefold() == fold:
+                return sid
+        return None
+
+    def settlement_of_place(self, place: "PlaceState") -> str | None:
+        """EM-110 — the settlement (city) a place belongs to: the NEAREST
+        settlement center in the world frame, with NO radius cap — a Voronoi
+        partition of the WHOLE map. So with exactly one settlement every place is
+        that city (single-city perception == the full town), and with two each
+        place falls to its nearer city (the per-city scoping that keeps an
+        agent's prompt FLAT as cities grow). Returns None only when no settlement
+        exists. Deterministic (nearest_settlement's sorted-id tie-break); reuses
+        the founding logical→world conversion (the anti-EM-243 discipline)."""
+        if place is None or not self.settlements:
+            return None
+        wx, wz = logical_to_world(float(place.x), float(place.y))
+        return self.nearest_settlement(wx, wz, float("inf"))
+
+    def _settlement_anchor_place(self, sid: str) -> str | None:
+        """The place an arriving traveler lands at in settlement `sid`: the place
+        nearest that settlement's world-frame center, falling back to the civic
+        center (the plaza). Pure + deterministic (sorted-id tie-break)."""
+        s = self.settlements.get(sid)
+        if s is not None and self.places:
+            cx, cz = (s.get("center") or (0.0, 0.0))
+            best: str | None = None
+            best_d2 = float("inf")
+            for pid in sorted(self.places):
+                p = self.places[pid]
+                wx, wz = logical_to_world(float(p.x), float(p.y))
+                d2 = (wx - float(cx)) ** 2 + (wz - float(cz)) ** 2
+                if d2 < best_d2:
+                    best, best_d2 = pid, d2
+            if best is not None:
+                return best
+        return self.civic_center_id() or None
+
+    def _in_transit(self, agent: "AgentState") -> bool:
+        """EM-110 — True while `agent` is off-board traveling (departed, arrival
+        not yet resolved). Off-board agents are EXCLUDED from the scheduler's due
+        set (0 LLM calls while traveling — a rate SAVING, never a mute), and are
+        cleared by resolve_travel_arrivals at the first round boundary at/after
+        transit_arrival_tick. None by construction when settlements are disabled,
+        so the OFF scheduler is byte-identical."""
+        return getattr(agent, "in_transit_to", None) is not None
+
+    def travel_ticks(self, a: str | None, b: str) -> int:
+        """EM-110 — ticks to travel from settlement `a` to `b`: the world-frame
+        distance between their centers over TRAVEL_SPEED, floored at
+        TRAVEL_MIN_TICKS. Pure fn of the two centers (world-frame floats already
+        in settlements[id]['center']) — deterministic + replay-identical
+        (EM-155). An absent origin (`a` None / unknown) measures from the world
+        origin, so an unsettled traveler still gets a sane, seeded ETA."""
+        ca = (self.settlements.get(a) or {}).get("center") or (0.0, 0.0)
+        cb = (self.settlements.get(b) or {}).get("center") or (0.0, 0.0)
+        dist = math.hypot(float(ca[0]) - float(cb[0]), float(ca[1]) - float(cb[1]))
+        return max(TRAVEL_MIN_TICKS, math.ceil(dist / TRAVEL_SPEED))
+
+    def action_travel_to(self, agent: AgentState, target: str) -> dict:
+        """EM-110 — the reflex TRAVEL verb: send the agent off-board toward
+        another settlement. It is a DECLARATION (free); the agent takes 0 LLM
+        calls while traveling (the scheduler excludes it) and arrives at
+        transit_arrival_tick, where resolve_travel_arrivals migrates its home
+        city. Rejected — with a normal, feed-safe action-failure string (never a
+        dead turn) — when settlements are disabled, the agent is already
+        traveling, the target is unknown, or the target is already the agent's
+        home. `target` accepts a settlement id OR a (case-insensitive) name."""
+        if not self._settlements_enabled():
+            return self._fail_event(
+                agent.id, "travel_to", "settlements_disabled",
+                f"{agent.name} dreams of setting out for another town, but this "
+                f"world has none to reach.")
+        if getattr(agent, "in_transit_to", None) is not None:
+            dest = self.settlements.get(agent.in_transit_to, {})
+            return self._fail_event(
+                agent.id, "travel_to", "already_traveling",
+                f"{agent.name} is already on the road to "
+                f"{dest.get('name', agent.in_transit_to)}.")
+        sid = self._resolve_settlement_ref(str(target or ""))
+        if sid is None:
+            return self._fail_event(
+                agent.id, "travel_to", "unknown_settlement",
+                f"{agent.name} looks for the road to '{str(target or '')[:40]}', "
+                f"but no such settlement exists.")
+        home = getattr(agent, "home_settlement_id", None)
+        if sid == home:
+            return self._fail_event(
+                agent.id, "travel_to", "already_here",
+                f"{agent.name} is already in "
+                f"{self.settlements[sid].get('name', sid)}.")
+        ticks = self.travel_ticks(home, sid)
+        arrival = self.tick + ticks
+        agent.in_transit_to = sid
+        agent.transit_arrival_tick = arrival
+        from_name = (self.settlements.get(home, {}).get("name", home)
+                     if home else "the wilds")
+        to_name = self.settlements[sid].get("name", sid)
+        return {
+            "kind": "travel_departed",
+            "actor_id": agent.id,
+            "text": f"{agent.name} sets out from {from_name} for {to_name} — "
+                    f"arriving around tick {arrival}.",
+            "payload": {
+                "from_settlement": home,
+                "to_settlement": sid,
+                "arrival_tick": arrival,
+                "travel_ticks": ticks,
+            },
+        }
+
+    def resolve_travel_arrivals(self) -> None:
+        """EM-110 — migrate every traveling agent whose transit_arrival_tick has
+        passed. Called at each round start (from _apply_round_start, BEFORE the
+        due set is computed) so an arrived agent rejoins THIS round's rotation.
+        Migration = home_settlement_id ← target, location ← the target's anchor
+        place, loose membership moved, transit cleared; credits/skills/memories/
+        relationships ride ON the agent and move WITH it (NO rebuild). Parks a
+        travel_arrived event in pending_spawn_events (the births/factions outbox,
+        drained by the loop's _flush_spawn_events). Deterministic: sweeps sorted
+        agent ids, reads only world.tick, seeds nothing. No-op when settlements
+        are disabled (no agent is ever in transit) ⇒ byte-identical OFF path.
+        Idempotent — a re-call after migration is a no-op."""
+        if not self._settlements_enabled():
+            return
+        for aid in sorted(self.agents):
+            agent = self.agents[aid]
+            target = getattr(agent, "in_transit_to", None)
+            if target is None:
+                continue
+            if (agent.transit_arrival_tick is None
+                    or self.tick < agent.transit_arrival_tick):
+                continue
+            if target not in self.settlements:
+                # Target vanished (settlements are never removed today, so this is
+                # a tampered/forked-corrupt guard): clear transit so the agent is
+                # never stranded off-board forever — it simply keeps its home.
+                agent.in_transit_to = None
+                agent.transit_arrival_tick = None
+                continue
+            self._settlement_reassociate(agent.id, target)
+            agent.home_settlement_id = target
+            anchor = self._settlement_anchor_place(target)
+            if anchor:
+                agent.location = anchor
+            agent.in_transit_to = None
+            agent.transit_arrival_tick = None
+            self.pending_spawn_events.append({
+                "kind": "travel_arrived",
+                "actor_id": agent.id,
+                "text": f"{agent.name} arrives in "
+                        f"{self.settlements[target].get('name', target)}.",
+                "payload": {
+                    "settlement": target,
+                    "tick": self.tick,
+                },
+            })
 
     def action_set_building_skin(
         self, agent: AgentState, building_id: str, skin: str
@@ -10749,6 +11039,32 @@ class World:
                     creed_cap=_block_get(
                         getattr(params, "charters", None),
                         "creed_cap", CHARTER_CREED_CAP),
+                ),
+                # EM-109/EM-110 — home + travel state: additive. Pre-EM-109
+                # snapshots (and every settlements-OFF world) lack the keys and
+                # restore None; a blank/non-str home fails safe to None. The
+                # transit pair restores ONLY when in_transit_to is a real id (a
+                # stray arrival tick without a target is ignored), so a traveling
+                # agent resumes off-board mid-trip and an at-home agent restores
+                # settled. Byte-stable round-trip (EM-155): an unset field is
+                # never re-emitted.
+                home_settlement_id=(
+                    str(d["home_settlement_id"])
+                    if isinstance(d.get("home_settlement_id"), str)
+                    and str(d.get("home_settlement_id")).strip()
+                    else None
+                ),
+                in_transit_to=(
+                    str(d["in_transit_to"])
+                    if isinstance(d.get("in_transit_to"), str)
+                    and str(d.get("in_transit_to")).strip()
+                    else None
+                ),
+                transit_arrival_tick=(
+                    _int(d.get("transit_arrival_tick"))
+                    if isinstance(d.get("in_transit_to"), str)
+                    and str(d.get("in_transit_to")).strip()
+                    else None
                 ),
             )
             a.relationships = {

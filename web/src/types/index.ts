@@ -152,6 +152,19 @@ export interface Agent {
   // The feed twin lens reads this to pair the strands + find the divergence.
   // Optional so pre-EM-310 backends/snapshots stay valid; absent ⇒ not a twin.
   twin?: TwinLink | null;
+  // EM-109/110 (multi-city keystone, additive) — the agent's settlement + travel
+  // state, mirroring the backend AgentState fields (contracts/settlement-travel.md
+  // §1). Serialized only-when-non-default, so a settlements-OFF world's agent dicts
+  // stay byte-identical and pre-multi-city snapshots/mock mode omit all three.
+  //   • home_settlement_id — the settlement (world.settlements key) the agent lives
+  //     in; null/absent ⇒ unsettled/primordial (no city yet).
+  //   • in_transit_to — the target settlement id while TRAVELING (off-board, 0 LLM);
+  //     null/absent ⇒ not traveling (rendered inside its city as usual).
+  //   • transit_arrival_tick — the tick the agent arrives; null/absent when not
+  //     traveling. Drives the in-transit route-marker progress in the 3D/2D views.
+  home_settlement_id?: string | null;
+  in_transit_to?: string | null;
+  transit_arrival_tick?: number | null;
 }
 
 // EM-310 — the twin link carried on each half of a Chimera pair. `of` is the
@@ -594,6 +607,17 @@ export type EventKind =
   // tier, building_id, reason:"megaproject_completed"}. Only emitted when
   // world.district_growth.enabled — absent histories are normal.
   | 'district_grew'
+  // EM-109/110 (multi-city keystone) — the settlement + travel narrative, all
+  // rendered as NORMAL movement cards (never errors), in the Actions feed lane.
+  //   • settlement_founded {settlement_id, name, center} — an agent founded a new
+  //     city (already emitted by the EM-269 F2 found_settlement verb).
+  //   • travel_departed {from_settlement, to_settlement, arrival_tick} — an agent
+  //     left its city for another (now off-board until it arrives).
+  //   • travel_arrived {settlement, tick} — the traveler reached + migrated to the
+  //     target city. Both carry actor_id + a human text + the actor profile color.
+  | 'settlement_founded'
+  | 'travel_departed'
+  | 'travel_arrived'
   // W11a (EM-094, event-log.md v1.2.0 note 1) — the optional LLM narrator's
   // periodic recap: actor_type:"system", actor_id:"narrator", text = the 2–3
   // sentence recap, payload {from_tick, to_tick, profile, routed_via?}. Only

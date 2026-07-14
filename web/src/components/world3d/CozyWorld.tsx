@@ -53,6 +53,9 @@ import { Ambiance } from './Ambiance';
 import { Traffic } from './Traffic';
 import { StreetLabels } from './StreetLabels';
 import { SettlementLabels } from './SettlementLabels';
+import { SettlementGrounds } from './SettlementGrounds';
+import { TravelMarkers } from './TravelMarkers';
+import { inTransitAgentIds } from './travel';
 import { CityNameChip } from './CityNameChip';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
@@ -778,6 +781,16 @@ function Scene({
   const { places, agents } = world;
   const animals = world.animals ?? [];
 
+  // EM-110: agents in transit are OFF-BOARD — they must NOT render inside a city
+  // (they show on the route via <TravelMarkers>). Absent field ⇒ empty set, so a
+  // no-travel world's villager render is unchanged (no regression). Full `agents`
+  // still feeds StorylineTether / pet-owner resolution below.
+  const inTransit = useMemo(() => inTransitAgentIds(agents), [agents]);
+  const residentAgents = useMemo(
+    () => agents.filter((a) => !inTransit.has(a.id)),
+    [agents, inTransit],
+  );
+
   const focusedPlaceId = focus?.type === 'place' ? focus.id : null;
 
   // Wave I (EM-213, I4): the plaza banner's world spot — a stable satellite of
@@ -793,13 +806,13 @@ function Scene({
 
   const targets = useMemo(() => {
     const byPlace = new Map<string, string[]>();
-    agents.forEach((a) => {
+    residentAgents.forEach((a) => {
       const list = byPlace.get(a.location) ?? [];
       list.push(a.id);
       byPlace.set(a.location, list);
     });
     const result = new Map<string, AnimPos>();
-    agents.forEach((a) => {
+    residentAgents.forEach((a) => {
       const center = placeCenters.get(a.location);
       if (!center) {
         result.set(a.id, { x: 0, z: 0 });
@@ -814,7 +827,7 @@ function Scene({
       }
     });
     return result;
-  }, [agents, placeCenters, animMap]);
+  }, [residentAgents, placeCenters, animMap]);
 
   return (
     <>
@@ -866,6 +879,12 @@ function Scene({
       <fog attach="fog" args={[GOLDEN_HOUR.fog, 80, 215]} />
 
       <Ground places={places} />
+      {/* EM-109: a distinct GROUND footprint per agent-founded settlement (paved
+          town-square core + per-settlement grass wash + accent rim at each
+          world-frame center), so multiple cities read as distinct clusters and
+          not one origin grid + scattered far buildings. Absent/empty settlements
+          ⇒ renders nothing (a single-/no-settlement world is unchanged). */}
+      <SettlementGrounds settlements={world.settlements} />
       <Scenery places={places} />
       {/* EM-118: instanced treeline (LOD) + lived-in town props. */}
       <Foliage places={places} />
@@ -944,7 +963,7 @@ function Scene({
         ) : null;
       })}
 
-      {agents.map((a) => {
+      {residentAgents.map((a) => {
         const target = targets.get(a.id) ?? { x: 0, z: 0 };
         let anim = animMap.current.get(a.id);
         if (!anim) {
@@ -964,6 +983,11 @@ function Scene({
           />
         );
       })}
+
+      {/* EM-110: the in-transit agents — off-board (excluded from the villager
+          render above), shown gliding along the route between their home + target
+          settlements. Absent settlements / no travelers ⇒ renders nothing. */}
+      <TravelMarkers agents={agents} settlements={world.settlements} tick={world.tick} />
 
       {/* EM-312: the storyline tether — a taut red line between the selected
           thread's first two principals, tracking their live animated positions

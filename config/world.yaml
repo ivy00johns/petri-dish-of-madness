@@ -374,7 +374,7 @@ world:
   # stay in sync with the SettlementParams mirror in
   # backend/petridish/config/loader.py.
   settlements:
-    enabled: false              # found_settlement + settlement-anchored placement + the one-line settlement perception
+    enabled: true               # EM-109/EM-110 live opt-in: genesis home city + found_settlement + travel_to + settlement-anchored placement + per-city perception scoping. Loader/embedded defaults stay OFF (byte-identical goldens); this is the per-run live flip (baked per-run ⇒ restart to adopt).
 
   # EM-203 — governance renewal cooldown (contracts/wave-m.md §3 Wave M4). The
   # W11b/EM-087 RENEWAL ritual lets agents re-pass a law identical to an ACTIVE

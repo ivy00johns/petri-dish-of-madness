@@ -543,6 +543,13 @@ class TickLoop:
         if callable(seed_all_charters):
             seed_all_charters()
 
+        # EM-109/EM-110 — seed the genesis home city (a no-op unless
+        # world.settlements.enabled), so the whole seed cast begins in one named
+        # settlement and multi-city grows from found_settlement/travel_to.
+        seed_genesis = getattr(self._world, "seed_genesis_settlement", None)
+        if callable(seed_genesis):
+            seed_genesis()
+
         # Clear agent memories + W11b cognition state (commitments, importance
         # accumulators, pending overheard lines).
         reset_state = getattr(self._runtime, "reset_state", None)
@@ -606,6 +613,12 @@ class TickLoop:
         seed_all_charters = getattr(self._world, "seed_all_charters", None)
         if callable(seed_all_charters):
             seed_all_charters()
+        # EM-109/EM-110 — seed the genesis home city BEFORE the tick-0 save (a
+        # no-op unless world.settlements.enabled), so the persisted base run + its
+        # replay carry the same seeded genesis settlement + agent homes.
+        seed_genesis = getattr(self._world, "seed_genesis_settlement", None)
+        if callable(seed_genesis):
+            seed_genesis()
         self._repo.save_places(self._run_id, list(self._world.places.values()))
         for agent in self._world.agents.values():
             self._repo.save_agent(self._run_id, agent, 0)

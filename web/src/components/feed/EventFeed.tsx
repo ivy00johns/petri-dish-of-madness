@@ -122,6 +122,12 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   prophecy_resolved:    '🔮',
   // EM-123 — a zoned district matured a tier (megaproject completed).
   district_grew:        '🏙',
+  // EM-109/110 — the multi-city keystone reads as normal MOVEMENT (Actions lane,
+  // never the errors channel): 🏘 a new city founded, 🧳 an agent leaving for
+  // another, 🏁 the traveler arriving + migrating.
+  settlement_founded:   '🏘',
+  travel_departed:      '🧳',
+  travel_arrived:       '🏁',
   // Decision-trace chain (event-log.md §3) — default-muted via the Trace
   // category so these don't flood the live feed.
   perceived:        '◌',
@@ -422,7 +428,9 @@ interface FeedCategory {
 
 export const CATEGORIES: FeedCategory[] = [
   { key: 'chat',    label: 'Chat',    icon: '◉', kinds: ['agent_speech'] },
-  { key: 'actions', label: 'Actions', icon: '◆', kinds: ['agent_action', 'agent_moved'] },
+  // EM-109/110: settlement founding + travel are MOVEMENT, so they live in the
+  // Actions lane beside agent_moved (styled as normal cards, never errors).
+  { key: 'actions', label: 'Actions', icon: '◆', kinds: ['agent_action', 'agent_moved', 'settlement_founded', 'travel_departed', 'travel_arrived'] },
   { key: 'economy', label: 'Economy', icon: '¢', kinds: ['economy'] },
   // Wave E: the social fabric grows typed-bond shifts, births, and the
   // faction lifecycle — all social-texture kinds, one chip. Wave O (EM-256–259)

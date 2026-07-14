@@ -16,9 +16,10 @@
  */
 
 import { useRef, useEffect, useCallback } from 'react';
-import type { WorldState, WorldEvent } from '../../types';
+import type { WorldState, WorldEvent, Settlement } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
-import { PLACE_STYLES, speciesEmoji } from '../world3d/worldSpace';
+import { PLACE_STYLES, speciesEmoji, toLogicalX, toLogicalY, settlementTint } from '../world3d/worldSpace';
+import { travelMarkerEntries, inTransitAgentIds } from '../world3d/travel';
 // Declares the shared :root tokens (incl. --marker-animal, the chaos magenta)
 // the canvas reads via getComputedStyle — token-only color, no hardcoded hex.
 import '../../inspector/inspector-tokens.css';
@@ -39,6 +40,42 @@ const EASE = 0.18;              // glide easing per frame
 const SETTLE_EPS = 0.4;         // logical-units distance considered "arrived"
 
 interface Vec { x: number; y: number }
+
+/**
+ * EM-109/110 — one settlement on the macro 2D map, in the map's LOGICAL frame
+ * (0..1000). `Settlement.center` is WORLD-frame (±33), so it is converted back
+ * through worldSpace.toLogicalX/Y before the canvas plots it via sx/sy.
+ */
+export interface SettlementMapPoint {
+  id: string;
+  name: string;
+  lx: number;   // logical 0..1000 x
+  ly: number;   // logical 0..1000 y
+  tint: string; // per-city accent (shared with the 3D SettlementGrounds rim)
+}
+
+/**
+ * The render-safe settlement points for the 2D map (world→logical converted,
+ * per-city tint). Mirrors settlementLabelEntries' tolerance (skip empty name /
+ * malformed center) WITHOUT importing the R3F SettlementLabels module, keeping
+ * the 2D map free of three/drei. Absent/empty ⇒ [] (a settlement-free world
+ * draws no city markers — unchanged). Exported for the WorldMap render test.
+ */
+export function settlementMapPoints(
+  settlements?: Record<string, Settlement> | null,
+): SettlementMapPoint[] {
+  const out: SettlementMapPoint[] = [];
+  for (const [id, s] of Object.entries(settlements ?? {})) {
+    if (!s || typeof s.name !== 'string' || s.name.length === 0) continue;
+    const c = s.center;
+    if (
+      !Array.isArray(c) || c.length !== 2 ||
+      !Number.isFinite(c[0]) || !Number.isFinite(c[1])
+    ) continue;
+    out.push({ id, name: s.name, lx: toLogicalX(c[0]), ly: toLogicalY(c[1]), tint: settlementTint(id) });
+  }
+  return out;
+}
 
 export function WorldMap({ world, events, animalModels }: WorldMapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -104,6 +141,14 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
     const sy = (y: number) => pad + (y / 1000) * (H - 2 * pad);
     const unit = Math.min(W, H);
 
+    // EM-109/110: macro settlement layer. In-transit agents are OFF-BOARD — they
+    // must NOT cluster at a place; they draw on their route below. Absent field
+    // ⇒ empty set / [] ⇒ a single-settlement no-travel world is unchanged.
+    const settlements = world.settlements;
+    const settlementPts = settlementMapPoints(settlements);
+    const transiting = inTransitAgentIds(agents);
+    const residentAgents = agents.filter((a) => !transiting.has(a.id));
+
     // Place centers (pixel) + lookup of logical centers (for agent targets).
     const placePx = new Map<string, Vec>();
     const placeLogical = new Map<string, Vec>();
@@ -140,8 +185,9 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
     });
 
     // Group agents by place for cluster fan-out + ease rendered centers.
+    // Residents only — travelers are drawn on their route (below), not here.
     const byPlace = new Map<string, string[]>();
-    agents.forEach((a) => {
+    residentAgents.forEach((a) => {
       const list = byPlace.get(a.location) ?? [];
       list.push(a.id);
       byPlace.set(a.location, list);
@@ -152,7 +198,26 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
     const agentR = Math.min(16, Math.max(9, unit * 0.024));
     const clusterR = bSize * 0.95;
 
-    agents.forEach((a) => {
+    // ── EM-109/110: settlement ROUTES — faint lines between every pair of cities
+    // (the macro "cities on the grid" graph), drawn UNDER the agents/markers. ──
+    if (settlementPts.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = cssVar('--lab-border') || '#2a2a36';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([2, 5]);
+      for (let i = 0; i < settlementPts.length; i++) {
+        for (let j = i + 1; j < settlementPts.length; j++) {
+          const a = settlementPts[i], b = settlementPts[j];
+          ctx.beginPath();
+          ctx.moveTo(sx(a.lx), sy(a.ly));
+          ctx.lineTo(sx(b.lx), sy(b.ly));
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    residentAgents.forEach((a) => {
       const targetLogical = placeLogical.get(a.location) ?? { x: 500, y: 500 };
       let p = posRef.current.get(a.id);
       if (!p) { p = { ...targetLogical }; posRef.current.set(a.id, p); } // new agent: snap
@@ -223,6 +288,24 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
         const ax = sx(p.x) + fan;
         const ay = sy(p.y) + clusterR * 1.45;
         drawAnimal(ctx, an, ax, ay, animalR, chaosInk, animalModelsRef.current?.get(an.id) ?? null);
+      });
+    }
+
+    // ── EM-109: settlement MARKERS — a tinted diamond + name per founded city,
+    // the macro "cities on the grid" the user wants first-class on the map. ──
+    settlementPts.forEach((s) => {
+      drawSettlementMarker(ctx, s, sx(s.lx), sy(s.ly), Math.max(9, unit * 0.02), s.tint);
+    });
+
+    // ── EM-110: in-transit agents — off-board, drawn on their home→target route
+    // at the eased position (never inside a city). Empty ⇒ nothing. ──
+    if (transiting.size > 0) {
+      const travelers = travelMarkerEntries(agents, settlements, world.tick);
+      const travelR = Math.max(7, agentR * 0.8);
+      travelers.forEach((t) => {
+        const px = sx(toLogicalX(t.pos[0]));
+        const py = sy(toLogicalY(t.pos[1]));
+        drawTraveler(ctx, t.name, t.targetName, px, py, travelR, t.color ?? cssVar('--lab-acid'));
       });
     }
 
@@ -421,6 +504,95 @@ function drawAnimal(
     if (model.color) ctx.fillStyle = model.color;
     ctx.fillText(model.profile.slice(0, 14), ax, ay + r + 12);
   }
+
+  ctx.restore();
+}
+
+/**
+ * EM-109 — one settlement on the macro map: a tinted diamond (its per-city
+ * accent, shared with the 3D SettlementGrounds rim) with a soft ground shadow,
+ * and its name plated below. Reads as a first-class "city on the grid" marker,
+ * distinct from the little house footprints of the individual places.
+ */
+function drawSettlementMarker(
+  ctx: CanvasRenderingContext2D,
+  s: { name: string },
+  cx: number,
+  cy: number,
+  r: number,
+  tint: string,
+) {
+  ctx.save();
+
+  // Ground shadow.
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.7, r * 1.1, r * 0.4, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fill();
+
+  // Diamond body (rotated square) in the city tint, with a dark rim.
+  ctx.translate(cx, cy);
+  ctx.rotate(Math.PI / 4);
+  roundRect(ctx, -r, -r, r * 2, r * 2, r * 0.28);
+  ctx.fillStyle = tint;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = cssVar('--lab-bg') || '#0a0a0b';
+  ctx.stroke();
+  ctx.restore(); // undoes the translate/rotate for the marker body
+
+  // Name plate below, in the city tint.
+  ctx.save();
+  ctx.font = 'bold 11px "IBM Plex Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const label = s.name.toUpperCase();
+  const w = ctx.measureText(label).width;
+  const ly = cy + r + 4;
+  ctx.fillStyle = 'rgba(10,10,11,0.78)';
+  ctx.fillRect(cx - w / 2 - 4, ly - 1, w + 8, 14);
+  ctx.fillStyle = tint;
+  ctx.fillText(label, cx, ly);
+  ctx.restore();
+}
+
+/**
+ * EM-110 — one in-transit agent on the map, on its route between cities: a
+ * 🧳 luggage glyph in a ringed marker (the agent's profile color) with a
+ * "→ {city}" heading beneath. Never drawn inside a city (the caller places it
+ * at the eased route position).
+ */
+function drawTraveler(
+  ctx: CanvasRenderingContext2D,
+  name: string,
+  targetName: string,
+  cx: number,
+  cy: number,
+  r: number,
+  color: string,
+) {
+  ctx.save();
+
+  // Marker ring in the agent color.
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = (color || '#888888') + '33';
+  ctx.fill();
+  ctx.strokeStyle = color || '#888888';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // 🧳 luggage glyph (the travel signature — matches the feed cards).
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${Math.round(r * 1.3)}px "IBM Plex Mono", monospace`;
+  ctx.fillText('🧳', cx, cy + 0.5);
+
+  // "name → city" heading beneath.
+  ctx.font = 'bold 9px "IBM Plex Mono", monospace';
+  ctx.fillStyle = color || '#888888';
+  ctx.textBaseline = 'top';
+  ctx.fillText(`${name.slice(0, 8)} → ${targetName.slice(0, 10)}`, cx, cy + r + 3);
 
   ctx.restore();
 }
