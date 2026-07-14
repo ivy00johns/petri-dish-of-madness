@@ -510,12 +510,13 @@ def test_nearby_zones_district_scoped_not_whole_graph(monkeypatch):
     assert line.lower().count(" lots") <= _NEARBY_ZONES_MAX
 
 
-def test_nearby_zones_omitted_when_no_rules_byte_identical():
-    # The §0.1 guarantee: with the GRAPH_ZONES_ENABLED flag at its default OFF, the
-    # block is omitted entirely (the zoning-free prompt is byte-identical to pre-SB),
-    # even though faces exist and there are no rules. (Flag-OFF path, default state.)
-    from petridish.agents.runtime import build_nearby_layout, GRAPH_ZONES_ENABLED
-    assert GRAPH_ZONES_ENABLED is False  # ships dormant by default
+def test_nearby_zones_omitted_when_no_rules_byte_identical(monkeypatch):
+    # The §0.1 guarantee still holds for anyone running with zones OFF: pin the flag
+    # off (it now ships ON by default — feat/organic-world-regen) and the block is
+    # omitted entirely (the zoning-free prompt byte-identical to pre-SB), even though
+    # faces exist and there are no rules.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
+    from petridish.agents.runtime import build_nearby_layout
     w = _gov_world()
     assert not w.city_graph.zone_rules and planar_faces(w.city_graph)
     line = build_nearby_layout(w, _corner_place())
@@ -578,17 +579,19 @@ def test_nearby_zones_deterministic_names():
 
 # ── EM-265 fix: GRAPH_ZONES_ENABLED flag gates the AGENT SURFACE (bootstrap) ────
 
-def test_graph_zones_flag_defaults_off():
-    # SB ships DORMANT: the backend agent-surface flag is OFF by default, mirroring
-    # the frontend GRAPH_LOTS_ENABLED.
+def test_graph_zones_flag_defaults_on():
+    # Organic-world sign-off (feat/organic-world-regen): SB is now LIVE by default —
+    # the backend agent-surface flag ships ON, mirroring the frontend GRAPH_LOTS_ENABLED,
+    # so agents get the nearby_zones perception + set_zone_rule verb on the emergent city.
     from petridish.agents import runtime
-    assert runtime.GRAPH_ZONES_ENABLED is False
+    assert runtime.GRAPH_ZONES_ENABLED is True
 
 
-def test_runtime_gate_rejects_set_zone_rule_when_flag_off():
-    # OFF path (default): set_zone_rule is NOT offered on the agent surface, so the
-    # runtime gate rejects it as an invalid effect BEFORE the zone-specific checks —
-    # agent behavior is byte-identical to pre-SB.
+def test_runtime_gate_rejects_set_zone_rule_when_flag_off(monkeypatch):
+    # OFF path (pinned; ships ON by default now): with zones OFF, set_zone_rule is NOT
+    # offered on the agent surface, so the runtime gate rejects it as an invalid effect
+    # BEFORE the zone-specific checks — agent behavior byte-identical to pre-SB.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
     from petridish.agents.runtime import _validate_world
     w = _gov_world()
     agent = next(iter(w.agents.values()))
@@ -606,12 +609,13 @@ def test_runtime_gate_rejects_set_zone_rule_when_flag_off():
     assert "valid:" in err.lower() and "'set_zone_rule'" not in err.split("Valid:")[1]
 
 
-def test_dispatch_rejects_set_zone_rule_when_flag_off():
-    # OFF path: the GATED dispatch (_apply_steps runs _validate_world → dispatch)
-    # refuses set_zone_rule — it emits a parse_failure, never rule_proposed, and no
-    # zone rule is applied, so SB ships byte-identical / dormant. (The world method
-    # action_propose_rule itself stays directly callable — only the agent surface is
-    # gated.)
+def test_dispatch_rejects_set_zone_rule_when_flag_off(monkeypatch):
+    # OFF path (pinned; ships ON by default now): the GATED dispatch (_apply_steps runs
+    # _validate_world → dispatch) refuses set_zone_rule with zones OFF — it emits a
+    # parse_failure, never rule_proposed, and no zone rule is applied, byte-identical /
+    # dormant. (The world method action_propose_rule stays directly callable — only the
+    # agent surface is gated.)
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
     from petridish.agents.runtime import AgentRuntime
     w = _gov_world()
     rt = AgentRuntime(w, _router())
@@ -891,11 +895,11 @@ def test_zones_present_on_interior_lattice_node_with_no_road_sentence(monkeypatc
     assert not line.startswith("Nearby layout:")
 
 
-def test_zones_flag_off_byte_identical_road_line_only():
-    # §0.1 guarantee: with the flag OFF (default) the output is EXACTLY the pre-fix
-    # road line — no zones block, no drift.
-    from petridish.agents.runtime import build_nearby_layout, GRAPH_ZONES_ENABLED
-    assert GRAPH_ZONES_ENABLED is False
+def test_zones_flag_off_byte_identical_road_line_only(monkeypatch):
+    # §0.1 guarantee (pinned OFF; ships ON by default now): with zones OFF the output
+    # is EXACTLY the pre-fix road line — no zones block, no drift.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
+    from petridish.agents.runtime import build_nearby_layout
     w = _gov_world()
     line = build_nearby_layout(w, _corner_place())   # SW corner: west/south open
     assert line == ("Nearby layout: can build a road west, south. "
@@ -905,9 +909,10 @@ def test_zones_flag_off_byte_identical_road_line_only():
 def test_returns_none_only_when_both_road_and_zones_absent(monkeypatch):
     # Interior node + flag OFF → neither a road sentence nor a zones block → None.
     from petridish.agents.runtime import build_nearby_layout
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
     w = _gov_world()
     place = PlaceState(id="p", name="Center", x=500, y=500, kind="social")
-    assert build_nearby_layout(w, place) is None      # flag off default
+    assert build_nearby_layout(w, place) is None      # flag pinned off
     # Flip the flag ON and the SAME interior place now yields a zones-only block.
     monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", True)
     line = build_nearby_layout(w, place)

@@ -574,10 +574,20 @@ world:
   # grid. Geometric presets (pentagon/radial/ring) fall back to grid + a logged
   # warning until EM-245 (generators) + EM-247 (meshing) land. Absent ⇒ grid.
   city:
-    template: grid          # grid | greenfield | village (pentagon/radial/ring → grid until EM-245)
+    # Genesis stays the deterministic GRID baseline (byte-identical, EM-155) — the
+    # organic world is delivered on RESET, not at genesis (feat/organic-world-regen).
+    template: grid          # grid | greenfield | village | pentagon | radial | ring
     size: 5                 # RESERVED — parsed but not yet honored (extent is fixed for now)
     density: medium         # low | medium | high — village sparsity
     car_policy: cars        # starting global graph car policy (votes can change it)
+    # Organic-world sign-off: when true, each /api/control/reset re-rolls city_seed +
+    # picks a fresh template from template_pool AND switches the POIs to the seeded
+    # organic ring (procgen) ⇒ a genuinely DIFFERENT, non-grid city every reset
+    # (roads + POI ring + building scatter), instead of the byte-identical same-seed
+    # rebuild. The rolled seed/template ride the tick-0 snapshot, so replay/fork of a
+    # rerolled run still reproduce it (EM-155). Default false ⇒ deterministic reset.
+    randomize_on_reset: true
+    template_pool: [pentagon, radial, ring]
 
   # W10 / EM-085 — persist runs by default so run history + replay survive
   # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
@@ -725,6 +735,11 @@ world:
   # (kind home, capacity = agents - 1, so bed scarcity exists). Recharge works
   # at any home kind; cottage owner-only gating is out of scope for W11b.
   procgen:
+    # OFF at genesis (hand-authored town, byte-identical). The organic-world reroll
+    # (city.randomize_on_reset) turns this ON per-reset and re-seeds it, so a reset's
+    # POIs lay out on a seeded jittered RING around a central plaza
+    # (generate_procgen_places) instead of the hand-authored 5x5 place LATTICE that
+    # made the city read as a square grid — WITHOUT changing the genesis baseline.
     enabled: false
     seed: 42
     n_places: 9               # town places incl. the plaza (housing on top), cap 12

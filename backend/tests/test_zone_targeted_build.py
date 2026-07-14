@@ -239,10 +239,12 @@ def test_no_zone_target_is_valid(monkeypatch):
 
 # ── flag OFF ⇒ zone_id ignored, no events, byte-identical ─────────────────────
 
-def test_flag_off_ignores_zone_id_byte_identical():
-    # GRAPH_ZONES_ENABLED defaults OFF — no monkeypatch here.
-    from petridish.agents.runtime import GRAPH_ZONES_ENABLED
-    assert GRAPH_ZONES_ENABLED is False  # ships dormant
+def test_flag_off_ignores_zone_id_byte_identical(monkeypatch):
+    # Zones now ship ON by default (feat/organic-world-regen); pin OFF to prove the
+    # dormant path ignores a zone_id and serializes byte-identically.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
+    from petridish.agents import runtime as _rt
+    assert _rt.GRAPH_ZONES_ENABLED is False  # pinned dormant
 
     # a build passing a (would-be valid) zone_id with the flag OFF...
     w1 = _world()

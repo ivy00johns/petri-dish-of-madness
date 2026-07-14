@@ -1044,7 +1044,11 @@ _NEARBY_ZONES_MAX: int = 4  # hard line cap (prompt-diet — never the whole gra
 # NOTE: this is a COMPILE-TIME const (no clock/random — pure); it gates ONLY the
 # runtime agent surface. `world.action_propose_rule` itself stays directly callable
 # (tests + any future god path) regardless of this flag.
-GRAPH_ZONES_ENABLED = False
+# ON since the organic-world sign-off (feat/organic-world-regen): with non-grid
+# templates the road graph has real planar faces, so agents get the nearby_zones
+# perception + set_zone_rule effect and can zone the emergent city. Paired with the
+# frontend GRAPH_LOTS_ENABLED.
+GRAPH_ZONES_ENABLED = True
 
 # EM-268 (F1) — agent-controlled FREE building placement. Default OFF ⇒ buildings
 # carry no position ⇒ frontend falls back to assignBuildingLots (byte-identical to

@@ -195,9 +195,12 @@ def test_nearby_layout_lists_extendable_directions():
     assert "cars" in line.lower()
 
 
-def test_nearby_layout_omitted_when_nothing_extendable():
+def test_nearby_layout_omitted_when_nothing_extendable(monkeypatch):
     # A fully-enclosed node (all 4 dirs are road/edge), the zones flag OFF → None
-    # (diet: omit empties).
+    # (diet: omit empties). Zones now ship ON by default (feat/organic-world-regen),
+    # which would add a nearby_zones block, so pin the flag off to test the road-only
+    # omission.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
     from petridish.agents.runtime import build_nearby_layout
     w = _world()
     place = w.places["plaza"]

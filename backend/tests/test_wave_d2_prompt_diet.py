@@ -56,6 +56,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from petridish.engine.world import (
     World, AgentState, PlaceState, RelationshipState, RuleState, Building,
 )
@@ -66,6 +68,16 @@ from petridish.agents.runtime import (
 from petridish.engine.loop import TickLoop
 from petridish.persistence.repository import SQLiteRepository
 from petridish.providers.router import Router
+
+
+@pytest.fixture(autouse=True)
+def _zones_off(monkeypatch):
+    # The prompt-diet contract (byte-identical protagonist prompt, background size
+    # guard, tier-gated menu) is orthogonal to graph-zone perception, which now ships
+    # ON by default (feat/organic-world-regen) and would inject a `nearby zones` block.
+    # Pin it OFF so these tests measure the DIET baseline against the pre-diet capture;
+    # the zones on-path has its own coverage in test_zone_rules.py.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"

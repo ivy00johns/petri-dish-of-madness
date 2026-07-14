@@ -480,9 +480,53 @@ class TickLoop:
         self._world._round_start = True
         self._last_building_round = 0
 
+        # Organic-world reroll (feat/organic-world-regen). When
+        # world.city.randomize_on_reset is set, a reset is a genuinely NEW city,
+        # not the byte-identical same-seed rebuild: roll a fresh city_seed, pick a
+        # fresh template from the pool, rebuild the road graph off them, and steer
+        # the procgen POI ring to the same seed so the whole town moves together.
+        # The rolled seed/template ride the tick-0 snapshot saved below, so
+        # replay/fork of THIS run still reproduce it (EM-155 holds per-run). No-op
+        # (deterministic same-seed reset) unless the flag is on ⇒ every golden +
+        # embedded-default fixture stays byte-identical.
+        _prof = getattr(config.world, "city", None)
+        if _prof is not None and getattr(_prof, "randomize_on_reset", False):
+            import random as _random
+            from ..engine.citygraph import template as _city_template
+            _new_seed = _random.randrange(1, 2**31 - 1)
+            _pool = tuple(getattr(_prof, "template_pool", ()) or ("pentagon", "radial", "ring"))
+            _new_template = _random.choice(_pool)
+            self._world.city_seed = _new_seed
+            _prof.template = _new_template  # record intent; rides the run config json
+            # Switch the POIs to the seeded organic RING for this rerolled run so a
+            # reset escapes the hand-authored 5x5 place LATTICE too — not just the
+            # road grid. apply_procgen() (below) reads self.params.procgen, which IS
+            # config.world.procgen, so enabling + re-seeding it here takes effect for
+            # this run. Genesis is untouched (this only runs on a randomize reset).
+            _pg = getattr(config.world, "procgen", None)
+            if _pg is not None:
+                _pg.enabled = True
+                _pg.seed = _new_seed  # move the POI ring with the reroll
+            self._world.city_graph = _city_template(
+                _new_template, _new_seed,
+                size=getattr(_prof, "size", 5),
+                density=getattr(_prof, "density", "medium"),
+            )
+            log.info("reset reroll: template=%s city_seed=%s", _new_template, _new_seed)
+
         # W11b / EM-098 — regenerate the procgen town for the fresh run when
         # world.procgen.enabled (no-op for the hand-authored town).
         self._world.apply_procgen()
+        # When procgen is ON it REPLACED world.places with the seeded layout, so the
+        # DB place-row, the tick-0 snapshot, and the neighborhood derivation must all
+        # read the ACTUAL world places — not the hand-authored config `places` list
+        # built above (now stale). Gated on procgen so the disabled (default) path is
+        # byte-identical: apply_procgen was a no-op, world.places IS the config list
+        # in the same order, and neighborhoods keep their existing derivation.
+        _pg = getattr(config.world, "procgen", None)
+        if _pg is not None and bool(getattr(_pg, "enabled", False)):
+            places = list(self._world.places.values())
+            self._world.neighborhoods = self._world._derive_neighborhoods()
 
         # EM-227 — seed each agent's STARTING skills from a deterministic
         # per-archetype spread so the cast begins differentiated (and is NOT all

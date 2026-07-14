@@ -62,9 +62,12 @@ def test_adopt_master_plan_hidden_when_a_morph_is_active():
 
 # ── set_zone_rule is flag-gated (dormant by default, appears when enabled) ─────
 
-def test_set_zone_rule_absent_by_default():
+def test_set_zone_rule_absent_when_flag_off(monkeypatch):
+    # Zones now ship ON by default (feat/organic-world-regen); pin OFF to prove the
+    # dormant path still omits set_zone_rule from the propose menu.
+    monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
     agent, w = _world()
-    assert not rt.GRAPH_ZONES_ENABLED           # dormant flag (default)
+    assert not rt.GRAPH_ZONES_ENABLED           # pinned off
     assert "set_zone_rule" not in _propose_line(_sys(agent, w))
 
 

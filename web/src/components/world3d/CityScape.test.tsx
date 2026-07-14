@@ -684,10 +684,12 @@ describe('CityScape — EM-265 (SB) gate: zone tints only on the graph-lots path
     };
   }
 
-  it('GRAPH_LOTS_ENABLED defaults false ⇒ a graph carrying zone_rules paints NO zone tints (byte-identical)', () => {
-    // The flag-gated default: zones only exist on the graph-lots path, so with
-    // the flag OFF a ratified rule renders nothing here — law §0.1.
-    expect(GRAPH_LOTS_ENABLED).toBe(false);
+  it('GRAPH_LOTS_ENABLED ships ON ⇒ zone tints live on the graph-lots path, but a face-less graph still paints none', () => {
+    // Organic-world sign-off (feat/organic-world-regen): the flag now ships ON, so
+    // zone tints CAN render. This minimal 2-node / 1-edge graph encloses no planar
+    // face ⇒ no derivable zones ⇒ still no tints — a valid on-path edge case (a
+    // ratified rule with nowhere to land renders nothing, never a stray tile).
+    expect(GRAPH_LOTS_ENABLED).toBe(true);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
