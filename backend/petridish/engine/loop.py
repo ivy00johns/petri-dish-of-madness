@@ -2065,6 +2065,17 @@ class TickLoop:
             # drain, and we enrich the event's chip color from the router.
             if evt.get("kind") == "model_reassigned":
                 self._sync_transplant_router(evt)
+            # travel_arrived is parked in the spawn outbox by the World (which has
+            # no router/legend), so it lands WITHOUT a profile_color and the feed
+            # shows a neutral chip. Enrich from the arriving agent so the arrival
+            # card carries the traveler's model color — symmetric with travel_departed
+            # (an action-result event that already carries it). Mirrors
+            # _sync_transplant_router; guarded so a missing agent is a no-op.
+            if evt.get("kind") == "travel_arrived" and not evt.get("profile_color"):
+                _actor_id = evt.get("actor_id")
+                _actor = self._world.agents.get(str(_actor_id)) if _actor_id else None
+                if _actor is not None:
+                    evt["profile_color"] = self._get_profile_color(_actor)
             self._emit_event(evt)
         self._broadcast_world_state()
 

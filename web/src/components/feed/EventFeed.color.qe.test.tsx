@@ -1,23 +1,16 @@
 /**
- * QE (cosmetic, non-blocking) — the travel feed cards' COLOR resolution.
+ * Travel feed cards' COLOR resolution.
  *
  * The card border/badge color is `event.profile_color ?? KIND_FALLBACK_COLOR[kind]
- * ?? 'var(--marker-trace)'` (EventFeed.tsx). So a card is drawn in the ACTOR's model
- * color only when the backend event carries `profile_color`.
- *
+ * ?? 'var(--marker-trace)'` (EventFeed.tsx). All three travel kinds now carry the
+ * ACTOR's model color when emitted:
  *   • `travel_departed` / `settlement_founded` are ACTION results — the runtime's
- *     base-metadata spread stamps the actor's `profile_color`, so they render in
- *     the actor color.
- *   • `travel_arrived` is parked in `pending_spawn_events` and flushed via
- *     `_emit_event`, which reads `evt.get("profile_color")` (None here — the world
- *     resolver never sets it) and does NOT resolve it from `actor_id`. With no
- *     `KIND_FALLBACK_COLOR` entry either, the card falls back to the neutral
- *     `var(--marker-trace)`.
- *
- * This is COSMETIC: the card still renders (never throws, never an error lane) —
- * it just wears the generic trace tint instead of the traveler's color. This test
- * PINS that state so a future "arrivals should wear the actor color" fix is a
- * conscious change, not an accident.
+ *     base-metadata spread stamps the actor's `profile_color`.
+ *   • `travel_arrived` is parked in `pending_spawn_events` WITHOUT color by the World
+ *     (which has no router/legend), then ENRICHED from the arriving agent at loop
+ *     flush (`_flush_spawn_events`, mirrors `_sync_transplant_router`). So live arrival
+ *     cards wear the traveler's color too. `var(--marker-trace)` remains only as the
+ *     last-ditch fallback for a genuinely color-less event (never a throw / blank).
  */
 import { describe, expect, it } from 'vitest';
 import { KIND_ICON, KIND_FALLBACK_COLOR } from './EventFeed';
@@ -25,24 +18,23 @@ import type { EventKind } from '../../types';
 
 const TRAVEL_KINDS: EventKind[] = ['settlement_founded', 'travel_departed', 'travel_arrived'];
 
-describe('QE — travel feed card color resolution (cosmetic)', () => {
+function cardColor(profileColor: string | undefined, kind: EventKind): string {
+  // Mirror EventFeed's resolution formula.
+  return profileColor ?? KIND_FALLBACK_COLOR[kind] ?? 'var(--marker-trace)';
+}
+
+describe('travel feed card color resolution', () => {
   it.each(TRAVEL_KINDS)('%s has a movement icon (renders a card, never blank)', (kind) => {
     expect(KIND_ICON[kind]).toBeTruthy();
   });
 
-  it('none of the travel kinds has a KIND_FALLBACK_COLOR entry', () => {
-    // They rely on the emitted profile_color; absent it, the card uses the
-    // neutral var(--marker-trace) — documented, non-blocking.
-    for (const kind of TRAVEL_KINDS) {
-      expect(KIND_FALLBACK_COLOR[kind]).toBeUndefined();
-    }
+  it('an emitted travel_arrived carries the actor color ⇒ card renders in it', () => {
+    // The backend flush now enriches travel_arrived from the arriving agent, so the
+    // emitted event carries profile_color and the card wears the traveler's color.
+    expect(cardColor('#2ecc71', 'travel_arrived')).toBe('#2ecc71');
   });
 
-  it('the card color formula never yields undefined for travel_arrived (no throw)', () => {
-    // Mirror EventFeed's resolution with NO profile_color (the backend arrival path):
-    const profileColor: string | undefined = undefined;
-    const kind: EventKind = 'travel_arrived';
-    const color = profileColor ?? KIND_FALLBACK_COLOR[kind] ?? 'var(--marker-trace)';
-    expect(color).toBe('var(--marker-trace)'); // neutral fallback, not the actor color
+  it('a genuinely color-less event still falls back to the neutral tint (never undefined)', () => {
+    expect(cardColor(undefined, 'travel_arrived')).toBe('var(--marker-trace)');
   });
 });
