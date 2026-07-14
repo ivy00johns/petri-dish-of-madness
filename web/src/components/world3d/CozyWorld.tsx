@@ -876,7 +876,13 @@ function Scene({
         shadow-bias={-0.0004}
         shadow-normalBias={0.04}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 80, 215]} />
+      {/* Fog band pushed out (was 80/215) for the organic/radial city, which is
+          WIDER than the old compact grid: at the 130u zoom-out limit the whole city
+          sits ~90–170u from the camera, so the old 80u fog-start washed the entire
+          town into the matching #f6d3a4 background ("white + blurry at full zoom-out").
+          105/400 keeps the city crisp at max zoom-out while still giving a gentle
+          far-edge haze at the default framing. Tunable. */}
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 105, 400]} />
 
       <Ground places={places} />
       {/* EM-109: a distinct GROUND footprint per agent-founded settlement (paved
