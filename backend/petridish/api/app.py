@@ -764,6 +764,42 @@ async def get_lanes():
     return _router.lane_health()
 
 
+@app.get("/api/lanes/registry")
+async def get_lanes_registry():
+    """EM-300 P2 — the discovery/registry view (spec §8): the live lane
+    registry in priority order with per-lane discovery fields ({id, source,
+    priority, enabled, health, cap_state, discovered, last_refresh_counter, …})
+    plus a `discovery` meta block ({enabled, every_turns, served_turns,
+    last_refresh_counter, retired}). Additive sibling to `GET /api/lanes` (which
+    stays the byte-identical profile-keyed lane_health() map). Reflects the
+    STATIC P1 registry until discovery is enabled + a refresh runs."""
+    if _router is None:
+        raise HTTPException(503, "Not initialized")
+    view = getattr(_router, "lanes_view", None)
+    if not callable(view):  # pragma: no cover - older router
+        raise HTTPException(501, "registry view not available")
+    return view()
+
+
+@app.post("/api/lanes/refresh")
+async def refresh_lanes():
+    """EM-300 P2 — on-demand lane discovery refresh (spec §4): poll the
+    FreeLLMAPI catalog + detect direct-provider keys and rebuild the registry
+    NOW, so onboarding (adding a provider key) is instant instead of waiting for
+    the counter-based auto-refresh. Returns {refreshed, ...registry view}.
+    `refreshed` is false when discovery is disabled (the registry is unchanged)
+    — the endpoint never errors on a disabled flag, so a UI refresh button is
+    always safe to call."""
+    if _router is None:
+        raise HTTPException(503, "Not initialized")
+    refresh = getattr(_router, "refresh_lanes", None)
+    view = getattr(_router, "lanes_view", None)
+    if not callable(refresh) or not callable(view):  # pragma: no cover
+        raise HTTPException(501, "discovery not available")
+    refreshed = await refresh()
+    return {"refreshed": bool(refreshed), **view()}
+
+
 # Control endpoints
 
 @app.post("/api/control/start")

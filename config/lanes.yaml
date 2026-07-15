@@ -51,9 +51,31 @@ adaptive_routing:
   # when one does surface it is real signal, not noise to mask.
   terminal_fallback: auto
 
-  # P1 is STATIC — lanes come from this file matched against configured
-  # profiles. Discovery/refresh (poll FreeLLMAPI /v1/models + detect direct
-  # provider keys) is P2 and NOT implemented here yet.
+  # ── Dynamic discovery/refresh (spec P2, EM-300) ────────────────────────────
+  # Makes the lane pool DATA-DRIVEN: poll the FreeLLMAPI proxy's /v1/models
+  # catalog + detect direct-provider env keys so lanes appear as you provision
+  # accounts (add a key to FreeLLMAPI, set GEMINI_API_KEY) and drop out when
+  # disabled — no restart. A newly-available model joins via the `*` sweep
+  # below at sweep priority; a configured lane the catalog reports unavailable
+  # (no_key/disabled) is retired. Empirical (probe 2026-07-15): /v1/models
+  # carries `available` + `unavailable_reason`, so availability is real, not
+  # just configuration.
+  #
+  # DEFAULT enabled: false ⇒ BYTE-IDENTICAL: the static P1 registry (this file
+  # matched against configured profiles), no polling, no synth lanes. Flip
+  # enabled: true to adopt. Refresh also on demand via POST /api/lanes/refresh;
+  # the live registry is visible at GET /api/lanes/registry.
+  discovery:
+    enabled: false             # master toggle (default OFF ⇒ static registry)
+    every_turns: 40            # counter-based auto-refresh cadence (served turns)
+    freellmapi_models: true    # poll /v1/models: retire unavailable, synth new
+    direct_keys: true          # detect GEMINI/ANTHROPIC/OPENAI/OLLAMA env keys
+    admin_quota: false         # also read admin /api/health quotaStates (needs
+                               #  FREELLMAPI_ADMIN_* creds; enrichment only, P3
+                               #  owns 429-cap tracking)
+  #
+  # Lanes come from this file matched against configured profiles (P1) UNION the
+  # discovered catalog (P2, when discovery.enabled).
   #
   # priority order, best-headroom-first. matcher = source + model glob.
   # a glob `model: "*"` sweeps every remaining lane of that source.

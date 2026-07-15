@@ -197,6 +197,11 @@ class TickLoop:
         # so a failed call is simply skipped (no retry) until the next window.
         self._narrator_task: asyncio.Task | None = None
         self._last_narrator_tick: int = -1
+        # EM-300 P2 — the off-critical-path lane-discovery refresh task (poll the
+        # FreeLLMAPI catalog + detect direct keys, every N served turns). Same
+        # background pattern as the narrator: scheduled, never awaited on the
+        # tick path. None until discovery is enabled + a refresh comes due.
+        self._lane_refresh_task: asyncio.Task | None = None
         # EM-201 — the on-demand backfill task (chronicle the EXISTING history as
         # chapters). One at a time; cancelled on reset like the narrator task.
         self._chronicle_backfill_task: asyncio.Task | None = None
@@ -389,6 +394,19 @@ class TickLoop:
                 log.debug("narrator task raised during reset: %s", exc)
         self._narrator_task = None
         self._last_narrator_tick = -1
+        # EM-300 P2 — drop any in-flight lane-discovery refresh: it polls for the
+        # OLD run and the router's clear_cache() below rebuilds the static
+        # registry from scratch for the fresh run.
+        if (self._lane_refresh_task is not None
+                and not self._lane_refresh_task.done()):
+            self._lane_refresh_task.cancel()
+            try:
+                await self._lane_refresh_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("lane-refresh task raised during reset: %s", exc)
+        self._lane_refresh_task = None
         # EM-201 — drop any in-flight chronicle backfill: it chronicles the OLD
         # run and must not bleed chapters into the fresh run.
         if (
@@ -764,6 +782,11 @@ class TickLoop:
         # aligned tick, schedule ONE recap LLM call as a background task — same
         # off-critical-path pattern as the animals. Disabled = zero calls.
         self._maybe_schedule_narrator()
+
+        # EM-300 P2 — counter-gated lane-discovery refresh, off the critical
+        # path (a no-op unless adaptive_routing.discovery.enabled). Grouped with
+        # the sibling per-turn background schedulers above.
+        self._maybe_schedule_lane_refresh()
 
         try:
             # 1. turn_start (now persisted + carries turn_id)
@@ -1193,6 +1216,36 @@ class TickLoop:
         self._narrator_task = asyncio.create_task(
             self._run_narrator(from_tick, tick, profile_name)
         )
+
+    def _maybe_schedule_lane_refresh(self) -> None:
+        """EM-300 P2 — schedule a lane-discovery refresh OFF the agents' critical
+        path, every `adaptive_routing.discovery.every_turns` SERVED turns.
+
+        Mirrors the narrator/animal background-task pattern: the router's
+        `note_served_turn()` is a pure counter gate (no clock, no I/O) that
+        returns True when a refresh is due; the actual poll (`refresh_lanes()`)
+        runs as a fire-and-forget task so a slow/unreachable proxy never stalls
+        a tick. At most one refresh in flight (a still-running earlier refresh
+        skips this window, no queueing). Discovery disabled (default) ⇒
+        note_served_turn is a no-op returning False ⇒ zero scheduling, zero
+        network, byte-identical. NEVER raises (called from the hot path).
+
+        LIVE-ONLY: called from `_execute_turn`, which replay never runs (replay
+        reads routing from the event log), so discovery stays off the EM-155
+        replay surface."""
+        try:
+            note = getattr(self._router, "note_served_turn", None)
+            if not callable(note) or not note():
+                return
+            if (self._lane_refresh_task is not None
+                    and not self._lane_refresh_task.done()):
+                return  # an earlier refresh is still in flight — skip, no queueing
+            refresh = getattr(self._router, "refresh_lanes", None)
+            if not callable(refresh):
+                return
+            self._lane_refresh_task = asyncio.create_task(refresh())
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("lane-refresh scheduling failed: %s", exc)
 
     def _narrator_window_rows(self, from_tick: int, to_tick: int) -> list[dict]:
         """EM-201 — the window's digest-kind event rows, queried ONCE (lineage so
