@@ -48,12 +48,14 @@ _LONG = " ".join(["word"] * 25)
 
 
 @pytest.fixture(autouse=True)
-def _clear_ref_cache():
-    """The reference-corpus memo is module-global; clear it around each test so
-    fresh in-memory repos never read a prior test's corpus."""
+def _clear_caches():
+    """The reference-corpus and target-turn memos are module-global; clear them
+    around each test so fresh in-memory repos never read a prior test's state."""
     fp._REF_CACHE.clear()
+    fp._TURN_CACHE.clear()
     yield
     fp._REF_CACHE.clear()
+    fp._TURN_CACHE.clear()
 
 
 def _emit_turn(repo, run_id, actor_id, tick, model, *, style):
@@ -211,9 +213,98 @@ def test_deterministic():
     _emit_agent(repo, tid, "T_alpha", ALPHA, "alpha", 9)
     ft = FingerprintTickerParams(enabled=True)
     a = compute_run_fingerprints(repo, tid, ft)
-    fp._REF_CACHE.clear()  # prove it doesn't depend on the memo being warm
+    # Prove it doesn't depend on either memo being warm.
+    fp._REF_CACHE.clear()
+    fp._TURN_CACHE.clear()
     b = compute_run_fingerprints(repo, tid, ft)
     assert a == b
+
+
+# ── (E2) target-run delta cache (EM-313 C7 — 4s polls must not re-read the log)
+
+
+def test_target_turn_cache_parses_only_the_delta():
+    repo = SQLiteRepository(":memory:")
+    _seed_history(repo)
+    tid = repo.start_run("{}")
+    _emit_agent(repo, tid, "T_alpha", ALPHA, "alpha", 6)
+    ft = FingerprintTickerParams(enabled=True)
+
+    calls: list[dict] = []
+    orig = repo.get_events
+
+    def spy(run_id, **kw):
+        calls.append({"run_id": run_id, **kw})
+        return orig(run_id, **kw)
+
+    repo.get_events = spy
+    compute_run_fingerprints(repo, tid, ft)  # cold: full parse, warms the memo
+    seen = repo.get_event_stats(tid)["max_seq"]
+
+    # Grow the log; the next poll must fetch ONLY seq > seen for the target.
+    _emit_turn(repo, tid, "T_alpha", 7, ALPHA, style="alpha")
+    calls.clear()
+    warm = compute_run_fingerprints(repo, tid, ft)
+    target_fetches = [c for c in calls if c["run_id"] == tid]
+    assert target_fetches
+    assert all(c.get("after_seq") == seen for c in target_fetches)
+
+    # Unchanged log ⇒ no target fetch at all, identical payload.
+    calls.clear()
+    assert compute_run_fingerprints(repo, tid, ft) == warm
+    assert not [c for c in calls if c["run_id"] == tid]
+
+    # Incremental parse ≡ a cold full parse of the same log.
+    fp._TURN_CACHE.clear()
+    fp._REF_CACHE.clear()
+    assert compute_run_fingerprints(repo, tid, ft) == warm
+
+
+def test_target_turn_cache_handles_turn_straddling_two_polls():
+    """A poll landing mid-turn (llm_call persisted, action not yet) must still
+    reduce to ONE complete AgentTurn once the rest of the turn arrives."""
+    repo = SQLiteRepository(":memory:")
+    tid = repo.start_run("{}")
+    _emit_agent(repo, tid, "A1", ALPHA, "alpha", 4)
+    _emit_agent(repo, tid, "A2", ALPHA, "alpha", 4)
+    ft = FingerprintTickerParams(enabled=True)
+    base = {"actor_id": "A1", "actor_type": "human_agent", "turn_id": "A1-t5"}
+    repo.save_event(tid, {
+        **base, "kind": "llm_call",
+        "payload": {"gen_ai.response.model": ALPHA, "attempt": 1},
+    }, 5)
+    compute_run_fingerprints(repo, tid, ft)  # poll lands mid-turn
+    repo.save_event(tid, {
+        **base, "kind": "agent_action",
+        "payload": {"action": "build_step", "routed_via": ALPHA},
+    }, 5)
+    warm = compute_run_fingerprints(repo, tid, ft)
+    fp._TURN_CACHE.clear()
+    fp._REF_CACHE.clear()
+    assert warm == compute_run_fingerprints(repo, tid, ft)
+
+
+# ── (E3) series sampling bounds (EM-313 C19 — max_series_points=1 500'd) ──────
+
+
+def test_sample_indices_smallest_caps():
+    # k == 1 is the latest turn only (the live guess) — was ZeroDivisionError.
+    assert fp._sample_indices(10, 1) == [9]
+    assert fp._sample_indices(10, 2) == [0, 9]
+    assert fp._sample_indices(1, 1) == [0]
+    assert fp._sample_indices(0, 1) == []
+
+
+def test_max_series_points_one_returns_latest_point_only():
+    repo = SQLiteRepository(":memory:")
+    _seed_history(repo)
+    tid = repo.start_run("{}")
+    _emit_agent(repo, tid, "T_alpha", ALPHA, "alpha", 8)
+    ft = FingerprintTickerParams(enabled=True, max_series_points=1)
+    result = compute_run_fingerprints(repo, tid, ft)
+    ta = result["agents"][0]
+    assert [p["turn"] for p in ta["series"]] == [8]
+    assert ta["guess"] == ALPHA
 
 
 # ── (F) config gate ───────────────────────────────────────────────────────────
@@ -233,6 +324,31 @@ def test_config_defaults_off_and_roundtrips():
     assert parsed.lock_threshold == pytest.approx(0.8)
     assert parsed.min_turns == 2
     assert parsed.max_series_points == 40
+
+
+def test_malformed_config_block_falls_back_to_defaults():
+    """EM-313 C20 — `fingerprint_ticker: true` (or any non-dict / bad-scalar
+    block) must parse to defaults, never raise out of config load: the sim
+    should not fail to boot over viewer-only chrome."""
+    d = FingerprintTickerParams()
+    assert _parse_fingerprint_ticker(True) == d
+    assert _parse_fingerprint_ticker("garbage") == d
+    assert _parse_fingerprint_ticker([1, 2]) == d
+    # Bad scalars degrade PER FIELD; the parseable rest is kept.
+    parsed = _parse_fingerprint_ticker({
+        "enabled": True, "temperature": "hot", "min_turns": None,
+        "max_series_points": 40,
+    })
+    assert parsed.enabled is True
+    assert parsed.temperature == pytest.approx(d.temperature)
+    assert parsed.min_turns == d.min_turns
+    assert parsed.max_series_points == 40
+
+
+def test_malformed_block_survives_world_parse():
+    from petridish.config.loader import _parse_world
+    params, _, _ = _parse_world({"world": {"fingerprint_ticker": True}})
+    assert params.fingerprint_ticker == FingerprintTickerParams()
 
 
 def test_endpoint_gate_default_off():

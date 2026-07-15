@@ -19,6 +19,7 @@ retro-scores don't silently drift across releases.
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Iterable, Mapping, Sequence
@@ -111,6 +112,90 @@ class _TurnAcc:
         self.has_action = False
 
 
+class _TurnAccumulator:
+    """Incremental form of `turns_from_events`: feed seq-ordered event batches
+    and reduce to per-agent turn lists on demand. Per-turn accumulators persist
+    across feeds, so a turn whose events straddle two batches (a live turn still
+    being written when a poll lands) still reduces to ONE AgentTurn once its
+    remaining events arrive in a later delta."""
+
+    def __init__(self, run_id: int) -> None:
+        self.run_id = run_id
+        self._accs: dict[tuple[str, str], _TurnAcc] = {}
+        self._order: list[tuple[str, str]] = []
+
+    def feed(self, events: Iterable[Mapping]) -> None:
+        accs = self._accs
+        for ev in events:
+            if (ev.get("actor_type") or "human_agent") != "human_agent":
+                continue
+            actor_id = ev.get("actor_id")
+            if not actor_id:
+                continue
+            seq = int(ev.get("seq") or 0)
+            turn_id = ev.get("turn_id") or f"__seq{seq}"
+            key = (actor_id, turn_id)
+            acc = accs.get(key)
+            if acc is None:
+                acc = _TurnAcc(actor_id, seq, int(ev.get("tick") or 0))
+                accs[key] = acc
+                self._order.append(key)
+            kind = ev.get("kind") or ""
+            payload = ev.get("payload") or {}
+            if kind == "llm_call":
+                acc.llm_calls += 1
+                rm = payload.get("gen_ai.response.model")
+                if rm and acc.resp_model is None:
+                    acc.resp_model = rm
+                continue
+            if kind == "parse_failure":
+                acc.parse_failed = True
+                rv = payload.get("routed_via")
+                if rv and acc.routed_via is None:
+                    acc.routed_via = rv
+                continue
+            action = payload.get("action")
+            if action:
+                acc.has_action = True
+                acc.verbs.append(action)
+                if payload.get("reflex"):
+                    acc.reflex = True
+                if action in _TALK:
+                    said = payload.get("said")
+                    if isinstance(said, str) and said.strip():
+                        acc.said_words.append(len(said.split()))
+                rv = payload.get("routed_via")
+                if rv and acc.routed_via is None:
+                    acc.routed_via = rv
+
+    def turns_by_agent(self) -> dict[str, list[AgentTurn]]:
+        by_agent: dict[str, list[AgentTurn]] = {}
+        for key in self._order:
+            acc = self._accs[key]
+            # Drop reflex/instinct turns entirely — they are engine-authored,
+            # not model-authored, so their verbs (and any timed-out llm_call
+            # span) would only pollute the model's behavioral fingerprint.
+            if acc.reflex:
+                continue
+            is_model_turn = acc.llm_calls > 0 or acc.has_action or acc.parse_failed
+            if not is_model_turn:
+                continue
+            turn = AgentTurn(
+                actor_id=acc.actor_id,
+                run_id=self.run_id,
+                seq=acc.seq,
+                tick=acc.tick,
+                verbs=tuple(acc.verbs),
+                said_words=tuple(acc.said_words),
+                llm_attempts=acc.llm_calls,
+                parse_failed=acc.parse_failed,
+                routed_via=acc.routed_via or acc.resp_model,
+            )
+            by_agent.setdefault(acc.actor_id, []).append(turn)
+        # Each agent's turns are already in first-seen (seq) order via _order.
+        return by_agent
+
+
 def turns_from_events(
     events: Iterable[Mapping], run_id: int
 ) -> dict[str, list[AgentTurn]]:
@@ -120,75 +205,9 @@ def turns_from_events(
     when the model was genuinely consulted — it has an ``llm_call``, a real
     action verb, or a ``parse_failure`` — and is dropped when it is a pure
     reflex/instinct turn (engine-authored, not model-authored)."""
-    accs: dict[tuple[str, str], _TurnAcc] = {}
-    order: list[tuple[str, str]] = []
-    for ev in events:
-        if (ev.get("actor_type") or "human_agent") != "human_agent":
-            continue
-        actor_id = ev.get("actor_id")
-        if not actor_id:
-            continue
-        seq = int(ev.get("seq") or 0)
-        turn_id = ev.get("turn_id") or f"__seq{seq}"
-        key = (actor_id, turn_id)
-        acc = accs.get(key)
-        if acc is None:
-            acc = _TurnAcc(actor_id, seq, int(ev.get("tick") or 0))
-            accs[key] = acc
-            order.append(key)
-        kind = ev.get("kind") or ""
-        payload = ev.get("payload") or {}
-        if kind == "llm_call":
-            acc.llm_calls += 1
-            rm = payload.get("gen_ai.response.model")
-            if rm and acc.resp_model is None:
-                acc.resp_model = rm
-            continue
-        if kind == "parse_failure":
-            acc.parse_failed = True
-            rv = payload.get("routed_via")
-            if rv and acc.routed_via is None:
-                acc.routed_via = rv
-            continue
-        action = payload.get("action")
-        if action:
-            acc.has_action = True
-            acc.verbs.append(action)
-            if payload.get("reflex"):
-                acc.reflex = True
-            if action in _TALK:
-                said = payload.get("said")
-                if isinstance(said, str) and said.strip():
-                    acc.said_words.append(len(said.split()))
-            rv = payload.get("routed_via")
-            if rv and acc.routed_via is None:
-                acc.routed_via = rv
-
-    by_agent: dict[str, list[AgentTurn]] = {}
-    for key in order:
-        acc = accs[key]
-        # Drop reflex/instinct turns entirely — they are engine-authored, not
-        # model-authored, so their verbs (and any timed-out llm_call span) would
-        # only pollute the model's behavioral fingerprint.
-        if acc.reflex:
-            continue
-        is_model_turn = acc.llm_calls > 0 or acc.has_action or acc.parse_failed
-        if not is_model_turn:
-            continue
-        turn = AgentTurn(
-            actor_id=acc.actor_id,
-            run_id=run_id,
-            seq=acc.seq,
-            tick=acc.tick,
-            verbs=tuple(acc.verbs),
-            said_words=tuple(acc.said_words),
-            llm_attempts=acc.llm_calls,
-            parse_failed=acc.parse_failed,
-            routed_via=acc.routed_via or acc.resp_model,
-        )
-        by_agent.setdefault(acc.actor_id, []).append(turn)
-    # Each agent's turns are already in first-seen (seq) order via `order`.
-    return by_agent
+    acc = _TurnAccumulator(run_id)
+    acc.feed(events)
+    return acc.turns_by_agent()
 
 
 # ── Feature extraction ────────────────────────────────────────────────────────
@@ -322,6 +341,10 @@ def _sample_indices(n: int, k: int) -> list[int]:
         return []
     if k <= 0 or n <= k:
         return list(range(n))
+    if k == 1:
+        # A single point must be the latest turn (the live guess); the general
+        # stride below would divide by k-1 == 0.
+        return [n - 1]
     idxs = {0, n - 1}
     step = (n - 1) / (k - 1)
     for j in range(k):
@@ -348,6 +371,45 @@ def _group_by_model(
 # and off the sim surface — purely an endpoint-cost optimization for live polling.
 _REF_CACHE: dict[tuple, dict[str, list[AgentTurn]]] = {}
 _REF_CACHE_MAX = 8
+
+# Incremental memo for the TARGET run's parsed turns: (fed-up-to max_seq,
+# accumulator). Each poll fetches ONLY the seq delta since the last parse
+# (get_events after_seq/before_seq) and folds it into the persisted per-turn
+# accumulators, so the 4s ticker poll stops re-reading the whole event log.
+# _CACHE_LOCK serializes both memos: the endpoint offloads computes to worker
+# threads (app.py), so concurrent polls could otherwise race the shared state.
+_TURN_CACHE: dict[tuple, tuple[int, _TurnAccumulator]] = {}
+_TURN_CACHE_MAX = 4
+_CACHE_LOCK = threading.Lock()
+
+
+def _target_turns(repo, run_id: int) -> dict[str, list[AgentTurn]]:
+    """The target run's per-agent turns, parsed incrementally via _TURN_CACHE.
+    Returns a fresh snapshot (immutable AgentTurns), safe to use off-lock."""
+    try:
+        max_seq = int(repo.get_event_stats(run_id).get("max_seq") or 0)
+    except Exception:  # pragma: no cover - defensive
+        return turns_from_events(repo.get_events(run_id, order="asc"), run_id)
+    key = (id(repo), FEATURE_VERSION, run_id)
+    entry = _TURN_CACHE.get(key)
+    if entry is not None and entry[0] > max_seq:
+        entry = None  # log shrank (reset/prune) — the delta contract is void
+    if entry is None:
+        entry = (0, _TurnAccumulator(run_id))
+    seen, acc = entry
+    if max_seq > seen:
+        # before_seq pins the window's upper edge to the signature max_seq, so
+        # events landing between the stats read and this fetch are never fed
+        # twice (they re-fetch cleanly on the next poll).
+        acc.feed(repo.get_events(
+            run_id, order="asc",
+            after_seq=seen or None, before_seq=max_seq + 1,
+        ))
+        seen = max_seq
+    if key not in _TURN_CACHE and len(_TURN_CACHE) >= _TURN_CACHE_MAX:
+        _TURN_CACHE.clear()
+    _TURN_CACHE[key] = (seen, acc)
+    return acc.turns_by_agent()
 
 
 def _reference_corpus(repo, ref_run_ids: Sequence[int]) -> dict[str, list[AgentTurn]]:
@@ -402,7 +464,6 @@ def compute_run_fingerprints(repo, run_id: int, ft: object = None) -> dict:
     history has no honest reference and reports `status: "gathering"` — the
     publishable null result. READ-ONLY; touches no sim state."""
     cfg = _cfg_from(ft)
-    target_turns = turns_from_events(repo.get_events(run_id, order="asc"), run_id)
 
     # Historical reference corpus (other runs, newest first).
     ref_ids: list[int] = []
@@ -415,7 +476,11 @@ def compute_run_fingerprints(repo, run_id: int, ft: object = None) -> dict:
                 break
     except Exception:  # pragma: no cover - defensive
         ref_ids = []
-    historical = _reference_corpus(repo, ref_ids) if ref_ids else {}
+    # Both memos are shared module state and this compute may run on a worker
+    # thread (the endpoint offloads it off the sim loop) — serialize access.
+    with _CACHE_LOCK:
+        target_turns = _target_turns(repo, run_id)
+        historical = _reference_corpus(repo, ref_ids) if ref_ids else {}
     use_within_run = not any(historical.values())
     within_run = _group_by_model(target_turns) if use_within_run else {}
 

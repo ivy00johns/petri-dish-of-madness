@@ -22,7 +22,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 import jsonschema
 
@@ -1547,7 +1547,12 @@ def _sanitize_plan_revision(action_dict: dict) -> str | None:
     return None
 
 
-def _sanitize_charter_revision(action_dict: dict) -> str | None:
+def _sanitize_charter_revision(
+    action_dict: dict,
+    *,
+    max_ambitions: int = CHARTER_MAX_AMBITIONS,
+    creed_cap: int = CHARTER_CREED_CAP,
+) -> str | None:
     """EM-311 — pre-validate the optional `charter_revision` IN PLACE so a
     malformed/off-grammar one can never fail the turn (the _sanitize_plan_revision
     leniency rule). A usable revision (>=1 legal AMBITION_KINDS ambition) is
@@ -1555,7 +1560,10 @@ def _sanitize_charter_revision(action_dict: dict) -> str | None:
     schema; anything else is POPPED before validation and the reason returned for
     the decision trace. Off-grammar ambitions are DROPPED (never rejected wholesale)
     so a model that names one bad kind among good ones still lands its charter —
-    the EM-297 'meet the model where it is' rule."""
+    the EM-297 'meet the model where it is' rule. The caps are the WORLD's
+    effective charter caps (World.charter_caps — config clamped by the module
+    hard ceiling, so the sanitized shape always passes the schema); defaults
+    keep duck-typed callers on the hard ceiling."""
     if "charter_revision" not in action_dict:
         return None
     rev = action_dict.pop("charter_revision")
@@ -1571,14 +1579,14 @@ def _sanitize_charter_revision(action_dict: dict) -> str | None:
         kind = a.strip()
         if kind in AMBITION_GRAMMAR and kind not in ambitions:
             ambitions.append(kind)
-        if len(ambitions) >= CHARTER_MAX_AMBITIONS:
+        if len(ambitions) >= max_ambitions:
             break
     if not ambitions:
         return "charter_revision has no valid ambition"
     clean: dict = {"ambitions": ambitions}
     creed = rev.get("creed")
     if isinstance(creed, str) and creed.strip():
-        clean["creed"] = creed.strip()[:CHARTER_CREED_CAP]
+        clean["creed"] = creed.strip()[:creed_cap]
     reason = rev.get("reason")
     if isinstance(reason, str) and reason.strip():
         clean["reason"] = reason.strip()[:200]
@@ -1861,7 +1869,10 @@ def _building_field(building: Any, field: str, default: Any = None) -> Any:
     return getattr(building, field, default)
 
 
-def _emit_world_result(result: Any, base: dict, thought: str = "") -> dict:
+def _emit_world_result(
+    result: Any, base: dict, thought: str = "",
+    stamp_for: Callable[[str], dict | None] | None = None,
+) -> dict:
     """Spread per-turn base metadata (profile/profile_color/tick) onto whatever a
     world-core `action_*` method returned and hand it back in the loop's emit shape.
 
@@ -1872,6 +1883,14 @@ def _emit_world_result(result: Any, base: dict, thought: str = "") -> dict:
     exactly like the `vote` branch consumes its own `_multi`: it does NOT unpack a
     tuple and does NOT re-derive transitions — it reads the kinds/payloads the world
     already produced and overlays the base fields the loop needs.
+
+    `stamp_for` (optional): a _multi chain may carry events attributed to a
+    DIFFERENT actor than the acting agent (a clash kill's `agent_died` is the
+    slain TARGET's, the follow-up `inherited` is the HEIR's); the base spread
+    would dress them in the ACTING agent's profile/profile_color (the
+    travel_arrived mis-attribution class). A caller that can resolve another
+    agent's stamp passes it here and those events are re-stamped with their own
+    actor's chip.
     """
     building_id = None
     if isinstance(result, dict) and "_building_id" in result:
@@ -1881,6 +1900,11 @@ def _emit_world_result(result: Any, base: dict, thought: str = "") -> dict:
         # base supplies profile/profile_color/tick + a default actor_id; the world
         # event's own actor_id/target_id/text/payload win where present.
         merged = {**base, **evt}
+        if stamp_for is not None and \
+                merged.get("actor_id") not in (None, base.get("actor_id")):
+            stamp = stamp_for(str(merged["actor_id"]))
+            if stamp:
+                merged.update(stamp)
         payload = dict(merged.get("payload") or {})
         if thought and "thought" not in payload:
             payload["thought"] = thought
@@ -1936,8 +1960,9 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
     # move, work, or commit a crime — only say/whisper/idle/remember get through.
     # EM-258 — the gate WIDENS to `exiled` (a war loser's leader is cast out of
     # public life — permanent: advance_crime's release path never frees exiled)
-    # and explicitly NOT to `belligerent` (the war-band marker is a status, not
-    # a restriction — a mustered soldier keeps every action; plan §Feature 3).
+    # and explicitly NOT to belligerence (derived from war-band membership,
+    # never a crime_status — a mustered soldier keeps every action; plan
+    # §Feature 3).
     JAIL_ALLOWED = {"say", "whisper", "idle", "remember"}
     _status_now = getattr(agent, "crime_status", None)
     if _status_now in ("detained", "jailed", "exiled") and \
@@ -3690,20 +3715,24 @@ def _assemble_context(
             f"You are in JAIL for {_left} more ticks. You can only talk, whisper, "
             "and think — no moving, working, or crime until you are released."
         )
-    # EM-258/EM-259 — the war statuses. belligerent is a MARKER, not a
-    # restriction (the jail-gate ignores it); exiled is the permanent price of
-    # a lost war. Both only ever exist in a war-enabled world, so the peacetime
-    # prompt — and the em161 golden — never carries these lines.
-    elif _status == "belligerent":
-        _crime_lines.append(
-            "You march with your faction's war band. Clash with co-located "
-            "enemy belligerents or lay siege to their structures — the war "
-            "ends by peace treaty or collapse."
-        )
+    # EM-258/EM-259 — the war statuses. exiled is the permanent price of a
+    # lost war; belligerence is DERIVED from war-band membership (it never
+    # rides crime_status — that suppressed the wanted flip and froze notoriety
+    # decay), so a mustered soldier still sees the WANTED line above when
+    # justice calls. Both lines only ever exist in a war-enabled world, so the
+    # peacetime prompt — and the em161 golden — never carries them.
     elif _status == "exiled":
         _crime_lines.append(
             "You are EXILED — cast out after your faction's defeat. You can "
             "only talk, whisper, and think; the town goes on without you."
+        )
+    _is_belligerent = getattr(world, "is_belligerent", None)
+    if _status in (None, "wanted") and callable(_is_belligerent) \
+            and _is_belligerent(agent.id):
+        _crime_lines.append(
+            "You march with your faction's war band. Clash with co-located "
+            "enemy belligerents or lay siege to their structures — the war "
+            "ends by peace treaty or collapse."
         )
     _offers = getattr(world, "pending_crime_offers", {})
     _offer = _offers.get(agent.id) if isinstance(_offers, dict) else None
@@ -5735,20 +5764,22 @@ class AgentRuntime:
         # revision counter + stamping the tick) and emits ONE charter_revised event
         # carrying the exact old→new diff — the inspector-diff spectacle. Gated on
         # world.charters.enabled: a disabled world ignores the field and stays
-        # byte-silent (the em161 golden). The caps default to the module hard
-        # ceiling the schema/sanitizer enforce (== the config defaults).
+        # byte-silent (the em161 golden). Bounded by the WORLD's effective caps
+        # (World.charter_caps) so the applied charter is exactly what a snapshot
+        # restore re-normalizes to (byte-stable round-trip, EM-155).
         charter_rev_rejected = action_dict.pop("_charter_revision_rejected", None)
         charter_revision = action_dict.get("charter_revision")
         if self.world.charters_enabled() and isinstance(charter_revision, dict):
             old_charter = agent.charter if isinstance(agent.charter, dict) else None
             prev_revisions = (
                 int(old_charter.get("revisions", 0)) if old_charter else 0)
+            _max_amb, _creed_cap = self.world.charter_caps()
             new_charter = normalize_charter({
                 "ambitions": charter_revision.get("ambitions", []),
                 "creed": charter_revision.get("creed", ""),
                 "revised_tick": self.world.tick,
                 "revisions": prev_revisions + 1,
-            })
+            }, max_ambitions=_max_amb, creed_cap=_creed_cap)
             if new_charter is not None:
                 agent.charter = new_charter
                 vow = "; ".join(
@@ -6045,8 +6076,16 @@ class AgentRuntime:
         # rule as the bond): a bad plan can never fail the turn.
         plan_rev_rejected = _sanitize_plan_revision(action_dict)
         # EM-311 — a malformed/off-grammar charter_revision is normalized or popped
-        # HERE (same rule): a bad charter can never fail the turn.
-        charter_rev_rejected = _sanitize_charter_revision(action_dict)
+        # HERE (same rule): a bad charter can never fail the turn. Bounded by the
+        # WORLD's effective caps (not the module ceiling) so the write path and
+        # from_snapshot agree on a non-default max_ambitions/creed_cap (byte-
+        # stable round-trip, EM-155). getattr keeps duck-typed worlds safe.
+        _caps = getattr(self.world, "charter_caps", None)
+        _max_amb, _creed_cap = (
+            _caps() if callable(_caps)
+            else (CHARTER_MAX_AMBITIONS, CHARTER_CREED_CAP))
+        charter_rev_rejected = _sanitize_charter_revision(
+            action_dict, max_ambitions=_max_amb, creed_cap=_creed_cap)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
@@ -6401,6 +6440,20 @@ class AgentRuntime:
         if text:
             event["text"] = f"{text}  💢 (belying their {marker.get('intent')} words)"
 
+    def _profile_stamp(self, agent_id: str) -> dict | None:
+        """The (profile, profile_color) stamp for ANOTHER agent swept into an
+        acting agent's `_multi` chain (a clash kill's `agent_died`, the heir's
+        `inherited`): those events must wear their OWN actor's chip, not the
+        acting agent's — the same mis-attribution class travel_arrived was
+        fixed for. None for an unknown id (the base stamp then stands)."""
+        other = self.world.agents.get(str(agent_id))
+        if other is None:
+            return None
+        name = self.router.profile_name_for(other.id, other.profile)
+        profile = self.router.get_profile(name)
+        return {"profile": name,
+                "profile_color": profile.color if profile else "#888888"}
+
     def _apply_action_inner(
         self,
         agent: AgentState,
@@ -6574,8 +6627,12 @@ class AgentRuntime:
                 return {**base, "kind": "parse_failure",
                         "text": f"{agent.name} tried to clash but target not found",
                         "payload": {"error": "target_not_found"}}
+            # A kill's _multi chain carries the slain TARGET's agent_died and
+            # the HEIR's inherited — stamp_for dresses those in their OWN
+            # actor's profile/color, not the attacker's.
             return _emit_world_result(
-                self.world.action_clash(agent, target), base, thought)
+                self.world.action_clash(agent, target), base, thought,
+                stamp_for=self._profile_stamp)
 
         elif action == "siege":
             return _emit_world_result(

@@ -315,6 +315,7 @@ class Router:
         self._lane_registry: LaneRegistry = LaneRegistry(
             SortingList(
                 self._ar_order(), allow_paid=self._ar_allow_paid(),
+                exclude=self._ar_exclude(),
             ).apply(self._build_lane_universe()),
             health_fn=self.lane_sick,
         )
@@ -772,6 +773,15 @@ class Router:
         order = self._ar_value("order", ())
         if isinstance(order, (list, tuple)):
             return tuple(order)
+        return ()
+
+    def _ar_exclude(self) -> tuple:
+        """PR#106 C15 — the denylist matchers (same duck-typed entry shape as
+        `order`). Lanes they cover are barred from the sorting list entirely,
+        including the `*` sweep. Default () ⇒ nothing excluded."""
+        exclude = self._ar_value("exclude", ())
+        if isinstance(exclude, (list, tuple)):
+            return tuple(exclude)
         return ()
 
     @staticmethod

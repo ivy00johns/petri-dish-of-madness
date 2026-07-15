@@ -879,6 +879,12 @@ class AdaptiveRoutingParams:
                              it back to `auto` to restore the W30 backstop.
       order                — the priority order (top-to-bottom = ascending),
                              a tuple of LaneOrderEntry (spec §3.3).
+      exclude              — DENYLIST (PR#106 C15). Matchers (same source +
+                             model-glob shape as `order`) for lanes NO entry may
+                             place — not even a `model: "*"` sweep. This is how
+                             a profile kept only for legacy references (e.g. the
+                             EM-324 command-a-2 truncator) is barred from the
+                             bounce walk. Default () ⇒ nothing excluded.
     """
     enabled: bool = False
     max_attempts: int = 3
@@ -886,6 +892,7 @@ class AdaptiveRoutingParams:
     allow_paid: bool = False
     terminal_fallback: str | None = None
     order: tuple[LaneOrderEntry, ...] = ()
+    exclude: tuple[LaneOrderEntry, ...] = ()
 
 
 @dataclass
@@ -1142,7 +1149,11 @@ class WarParams:
 
       siege_damage          — building damage per siege (routes through the
                               shared _damage_building path).
+      siege_energy_cost     — energy the BESIEGER burns per siege (the
+                              attack_energy_cost convention; siege is not free).
       exhaustion_per_siege  — exhaustion the besieged owner's faction takes.
+      exhaustion_per_siege_own — the smaller exhaustion the besieger's OWN
+                              faction takes per siege (attrition cuts both ways).
       exhaustion_per_round  — passive war weariness both belligerents accrue
                               at every round boundary while a war is active.
       exhaustion_cap        — at/above this a faction collapses and the war
@@ -1172,7 +1183,9 @@ class WarParams:
     exhaustion_per_casualty: int = 15
     # EM-259 — siege + endgame.
     siege_damage: int = 20
+    siege_energy_cost: float = 4.0
     exhaustion_per_siege: int = 4
+    exhaustion_per_siege_own: int = 2
     exhaustion_per_round: int = 1
     exhaustion_cap: int = 100
 
@@ -2631,6 +2644,9 @@ def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
         allow_paid=bool(raw.get("allow_paid", d.allow_paid)),
         terminal_fallback=terminal_fallback,
         order=_parse_lane_order(raw.get("order")),
+        # PR#106 C15 — the denylist reuses the order-entry shape/parser, so the
+        # config_json asdict round-trip normalizes it for free.
+        exclude=_parse_lane_order(raw.get("exclude")),
     )
 
 
@@ -2655,18 +2671,26 @@ def _load_lanes_yaml_adaptive_routing(config_dir: Path | None) -> dict | None:
 
 
 def _parse_fingerprint_ticker(raw: dict | None) -> FingerprintTickerParams:
-    """Parse the optional `world.fingerprint_ticker` block (EM-313). Absent/empty
-    ⇒ defaults (enabled OFF). VIEWER-only; no engine consumer."""
+    """Parse the optional `world.fingerprint_ticker` block (EM-313). Absent/
+    empty/malformed ⇒ defaults (enabled OFF). VIEWER-only; no engine consumer —
+    a bad block (e.g. `fingerprint_ticker: true`) must never fail config load."""
     d = FingerprintTickerParams()
-    if not raw:
+    if not isinstance(raw, dict):
         return d
+
+    def _num(key: str, default, cast):
+        try:
+            return cast(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
     return FingerprintTickerParams(
         enabled=bool(raw.get("enabled", d.enabled)),
-        reference_runs=int(raw.get("reference_runs", d.reference_runs)),
-        temperature=float(raw.get("temperature", d.temperature)),
-        lock_threshold=float(raw.get("lock_threshold", d.lock_threshold)),
-        min_turns=int(raw.get("min_turns", d.min_turns)),
-        max_series_points=int(raw.get("max_series_points", d.max_series_points)),
+        reference_runs=_num("reference_runs", d.reference_runs, int),
+        temperature=_num("temperature", d.temperature, float),
+        lock_threshold=_num("lock_threshold", d.lock_threshold, float),
+        min_turns=_num("min_turns", d.min_turns, int),
+        max_series_points=_num("max_series_points", d.max_series_points, int),
     )
 
 
@@ -2902,7 +2926,10 @@ def _parse_war(raw: dict | None) -> WarParams:
             "exhaustion_per_casualty", d.exhaustion_per_casualty),
         # EM-259 — siege + endgame.
         siege_damage=_int("siege_damage", d.siege_damage),
+        siege_energy_cost=_float("siege_energy_cost", d.siege_energy_cost),
         exhaustion_per_siege=_int("exhaustion_per_siege", d.exhaustion_per_siege),
+        exhaustion_per_siege_own=_int(
+            "exhaustion_per_siege_own", d.exhaustion_per_siege_own),
         exhaustion_per_round=_int("exhaustion_per_round", d.exhaustion_per_round),
         exhaustion_cap=_int("exhaustion_cap", d.exhaustion_cap),
     )

@@ -54,7 +54,12 @@ profiles:
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
-    model_id: deepseek-ai/deepseek-v4-pro
+    # PR#106 C5 (2026-07-15): `deepseek-ai/deepseek-v4-pro` (the vendor-prefixed
+    # id) is not in the FreeLLMAPI catalog — 404, burning a bounce attempt per
+    # walk via the lanes.yaml `*` sweep. Corrected to the plain catalogued id
+    # (verified live); same class as EM-321/EM-323 — catalog ids never carry a
+    # `vendor/` prefix (the proxy resolves those internally).
+    model_id: deepseek-v4-pro
     max_tokens: 1024
     temperature: 0.8
     color: "#a86bd6"
@@ -131,9 +136,11 @@ profiles:
   # which — verified against run 1388 — emits a PLAINTEXT reasoning preamble on
   # strict-JSON agent turns and is output-capped at 1024 tokens, so it truncates
   # (finish_reason=length, no JSON) 32/32 times before emitting an action. It is
-  # therefore REMOVED from the config/lanes.yaml bounce order and NOT a pin; the
-  # profile stays only so any legacy reference still resolves. The Cohere *R*
-  # series (command-r, below) is clean — only the *A+* series preambles.
+  # therefore DENYLISTED from the bounce walk via config/lanes.yaml
+  # `adaptive_routing.exclude` (a plain order removal was not enough — the `*`
+  # sweep re-placed it, PR#106 C15) and NOT a pin; the profile stays only so any
+  # legacy reference still resolves. The Cohere *R* series (command-r, below) is
+  # clean — only the *A+* series preambles.
   - name: command-a
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}

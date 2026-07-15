@@ -7,8 +7,9 @@ faction is actually AT WAR: war disabled, a factionless agent, or a quiet
 world adds NO line — the FULL system prompt stays byte-identical (the
 em161-golden guarantee; the static ACTION_SCHEMA/TOOL_REGISTRY entries are
 identical on both sides so they cancel). The jail-gate widens to `exiled`
-and explicitly NOT to `belligerent` (a marker, not a restriction — plan
-§Feature 3), and `belligerent` round-trips the snapshot whitelist.
+and explicitly NOT to belligerence (derived from war-band membership, never
+a crime_status — the W31 C3 fix; a legacy `belligerent` crime_status in an
+old snapshot coerces to None on restore).
 """
 from petridish.engine.world import World, AgentState, PlaceState, Building
 from petridish.config.loader import WorldParams
@@ -135,10 +136,14 @@ def test_siege_line_names_only_enemy_structures_here():
 
 # ── the jail-gate widening ────────────────────────────────────────────────────
 
-def test_belligerent_does_not_restrict_actions():
+def test_belligerence_does_not_restrict_actions():
+    """W31 C3 — a mustered soldier (derived belligerence) keeps every action;
+    the jail-gate only ever reads detained/jailed/exiled."""
     w = _world()
     ada = w.agents["ada"]
-    ada.crime_status = "belligerent"
+    w.open_war(FA, FB, "avenge the market")
+    w.factions[FA]["war_band"] = ["ada"]
+    assert w.is_belligerent("ada")
     assert _validate_world({"action": "forage", "args": {}}, ada, w) is None
     assert _validate_world(
         {"action": "move_to", "args": {"place": "townhall"}},
@@ -189,13 +194,24 @@ def test_clash_front_gate_requires_a_reachable_target():
                            ada, w) is None
 
 
-# ── the belligerent snapshot whitelist ────────────────────────────────────────
+# ── the legacy belligerent crime_status coerces away ──────────────────────────
 
-def test_belligerent_round_trips_the_snapshot():
+def test_legacy_belligerent_crime_status_coerces_to_none_on_restore():
+    """W31 C3 — belligerence derives from the war_band lists (which round-trip
+    on the faction records); a legacy snapshot whose agent still carries
+    crime_status='belligerent' restores clean, so the wanted flip and the
+    notoriety decay work for that agent again."""
     w = _world()
-    w.agents["ada"].crime_status = "belligerent"
-    restored = World.from_snapshot(w.to_snapshot(), params=_params())
-    assert restored.agents["ada"].crime_status == "belligerent"
+    w.open_war(FA, FB, "avenge the market")
+    w.factions[FA]["war_band"] = ["ada"]
+    snap = w.to_snapshot()
+    for a in snap["agents"]:
+        if a["id"] == "ada":
+            a["crime_status"] = "belligerent"    # the legacy marker
+            a["crime_status_until_tick"] = 0
+    restored = World.from_snapshot(snap, params=_params())
+    assert restored.agents["ada"].crime_status is None
+    assert restored.is_belligerent("ada")        # the band round-tripped it
 
 
 def test_unknown_crime_status_still_fails_safe():

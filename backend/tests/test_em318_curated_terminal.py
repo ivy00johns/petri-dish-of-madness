@@ -1,26 +1,28 @@
 """
-EM-318 — model:auto feed-silence + CURATED TERMINAL FALLBACK (the LIVE fix).
+EM-318 — CURATED TERMINAL FALLBACK (the mechanism) + the EM-319 revert.
 
-Part 2 (routing): the RESERVED final-attempt slot in the adaptive bounce loop
-was the proxy's blind `auto` whole-pool router, which returns "All models
-exhausted" during a rate storm. `adaptive_routing.terminal_fallback` now names a
-DETERMINISTIC free lane that holds the reserved slot instead, so the guaranteed
-last attempt is a KNOWN model. UNSET ⇒ the W30 `auto` backstop (byte-identical).
+`adaptive_routing.terminal_fallback` names the profile that holds the RESERVED
+final-attempt slot in the adaptive bounce loop. UNSET ⇒ the W30 `auto` backstop
+(byte-identical). EM-318 pointed it at a deterministic free lane
+(gpt-oss-120b); EM-319 REVERTED the SHIPPED value to `auto` after a live storm
+proved every specific lane can be individually rate-limited while the blind
+pool still routes — so the mechanism supports any curated terminal, but the
+shipped lanes.yaml deliberately keeps `terminal_fallback: auto`.
 
 Covered here:
   - config parse + asdict fork/replay round-trip of `terminal_fallback`;
   - UNSET terminal_fallback ⇒ the reserved slot is `auto` (byte-identical W30);
-  - a curated terminal lane SERVES the reserved final attempt, and the blind
-    `auto` lane is NEVER called during a full rate storm;
+  - a CONFIGURED curated terminal lane SERVES the reserved final attempt, and
+    the blind `auto` lane is NEVER called during a full rate storm;
   - a curated terminal lane still gets the reserved slot when the curated lanes
     outnumber the attempt budget (the toy-universe blind spot the W30 auto
     backstop test also closed);
-  - the shipped lanes.yaml resolves terminal_fallback=gpt-oss-120b as the last
-    FREE lane in the registry.
+  - the shipped lanes.yaml resolves terminal_fallback=auto (the EM-319 revert).
 
 Style-matches test_adaptive_softpin_reconcile.py: a REAL Router over fake
-adapters that count calls / log call order. Part 1 (feed-silence) is a
-viewer-only filter, tested in web/src/components/feed/EventFeed.test.tsx.
+adapters that count calls / log call order. EM-318's part 1 (a viewer-side
+feed-silence filter) was REMOVED per fix-don't-hide — EM-324 fixed the idle
+churn at the root, so exhaustion idles are visible feed signal again.
 
 CRITICAL suite rule: petridish.engine.world is imported BEFORE
 petridish.agents.runtime — collection breaks otherwise (repo convention).
@@ -283,8 +285,8 @@ def test_shipped_lanes_yaml_terminal_fallback_reverted_to_auto():
     # a storm") was empirically false: during a real rate storm every SPECIFIC
     # lane (incl. gpt-oss-120b) 429s while `auto` still routes to a live model —
     # so a specific terminal death-spiraled the sim (~93% idle → starvation). The
-    # blind pool is the only storm-proof last attempt; feed-noise is handled by
-    # the retained EM-318 feed-silence, not by avoiding `auto`.
+    # blind pool is the only storm-proof last attempt; its rare exhaustion idles
+    # stay VISIBLE in the feed (fix-don't-hide — EM-324 fixed the root churn).
     cfg = load_config()
     ar = cfg.world.adaptive_routing
     # EM-323 widened max_attempts 4→5; EM-324 rebuilt `order` to probe-verified

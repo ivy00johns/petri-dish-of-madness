@@ -72,11 +72,17 @@ class SortingList:
     assigns the next ascending priority to the lanes it matches (source + model
     glob). A glob `model: "*"` sweeps every not-yet-placed lane of that source.
     A `free: false` entry is a PAID entry: excluded unless `allow_paid`. Lanes
-    matching no entry are dropped (they are not in the sorting list)."""
+    matching no entry are dropped (they are not in the sorting list). An
+    `exclude` matcher (same source + model-glob shape) DENYLISTS its lanes:
+    no entry may place them, not even a `*` sweep — the mechanism that keeps a
+    legacy-only profile (e.g. the EM-324 command-a-2 truncator) out of the
+    bounce walk (PR#106 C15)."""
 
-    def __init__(self, order: Iterable[Any], *, allow_paid: bool = False):
+    def __init__(self, order: Iterable[Any], *, allow_paid: bool = False,
+                 exclude: Iterable[Any] = ()):
         self._order = list(order or ())
         self._allow_paid = bool(allow_paid)
+        self._exclude = list(exclude or ())
 
     def _active_entry(self, entry: Any) -> bool:
         """True when this entry is processed (a free entry, or paid + allow_paid).
@@ -84,13 +90,25 @@ class SortingList:
         free = bool(_entry_attr(entry, "free", True))
         return free or self._allow_paid
 
+    def _excluded(self, lane: Lane) -> bool:
+        """True when a denylist matcher covers this lane (source equal + model
+        glob). Exclusion is absolute: it beats every entry, including a concrete
+        one naming the same model — a denylisted lane is never placed."""
+        for e in self._exclude:
+            if lane.source != _entry_attr(e, "source"):
+                continue
+            if fnmatch.fnmatch(lane.model_id, str(_entry_attr(e, "model", "*"))):
+                return True
+        return False
+
     def apply(self, universe: Iterable[Lane]) -> list[Lane]:
         """Order `universe` per the sorting list, assigning ascending priority.
 
         Returns a NEW list of Lanes (priority/free/tags/hints stamped from the
         matched entry). Stable: within one entry, lanes keep `universe` order.
         Excluded: paid entries (free:false) unless allow_paid; lanes no entry
-        matches. A `model: "*"` glob sweeps only lanes NOT named by a concrete
+        matches; lanes a denylist matcher covers (`exclude`, PR#106 C15).
+        A `model: "*"` glob sweeps only lanes NOT named by a concrete
         entry elsewhere in the order (§3.3 "isn't already listed"), so an
         explicitly-listed lane keeps its own slot even when a `*` precedes it —
         that is what pins `freellmapi: auto` truly last."""
@@ -125,6 +143,8 @@ class SortingList:
             for lane in lanes:
                 if lane.id in placed:
                     continue
+                if self._excluded(lane):
+                    continue  # denylisted — no entry may place it (PR#106 C15)
                 if lane.source != source:
                     continue
                 if not fnmatch.fnmatch(lane.model_id, model_glob):

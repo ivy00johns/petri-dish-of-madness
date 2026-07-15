@@ -184,6 +184,24 @@ def test_dissolved_electorate_rejects_the_proposal():
     assert ok and status == "rejected"
 
 
+def test_exiled_member_leaves_the_faction_electorate():
+    """W31 C4 — an EXILED member is PERMANENTLY vote-barred (the jail-gate
+    never releases exiled), so the substituted electorate excludes them:
+    ceil(0.7·2) = 2 — the two eligible members carry a declaration that a
+    3-member faction with 1 exiled could otherwise NEVER pass (3 yes needed
+    from 2 possible voters). detained/jailed members stay counted — their
+    bar expires."""
+    w = _world()
+    _casus(w)
+    w.agents["cyn"].crime_status = "exiled"            # a past defeat
+    _, _, rule = w.action_propose_rule(w.agents["ada"], "declare_war", "w",
+                                       target=FB)
+    assert w.action_vote(w.agents["ada"], rule.id, True) == (True, "ok", None)
+    ok, _, status = w.action_vote(w.agents["bram"], rule.id, True)
+    assert ok and status == "active"
+    assert len(w.wars) == 1
+
+
 def test_larger_faction_ceil_arithmetic_untouched():
     """Roster of 4: ceil(0.7·4) = 3 — three yes carry it with one abstainer."""
     w = _world()

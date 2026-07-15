@@ -69,13 +69,16 @@ function Sparkline({ series }: { series: number[] }) {
 }
 
 export function DramaWire({ world, history, onFocus }: DramaWireProps) {
-  // Hooks run unconditionally (rules-of-hooks); the flag gates the RENDER.
-  const beats = useMemo(() => dramaBeats(history), [history]);
-  const index = useMemo(() => dramaIndex(history), [history]);
-  const series = useMemo(() => dramaSparkline(history), [history]);
+  // The flag is read per render (call-time, so vi.stubEnv works in tests) and
+  // gates the SCORING, not just the render: with the wire OFF each memo
+  // short-circuits, so the deep history is never scanned on an update.
+  const enabled = isDramaWireEnabled();
+  const beats = useMemo(() => (enabled ? dramaBeats(history) : []), [enabled, history]);
+  const index = useMemo(() => (enabled ? dramaIndex(history) : 0), [enabled, history]);
+  const series = useMemo(() => (enabled ? dramaSparkline(history) : []), [enabled, history]);
 
   // Flag gate: DEFAULT OFF ⇒ nothing renders and the feed is byte-identical.
-  if (!isDramaWireEnabled()) return null;
+  if (!enabled) return null;
 
   return (
     <section
