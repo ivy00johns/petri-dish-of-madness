@@ -727,6 +727,72 @@ async def post_estimate(body: EstimateBody):
     return {"ok": True, **result}
 
 
+# Flags that do NOT live under world.yaml's `world:` block. `discovery` is
+# adaptive_routing.discovery.enabled in config/lanes.yaml (see _flag_baked
+# above, which reads it from there too). Writing it into world.yaml would
+# create a dead key the loader never reads — a silent no-op bake. Apply
+# refuses to write these; they come back in the response's `unapplied` list
+# instead (fix-don't-hide — a v2 lanes.yaml writer is future work, not this).
+_LANES_YAML_FLAGS = {"discovery"}
+
+
+class ApplyBody(BaseModel):
+    overrides: dict[str, bool] = Field(default_factory=dict)
+
+
+@app.post("/api/config/apply")
+async def post_config_apply(body: ApplyBody):
+    """Write the staged flag flips to config/world.yaml (comment-preserving) and
+    tell the caller a fresh ./dev restart is required to bake them. Never silent:
+    returns the exact diff plus any flags that could NOT be written here (e.g.
+    `discovery`, which lives in config/lanes.yaml). Does NOT restart in-process
+    (the --reload ban)."""
+    import os
+    from ruamel.yaml import YAML
+    if _config is None:
+        raise HTTPException(503, "Not initialized")
+    path = os.environ.get("PETRIDISH_WORLD_YAML", "config/world.yaml")
+    # ruamel round-trip loader (typ='rt', the default) — comment-preserving AND
+    # safe: it does NOT construct arbitrary Python like PyYAML's unsafe
+    # yaml.load(). Never swap this for PyYAML yaml.load()/unsafe_load().
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    # Calibrated to world.yaml's own hand-authored style (verified against
+    # both the top-level `animals:` list and the nested `charters.
+    # seed_ambitions:` list): ruamel's unset defaults would otherwise flatten
+    # every block-sequence dash to column 0 AND rewrap any flow mapping past
+    # the 80-col default width — turning a one-flag toggle into a huge,
+    # unrelated-looking diff. width=4096 stops the rewrap; the explicit
+    # indent reproduces this file's 2-space list indent.
+    yaml.width = 4096
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    with open(path) as fh:
+        doc = yaml.load(fh)
+    world_block = doc.get("world", doc)
+    unapplied = [f for f in body.overrides if f in _LANES_YAML_FLAGS]
+    diff = []
+    for flag, val in body.overrides.items():
+        if flag in _LANES_YAML_FLAGS:
+            continue  # reported via `unapplied`, never written to world.yaml
+        block = world_block.get(flag)
+        if block is None:
+            world_block[flag] = {"enabled": bool(val)}
+            diff.append({"flag": flag, "from": False, "to": bool(val)})
+            continue
+        prev = bool(block.get("enabled", False))
+        if prev != bool(val):
+            block["enabled"] = bool(val)
+            diff.append({"flag": flag, "from": prev, "to": bool(val)})
+    with open(path, "w") as fh:
+        yaml.dump(doc, fh)
+    message = "Config written. Restart ./dev to bake the new combo into a fresh run."
+    if unapplied:
+        message += (f" NOT written here — {', '.join(unapplied)} lives in "
+                     "config/lanes.yaml, not world.yaml.")
+    return {"ok": True, "diff": diff, "unapplied": unapplied, "restart_required": True,
+            "message": message}
+
+
 @app.get("/api/profiles")
 async def get_profiles():
     if _router is None:
