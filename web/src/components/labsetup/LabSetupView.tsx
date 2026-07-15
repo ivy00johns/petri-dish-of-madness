@@ -72,31 +72,54 @@ export function LabSetupView() {
 
   if (loadError && !flags) {
     return (
-      <div className="labsetup">
-        <p role="alert" className="labsetup-loaderror">
+      <div className="labsetup bg-lab-bg text-lab-text font-mono h-full overflow-y-auto p-4">
+        <p role="alert" className="labsetup-loaderror border border-lab-danger text-lab-danger text-[11px] px-3 py-2">
           Couldn’t load Lab Setup — is the backend running? ({loadError})
         </p>
       </div>
     );
   }
-  if (!flags) return <div className="labsetup"><p>Loading Lab Setup…</p></div>;
-  return (
-    <div className="labsetup">
-      {loadError && (
-        <p role="alert" className="labsetup-loaderror">
-          Some Lab Setup data failed to load ({loadError}) — showing what loaded.
-        </p>
-      )}
-      <h2>Lab Setup — compose the next run</h2>
-      <div className="labsetup-grid">
-        <FlagBoard flags={flags} pending={pending} onToggle={onToggle} />
-        <div className="labsetup-centerpiece">
-          <EstimatePanel estimate={estimate} loading={estimating} />
-          <RecommenderPanel rec={rec} />
-        </div>
-        <CapabilityTable cap={cap} />
+  if (!flags) {
+    return (
+      <div className="labsetup bg-lab-bg text-lab-text font-mono h-full overflow-y-auto p-4">
+        <p className="text-[11px] text-lab-muted animate-pulse">Loading Lab Setup…</p>
       </div>
-      <ApplyBar diff={diff} onApply={onApply} result={applyResult} busy={busy} />
+    );
+  }
+  return (
+    <div className="labsetup bg-lab-bg text-lab-text font-mono h-full overflow-y-auto">
+      <div className="max-w-[1600px] mx-auto p-4 pb-24">
+        <header className="mb-4">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-lab-text">
+            Lab Setup <span className="text-lab-acid">— compose the next run</span>
+          </h2>
+          <p className="mt-0.5 text-[10px] text-lab-muted">
+            Toggle flags → see the prompt size the combo generates and the lane tier it needs.
+            Changes bake on the next <span className="text-lab-muted-bright">./dev</span> restart.
+          </p>
+        </header>
+
+        {loadError && (
+          <p role="alert" className="labsetup-loaderror mb-3 border border-lab-warn text-lab-warn text-[10px] px-3 py-1.5">
+            Some Lab Setup data failed to load ({loadError}) — showing what loaded.
+          </p>
+        )}
+
+        <div className="labsetup-grid grid gap-3 lg:grid-cols-[340px_1fr] items-start">
+          <FlagBoard flags={flags} pending={pending} onToggle={onToggle} />
+          <div className="labsetup-centerpiece flex flex-col gap-3 min-w-0">
+            <EstimatePanel estimate={estimate} loading={estimating} />
+            <RecommenderPanel rec={rec} />
+            <CapabilityTable cap={cap} />
+          </div>
+        </div>
+      </div>
+
+      <div className="sticky bottom-0 border-t border-lab-border bg-lab-bg/95 backdrop-blur px-4 py-2">
+        <div className="max-w-[1600px] mx-auto">
+          <ApplyBar diff={diff} onApply={onApply} result={applyResult} busy={busy} />
+        </div>
+      </div>
     </div>
   );
 }
