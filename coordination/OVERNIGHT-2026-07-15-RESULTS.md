@@ -55,6 +55,11 @@ re-check after the fix soaks.
    Flag default OFF ⇒ byte-identical. Backend 2505/0 (+30 new). Merge after #108.
 6. **EM-305 fixed → PR #110** (see the root-cause section above): stale-socket guards + teardown
    detach, 3 regression tests, vitest 1471/0. Independent of #108 (branched off main).
+7. **EM-121 multi-city camera → `2a74042` on the multi-city branch**: settlements clickable
+   (label + town-square core) via a settlement FocusTarget framing the whole cluster; the
+   follow chain across a journey extracted + pinned by a whole-journey test; reset-view frames
+   ALL settlements with the same ease. Gates: tsc clean, vitest 1537/0 (+17). Deferred: 2D-map
+   clicks (the map routes no clicks at all today).
 
 ## Still running overnight (Opus — independent of the Fable budget)
 
