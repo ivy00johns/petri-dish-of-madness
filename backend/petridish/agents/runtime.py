@@ -206,6 +206,9 @@ ACTION_SCHEMA = {
                 # absent). Offered only while comm.enabled (see _assemble_context)
                 # — the default-OFF prompt/menu stays byte-identical (em161).
                 "spread_rumor", "send_letter",
+                # EM-253 — culture lifecycle verbs (reflex): create_meme coins an
+                # idea; adopt_meme takes up an existing meme (image memes drift).
+                "create_meme", "adopt_meme",
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
@@ -279,6 +282,8 @@ ACTION_SCHEMA = {
                             "muster", "clash", "siege",
                             # EM-251 — culture transmission verbs (reflex).
                             "spread_rumor", "send_letter",
+                            # EM-253 — culture lifecycle verbs (reflex).
+                            "create_meme", "adopt_meme",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
                         ],
@@ -408,6 +413,17 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "send_letter"}}},
          "then": {"properties": {"args": {"required": ["target", "text"], "properties": {
              "target": {"type": "string"}, "text": {"type": "string"},
+         }}}}},
+        # EM-253 — create_meme requires the idea text; adopt_meme requires the
+        # target meme_id (an existing registered meme, not a name → NOT in
+        # _TARGETED_ACTIONS).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "create_meme"}}},
+         "then": {"properties": {"args": {"required": ["text"], "properties": {
+             "text": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "adopt_meme"}}},
+         "then": {"properties": {"args": {"required": ["meme_id"], "properties": {
+             "meme_id": {"type": "string"},
          }}}}},
     ],
 }
@@ -582,6 +598,14 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # em161 golden — never change.
     "spread_rumor":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "send_letter":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-253 — culture lifecycle verbs (Wave O Culture stage), both reflex, no
+    # gates. create_meme coins an idea (no target, ungated by co-location);
+    # adopt_meme takes up an existing meme by id (an image meme drifts a child
+    # image). Offered ONLY while comm.enabled — and adopt_meme only with an
+    # adoptable meme — see _assemble_context, so the default-OFF menu (and the
+    # em161 golden) never change.
+    "create_meme":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "adopt_meme":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-269 (F2) — found a settlement at your current place; offered anywhere
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
@@ -3097,6 +3121,20 @@ def _assemble_context(
                 "send_letter (target, text) - write a letter to any citizen, even "
                 "one who is elsewhere (delivered on their next turn): "
                 + ", ".join(a.name for a in _letter_targets))
+        # EM-253 — culture lifecycle: create_meme is always offered under comm
+        # (an author needs no audience); adopt_meme is offered ONLY when a meme
+        # this agent does NOT already carry is in circulation (the adopt/
+        # pitch_contribution eligible-target gate) — a few concrete ids ride the
+        # line (the promote_image recipe) so the model targets memes that resolve.
+        valid_actions.append(
+            "create_meme (text) - coin an idea others can adopt and spread")
+        _adoptable = sorted(
+            (m for m in world.memes.values() if m.id not in agent.held_memes),
+            key=lambda m: m.id)
+        if _adoptable:
+            valid_actions.append(
+                "adopt_meme (meme_id) - take up an idea in circulation: "
+                + ", ".join(f'{m.id} ("{m.text[:24]}")' for m in _adoptable[:6]))
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -6764,6 +6802,21 @@ class AgentRuntime:
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
                 self.world.action_send_letter(agent, target, args.get("text", "")),
+                base, thought)
+
+        # EM-253 — culture lifecycle verbs (Wave O Culture stage), both reflex.
+        # create_meme coins an idea (no target); adopt_meme takes up a meme by id
+        # (an image meme drifts a child, returned as a {"_multi": [...]} chain).
+        # Each world action returns a ready event dict OR a clear _fail_event —
+        # _emit_world_result consumes both shapes, exactly like create_image.
+        elif action == "create_meme":
+            return _emit_world_result(
+                self.world.action_create_meme(agent, args.get("text", "")),
+                base, thought)
+
+        elif action == "adopt_meme":
+            return _emit_world_result(
+                self.world.action_adopt_meme(agent, args.get("meme_id", "")),
                 base, thought)
 
         # EM-240 — economy & corruption verbs (Task 7). launder takes NO target

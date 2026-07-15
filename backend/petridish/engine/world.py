@@ -1676,6 +1676,13 @@ class World:
         self.memes: dict[str, Meme] = {}
         self.culture_camps: dict[str, dict] = {}
         self.town_motif_ref: str | None = None
+        # EM-253 — the ids of memes that have crossed comm.dominance_threshold
+        # live carriers and already fired their ONCE `meme_dominant` event. A
+        # snapshot-safe transition latch beside town_motif_ref: a meme drops
+        # out when it falls below threshold (so re-crossing re-fires) and is
+        # discarded when the meme is pruned. Serialized only-when-non-empty (as
+        # a SORTED list), so a culture-free world stays byte-identical (EM-155).
+        self.dominant_meme_ids: set[str] = set()
         # EM-256 — the Wave O war substrate. Two collections beside factions:
         # wars {id: WarState} (minted seeded via open_war — the declare_war
         # governance effect is the only production writer this stage) and
@@ -6602,16 +6609,32 @@ class World:
             return self._fail_event(
                 agent.id, "create_image", "image_gen_disabled",
                 f"{agent.name} reached for the brushes, but the atelier is closed today.")
+        # EM-253 — when comm AND comm.meme_images are BOTH on, the posted image
+        # is ALSO registered as a kind="image" meme (riding the SAME seeded
+        # image_id) so it can spread + drift via adopt_meme. The meme_id rides
+        # the payload only when minted. GOLDEN-CRITICAL: with either flag off
+        # (the default world) this whole block is skipped and image_posted is
+        # BYTE-IDENTICAL to pre-EM-253 (create_image runs in every world).
+        meme_id: str | None = None
+        if self._comm_enabled() and bool(self._comm_param("meme_images", True)):
+            meme = self.mint_meme("image", minted["prompt"], agent.id,
+                                  image_id=minted["image_id"])
+            self._attach_meme(agent, meme)
+            meme.virality = 1
+            meme_id = meme.id
+        payload = {
+            "image_id": minted["image_id"],
+            "prompt": minted["prompt"],
+            "url": minted["url"],
+            "place": minted["place"],
+        }
+        if meme_id is not None:
+            payload["meme_id"] = meme_id
         return {
             "kind": "image_posted",
             "actor_id": agent.id,
             "text": f"🎨 {agent.name} paints \"{_truncate(minted['prompt'], 60)}\".",
-            "payload": {
-                "image_id": minted["image_id"],
-                "prompt": minted["prompt"],
-                "url": minted["url"],
-                "place": minted["place"],
-            },
+            "payload": payload,
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -9186,6 +9209,33 @@ class World:
             self.pending_spawn_events.extend(events)
         return events
 
+    def recompute_culture_camps(self) -> list[dict]:
+        """EM-253 — the once-per-round culture-camp recompute, a THIN caller of
+        the shared _recompute_groups clusterer (kind="culture_camp", the
+        recompute_factions template): two LIVING agents share an edge when their
+        held_memes overlap by >= comm.camp_min_shared; components of >=
+        comm.camp_min_size members become camps (cmp_ ids, "…'s camp" names).
+        Diff events (culture_camp_formed/joined/left/dissolved) park in the
+        pending_spawn_events outbox (same drain as recompute_factions). Called at
+        the END of diffuse_culture, so it rides the same comm.enabled gate; gated
+        here too so a direct call on a default world is a no-op (byte-identical —
+        the em161 golden). Deterministic — the seeded clusterer, no clock/RNG
+        (EM-155). Returns the parked events ([] when stable/disabled)."""
+        if not self._comm_enabled():
+            return []
+        min_shared = max(1, int(self._comm_param("camp_min_shared", 2)))
+        min_size = max(1, int(self._comm_param("camp_min_size", 3)))
+
+        def _edge(a: AgentState, b: AgentState) -> bool:
+            return len(set(a.held_memes) & set(b.held_memes)) >= min_shared
+
+        new_store, events = self._recompute_groups(
+            _edge, self.culture_camps, min_size, "culture_camp")
+        self.culture_camps = new_store
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
     # ──────────────────────────────────────────────────────────────────────────
     # EM-250 — Communication & Culture substrate (Wave O keystone). Build-once
     # seams shared by Culture (EM-251+), Religion (EM-260+), and War-adjacent
@@ -9446,6 +9496,103 @@ class World:
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-253 — Culture lifecycle verbs (Wave O Culture stage). Two REFLEX
+    # authoring channels (zero extra LLM calls — the MAX-call-rate ethos), both
+    # gated on comm.enabled (default OFF ⇒ unreachable ⇒ byte-identical pre-Wave-O
+    # — the em161 golden). create_meme coins a fresh idea (ungated by co-location:
+    # an author needs no audience); adopt_meme takes up an existing meme and, for
+    # an IMAGE meme, mints a DRIFTED CHILD image through the free gallery seam so
+    # a visual meme MUTATES as it spreads (fox in a crown → fox in a paper crown).
+    # Deterministic — seeded meme/image ids, no clock/RNG; the child PNG is
+    # off-replay chrome (the free-first cost rule; NO paid text→image).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_create_meme(self, agent: AgentState, text: str) -> dict:
+        """EM-253 — mint a fresh kind="idea" meme and carry it. REFLEX, UNGATED
+        by co-location. Empty text ⇒ _fail_event. The author becomes the sole
+        carrier and the meme opens at virality 1 (consistent with adopt's +1 on
+        a fresh catch). Emits `meme_created`. Deterministic — mint_meme is
+        seeded, no clock/RNG (EM-155)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "create_meme", "comm disabled",
+                f"{agent.name} has an idea no one is here to catch.")
+        body = (text or "").strip()
+        if not body:
+            return self._fail_event(
+                agent.id, "create_meme", "empty",
+                f"{agent.name} reaches for an idea and finds none.")
+        meme = self.mint_meme("idea", body, agent.id)
+        self._attach_meme(agent, meme)
+        meme.virality = 1
+        return {
+            "kind": "meme_created",
+            "actor_id": agent.id,
+            "text": f"💡 {agent.name} coins an idea: \"{_truncate(body, 60)}\".",
+            "payload": {"action": "create_meme", "meme_id": meme.id,
+                        "kind": meme.kind},
+        }
+
+    def action_adopt_meme(self, agent: AgentState, meme_id: str) -> dict:
+        """EM-253 — adopt an EXISTING registered meme into your held set. REFLEX.
+        The meme must be in self.memes (else _fail_event). Attaching is
+        idempotent, so an already-carrier adopt is a no-op fail. A genuine adopt
+        bumps virality (+1, consistent with create) and emits `meme_adopted`.
+
+        IMAGE-MEME DRIFT: adopting a kind="image" meme WHILE comm.meme_images
+        mints a DRIFTED CHILD image meme — a distorted prompt
+        (_distort_text(meme.text, agent.id, tick)) minted through the SAME free
+        gallery seam create_image uses (_mint_gallery_image → a seeded,
+        replay-safe image_id; the PNG is off-replay chrome), then registered
+        (parent_id + generation+1 + the fresh image_id) and attached to the
+        adopter. A second `meme_created` rides the marquee "meme mutates as it
+        spreads" moment. Determinism holds — every id is seeded (EM-155); the
+        child image is the ONLY new image, minted on this explicit agent turn via
+        the FREE lane (the free-first cost rule; NO paid text→image)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "adopt_meme", "comm disabled",
+                f"{agent.name} reaches for an idea that isn't here.")
+        meme = self.memes.get(str(meme_id))
+        if meme is None:
+            return self._fail_event(
+                agent.id, "adopt_meme", "unknown meme",
+                f"{agent.name} tried to adopt an idea no one has heard of.")
+        if not self._attach_meme(agent, meme):
+            return self._fail_event(
+                agent.id, "adopt_meme", "already held",
+                f"{agent.name} already carries that idea.")
+        meme.virality += 1
+        adopted = {
+            "kind": "meme_adopted",
+            "actor_id": agent.id,
+            "text": f"🔁 {agent.name} takes up \"{_truncate(meme.text, 60)}\".",
+            "payload": {"action": "adopt_meme", "meme_id": meme.id,
+                        "kind": meme.kind},
+        }
+        # Image-meme drift — the marquee "it repaints as it spreads" moment.
+        if meme.kind == "image" and bool(self._comm_param("meme_images", True)):
+            drifted_prompt = self._distort_text(meme.text, agent.id, self.tick)
+            minted = self._mint_gallery_image(agent, drifted_prompt)
+            if minted is not None:
+                child = self.mint_meme(
+                    "image", drifted_prompt, agent.id,
+                    image_id=minted["image_id"], parent_id=meme.id,
+                    generation=meme.generation + 1)
+                self._attach_meme(agent, child)
+                return {"_multi": [adopted, {
+                    "kind": "meme_created",
+                    "actor_id": agent.id,
+                    "text": (f"🎨 …and it repaints in {agent.name}'s hands: "
+                             f"\"{_truncate(child.text, 60)}\"."),
+                    "payload": {"action": "adopt_meme", "meme_id": child.id,
+                                "parent_id": meme.id,
+                                "generation": child.generation,
+                                "image_id": child.image_id},
+                }]}
+        return adopted
+
+    # ──────────────────────────────────────────────────────────────────────────
     # EM-252 — Passive culture diffusion (the once-per-round Wave-O round system,
     # inserted into _apply_round_start between recompute_factions and advance_war).
     # Three PURE-COMPUTE mechanics — zero LLM, no clock, no RNG (EM-155): seeded
@@ -9527,6 +9674,10 @@ class World:
                     if not self._attach_meme(target, child):
                         continue
                     infections += 1
+                    # EM-253 — a passive catch is a spread: the freshly-caught
+                    # child opens at virality 1 (consistent with create/adopt —
+                    # a meme with a carrier is never virality 0).
+                    child.virality += 1
                     events.append({
                         "kind": "meme_mutated",
                         "actor_id": carrier.id,
@@ -9558,6 +9709,7 @@ class World:
                 continue
             if self.tick - meme.last_spread_tick >= decay_ticks:
                 del self.memes[mid]
+                self.dominant_meme_ids.discard(mid)   # EM-253 — no stale latch
                 events.append(self._faction_event(
                     "meme_died", meme.origin_agent_id,
                     f'The {meme.kind} "{meme.text[:40]}" fades from memory.',
@@ -9565,8 +9717,39 @@ class World:
                      "generation": meme.generation},
                 ))
 
+        # 4) Dominance ("🦊 dominant motif", EM-253) — a meme whose LIVE carrier
+        # count reaches comm.dominance_threshold and was NOT dominant before
+        # fires `meme_dominant` EXACTLY once; it drops out of the latch (quietly)
+        # when it falls back below threshold, so re-crossing re-fires. Walk memes
+        # sorted for deterministic event order (EM-155). Pure compute — text only.
+        dom_threshold = max(1, int(self._comm_param("dominance_threshold", 6)))
+        for mid in sorted(self.memes):
+            meme = self.memes[mid]
+            live = sum(
+                1 for cid in meme.carriers
+                if (a := self.agents.get(cid)) is not None and a.alive
+            )
+            if live >= dom_threshold:
+                if mid not in self.dominant_meme_ids:
+                    self.dominant_meme_ids.add(mid)
+                    events.append(self._faction_event(
+                        "meme_dominant", meme.origin_agent_id,
+                        f'🦊 "{meme.text[:40]}" is now the dominant motif '
+                        f'({live} carriers).',
+                        {"meme_id": mid, "kind": meme.kind, "carriers": live},
+                    ))
+            else:
+                self.dominant_meme_ids.discard(mid)   # quiet fall — re-crossing re-fires
+
         if events:
             self.pending_spawn_events.extend(events)
+        # 5) Culture camps (EM-253) — cluster living agents who share memes. The
+        # camp recompute SELF-PARKS its own diff events (same outbox as
+        # recompute_factions), so it is NOT folded into `events` here. Both this
+        # and the sweep above are already past the comm.enabled gate, so the
+        # round-order chain stays factions → diffuse_culture → advance_war → age
+        # (no new _apply_round_start slot).
+        self.recompute_culture_camps()
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -10625,6 +10808,12 @@ class World:
             }
         if self.town_motif_ref:
             snap["town_motif_ref"] = self.town_motif_ref
+        # EM-253 — the dominance latch. Serialized only-when-non-empty as a
+        # SORTED list (deterministic, EM-155), so a world with no dominant meme —
+        # and every pre-EM-253 snapshot — omits the key (absent ⇒ empty set on
+        # restore); the byte-identical golden holds.
+        if self.dominant_meme_ids:
+            snap["dominant_meme_ids"] = sorted(self.dominant_meme_ids)
         # EM-256 — wars + grievances (the Wave O war substrate). Serialized
         # only when non-empty (the factions pattern), so a peaceful world —
         # and every pre-EM-256 snapshot — keeps the exact prior key set
@@ -11370,6 +11559,12 @@ class World:
         }
         _motif = state.get("town_motif_ref")
         world.town_motif_ref = str(_motif) if _motif else None
+        # EM-253 — restore the dominance latch (additive: pre-EM-253 snapshots
+        # lack the key and restore an empty set, so a culture-free fork/replay is
+        # byte-identical). Defensive: coerce to str, drop falsy entries.
+        world.dominant_meme_ids = {
+            str(x) for x in (state.get("dominant_meme_ids") or []) if x
+        }
         # EM-256 — restore wars + grievances (additive: pre-EM-256 snapshots
         # lack the keys and restore {} / {}, so a peaceful fork/replay is
         # byte-identical). Defensive: a war row that is not a dict, has a
