@@ -133,6 +133,27 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   culture_camp_joined:  '◈',
   culture_camp_left:    '◈',
   culture_camp_dissolved: '◈',
+  // Wave O (EM-260–263) — Religion. Founding/consecration + worship read with the
+  // ✞ faith glyph (the SAME marker the FaithPanel badge wears); a conversion is
+  // 🕯 (the candle the backend stamps), a resisted sermon ✋; a schism ⚡ (the web
+  // tears); the congregation lifecycle wears the ⛪ house-of-worship glyph. The
+  // CONFLICT surface reads with the ⚔ crossed-swords (excommunication ⛔) — it
+  // shares the red war register with the casus-belli it can spark.
+  faith_founded:        '✞',
+  faith_consecrated:    '✞',
+  temple_consecrated:   '✞',
+  proselytized:         '🕯',
+  proselytize_resisted: '✋',
+  worshipped:           '🙏',
+  faith_joined:         '🕯',
+  faith_left:           '🕯',
+  faith_schism:         '⚡',
+  excommunicated:       '⛔',
+  faith_hostility_declared: '⚔',
+  congregation_formed:  '⛪',
+  congregation_joined:  '⛪',
+  congregation_left:    '⛪',
+  congregation_dissolved: '⛪',
   // EM-317 — the Prophecy Board: the 🔮 omen crystal on both the posting and
   // the FULFILLED/BROKEN resolution (the backend stamps the verdict in .text).
   prophecy_posted:      '🔮',
@@ -215,6 +236,28 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   culture_camp_joined:  'var(--faction-tint)',
   culture_camp_left:    'var(--faction-tint)',
   culture_camp_dissolved: 'var(--faction-tint)',
+  // Wave O (EM-260–263) — the faith narrative reads in the candle-brass
+  // --faith-tint register (the SAME token the FaithPanel badges + congregation
+  // chips wear), so founding/worship/congregations pop as one color everywhere.
+  // The CONFLICT surface (excommunicated, faith_hostility_declared) borrows the
+  // crime-red war register instead — an expulsion / casus-belli, not devotion.
+  // Token var() only (design-token-guard); these are actor_type:"system"/agent
+  // events carrying no distinguishing profile color, so the fallback drives the row.
+  faith_founded:        'var(--faith-tint)',
+  faith_consecrated:    'var(--faith-tint)',
+  temple_consecrated:   'var(--faith-tint)',
+  proselytized:         'var(--faith-tint)',
+  proselytize_resisted: 'var(--faith-tint)',
+  worshipped:           'var(--faith-tint)',
+  faith_joined:         'var(--faith-tint)',
+  faith_left:           'var(--faith-tint)',
+  faith_schism:         'var(--faith-tint)',
+  congregation_formed:  'var(--faith-tint)',
+  congregation_joined:  'var(--faith-tint)',
+  congregation_left:    'var(--faith-tint)',
+  congregation_dissolved: 'var(--faith-tint)',
+  excommunicated:       'var(--marker-crime)',
+  faith_hostility_declared: 'var(--marker-crime)',
 };
 
 // W8 — the animal chaos magenta, referenced as the shared --marker-animal token
@@ -452,6 +495,12 @@ export const CATEGORIES: FeedCategory[] = [
   // lifecycle. Its OWN lane (not folded into social) so filtering Culture
   // surfaces the whole idea-spread arc without the war/crime noise.
   { key: 'culture', label: 'Culture', icon: '🦊', kinds: ['meme_created', 'meme_adopted', 'rumor_spread', 'meme_mutated', 'letter_sent', 'letter_read', 'meme_canonized', 'meme_dominant', 'meme_died', 'culture_camp_formed', 'culture_camp_joined', 'culture_camp_left', 'culture_camp_dissolved'] },
+  // Wave O (EM-260–263): the faith lane — the whole religion arc (founding,
+  // consecration, proselytize/worship, congregation lifecycle, schism) AND its
+  // conflict surface (excommunication, declared hostility). Its OWN lane (a
+  // sibling of Culture, not folded into it) so filtering Faith surfaces the
+  // religion narrative on its own; each kind maps to exactly ONE category.
+  { key: 'faith',   label: 'Faith',   icon: '✞', kinds: ['faith_founded', 'faith_consecrated', 'temple_consecrated', 'proselytized', 'proselytize_resisted', 'worshipped', 'faith_joined', 'faith_left', 'faith_schism', 'excommunicated', 'faith_hostility_declared', 'congregation_formed', 'congregation_joined', 'congregation_left', 'congregation_dissolved'] },
   // EM-315 — the Healing House verdict (`sentenced_healing`) lands with the rule
   // outcomes it is decided by; the follow-on transplant rides `model_reassigned`
   // in the System (model-lever) lane.

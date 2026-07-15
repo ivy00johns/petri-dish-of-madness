@@ -1219,6 +1219,10 @@ class FaithParams:
       convert_trust_seed — the warm trust floor a proselytize conversion seals on
                           the mutual co_religionist edge (trust-positive; never
                           lowers trust — EM-262).
+      hostility_grievance — the war-grievance heat a founder's declare_hostility
+                          feeds between the two faiths' factions (EM-263 casus-
+                          belli hook; opaque input to the war layer, gated on
+                          war.enabled — inert when war is off / members factionless).
     """
     enabled: bool = False
     devotion_base: int = 10
@@ -1229,6 +1233,7 @@ class FaithParams:
     schism_grace: int = 20
     congregation_min_size: int = 2
     convert_trust_seed: int = 20
+    hostility_grievance: int = 8
 
 
 @dataclass
@@ -3013,6 +3018,7 @@ def _parse_faith(raw: dict | None) -> FaithParams:
         schism_grace=_int("schism_grace", d.schism_grace),
         congregation_min_size=_int("congregation_min_size", d.congregation_min_size),
         convert_trust_seed=_int("convert_trust_seed", d.convert_trust_seed),
+        hostility_grievance=_int("hostility_grievance", d.hostility_grievance),
     )
 
 

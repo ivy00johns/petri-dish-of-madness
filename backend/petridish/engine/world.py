@@ -10318,6 +10318,168 @@ class World:
         }
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-263 — Religion conflict surface (Wave O Religion, final stage): the two
+    # FOUNDER-ONLY REFLEX verbs. excommunicate casts a member out of the founder's
+    # own faith (a purely internal state edit — remove membership, zero devotion,
+    # tear the co_religionist web to the founder + remaining members); it has NO
+    # co-location gate (a founder excommunicates from afar). declare_hostility
+    # marks a rival faith on the founder's faith.hostile_to and, when war is on,
+    # feeds religious grievance between the two faiths' factions through the SHARED
+    # add_grievance seam (the plan's opaque casus-belli hook — the caller owns WHY,
+    # the war layer owns the ledger). Both gate on faith_enabled (default OFF ⇒ the
+    # verbs never surface, byte-identical control — the em260 golden). Deterministic
+    # — pure state edits + sorted-iteration grievance, no clock/RNG (EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_excommunicate(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-263 — cast a member out of the founder's OWN faith (FOUNDER-GATED,
+        REFLEX, gated on faith_enabled). Only the faith's founder may excommunicate,
+        and only a NON-founder MEMBER of that same faith (the founder cannot
+        excommunicate themselves). NO co-location gate — the founder acts from afar
+        (the send_letter absent-target convention, not the clash co-location one).
+
+        Effect (all deterministic, pure state edits — EM-155): remove `target` from
+        `faith.members`, clear `target.faith_id`, ZERO `target.devotion`, and TEAR
+        the mutual `co_religionist` relationship web binding the target to the
+        founder AND to every remaining member (each such edge neutralizes to the
+        default "neutral" type both ways, so the next recompute_congregations drops
+        the target from the congregation and the schism web reflects the split).
+        Emits `excommunicated`. A non-founder / factionless-of-faith / self / non-
+        member attempt is a clear _fail_event (the demolish vanished-target
+        convention)."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "excommunicate", "faith disabled",
+                f"{agent.name} reaches for a faith no one here shares.")
+        if not agent.faith_id:
+            return self._fail_event(
+                agent.id, "excommunicate", "faithless",
+                f"{agent.name} keeps no faith to cast anyone out of.")
+        faith = self.faiths.get(agent.faith_id)
+        if faith is None:                                   # actor's faith vanished
+            return self._fail_event(
+                agent.id, "excommunicate", "faith gone",
+                f"{agent.name}'s faith has faded from memory.")
+        if agent.id != faith.founder_id:
+            return self._fail_event(
+                agent.id, "excommunicate", "not founder",
+                f"only {faith.name}'s founder may excommunicate its members.")
+        if target.id == faith.founder_id:                   # covers self (agent IS founder)
+            return self._fail_event(
+                agent.id, "excommunicate", "founder",
+                f"{agent.name} cannot excommunicate the founder of {faith.name}.")
+        if target.faith_id != faith.id or target.id not in faith.members:
+            return self._fail_event(
+                agent.id, "excommunicate", "not a member",
+                f"{target.name} is not a member of {faith.name}.")
+        # Remove membership + zero the faith bond (both keys drop from to_dict when
+        # cleared — devotion serializes only when > 0, faith_id only when set).
+        faith.members.remove(target.id)
+        target.faith_id = None
+        target.devotion = 0
+        # Tear the co_religionist web: neutralize the target's mutual edges to the
+        # founder AND to every remaining member (sorted for deterministic order —
+        # cosmetic here since edits are commutative, kept for replay clarity).
+        for other_id in sorted({faith.founder_id, *faith.members}):
+            other = self.agents.get(other_id)
+            if other is None or other.id == target.id:
+                continue
+            for a, b in ((target, other), (other, target)):
+                rel = a.relationships.get(b.id)
+                if rel is not None and rel.type == "co_religionist":
+                    rel.type = "neutral"
+                    rel.since_tick = self.tick
+        return {
+            "kind": "excommunicated",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"⛔ {agent.name} casts {target.name} out of {faith.name}.",
+            "payload": {"action": "excommunicate", "faith_id": faith.id,
+                        "target_id": target.id},
+        }
+
+    def action_declare_hostility(self, agent: AgentState,
+                                 target_faith_id: str) -> dict:
+        """EM-263 — declare the founder's OWN faith hostile to a RIVAL faith
+        (FOUNDER-GATED, REFLEX, gated on faith_enabled). Only the faith's founder
+        may declare; the target must be a real, DIFFERENT faith. Adds the rival's
+        id to `faith.hostile_to` (IDEMPOTENT — a re-declaration is a clean no-op
+        that still emits). NO co-location gate.
+
+        War casus-belli hook (best-effort, deterministic): when war is enabled,
+        feed religious grievance between the two faiths' FACTIONS through the shared
+        `add_grievance` seam — for every distinct declaring-faith faction × target-
+        faith faction pair (sorted iteration, no RNG/clock), so the war layer reads
+        an opaque religious grievance without knowing WHY. Skips cleanly when war is
+        off or members are factionless. Emits `faith_hostility_declared`. A non-
+        founder / self-faith / unknown-faith attempt is a clear _fail_event."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "declare_hostility", "faith disabled",
+                f"{agent.name} rails against a faith no one here keeps.")
+        if not agent.faith_id:
+            return self._fail_event(
+                agent.id, "declare_hostility", "faithless",
+                f"{agent.name} keeps no faith to declare hostilities for.")
+        faith = self.faiths.get(agent.faith_id)
+        if faith is None:                                   # actor's faith vanished
+            return self._fail_event(
+                agent.id, "declare_hostility", "faith gone",
+                f"{agent.name}'s faith has faded from memory.")
+        if agent.id != faith.founder_id:
+            return self._fail_event(
+                agent.id, "declare_hostility", "not founder",
+                f"only {faith.name}'s founder may declare its hostilities.")
+        tfid = str(target_faith_id or "")
+        if not tfid or tfid == faith.id:
+            return self._fail_event(
+                agent.id, "declare_hostility", "self faith",
+                f"{agent.name} cannot declare {faith.name} hostile to itself.")
+        target_faith = self.faiths.get(tfid)
+        if target_faith is None:
+            return self._fail_event(
+                agent.id, "declare_hostility", "unknown faith",
+                f"{agent.name} declares hostility toward a faith that does not exist.")
+        if tfid not in faith.hostile_to:
+            faith.hostile_to.append(tfid)
+        # War casus-belli hook — best-effort, deterministic, inert unless war is on.
+        self._feed_faith_grievance(faith, target_faith)
+        return {
+            "kind": "faith_hostility_declared",
+            "actor_id": agent.id,
+            "text": (f"⚔ {agent.name} declares {faith.name} hostile to "
+                     f"{target_faith.name}."),
+            "payload": {"action": "declare_hostility", "faith_id": faith.id,
+                        "target_faith_id": tfid},
+        }
+
+    def _feed_faith_grievance(self, faith: "Faith", target_faith: "Faith") -> None:
+        """EM-263 — feed religious grievance between two faiths' factions through
+        the ONE public add_grievance seam (the plan's opaque casus-belli input to
+        the war layer). Gated on war.enabled (add_grievance self-gates too, but we
+        skip the walk cleanly when war is off). Collects the DISTINCT factions each
+        faith's members belong to (sorted), then bumps grievance for every cross-
+        faction pair — deterministic (sorted iteration, no RNG/clock, EM-155);
+        factionless members contribute nothing (best-effort)."""
+        if not self.war_enabled():
+            return
+        amount = max(0, int(self._faith_param("hostility_grievance", 8)))
+        if amount <= 0:
+            return
+        src_factions = sorted({
+            f["id"] for m in sorted(faith.members)
+            if (f := self.faction_of(m)) is not None
+        })
+        dst_factions = sorted({
+            f["id"] for m in sorted(target_faith.members)
+            if (f := self.faction_of(m)) is not None
+        })
+        for src in src_factions:
+            for dst in dst_factions:
+                if src != dst:
+                    self.add_grievance(src, dst, amount, "faith_hostility")
+
+    # ──────────────────────────────────────────────────────────────────────────
     # EM-252 — Passive culture diffusion (the once-per-round Wave-O round system,
     # inserted into _apply_round_start between recompute_factions and advance_war).
     # Three PURE-COMPUTE mechanics — zero LLM, no clock, no RNG (EM-155): seeded

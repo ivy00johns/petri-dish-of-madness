@@ -216,6 +216,11 @@ ACTION_SCHEMA = {
                 # converts a co-located faithless agent to the actor's faith;
                 # worship draws a devotion buff at a co-located consecrated temple.
                 "proselytize", "worship",
+                # EM-263 — the religion conflict surface (reflex; faith_enabled,
+                # FOUNDER-only). excommunicate casts a member out of the founder's
+                # faith (no co-location); declare_hostility marks a rival faith
+                # hostile (and, with war on, feeds a religious grievance).
+                "excommunicate", "declare_hostility",
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
@@ -295,6 +300,8 @@ ACTION_SCHEMA = {
                             "found_faith",
                             # EM-262 — religion emergence (reflex; faith_enabled).
                             "proselytize", "worship",
+                            # EM-263 — religion conflict surface (reflex; founder).
+                            "excommunicate", "declare_hostility",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
                         ],
@@ -442,6 +449,18 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "proselytize"}}},
          "then": {"properties": {"args": {"required": ["target"], "properties": {
              "target": {"type": "string"},
+         }}}}},
+        # EM-263 — excommunicate requires an agent `target` (a member of the
+        # founder's faith, resolved by name/id — NOT co-location gated);
+        # declare_hostility requires a `faith_id` (a rival faith's id, resolved
+        # against world.faiths — not an agent target, like adopt_meme's meme_id).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "excommunicate"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "declare_hostility"}}},
+         "then": {"properties": {"args": {"required": ["faith_id"], "properties": {
+             "faith_id": {"type": "string"},
          }}}}},
     ],
 }
@@ -643,6 +662,17 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # so the faith-off prompt/menu — and the em260 golden — never change.
     "proselytize":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "worship":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-263 — the religion conflict surface, both REFLEX + FOUNDER-only (the real
+    # gates — faith.enabled + the actor being their faith's founder — are computed
+    # in _assemble_context and re-enforced at resolution in the world actions).
+    # excommunicate carries NO location_gate (a founder acts from afar; the target
+    # need not be co-located — the send_letter recipe, not clash's); declare_-
+    # hostility takes a faith_id, not an agent, and is likewise ungated here. No
+    # agreement_gate. Offered ONLY while faith is enabled AND the agent founded a
+    # faith (see _assemble_context), so the faith-off menu — and the em260 golden —
+    # never change.
+    "excommunicate":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "declare_hostility": {"tier": "reflex", "location_gate": None,           "agreement_gate": None},
     # EM-269 (F2) — found a settlement at your current place; offered anywhere
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
@@ -1749,7 +1779,12 @@ _TARGETED_ACTIONS = frozenset(
      "spread_rumor", "send_letter",
      # EM-262 — proselytize targets a co-located agent (resolved + co-location-
      # validated like deceive/clash). worship takes NO target (EXCLUDED).
-     "proselytize"}
+     "proselytize",
+     # EM-263 — excommunicate resolves an agent target by NAME→id like the others,
+     # BUT is NOT co-location gated (a founder casts out a member from afar — the
+     # send_letter recipe: _resolve_agent_target already matches an ABSENT living
+     # agent by name). declare_hostility takes a faith_id, not an agent (EXCLUDED).
+     "excommunicate"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -2206,6 +2241,38 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         target_error = _validate_target(args, agent, world, "proselytize")
         if target_error:
             return target_error
+
+    elif action == "excommunicate":
+        # EM-263 — excommunicate resolves an agent target but is NOT co-location
+        # gated (a founder casts a member out from afar — the send_letter recipe,
+        # not clash's). This front gate only ensures the (resolved) id names a
+        # real, LIVING agent; the world action owns the founder + own-faith-member
+        # checks and returns a clear fail event on any miss.
+        target_id = args.get("target")
+        if not target_id:
+            return "excommunicate requires target"
+        _member = world.agents.get(target_id)
+        if _member is None:
+            return (f"unknown target '{target_id}' — excommunicate needs a member "
+                    "of your faith (by name or id)")
+        if not _member.alive:
+            return f"target '{_member.name}' is dead"
+
+    elif action == "declare_hostility":
+        # EM-263 — declare_hostility carries a faith_id (a rival faith's id), not an
+        # agent target. This front gate mirrors consecrate_faith's existence check:
+        # the id must name a real, DIFFERENT faith; the world action owns the
+        # founder gate. A faith-off world never surfaces the verb (menu-gated) and
+        # the world action re-rejects it, so this only fires on an off-menu invention.
+        fid = args.get("faith_id")
+        if not fid:
+            return "declare_hostility requires faith_id"
+        _faiths = getattr(world, "faiths", None) or {}
+        if fid not in _faiths:
+            return (f"unknown faith '{fid}' — declare_hostility needs a rival "
+                    "faith's id")
+        if getattr(agent, "faith_id", None) == fid:
+            return "declare_hostility cannot target your own faith"
 
     elif action == "spread_rumor":
         # EM-254 — a ratified ban_gossip forbids spreading rumors (steal's
@@ -3261,6 +3328,34 @@ def _assemble_context(
                 valid_actions.append(
                     f"worship - pray at {_building_field(_seat, 'name')} (a temple "
                     "of your faith stands here) to deepen your devotion")
+            # EM-263 — the FOUNDER-only conflict verbs. Offered ONLY to a faith's
+            # founder (menu/resolution agree — EM-108, mirroring action_excommunicate
+            # / action_declare_hostility's founder gate): excommunicate when >= 1
+            # LIVING non-founder member exists (named so the target resolves — the
+            # promote_image recipe); declare_hostility when another faith exists
+            # (named by id so the model can address it).
+            _own_faith = (world.faiths.get(agent.faith_id)
+                          if getattr(world, "faiths", None) else None)
+            if _own_faith is not None and agent.id == _own_faith.founder_id:
+                _flock = [
+                    world.agents[m] for m in _own_faith.members
+                    if m != _own_faith.founder_id and m in world.agents
+                    and world.agents[m].alive
+                ]
+                if _flock:
+                    valid_actions.append(
+                        "excommunicate (target) - cast a member out of your faith "
+                        "(a founder's decree; no need to be near them): "
+                        + ", ".join(a.name for a in _flock))
+                _rivals = [
+                    f for fid, f in sorted(world.faiths.items())
+                    if fid != agent.faith_id
+                ]
+                if _rivals:
+                    valid_actions.append(
+                        "declare_hostility (faith_id) - declare your faith hostile "
+                        "to a rival faith (a casus belli if war is brewing): "
+                        + ", ".join(f"{f.id} ({f.name})" for f in _rivals[:6]))
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -7519,6 +7614,26 @@ class AgentRuntime:
         elif action == "worship":
             return _emit_world_result(
                 self.world.action_worship(agent), base, thought)
+
+        # ── EM-263 — the religion conflict surface: excommunicate (cast a member
+        # out of the founder's faith — target resolved by name/id, need NOT be
+        # co-located) + declare_hostility (mark a rival faith hostile — carries a
+        # faith_id, not an agent target). Both may fail-event (faith off / non-
+        # founder / bad target) — _emit_world_result consumes every shape.
+        elif action == "excommunicate":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to excommunicate but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_excommunicate(agent, target), base, thought)
+
+        elif action == "declare_hostility":
+            return _emit_world_result(
+                self.world.action_declare_hostility(
+                    agent, str(args.get("faith_id") or "")),
+                base, thought)
 
         # ── EM-269 (F2) — found a settlement at the agent's current place ───────
         elif action == "found_settlement":
