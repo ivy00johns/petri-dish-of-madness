@@ -172,7 +172,7 @@ world:
   # sync with the CommunicationParams mirror in
   # backend/petridish/config/loader.py.
   comm:
-    enabled: false            # master gate for Wave-O transmission verbs + diffusion
+    enabled: true             # master gate for Wave-O transmission verbs + diffusion
     diffusion_chance: 0.20    # per-carrier co-located passive-hop chance (seeded)
     max_diffusions: 12        # per-round ceiling on passive hops
     half_life_ticks: 30       # ticks without a spread before virality halves
@@ -374,7 +374,7 @@ world:
   # stay in sync with the SettlementParams mirror in
   # backend/petridish/config/loader.py.
   settlements:
-    enabled: true               # EM-109/EM-110 live opt-in: genesis home city + found_settlement + travel_to + settlement-anchored placement + per-city perception scoping. Loader/embedded defaults stay OFF (byte-identical goldens); this is the per-run live flip (baked per-run ⇒ restart to adopt).
+    enabled: false              # EM-109/EM-110 live opt-in: genesis home city + found_settlement + travel_to + settlement-anchored placement + per-city perception scoping. Loader/embedded defaults stay OFF (byte-identical goldens); this is the per-run live flip (baked per-run ⇒ restart to adopt).
 
   # EM-203 — governance renewal cooldown (contracts/wave-m.md §3 Wave M4). The
   # W11b/EM-087 RENEWAL ritual lets agents re-pass a law identical to an ACTIVE
