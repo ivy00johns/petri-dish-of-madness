@@ -9297,6 +9297,146 @@ class World:
         return out[:200]
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-251 — Culture transmission verbs (Wave O Culture track). Two REFLEX
+    # channels (zero extra LLM calls — the MAX-call-rate ethos), both gated on
+    # comm.enabled (default OFF ⇒ unreachable ⇒ byte-identical pre-Wave-O; the
+    # em161 golden). spread_rumor is the "telephone game" hop: it clones
+    # action_deceive's belief-plant + action_recruit's co-location gate but
+    # stays TRUST-POSITIVE and CRIME-FREE — no _register_crime, no trust hit —
+    # and carries a drifted Meme so the distortion has lineage. send_letter is
+    # the first NON-co-located directed channel: it parks a letter in ANY living
+    # agent's mailbox (present or absent), delivered on the recipient's next
+    # turn by deliver_letters. Deterministic — seeded meme ids, no clock/RNG.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_spread_rumor(self, agent: AgentState, target: AgentState,
+                            rumor: str = "",
+                            meme_id: str | None = None) -> dict:
+        """EM-251 — whisper a rumor to a CO-LOCATED target: distort it one hop
+        (_distort_text), plant the drifted text in the target's beliefs
+        (_plant_belief — the SAME seam action_deceive uses), and carry the drift
+        as a child Meme (parent_id + generation+1) attached to BOTH the actor and
+        the target so lineage survives. Unlike deceive this is a TRUST-POSITIVE
+        channel: NO _register_crime, NO trust crater (trust is left untouched).
+
+        The source rumor is an existing carried meme (`meme_id` when it names a
+        registered meme) or, failing that, a fresh kind="rumor" meme minted from
+        the free-text `rumor`. Emits `rumor_spread`, plus `meme_mutated` when the
+        hop actually changed the text (a `_multi` chain then). Deterministic —
+        mint_meme/_distort_text are seeded, no clock/RNG (EM-155)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "spread_rumor", "comm disabled",
+                f"{agent.name} murmurs a rumor no one is here to catch.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "spread_rumor", "self",
+                f"{agent.name} cannot spread a rumor to themselves.")
+        if agent.location != target.location:
+            return self._fail_event(
+                agent.id, "spread_rumor", "not co-located",
+                f"{agent.name} found no one here to whisper to.")
+        source: Meme | None = None
+        if meme_id:
+            source = self.memes.get(str(meme_id))
+        if source is None:
+            text = (rumor or "").strip()
+            if not text:
+                return self._fail_event(
+                    agent.id, "spread_rumor", "empty",
+                    f"{agent.name} has no rumor to spread.")
+            source = self.mint_meme("rumor", text, agent.id)
+        # The drifted CHILD: one telephone-game hop, seeded on the target so a
+        # replay reproduces the exact distortion (EM-155). Attached to BOTH the
+        # actor (the carrier who spread it) and the co-located target.
+        child = self.mint_meme(
+            "rumor", self._distort_text(source.text, target.id), agent.id,
+            parent_id=source.id, generation=source.generation + 1)
+        self._attach_meme(agent, child)
+        self._attach_meme(target, child)
+        self._plant_belief(target, agent.name, child.text)
+        spread = {
+            "kind": "rumor_spread",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"{agent.name} whispers a rumor to {target.name}.",
+            "payload": {"action": "spread_rumor", "meme_id": child.id,
+                        "parent_id": source.id, "generation": child.generation},
+        }
+        if child.text == source.text:
+            return spread
+        # The drift is visible — a second legible line, like a clash kill's chain.
+        return {"_multi": [spread, {
+            "kind": "meme_mutated",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"…and it mutates on the way to {target.name}.",
+            "payload": {"action": "spread_rumor", "meme_id": child.id,
+                        "parent_id": source.id, "generation": child.generation},
+        }]}
+
+    def action_send_letter(self, agent: AgentState, target: AgentState,
+                           text: str) -> dict:
+        """EM-251 — the first NON-co-located directed channel: park a letter in
+        `target`'s mailbox (FIFO-capped at comm.letter_cap; OLDEST dropped on
+        overflow) — NO co-location gate, so you can write to an ABSENT citizen.
+        Delivered reflexively on the recipient's OWN next turn (deliver_letters).
+        Emits `letter_sent`. Deterministic — no clock/RNG (the tick stamp is the
+        world's own logical tick, snapshot-durable like pending_skill_requests)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "send_letter", "comm disabled",
+                f"{agent.name} pens a letter with nowhere to send it.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "send_letter", "self",
+                f"{agent.name} cannot send a letter to themselves.")
+        body = (text or "").strip()
+        if not body:
+            return self._fail_event(
+                agent.id, "send_letter", "empty",
+                f"{agent.name} has nothing to write.")
+        target.mailbox.append({"from_id": agent.id, "from_name": agent.name,
+                               "text": body, "tick": self.tick})
+        cap = max(1, int(self._comm_param("letter_cap", 8)))
+        while len(target.mailbox) > cap:
+            target.mailbox.pop(0)          # FIFO overflow — drop the OLDEST
+        return {
+            "kind": "letter_sent",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"{agent.name} sends a letter to {target.name}.",
+            "payload": {"action": "send_letter"},
+        }
+
+    def deliver_letters(self, agent: AgentState) -> list[dict]:
+        """EM-251 — drain `agent`'s mailbox at the START of its OWN turn: plant
+        each parked letter's body in beliefs (_plant_belief, prefixed "(letter) ")
+        and emit a `letter_read` event, then clear the mailbox. REFLEX (no LLM),
+        deterministic, EXACTLY once per letter. Gated on comm.enabled — a default
+        world never parks a letter, so this is a no-op (the em161 golden). The
+        runtime calls this once per turn (mirroring the god-whisper pop)."""
+        if not self._comm_enabled() or not agent.mailbox:
+            return []
+        events: list[dict] = []
+        for letter in agent.mailbox:
+            if not isinstance(letter, dict):
+                continue
+            from_name = str(letter.get("from_name")
+                            or letter.get("from_id") or "Someone")
+            body = str(letter.get("text") or "")
+            self._plant_belief(agent, from_name, "(letter) " + body)
+            events.append({
+                "kind": "letter_read",
+                "actor_id": agent.id,
+                "text": f"{agent.name} reads a letter from {from_name}.",
+                "payload": {"action": "letter_read",
+                            "from_id": letter.get("from_id")},
+            })
+        agent.mailbox = []
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
     # EM-256 — War data model + grievance substrate (Wave O War track). The
     # read-only faction layer promoted to belligerent actors: directional
     # group grievance (the notoriety analog), seeded WarState minting, and the

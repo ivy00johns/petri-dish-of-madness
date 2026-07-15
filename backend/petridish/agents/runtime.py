@@ -200,6 +200,12 @@ ACTION_SCHEMA = {
                 # Offered only while the agent's faction is at war (peacetime
                 # golden intact — see _assemble_context).
                 "muster", "clash", "siege",
+                # EM-251 — culture transmission verbs (Wave O Culture stage),
+                # both reflex: spread_rumor whispers a distorting rumor to a
+                # co-located agent; send_letter mails ANY citizen (present or
+                # absent). Offered only while comm.enabled (see _assemble_context)
+                # — the default-OFF prompt/menu stays byte-identical (em161).
+                "spread_rumor", "send_letter",
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
@@ -271,6 +277,8 @@ ACTION_SCHEMA = {
                             "build_road",
                             # EM-258/EM-259 — the war verbs (reflex).
                             "muster", "clash", "siege",
+                            # EM-251 — culture transmission verbs (reflex).
+                            "spread_rumor", "send_letter",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
                         ],
@@ -387,6 +395,19 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "siege"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
+         }}}}},
+        # EM-251 — spread_rumor requires a co-located target (name or id, resolved
+        # like clash/deceive); the rumor free-text is optional (a carried meme_id
+        # can source it instead), so only `target` is structurally required.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "spread_rumor"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
+         }}}}},
+        # EM-251 — send_letter requires a target (any living citizen, present or
+        # absent) AND the letter text.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "send_letter"}}},
+         "then": {"properties": {"args": {"required": ["target", "text"], "properties": {
+             "target": {"type": "string"}, "text": {"type": "string"},
          }}}}},
     ],
 }
@@ -553,6 +574,14 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "muster":           {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "clash":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "siege":            {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+    # EM-251 — culture transmission verbs 🟢, both REFLEX (zero extra LLM calls).
+    # spread_rumor's co-location gate is war-style — enforced by the world action
+    # (like recruit), NOT a place gate; send_letter has NO location gate BY DESIGN
+    # (the first absent-target channel). No agreement_gate. Offered ONLY while
+    # comm.enabled (see _assemble_context), so the default-OFF menu — and the
+    # em161 golden — never change.
+    "spread_rumor":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "send_letter":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-269 (F2) — found a settlement at your current place; offered anywhere
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
@@ -1650,7 +1679,13 @@ _TARGETED_ACTIONS = frozenset(
      # EM-258 — clash targets a co-located enemy belligerent name in
      # args["target"] (resolved to an id before dispatch, like attack). muster
      # takes NO target and siege takes a building_id — both EXCLUDED here.
-     "clash"}
+     "clash",
+     # EM-251 — spread_rumor targets a co-located agent (resolved + co-location-
+     # validated like deceive/clash). send_letter ALSO resolves a name→id here so
+     # the model can address a letter by name, but its resolution stays PERMISSIVE
+     # (the world action / validator does NOT require co-location or presence —
+     # _resolve_agent_target already matches an ABSENT living agent by name).
+     "spread_rumor", "send_letter"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -2097,6 +2132,32 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         target_error = _validate_target(args, agent, world, "clash")
         if target_error:
             return target_error
+
+    elif action == "spread_rumor":
+        # EM-251 — spread_rumor targets a CO-LOCATED agent (resolved + validated
+        # like deceive/clash: reachable + alive + here). The world action re-checks
+        # comm.enabled + self-target + co-location and mints/plants the drift, so
+        # this front gate only ensures a reachable target — a clear rejection lets
+        # the model self-correct.
+        target_error = _validate_target(args, agent, world, "spread_rumor")
+        if target_error:
+            return target_error
+
+    elif action == "send_letter":
+        # EM-251 — send_letter is the first NON-co-located channel: the target may
+        # be ABSENT (do NOT require co-location or presence), so this gate ONLY
+        # checks the (resolved) id names a real, LIVING agent. The world action
+        # re-checks comm.enabled + self-target + non-empty text and parks the
+        # letter in the recipient's mailbox for reflex delivery next turn.
+        target_id = args.get("target")
+        if not target_id:
+            return "send_letter requires target"
+        _recipient = world.agents.get(target_id)
+        if _recipient is None:
+            return (f"unknown target '{target_id}' — send_letter needs a citizen's "
+                    "name or id")
+        if not _recipient.alive:
+            return f"target '{_recipient.name}' is dead"
 
     elif action in ("teach_skill", "request_skill"):
         # EM-228 — both verbs target a co-located agent (resolved like steal). The
@@ -3013,6 +3074,29 @@ def _assemble_context(
                             f"siege (building_id={_building_field(b, 'id')}) - "
                             f"lay siege to the enemy structure "
                             f"{_building_field(b, 'name')}")
+    # EM-251 — the culture-transmission menu (Wave O Culture stage), surfaced
+    # ONLY when comm is enabled (world.comm.enabled; default OFF ⇒ NO line ⇒ the
+    # prompt stays byte-identical — the em161 golden, mirroring the war block
+    # above). spread_rumor needs a co-located target (the telephone-game hop
+    # plants a drifting belief); send_letter is the first NON-co-located channel
+    # (write to ANY other living citizen, present or absent). Concrete names ride
+    # each line (the promote_image FINDING 1(b) recipe) so the model is offered
+    # targets that actually resolve. getattr keeps callers safe if the seam is
+    # ever absent.
+    if getattr(world, "_comm_enabled", None) and world._comm_enabled():
+        if co_located:
+            valid_actions.append(
+                "spread_rumor (target, rumor) - whisper a rumor to someone here; "
+                "it distorts as it passes: "
+                + ", ".join(a.name for a in co_located))
+        _letter_targets = sorted(
+            (a for a in world.living_agents() if a.id != agent.id),
+            key=lambda a: (a.name, a.id))
+        if _letter_targets:
+            valid_actions.append(
+                "send_letter (target, text) - write a letter to any citizen, even "
+                "one who is elsewhere (delivered on their next turn): "
+                + ", ".join(a.name for a in _letter_targets))
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -5268,6 +5352,17 @@ class AgentRuntime:
         god_whispers = _pw.pop(agent.id, []) if isinstance(_pw, dict) else []
         board_notes = self._unseen_god_board_notes(agent)
 
+        # EM-251 — drain any letters parked in this agent's mailbox at the START
+        # of its own turn (reflex delivery, mirroring the god-whisper pop above).
+        # _plant_belief lands each letter in beliefs BEFORE the prompt is
+        # assembled, so a fresh letter rides THIS turn's context exactly like a
+        # whisper; deliver_letters clears the mailbox and returns legible
+        # letter_read feed events. Gated on comm.enabled so a default world never
+        # parks — nor drains — a letter (the em161 golden; zero extra LLM calls).
+        mail_events: list[dict] = []
+        if getattr(self.world, "_comm_enabled", None) and self.world._comm_enabled():
+            mail_events = self.world.deliver_letters(agent)
+
         # EM-222 — the memory block: relevance-scored long-term retrieval merged
         # with the recent tail (protagonist/supporting), or the unchanged
         # blind-recency slice (background / disabled / embeddings down). It owns
@@ -5285,8 +5380,10 @@ class AgentRuntime:
             memory_prebounded=True,
         )
 
-        # The legible half of EM-145: watchers see the god's voice land.
-        delivery_events: list[dict] = []
+        # The legible half of EM-145: watchers see the god's voice land. EM-251 —
+        # any letters drained above ride the same delivery tail (they surface even
+        # on a turn that later fails to parse, like the god's voice).
+        delivery_events: list[dict] = list(mail_events)
         if god_whispers:
             delivery_events.append({
                 "kind": "god_voice_heard",
@@ -6637,6 +6734,36 @@ class AgentRuntime:
         elif action == "siege":
             return _emit_world_result(
                 self.world.action_siege(agent, args.get("building_id", "")),
+                base, thought)
+
+        # EM-251 — culture transmission verbs (Wave O Culture stage), both
+        # reflex. Each world action returns a ready event dict (rumor_spread /
+        # letter_sent) — or a {"_multi": [...]} chain (spread_rumor appends
+        # meme_mutated when the hop drifted the text) — or a clear parse_failure;
+        # _emit_world_result consumes both shapes, exactly like recruit/clash.
+        elif action == "spread_rumor":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to spread a rumor but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_spread_rumor(
+                    agent, target,
+                    args.get("rumor", "") or args.get("text", ""),
+                    args.get("meme_id")),
+                base, thought)
+
+        elif action == "send_letter":
+            # The recipient may be ABSENT (the whole point) — resolve by id only;
+            # a name was already resolved to an id by _normalize_args.
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to send a letter but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_send_letter(agent, target, args.get("text", "")),
                 base, thought)
 
         # EM-240 — economy & corruption verbs (Task 7). launder takes NO target
