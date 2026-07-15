@@ -55,7 +55,12 @@ import { StreetLabels } from './StreetLabels';
 import { SettlementLabels } from './SettlementLabels';
 import { SettlementGrounds } from './SettlementGrounds';
 import { TravelMarkers } from './TravelMarkers';
-import { inTransitAgentIds } from './travel';
+import {
+  dropInTransitPositions,
+  inTransitAgentIds,
+  travelMarkerEntries,
+  type XZ,
+} from './travel';
 import { CityNameChip } from './CityNameChip';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
@@ -214,12 +219,12 @@ function CameraDirector({
   const controlsRef = useRef<OrbitControlsImpl>(null);
   // Adaptive resolution driven by ZOOM DISTANCE (not fps). Zoomed out, the
   // whole organic city fills the frame and the per-fragment work (toon shade +
-  // PCSS soft shadows + fog) runs over ~every pixel, so we step DPR down as the
+  // PCFSoft shadows + fog) runs over ~every pixel, so we step DPR down as the
   // orbit radius grows. Distance is monotonic in the zoom gesture, so a Schmitt
   // trigger (separate up/down edges) changes DPR at most once per zoom and
   // NEVER thrashes the drawing buffer the way an fps-driven monitor does at the
   // overhead fps floor — that buffer churn was the overhead flicker. Floor 1.5
-  // keeps the PCSS shadows from undersampling into ringing halos around objects.
+  // keeps the soft shadows from undersampling into ringing halos around objects.
   const setDpr = useThree((s) => s.setDpr);
   const dprTierRef = useRef(0); // 0 = close, 1 = mid, 2 = far
   const modeRef = useRef<CamMode>('free');
@@ -654,6 +659,19 @@ export function CozyWorld({
     return map;
   }, [world]);
 
+  // EM-110: live route-marker position per in-transit agent id — the follow
+  // fallback for a traveler (its animMap entry is dropped while off-board).
+  // Recomputed per snapshot, same inputs <TravelMarkers> renders from.
+  const travelPosById = useMemo<Map<string, XZ>>(() => {
+    const m = new Map<string, XZ>();
+    if (world) {
+      for (const t of travelMarkerEntries(world.agents, world.settlements, world.tick)) {
+        m.set(t.id, t.pos);
+      }
+    }
+    return m;
+  }, [world]);
+
   // EM-095: where is the focus target RIGHT NOW. Agents/animals read the live
   // animated positions (the same refs the renderer lerps), so a follow tracks
   // the walking villager, not its last place center. 'place' ids may be a
@@ -662,7 +680,11 @@ export function CozyWorld({
     (f: FocusTarget): FocusPoint | null => {
       if (f.type === 'agent') {
         const p = animMap.current.get(f.id);
-        return p ? { x: p.x, y: 1.4, z: p.z } : null;
+        if (p) return { x: p.x, y: 1.4, z: p.z };
+        // In transit (no animMap entry while off-board): follow the route
+        // marker along the trip rather than the stale pre-departure spot.
+        const t = travelPosById.get(f.id);
+        return t ? { x: t[0], y: 1.4, z: t[1] } : null;
       }
       if (f.type === 'animal') {
         const p = critterMap.current.get(f.id);
@@ -673,7 +695,7 @@ export function CozyWorld({
       const b = buildingSpotById.get(f.id);
       return b ? { x: b.x, y: 1.2, z: b.z } : null;
     },
-    [placeCenters, buildingSpotById],
+    [placeCenters, buildingSpotById, travelPosById],
   );
 
   if (!world) {
@@ -698,15 +720,13 @@ export function CozyWorld({
         camera={{ position: [54, 46, 54], fov: 42, near: 0.1, far: 420 }}
       >
         <color attach="background" args={[GOLDEN_HOUR.background]} />
-        {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
-            feathered golden-hour shadows instead of hard stencils. */}
         {/* Shadows: the Canvas default PCFSoftShadowMap — soft-edged but
             TEMPORALLY STABLE. We dropped drei <SoftShadows> (PCSS): its
             stochastic penumbra "boiled" frame-to-frame (the flicker on every
             object with the camera dead still) AND splayed a wide soft ring
-            (the halo). PCF has a fixed kernel — no boil, no halo. The
-            directional light's shadow-radius (below) carries the golden-hour
-            softness instead. */}
+            (the halo). PCFSoft's fixed built-in filter kernel IS the
+            golden-hour softness — no boil, no halo, no knobs (under
+            PCFSoftShadowMap, LightShadow.radius has no effect). */}
         <Scene
           world={world}
           bubblesByAgent={bubblesByAgent}
@@ -819,8 +839,15 @@ function Scene({
   // EM-110: agents in transit are OFF-BOARD — they must NOT render inside a city
   // (they show on the route via <TravelMarkers>). Absent field ⇒ empty set, so a
   // no-travel world's villager render is unchanged (no regression). Full `agents`
-  // still feeds StorylineTether / pet-owner resolution below.
-  const inTransit = useMemo(() => inTransitAgentIds(agents), [agents]);
+  // still feeds StorylineTether / pet-owner resolution below. Travelers' animMap
+  // entries are dropped while off-board so the snap-on-missing seeding (targets
+  // below) re-seats each arrival AT its destination city instead of easing the
+  // mesh from the stale pre-departure spot across the map.
+  const inTransit = useMemo(() => {
+    const s = inTransitAgentIds(agents);
+    dropInTransitPositions(s, animMap.current);
+    return s;
+  }, [agents, animMap]);
   const residentAgents = useMemo(
     () => agents.filter((a) => !inTransit.has(a.id)),
     [agents, inTransit],
@@ -910,7 +937,6 @@ function Scene({
         shadow-camera-bottom={-48}
         shadow-bias={-0.0004}
         shadow-normalBias={0.04}
-        shadow-radius={3}
       />
       {/* Fog band pushed out (was 80/215) for the organic/radial city, which is
           WIDER than the old compact grid: at the 130u zoom-out limit the whole city

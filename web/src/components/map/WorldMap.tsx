@@ -19,7 +19,7 @@ import { useRef, useEffect, useCallback } from 'react';
 import type { WorldState, WorldEvent, Settlement } from '../../types';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 import { PLACE_STYLES, speciesEmoji, toLogicalX, toLogicalY, settlementTint } from '../world3d/worldSpace';
-import { travelMarkerEntries, inTransitAgentIds } from '../world3d/travel';
+import { dropInTransitPositions, travelMarkerEntries, inTransitAgentIds } from '../world3d/travel';
 // Declares the shared :root tokens (incl. --marker-animal, the chaos magenta)
 // the canvas reads via getComputedStyle — token-only color, no hardcoded hex.
 import '../../inspector/inspector-tokens.css';
@@ -147,6 +147,10 @@ export function WorldMap({ world, events, animalModels }: WorldMapProps) {
     const settlements = world.settlements;
     const settlementPts = settlementMapPoints(settlements);
     const transiting = inTransitAgentIds(agents);
+    // Travelers' eased positions are dropped while off-board so the
+    // snap-on-missing path (below) re-seats each arrival at its NEW city's
+    // place — not gliding cross-map from the stale pre-departure dot.
+    dropInTransitPositions(transiting, posRef.current);
     const residentAgents = agents.filter((a) => !transiting.has(a.id));
 
     // Place centers (pixel) + lookup of logical centers (for agent targets).
