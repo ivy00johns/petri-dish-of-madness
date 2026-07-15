@@ -61,6 +61,14 @@
   --marker-miracle: #ffd75e;
   --faction-tint: #2ee6a8;
 
+  /* Wave O (EM-260–263) — the Religion accent. A warm candle-brass register no
+     other surface owns (distinct from the crime-red war lane and the mint culture
+     lane), so a faith reads as one color everywhere: the FaithPanel badges +
+     congregation chips + the feed's faith lane all key on --faith-tint. The
+     conflict verbs (excommunicated / faith_hostility_declared) intentionally
+     borrow the crime-red war register instead — the casus-belli / expulsion arc. */
+  --faith-tint: #d9a441;
+
   /* W7 building-status markers (mini-map squares + projects readout dots).
      Both the canvas (getComputedStyle) and the DOM legend (var(--…)) read these
      same tokens, so a building marker can never drift from the theme. */

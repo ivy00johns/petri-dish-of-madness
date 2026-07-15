@@ -4,6 +4,7 @@ Exposes all /api routes per api.openapi.yaml + WS /ws per events.schema.json.
 """
 from __future__ import annotations
 
+import anyio.to_thread
 import asyncio
 import json
 import logging
@@ -761,6 +762,42 @@ async def get_lanes():
     if _router is None:
         raise HTTPException(503, "Not initialized")
     return _router.lane_health()
+
+
+@app.get("/api/lanes/registry")
+async def get_lanes_registry():
+    """EM-300 P2 — the discovery/registry view (spec §8): the live lane
+    registry in priority order with per-lane discovery fields ({id, source,
+    priority, enabled, health, cap_state, discovered, last_refresh_counter, …})
+    plus a `discovery` meta block ({enabled, every_turns, served_turns,
+    last_refresh_counter, retired}). Additive sibling to `GET /api/lanes` (which
+    stays the byte-identical profile-keyed lane_health() map). Reflects the
+    STATIC P1 registry until discovery is enabled + a refresh runs."""
+    if _router is None:
+        raise HTTPException(503, "Not initialized")
+    view = getattr(_router, "lanes_view", None)
+    if not callable(view):  # pragma: no cover - older router
+        raise HTTPException(501, "registry view not available")
+    return view()
+
+
+@app.post("/api/lanes/refresh")
+async def refresh_lanes():
+    """EM-300 P2 — on-demand lane discovery refresh (spec §4): poll the
+    FreeLLMAPI catalog + detect direct-provider keys and rebuild the registry
+    NOW, so onboarding (adding a provider key) is instant instead of waiting for
+    the counter-based auto-refresh. Returns {refreshed, ...registry view}.
+    `refreshed` is false when discovery is disabled (the registry is unchanged)
+    — the endpoint never errors on a disabled flag, so a UI refresh button is
+    always safe to call."""
+    if _router is None:
+        raise HTTPException(503, "Not initialized")
+    refresh = getattr(_router, "refresh_lanes", None)
+    view = getattr(_router, "lanes_view", None)
+    if not callable(refresh) or not callable(view):  # pragma: no cover
+        raise HTTPException(501, "discovery not available")
+    refreshed = await refresh()
+    return {"refreshed": bool(refreshed), **view()}
 
 
 # Control endpoints
@@ -1979,7 +2016,10 @@ async def get_fingerprints(run_id: int | None = None):
     rid = _resolve_run_id(run_id)  # 404 on an explicit unknown id
     if rid is None:
         return {"enabled": True, "feature_version": FEATURE_VERSION, "agents": []}
-    return compute_run_fingerprints(_repo, rid, ft)
+    # The compute is SQL + CPU heavy (series recompute per agent) — run it on a
+    # worker thread so a cold compute never stalls the tick loop / WS broadcast
+    # sharing this event loop. The classifier serializes its shared memos.
+    return await anyio.to_thread.run_sync(compute_run_fingerprints, _repo, rid, ft)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2322,5 +2362,12 @@ async def get_babel_matrix(
     run_id = _resolve_run_id(run_id)
     if _repo is None or run_id is None:
         return build_babel_matrix([], family=family)
-    events = _repo.get_events(run_id, order="asc", lineage=lineage)
-    return build_babel_matrix(events, family=family)
+    repo, rid = _repo, run_id
+
+    def _compute() -> dict:
+        return build_babel_matrix(
+            repo.get_events(rid, order="asc", lineage=lineage), family=family)
+
+    # Full-run fetch + projection — same blocking class as /api/fingerprints
+    # (lighter: fetch-on-mount, not polled), so same worker-thread treatment.
+    return await anyio.to_thread.run_sync(_compute)

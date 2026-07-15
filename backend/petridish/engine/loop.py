@@ -197,6 +197,11 @@ class TickLoop:
         # so a failed call is simply skipped (no retry) until the next window.
         self._narrator_task: asyncio.Task | None = None
         self._last_narrator_tick: int = -1
+        # EM-300 P2 — the off-critical-path lane-discovery refresh task (poll the
+        # FreeLLMAPI catalog + detect direct keys, every N served turns). Same
+        # background pattern as the narrator: scheduled, never awaited on the
+        # tick path. None until discovery is enabled + a refresh comes due.
+        self._lane_refresh_task: asyncio.Task | None = None
         # EM-201 — the on-demand backfill task (chronicle the EXISTING history as
         # chapters). One at a time; cancelled on reset like the narrator task.
         self._chronicle_backfill_task: asyncio.Task | None = None
@@ -224,6 +229,14 @@ class TickLoop:
         # world-side at the round boundary and its events ride the existing
         # _flush_spawn_events drain.
         self._seed_birth_casting()
+
+        # EM-315 — pin the Healing House target pool to the router's KNOWN
+        # profiles (same construction-time config seam as the birth casting).
+        # A typo'd lane in world.healing_house.target_profiles would otherwise
+        # flow onto the replay-surface agent.profile, fail the live-router
+        # reassign, and silently degrade the agent to mock on a fork/resume —
+        # the never-swap-toward-silence law.
+        self._seed_healing_known_profiles()
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -257,6 +270,29 @@ class TickLoop:
             setter(load_personas(), roster)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("birth casting seed failed: %s", exc)
+
+    def _seed_healing_known_profiles(self) -> None:
+        """EM-315 — inject the router's known profile names as the world's
+        healing allow-list, so _pick_healing_profile can only choose lanes the
+        router can actually route (an unknown lane is never chosen — the swap
+        simply does not happen). Unknown configured entries are warned about
+        ONCE here, at boot, where the operator can fix the config. Defensive:
+        the allow-list is a guard, never a reason a loop fails to construct."""
+        setter = getattr(self._world, "set_healing_known_profiles", None)
+        if not callable(setter):
+            return
+        try:
+            configured = list(self._world.healing_target_profiles())
+            known = [str(n) for n in self._router.profile_names()]
+            setter(known)
+            unknown = [t for t in configured if t not in known]
+            if unknown:
+                log.warning(
+                    "healing_house.target_profiles names lanes unknown to the "
+                    "router — dropped (a heal must never swap an agent onto an "
+                    "unroutable lane): %s", unknown)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("healing known-profile seed failed: %s", exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Control API
@@ -358,6 +394,19 @@ class TickLoop:
                 log.debug("narrator task raised during reset: %s", exc)
         self._narrator_task = None
         self._last_narrator_tick = -1
+        # EM-300 P2 — drop any in-flight lane-discovery refresh: it polls for the
+        # OLD run and the router's clear_cache() below rebuilds the static
+        # registry from scratch for the fresh run.
+        if (self._lane_refresh_task is not None
+                and not self._lane_refresh_task.done()):
+            self._lane_refresh_task.cancel()
+            try:
+                await self._lane_refresh_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("lane-refresh task raised during reset: %s", exc)
+        self._lane_refresh_task = None
         # EM-201 — drop any in-flight chronicle backfill: it chronicles the OLD
         # run and must not bleed chapters into the fresh run.
         if (
@@ -800,6 +849,11 @@ class TickLoop:
         # off-critical-path pattern as the animals. Disabled = zero calls.
         self._maybe_schedule_narrator()
 
+        # EM-300 P2 — counter-gated lane-discovery refresh, off the critical
+        # path (a no-op unless adaptive_routing.discovery.enabled). Grouped with
+        # the sibling per-turn background schedulers above.
+        self._maybe_schedule_lane_refresh()
+
         try:
             # 1. turn_start (now persisted + carries turn_id)
             self._emit_event({
@@ -1228,6 +1282,36 @@ class TickLoop:
         self._narrator_task = asyncio.create_task(
             self._run_narrator(from_tick, tick, profile_name)
         )
+
+    def _maybe_schedule_lane_refresh(self) -> None:
+        """EM-300 P2 — schedule a lane-discovery refresh OFF the agents' critical
+        path, every `adaptive_routing.discovery.every_turns` SERVED turns.
+
+        Mirrors the narrator/animal background-task pattern: the router's
+        `note_served_turn()` is a pure counter gate (no clock, no I/O) that
+        returns True when a refresh is due; the actual poll (`refresh_lanes()`)
+        runs as a fire-and-forget task so a slow/unreachable proxy never stalls
+        a tick. At most one refresh in flight (a still-running earlier refresh
+        skips this window, no queueing). Discovery disabled (default) ⇒
+        note_served_turn is a no-op returning False ⇒ zero scheduling, zero
+        network, byte-identical. NEVER raises (called from the hot path).
+
+        LIVE-ONLY: called from `_execute_turn`, which replay never runs (replay
+        reads routing from the event log), so discovery stays off the EM-155
+        replay surface."""
+        try:
+            note = getattr(self._router, "note_served_turn", None)
+            if not callable(note) or not note():
+                return
+            if (self._lane_refresh_task is not None
+                    and not self._lane_refresh_task.done()):
+                return  # an earlier refresh is still in flight — skip, no queueing
+            refresh = getattr(self._router, "refresh_lanes", None)
+            if not callable(refresh):
+                return
+            self._lane_refresh_task = asyncio.create_task(refresh())
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("lane-refresh scheduling failed: %s", exc)
 
     def _narrator_window_rows(self, from_tick: int, to_tick: int) -> list[dict]:
         """EM-201 — the window's digest-kind event rows, queried ONCE (lineage so
@@ -2101,8 +2185,15 @@ class TickLoop:
             return
         try:
             self._router.reassign(str(patient_id), str(to_profile))
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("healing-house router sync failed: %s", exc)
+        except Exception as exc:
+            # The serialized agent.profile already swapped world-side; a failed
+            # live reassign means chip/snapshot and the routing lane now
+            # DISAGREE (and a fork/resume would re-register the unroutable
+            # profile — the mock-degradation path). Loud, not debug.
+            log.warning(
+                "healing-house router sync failed — %s keeps its OLD live "
+                "lane this run while its serialized profile says %r: %s",
+                patient_id, to_profile, exc)
             return
         # Enrich the sentence card's chip color from the freshly-adopted lane so
         # the feed shows the transplanted model's color, not the fallback.

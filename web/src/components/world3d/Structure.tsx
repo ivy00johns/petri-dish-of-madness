@@ -40,12 +40,14 @@ import * as THREE from 'three';
 import type { Building } from '../../types';
 import {
   buildingStyle,
+  hashUnit,
   healthTint,
   skinPalette,
   type BuildingStyle,
   type VariantKey,
 } from './worldSpace';
 import { GOLDEN_HOUR, LABEL_INK, LABEL_OUTLINE, toonGradientMap, toonMaterial } from './toon';
+import { computeBuildingMesh, PLINTH_H as PLINTH_H_TS, type RecipeMesh } from './buildingRecipe';
 import { Model } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
 import type { ModelSpec } from './assets/models';
@@ -1100,6 +1102,168 @@ const VARIANT_COMPONENTS: Record<VariantKey, ComponentType<VariantProps>> = {
   dock: WorkshopStructure,
 };
 
+// ── EM-299 (Wave Q): a procedural building from a parametric RECIPE ──────────
+// Renders the model-authored shape (buildingRecipe.computeBuildingMesh) with the
+// same warm-toon primitives as the EM-122 silhouettes: a walled body, a roof by
+// kind, a grid of glow-windows, and optional trim bands. Health soots the body/
+// roof (like every operational variant); an owner skin still overrides the body
+// (recipe palette → skin, healthTint composed on top). Offline kills the glows.
+// PLINTH_H_TS is imported from buildingRecipe so the body/windows/plinth agree.
+
+function RecipeStructure({
+  mesh,
+  health,
+  offline,
+  skinTint,
+}: {
+  mesh: RecipeMesh;
+  health: number;
+  offline: boolean;
+  /** EM-220 skin override for the body (composes UNDER healthTint), or null. */
+  skinTint: string | null;
+}) {
+  const bodyBase = skinTint ?? mesh.body;
+  const body = toonMaterial(healthTint(bodyBase, health));
+  const roofMat = toonMaterial(healthTint(mesh.roofColor, health));
+  const accent = toonMaterial(mesh.trim.accent);
+  const winMat = offline
+    ? toonMaterial(WINDOW_OFF)
+    : toonMaterial(mesh.windowColor, { emissive: mesh.windowColor, emissiveIntensity: 0.6 });
+
+  const { width, depth, bodyHeight, roof } = mesh;
+  const bodyCenterY = PLINTH_H_TS + bodyHeight / 2;
+  const roofBaseY = PLINTH_H_TS + bodyHeight;
+
+  return (
+    <group>
+      {/* base plinth band */}
+      {mesh.trim.plinth && (
+        <mesh position={[0, PLINTH_H_TS / 2, 0]} castShadow receiveShadow material={accent}>
+          <boxGeometry args={[width + 0.14, PLINTH_H_TS, depth + 0.14]} />
+        </mesh>
+      )}
+      {/* walled body */}
+      <RoundedBox
+        args={[width, bodyHeight, depth]}
+        radius={0.08}
+        smoothness={2}
+        position={[0, bodyCenterY, 0]}
+        castShadow
+        receiveShadow
+        material={body}
+      />
+      {/* cornice band under the roof (ornate/gilded) */}
+      {mesh.trim.cornice && (
+        <mesh position={[0, roofBaseY - 0.06, 0]} castShadow material={accent}>
+          <boxGeometry args={[width + 0.12, 0.14, depth + 0.12]} />
+        </mesh>
+      )}
+      {/* corner pilasters (gilded) */}
+      {mesh.trim.quoins &&
+        ([[-1, -1], [1, -1], [1, 1], [-1, 1]] as Array<[number, number]>).map(([sx, sz], i) => (
+          <mesh
+            key={i}
+            position={[(sx * width) / 2, bodyCenterY, (sz * depth) / 2]}
+            castShadow
+            material={accent}
+          >
+            <boxGeometry args={[0.16, bodyHeight, 0.16]} />
+          </mesh>
+        ))}
+      {/* front-face glow windows */}
+      {mesh.windows.map((wnd, i) => (
+        <mesh key={i} position={[wnd.x, wnd.y, wnd.z]} material={winMat}>
+          <planeGeometry args={[wnd.w, wnd.h]} />
+        </mesh>
+      ))}
+      {/* roof by kind */}
+      <group position={[0, roofBaseY, 0]}>
+        <RecipeRoof roof={roof} width={width} depth={depth} material={roofMat} />
+      </group>
+    </group>
+  );
+}
+
+function RecipeRoof({
+  roof,
+  width,
+  depth,
+  material,
+}: {
+  roof: RecipeMesh['roof'];
+  width: number;
+  depth: number;
+  material: THREE.Material;
+}) {
+  const { kind, height, radius } = roof;
+  if (kind === 'flat') {
+    return (
+      <mesh position={[0, height / 2, 0]} castShadow material={material}>
+        <boxGeometry args={[width + 0.2, height, depth + 0.2]} />
+      </mesh>
+    );
+  }
+  if (kind === 'shed') {
+    // a single slope tilted about Z
+    return (
+      <mesh position={[0, height / 2, 0]} rotation={[0, 0, 0.32]} castShadow material={material}>
+        <boxGeometry args={[width + 0.24, 0.14, depth + 0.2]} />
+      </mesh>
+    );
+  }
+  if (kind === 'gable') {
+    // two tilted planks meeting at a ridge running along Z (a tent).
+    const angle = Math.atan2(height, width / 2);
+    const slopeLen = Math.hypot(width / 2, height) + 0.12;
+    return (
+      <group>
+        {([-1, 1] as const).map((side) => (
+          <mesh
+            key={side}
+            position={[(side * width) / 4, height / 2, 0]}
+            rotation={[0, 0, -side * angle]}
+            castShadow
+            material={material}
+          >
+            <boxGeometry args={[slopeLen, 0.1, depth + 0.24]} />
+          </mesh>
+        ))}
+      </group>
+    );
+  }
+  if (kind === 'dome') {
+    return (
+      <mesh position={[0, 0, 0]} scale={[1, height / radius, 1]} castShadow material={material}>
+        <sphereGeometry args={[radius, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
+      </mesh>
+    );
+  }
+  if (kind === 'spire') {
+    return (
+      <group>
+        {/* a short drum + a tall narrow cone */}
+        <mesh position={[0, 0.12, 0]} castShadow material={material}>
+          <cylinderGeometry args={[radius, radius + 0.06, 0.24, 8]} />
+        </mesh>
+        <mesh position={[0, 0.24 + height / 2, 0]} castShadow material={material}>
+          <coneGeometry args={[radius, height, 8]} />
+        </mesh>
+      </group>
+    );
+  }
+  // hip (and any fallback) — a 4-sided pyramid
+  return (
+    <mesh
+      position={[0, height / 2, 0]}
+      rotation={[0, Math.PI / 4, 0]}
+      castShadow
+      material={material}
+    >
+      <coneGeometry args={[radius, height, 4]} />
+    </mesh>
+  );
+}
+
 function OperationalStructure({
   style,
   variant,
@@ -1363,6 +1527,17 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
     () => resolveStructureModel(building.kind, building.id),
     [building.kind, building.id],
   );
+  // EM-299 (Wave Q): when a recipe is present, derive its procedural mesh. The
+  // memo keys on the recipe CONTENT (a stable JSON key) + id, NOT object identity
+  // — a live snapshot hands a fresh object each tick, so identity-keying would
+  // recompute every frame, while content-keying recomputes exactly on change
+  // (the citygraph-live-render lesson). Absent recipe ⇒ null ⇒ today's render.
+  const recipeKey = building.recipe ? JSON.stringify(building.recipe) : null;
+  const recipeMesh = useMemo<RecipeMesh | null>(
+    () => (building.recipe ? computeBuildingMesh(building.recipe, hashUnit(building.id)) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [recipeKey, building.id],
+  );
   // EM-180: funds render as a treasury object, never a building shell.
   const fund = isFundBuilding(building);
   const bobRef = useRef<THREE.Group>(null);
@@ -1403,7 +1578,11 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
   const labelY = fund
     ? 1.7 // the treasury chest is short — keep its card low
     : building.status === 'operational' || building.status === 'offline'
-      ? (spec ? GLB_LABEL_Y[variant] : undefined) ?? OPERATIONAL_LABEL_Y[variant]
+      ? // EM-299: a recipe building's label clears its authored height; else the
+        // per-variant / GLB clearance exactly as before.
+        recipeMesh
+        ? recipeMesh.totalHeight + 1.0
+        : (spec ? GLB_LABEL_Y[variant] : undefined) ?? OPERATIONAL_LABEL_Y[variant]
       : building.status === 'under_construction'
         ? 0.6 + grow * 3.4 + 1.4
         : building.status === 'destroyed' || building.status === 'planned'
@@ -1436,16 +1615,26 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
           </>
         )}
 
-        {(building.status === 'operational' || building.status === 'offline') && (
-          <OperationalStructure
-            style={operationalStyle}
-            variant={variant}
-            spec={spec}
-            offline={building.status === 'offline'}
-            health={building.health}
-            skinTint={skinPalette(building.skin)}
-          />
-        )}
+        {(building.status === 'operational' || building.status === 'offline') &&
+          // EM-299: an authored recipe renders its procedural shape; otherwise the
+          // exact pre-EM-299 catalog/silhouette path (never a hole either way).
+          (recipeMesh ? (
+            <RecipeStructure
+              mesh={recipeMesh}
+              offline={building.status === 'offline'}
+              health={building.health}
+              skinTint={skinPalette(building.skin)}
+            />
+          ) : (
+            <OperationalStructure
+              style={operationalStyle}
+              variant={variant}
+              spec={spec}
+              offline={building.status === 'offline'}
+              health={building.health}
+              skinTint={skinPalette(building.skin)}
+            />
+          ))}
 
         {building.status === 'damaged' && <DamagedStructure style={style} />}
 

@@ -5,13 +5,31 @@
  * ON breaks the news, and a card click flies the shipped camera.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+
+// Pass-through wraps of the scorers so the OFF-path tests can assert the deep
+// history is NEVER scanned when the flag is off (isDramaWireEnabled stays real).
+vi.mock('../../lib/dramaWire', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/dramaWire')>();
+  return {
+    ...actual,
+    dramaBeats: vi.fn(actual.dramaBeats),
+    dramaIndex: vi.fn(actual.dramaIndex),
+    dramaSparkline: vi.fn(actual.dramaSparkline),
+  };
+});
+
+import { dramaBeats, dramaIndex, dramaSparkline } from '../../lib/dramaWire';
 import { DramaWire } from './DramaWire';
 import { agent, ev, resetSeq, world } from '../../test-utils/fixtures';
 import type { WorldEvent } from '../../types';
 
-beforeEach(() => resetSeq());
+beforeEach(() => {
+  resetSeq();
+  vi.clearAllMocks();
+});
 afterEach(() => vi.unstubAllEnvs());
 
 function newestFirst(events: WorldEvent[]): WorldEvent[] {
@@ -36,6 +54,19 @@ describe('DramaWire — flag gate', () => {
       <DramaWire world={W} history={newestFirst([ev({ kind: 'agent_died', tick: 5 })])} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('does NO scoring with the flag off — the full history is never scanned (C6)', () => {
+    const history = newestFirst([
+      ev({ kind: 'agent_died', tick: 5 }),
+      ev({ kind: 'war_clash', tick: 6 }),
+    ]);
+    const { rerender } = render(<DramaWire world={W} history={history} />);
+    // Simulate a live feed update: a new history array arrives.
+    rerender(<DramaWire world={W} history={[...history]} />);
+    expect(dramaBeats as Mock).not.toHaveBeenCalled();
+    expect(dramaIndex as Mock).not.toHaveBeenCalled();
+    expect(dramaSparkline as Mock).not.toHaveBeenCalled();
   });
 });
 

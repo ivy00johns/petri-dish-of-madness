@@ -126,6 +126,25 @@ def test_duplicate_peace_vote_guard_per_war():
     assert not ok and "already open" in reason
 
 
+def test_wedged_peace_vote_with_an_exiled_member_resolves():
+    """W31 C4 — the wedge: FA (3 members) sues for peace with its leader
+    already EXILED from an earlier defeat. Counting the exiled member needed
+    ceil(0.7·3) = 3 yes from 2 eligible voters — unpassable — and the
+    per-war duplicate guard then blocked every later peace_treaty for this
+    war from EITHER side. Excluding the permanently vote-barred member,
+    ceil(0.7·2) = 2 yes from the 2 eligible settles the war."""
+    w = _world()
+    war = _at_war(w)
+    w.agents["ada"].crime_status = "exiled"            # FA's cast-out leader
+    ok, reason, rule = w.action_propose_rule(
+        w.agents["bram"], "peace_treaty", "we yield", war_id=war.id)
+    assert ok, reason
+    w.action_vote(w.agents["bram"], rule.id, True)
+    ok, _, status = w.action_vote(w.agents["cyn"], rule.id, True)
+    assert ok and status == "active"
+    assert war.status == "settled"
+
+
 # ── settlement: reparations split + exile + ledger ────────────────────────────
 
 def test_settlement_settles_the_war_and_clears_the_pair_ledger():

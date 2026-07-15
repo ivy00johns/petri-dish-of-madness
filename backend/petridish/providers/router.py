@@ -16,6 +16,7 @@ from typing import Callable
 
 from ..config.loader import ModelProfile
 from .adapters import OpenAICompatibleAdapter, AnthropicAdapter, GeminiAdapter
+from . import discovery as _discovery
 from .base import Provider, ProviderError
 from .lanes import Lane, LaneRegistry, SortingList
 from .mock import MockProvider
@@ -315,9 +316,28 @@ class Router:
         self._lane_registry: LaneRegistry = LaneRegistry(
             SortingList(
                 self._ar_order(), allow_paid=self._ar_allow_paid(),
+                exclude=self._ar_exclude(),
             ).apply(self._build_lane_universe()),
             health_fn=self.lane_sick,
         )
+
+        # ── Adaptive Lane Routing — dynamic discovery/refresh (spec P2) ─────────
+        # Discovery makes the registry DATA-DRIVEN: refresh_lanes() polls the
+        # FreeLLMAPI catalog + detects direct-provider keys and REBUILDS the
+        # registry (adding discovered lanes, retiring vanished ones). It is
+        # gated behind `adaptive_routing.discovery.enabled` (default OFF ⇒ the
+        # static registry above is never rebuilt ⇒ byte-identical). All state
+        # below is in-memory + counter-based (no clock reads ⇒ off the EM-155
+        # replay surface). `_discovery_served` counts served turns for the
+        # counter-gated auto-refresh; `_last_refresh_counter` records the served
+        # count at the last rebuild; `_discovery_synth` holds the profile names
+        # of adapters synthesized for discovered models (so a rebuild reuses
+        # them and their EM-135 health carries over). Reset by clear_cache().
+        self._discovery_served: int = 0
+        self._last_refresh_counter: int = 0
+        self._discovery_synth: set[str] = set()
+        self._discovery_retired: list[tuple[str, str]] = []
+        self._discovery_quota: list | None = None
 
     def set_usage_alert_sink(self, sink: Callable[[dict], None] | None) -> None:
         """Register the callback that receives `usage_alert` payloads
@@ -774,6 +794,15 @@ class Router:
             return tuple(order)
         return ()
 
+    def _ar_exclude(self) -> tuple:
+        """PR#106 C15 — the denylist matchers (same duck-typed entry shape as
+        `order`). Lanes they cover are barred from the sorting list entirely,
+        including the `*` sweep. Default () ⇒ nothing excluded."""
+        exclude = self._ar_value("exclude", ())
+        if isinstance(exclude, (list, tuple)):
+            return tuple(exclude)
+        return ()
+
     @staticmethod
     def _lane_source(profile: ModelProfile) -> str | None:
         """Map a profile to its lane `source`, or None when it is not a routable
@@ -833,6 +862,207 @@ class Router:
             }
             for ln in self._lane_registry.ordered()
         ]
+
+    # ── Adaptive Lane Routing — dynamic discovery/refresh (spec P2) ────────────
+
+    def _disco_value(self, key: str, default: Any) -> Any:
+        """Read one `adaptive_routing.discovery` knob defensively: the sub-block
+        may be a DiscoveryParams dataclass, a plain dict, or absent (⇒ defaults),
+        exactly like the sibling _ar_value / _lf_value / _ol_value accessors."""
+        cfg = self._ar_value("discovery", None)
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            value = cfg.get(key, default)
+        else:
+            value = getattr(cfg, key, default)
+        return default if value is None else value
+
+    def _discovery_enabled(self) -> bool:
+        """Discovery fires only when adaptive routing is ON (the registry it
+        rebuilds is walked only then) AND `discovery.enabled`. Default OFF ⇒
+        the static P1 registry is never rebuilt ⇒ byte-identical: no fetches,
+        no synth adapters, no registry delta."""
+        return self._adaptive_enabled() and bool(
+            self._disco_value("enabled", False))
+
+    def _discovery_every_turns(self) -> int:
+        try:
+            return max(1, int(self._disco_value("every_turns", 40)))
+        except (TypeError, ValueError):
+            return 40
+
+    def note_served_turn(self) -> bool:
+        """Counter-based auto-refresh gate (spec §4). Called once per SERVED
+        live turn from the engine loop (off the EM-155 replay surface). PURE +
+        counter-only — no clock reads, no I/O — so it is cheap on the tick path;
+        the caller schedules the actual fetch off the critical path when this
+        returns True (a refresh is DUE, every `every_turns` served turns).
+        No-op returning False (counter untouched) when discovery is disabled ⇒
+        byte-identical."""
+        if not self._discovery_enabled():
+            return False
+        self._discovery_served += 1
+        return self._discovery_served % self._discovery_every_turns() == 0
+
+    def _freellmapi_template(self) -> "_discovery.FreeLLMTemplate | None":
+        """Connection params from a representative FreeLLMAPI profile (base_url
+        + api_key + color) so a discovered model with no hand-authored profile
+        can still be CALLED — every freellmapi lane shares one endpoint + key,
+        only `model` differs. None when no usable freellmapi profile exists
+        (discovery then still retires/keeps existing lanes but synthesizes
+        nothing new)."""
+        for _name, profile in self._profiles.items():
+            if self._lane_source(profile) != "freellmapi":
+                continue
+            key = (profile.api_key() or "").strip()
+            if not key:
+                continue
+            return _discovery.FreeLLMTemplate(
+                base_url=profile.base_url or "http://localhost:3001/v1",
+                api_key=key,
+                color=getattr(profile, "color", "#8888aa"),
+            )
+        return None
+
+    async def _fetch_admin_quota_from_env(self, env: Any) -> list | None:
+        """Optional admin `/api/health` quotaStates fetch from FREELLMAPI_ADMIN_*
+        env (enrichment only — never the availability gate). None when creds are
+        absent / anything fails."""
+        environ = env if env is not None else os.environ
+        return await _discovery.fetch_admin_quota(
+            environ.get("FREELLMAPI_ADMIN_BASE_URL", ""),
+            environ.get("FREELLMAPI_ADMIN_EMAIL", ""),
+            environ.get("FREELLMAPI_ADMIN_PASSWORD", ""),
+        )
+
+    async def refresh_lanes(
+        self, *, catalog: Any = None, quota: Any = None, env: Any = None,
+    ) -> bool:
+        """Rebuild the lane registry from live discovery (spec §4 step 3):
+        poll the FreeLLMAPI catalog + detect direct-provider keys, MERGE into a
+        new universe, synthesize adapters for newly-available models, and
+        re-rank via the SAME sorting list (lanes.yaml order/pins stay
+        authoritative). Health/priority carry across refreshes by lane id
+        (stable `disco:<model>` profile names). DEFENSIVE — never raises into the
+        caller; on any fetch failure it keeps the current registry. No-op
+        returning False when discovery is disabled (byte-identical).
+
+        `catalog`/`quota`/`env` are hermetic-test injection seams; in production
+        `catalog` defaults to a real read-only `GET /v1/models` and `env` to
+        os.environ. Returns True when a rebuild happened."""
+        if not self._discovery_enabled():
+            return False
+        try:
+            return await self._refresh_lanes_inner(
+                catalog=catalog, quota=quota, env=env)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("lane discovery refresh failed: %s", exc)
+            return False
+
+    async def _refresh_lanes_inner(
+        self, *, catalog: Any, quota: Any, env: Any,
+    ) -> bool:
+        template = self._freellmapi_template()
+        fllm_models = bool(self._disco_value("freellmapi_models", True))
+        direct_keys = bool(self._disco_value("direct_keys", True))
+
+        # 1. FreeLLMAPI catalog — the availability truth (spec §11 Q1: the
+        #    proxy's /v1/models carries `available` + `unavailable_reason`).
+        #    Injected in tests; else a real read-only GET on the template's
+        #    endpoint. Absent template ⇒ nothing to poll.
+        discovered = catalog
+        if discovered is None and fllm_models and template is not None:
+            discovered = await _discovery.fetch_freellmapi_catalog(
+                template.base_url, template.api_key)
+        discovered = list(discovered or ())
+
+        # 2. Optional admin quotaStates enrichment (creds + opt-in). Recorded
+        #    for the /api/lanes/registry view; NOT folded into availability
+        #    (429-driven cap/cooldown is P3).
+        if quota is None and bool(self._disco_value("admin_quota", False)):
+            quota = await self._fetch_admin_quota_from_env(env)
+        self._discovery_quota = quota
+
+        # 3. Direct-provider key presence (spec §4 step 2).
+        environ = env if env is not None else os.environ
+        direct_sources = _discovery.detect_direct_sources(dict(environ))
+
+        # 4. Pure merge → new universe + synth specs; build synth adapters
+        #    (reused on later refreshes so their EM-135 health persists), then
+        #    re-rank via the SAME sorting list.
+        result = _discovery.merge_universe(
+            self._build_lane_universe(),
+            discovered,
+            direct_sources=direct_sources,
+            freellmapi_template=template,
+            freellmapi_models=fllm_models,
+            direct_keys=direct_keys,
+        )
+        for spec in result.synth:
+            if spec.profile in self._adapters or template is None:
+                continue
+            self._adapters[spec.profile] = OpenAICompatibleAdapter(
+                profile=spec.profile,
+                base_url=template.base_url,
+                api_key=template.api_key,
+                model_id=spec.model_id,
+                color=template.color,
+            )
+            self._discovery_synth.add(spec.profile)
+
+        self._lane_registry = LaneRegistry(
+            SortingList(
+                self._ar_order(), allow_paid=self._ar_allow_paid(),
+                exclude=self._ar_exclude(),
+            ).apply(result.universe),
+            health_fn=self.lane_sick,
+        )
+        self._discovery_retired = list(result.retired)
+        self._last_refresh_counter = self._discovery_served
+        return True
+
+    def lanes_view(self) -> dict:
+        """Spec §8 discovery/registry view: the live registry in priority order
+        with per-lane discovery fields, plus a discovery meta block. Served by
+        the additive `GET /api/lanes/registry` (the profile-keyed lane_health()
+        that `GET /api/lanes` returns is left byte-identical). Per lane:
+        {id, source, model_id, profile, priority, enabled, health, cap_state,
+        discovered, free, out_hint, last_refresh_counter}. `discovered` marks a
+        lane synthesized from the live catalog (no hand-authored profile);
+        `cap_state` is a lightweight health projection here — 429-driven
+        daily-cap state is P3."""
+        lanes = []
+        for ln in self._lane_registry.ordered():
+            sick = self.lane_sick(ln.profile)
+            lanes.append({
+                "id": ln.id,
+                "source": ln.source,
+                "model_id": ln.model_id,
+                "profile": ln.profile,
+                "priority": ln.priority,
+                "enabled": self._adapters.get(ln.profile) is not None,
+                "health": "sick" if sick else "ok",
+                "cap_state": "sick" if sick else "ok",
+                "discovered": ln.profile in self._discovery_synth,
+                "free": ln.free,
+                "out_hint": ln.out_hint,
+                "last_refresh_counter": self._last_refresh_counter,
+            })
+        return {
+            "lanes": lanes,
+            "discovery": {
+                "enabled": self._discovery_enabled(),
+                "every_turns": (
+                    self._discovery_every_turns()
+                    if self._discovery_enabled() else None),
+                "served_turns": self._discovery_served,
+                "last_refresh_counter": self._last_refresh_counter,
+                "retired": [
+                    {"id": i, "reason": r} for (i, r) in self._discovery_retired
+                ],
+            },
+        }
 
     async def _bounce_call(
         self,
@@ -1143,6 +1373,26 @@ class Router:
         # EM-226 — the storm breaker is per-run state too: a prior run's storm
         # must never suppress a fresh run's backups.
         self._auto_breaker_open = False
+        # Spec P2 — discovery is per-run too: drop the adapters synthesized for
+        # a prior run's discovered models and rebuild the STATIC P1 registry, so
+        # a fresh run starts from the configured lanes and re-discovers from
+        # scratch (no leaked lanes across reset/fork). A no-op-equivalent when
+        # discovery never ran (empty synth set, same static build) ⇒
+        # byte-identical.
+        for synth_profile in self._discovery_synth:
+            self._adapters.pop(synth_profile, None)
+        self._discovery_synth.clear()
+        self._discovery_served = 0
+        self._last_refresh_counter = 0
+        self._discovery_retired = []
+        self._discovery_quota = None
+        self._lane_registry = LaneRegistry(
+            SortingList(
+                self._ar_order(), allow_paid=self._ar_allow_paid(),
+                exclude=self._ar_exclude(),
+            ).apply(self._build_lane_universe()),
+            health_fn=self.lane_sick,
+        )
 
     def cache_stats(self) -> dict:
         """Wave D2 / EM-162 — additive decision-cache bookkeeping:

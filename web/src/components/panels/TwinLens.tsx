@@ -190,9 +190,13 @@ export function TwinLens({ world, history }: TwinLensProps) {
   // twin pair is deliberately spawned behind the flag).
   if (!pair) return null;
 
-  const rows = Math.min(Math.max(aActions.length, bActions.length), MAX_STRAND_ROWS);
-  const startA = Math.max(0, aActions.length - rows);
-  const startB = Math.max(0, bActions.length - rows);
+  // ONE shared index window over both strands: row r shows answer #(start+r)
+  // for BOTH twins, so the columns stay index-aligned when the streams have
+  // drifted apart in length (a per-twin offset would pair different answer
+  // indexes as if aligned and could tint the wrong row as the divergence).
+  const maxLen = Math.max(aActions.length, bActions.length);
+  const rows = Math.min(maxLen, MAX_STRAND_ROWS);
+  const start = Math.max(0, maxLen - rows);
 
   return (
     <section
@@ -260,13 +264,12 @@ export function TwinLens({ world, history }: TwinLensProps) {
           {/* Synchronized dual-strand thread — index-aligned answer rows. */}
           <ul className="m-0 p-0 list-none">
             {Array.from({ length: rows }).map((_, r) => {
-              const ai = startA + r;
-              const bi = startB + r;
-              const a = aActions[ai];
-              const b = bActions[bi];
-              const isDiverge = divergence != null
-                && (ai === divergence.index || bi === divergence.index)
-                && a?.verb !== b?.verb;
+              const i = start + r;
+              const a = aActions[i];
+              const b = bActions[i];
+              // The shared index makes this exact: at divergence.index both
+              // twins answered (firstDivergence only scans the shared length).
+              const isDiverge = divergence != null && i === divergence.index;
               return (
                 <li
                   key={r}

@@ -17,9 +17,10 @@ Damage rides energy → the EXISTING check_death (energy IS the HP analog —
 the frozen no-weapons/no-HP-objects constraint). The seed is SYMMETRIC in
 the pair, so who initiates cannot re-roll the swing (order-independence,
 pinned below with a hardcoded literal). muster seals an accept_contract-
-style ally ring across the war band and marks the agent `belligerent` — a
-STATUS marker the jail-gate must ignore (only detained/jailed/exiled
-restrict; the widening is pinned in test_em258_schema.py).
+style ally ring across the war band; belligerence is DERIVED from band
+membership (World.is_belligerent) and never rides crime_status — riding it
+suppressed the wanted flip and froze notoriety decay (the W31 C3 fix; the
+jail-gate widening is pinned in test_em258_schema.py).
 """
 import math
 
@@ -85,13 +86,17 @@ def test_muster_requires_war_enabled_faction_and_active_war():
     assert evt["payload"]["error"] == "not at war"
 
 
-def test_muster_joins_the_band_and_marks_belligerent():
+def test_muster_joins_the_band_and_derives_belligerence():
+    """W31 C3 — muster never writes crime_status (that suppressed the wanted
+    flip + froze notoriety decay); the band list IS belligerence."""
     w = _world()
     _at_war(w)
+    assert w.is_belligerent("ada") is False
     evt = w.action_muster(w.agents["ada"])
     assert evt["kind"] == "war_band_joined"
     assert w.factions[FA]["war_band"] == ["ada"]
-    assert w.agents["ada"].crime_status == "belligerent"
+    assert w.agents["ada"].crime_status is None
+    assert w.is_belligerent("ada") is True
     assert evt["payload"] == {"action": "muster", "faction_id": FA,
                               "band_size": 1}
 
@@ -118,14 +123,45 @@ def test_muster_seals_the_ally_ring_like_accept_contract():
         assert rel.type == "ally"
 
 
-def test_muster_never_clobbers_an_existing_crime_status():
+def test_muster_never_touches_crime_status():
+    """W31 C3 — a wanted agent who musters stays wanted (justice applies to
+    soldiers); belligerence derives from the band, not crime_status."""
     w = _world()
     _at_war(w)
     w.agents["ada"].crime_status = "wanted"
     evt = w.action_muster(w.agents["ada"])
     assert evt["kind"] == "war_band_joined"
-    assert w.agents["ada"].crime_status == "wanted"         # marker skipped
+    assert w.agents["ada"].crime_status == "wanted"         # untouched
     assert "ada" in w.factions[FA]["war_band"]              # band is the truth
+    assert w.is_belligerent("ada") is True
+
+
+def test_mustered_agent_still_flips_wanted_at_threshold():
+    """W31 C3 — the failure the crime_status overload caused: a mustered
+    agent in the 40-59 notoriety band could never be flagged wanted (justice
+    silently disabled). A witnessed crime past wanted_threshold flips it."""
+    w = _world()
+    _at_war(w)
+    assert w.action_muster(w.agents["ada"])["kind"] == "war_band_joined"
+    ada = w.agents["ada"]
+    ada.notoriety = 39
+    # townhall crowd: 4 witnesses ⇒ gain 10 + 3·3 = 19 ⇒ notoriety 58 ≥ 40.
+    w._register_crime(ada, "steal", "dot", 10)
+    assert ada.notoriety == 58
+    assert ada.crime_status == "wanted"
+    assert w.is_belligerent("ada")                          # still a soldier
+
+
+def test_mustered_agent_still_decays_notoriety():
+    """W31 C3 — advance_crime's decay gate reads (None, wanted); a mustered
+    agent's crime_status stays in that set, so their heat cools like
+    anyone else's."""
+    w = _world()
+    _at_war(w)
+    w.action_muster(w.agents["ada"])
+    w.agents["ada"].notoriety = 10
+    w.advance_crime()
+    assert w.agents["ada"].notoriety == 8                   # decay default 2
 
 
 # ── clash: gates ──────────────────────────────────────────────────────────────

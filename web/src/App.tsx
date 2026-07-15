@@ -33,9 +33,10 @@ import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
 import { WarPanel } from './components/panels/WarPanel';
-import { StorylinesRail } from './components/feed/StorylinesRail';
+import { MemeLineagePanel } from './components/panels/MemeLineagePanel';
+import { FaithPanel } from './components/panels/FaithPanel';
+import { StorylinesRail, useStorylines } from './components/feed/StorylinesRail';
 import { STORYLINES_RAIL_ENABLED } from './lib/featureFlags';
-import type { Storyline } from './lib/storylines';
 import { TwinLens } from './components/panels/TwinLens';
 import FingerprintTicker from './components/panels/FingerprintTicker';
 import { RosterStrip } from './components/panels/RosterStrip';
@@ -186,8 +187,18 @@ function LiveLayout({ sim }: { sim: Sim }) {
   const [resetNonce, setResetNonce] = useState(0);
   // EM-312: the selected storyline — drives the feed thread filter + the 3-D
   // tether. Display-only state; never touches the sim. Ignored when the flag is
-  // off (the rail isn't mounted, so it can never be set).
-  const [selectedStory, setSelectedStory] = useState<Storyline | null>(null);
+  // off (the rail isn't mounted, so it can never be set). Only the ID is
+  // stored: the live Storyline is re-resolved from the current scored set each
+  // render, so a thread that persists but EVOLVES (new allies/title/status)
+  // never leaves click-time principals stale in the filter or tether.
+  const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
+  const storylines = useStorylines(sim.history, world, STORYLINES_RAIL_ENABLED);
+  const selectedStory = useMemo(
+    () => (selectedStoryId
+      ? storylines.find((s) => s.id === selectedStoryId) ?? null
+      : null),
+    [storylines, selectedStoryId],
+  );
 
   // EM-105: feed-column width — persisted, drag-handle driven.
   const [feedWidth, setFeedWidth] = useState<number>(loadFeedWidth);
@@ -292,6 +303,16 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* Wave O (EM-251–255): the culture panel — the town's meme family
+              tree, the belief camps clustering around them, and the canonized
+              motif banner. Renders NOTHING in a culture-free world (no memes,
+              no camps ⇒ null), so it adds zero chrome until culture fires. */}
+          <MemeLineagePanel world={world} />
+          {/* Wave O (EM-260–263): the faith panel — the town's religions, their
+              congregations, devotion, and declared hostilities. Renders NOTHING
+              in a religion-free world (no faiths ⇒ null), so it adds zero chrome
+              until a faith is founded (a sibling of the war + culture panels). */}
+          <FaithPanel world={world} />
           {/* EM-312 (Storylines Rail): the feed's drama index — recurring
               rivalries / redemptions / power grabs, promoted from the event log
               with zero LLM. Gated OFF by default; renders nothing until a thread
@@ -299,10 +320,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
               thread filters the feed (below) + tethers its principals in 3-D. */}
           {STORYLINES_RAIL_ENABLED && (
             <StorylinesRail
-              world={world}
-              history={sim.history}
-              selectedId={selectedStory?.id ?? null}
-              onSelect={setSelectedStory}
+              storylines={storylines}
+              selectedId={selectedStoryId}
+              onSelect={(s) => setSelectedStoryId(s?.id ?? null)}
             />
           )}
           {/* EM-310 (Chimera Twins): the twin lens — a synchronized dual-strand
@@ -334,7 +354,7 @@ function LiveLayout({ sim }: { sim: Sim }) {
               threadFilter={STORYLINES_RAIL_ENABLED && selectedStory
                 ? { id: selectedStory.id, title: selectedStory.title, principals: selectedStory.principals }
                 : null}
-              onClearThread={() => setSelectedStory(null)}
+              onClearThread={() => setSelectedStoryId(null)}
             />
           </div>
         </aside>

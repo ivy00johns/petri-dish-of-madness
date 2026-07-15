@@ -704,6 +704,26 @@ class UniversalizationParams:
 
 
 @dataclass
+class BuildingRecipesParams:
+    """EM-299 (Wave Q) — parametric building recipes (config `world.building_recipes`).
+
+    A build turn may carry an OPTIONAL closed-enum `recipe` authoring the
+    building's SHAPE (footprint/floors/roof/material/palette/window_density/trim).
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-299 — the recipe is
+    ignored, no recipe is stored or serialized, and the build menu carries no
+    recipe clause (prompt goldens unchanged). The engine + prompt both read via
+    the defensive `_building_recipes_enabled` accessors with the IDENTICAL default,
+    so an absent block behaves the same (config-absent = OFF). Flip `enabled: true`
+    to let models author skylines (zero extra LLM calls — the recipe rides the
+    existing build turn; the frontend derives a procedural mesh from it).
+
+      enabled — master toggle (default False = zero behavioral change).
+    """
+    enabled: bool = False
+
+
+@dataclass
 class CoherenceParams:
     """EM-224 — PIANO coherence for multi-action turns (config `world.coherence`).
 
@@ -850,6 +870,41 @@ class LaneOrderEntry:
     tags: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class DiscoveryParams:
+    """Adaptive Lane Routing — dynamic lane discovery/refresh (spec 2026-07-07
+    §4/§9 Phase P2, config `config/lanes.yaml` `adaptive_routing.discovery:`
+    sub-block). Makes the lane registry DATA-DRIVEN: poll the FreeLLMAPI proxy's
+    `/v1/models` catalog + detect direct-provider env keys so lanes appear as the
+    user provisions accounts and drop out when disabled — no restart (spec §4).
+
+    Default `enabled: false` ⇒ BYTE-IDENTICAL: the router never fetches, the
+    registry stays the P1 static build, no new routing behavior. The router
+    reads this block via a defensive accessor with IDENTICAL defaults, so an
+    ABSENT sub-block behaves exactly like these values.
+
+      enabled          — master toggle (default OFF ⇒ static P1 registry).
+      every_turns      — counter-based auto-refresh cadence: refresh after every
+                         N served turns (spec §4). Counter-gated, no clock reads
+                         on the tick path (determinism, EM-155). Clamped >= 1.
+      freellmapi_models— poll `/v1/models`: retire configured lanes the catalog
+                         reports unavailable, synth `disco:` lanes for newly
+                         available models (the lanes.yaml `*` sweep places them).
+      direct_keys      — detect direct-provider env keys (GEMINI/ANTHROPIC/
+                         OPENAI/OLLAMA): present ⇒ that source's lanes stay,
+                         absent ⇒ they retire.
+      admin_quota      — ALSO read the admin `/api/health` quotaStates (richer
+                         per-key health) when creds are configured. Default OFF —
+                         it needs the FREELLMAPI_ADMIN_* account and is only
+                         enrichment (429-cap tracking is P3), not the gate.
+    """
+    enabled: bool = False
+    every_turns: int = 40
+    freellmapi_models: bool = True
+    direct_keys: bool = True
+    admin_quota: bool = False
+
+
 @dataclass
 class AdaptiveRoutingParams:
     """Adaptive Lane Routing — the custom sorting list + bounce loop (spec
@@ -879,6 +934,15 @@ class AdaptiveRoutingParams:
                              it back to `auto` to restore the W30 backstop.
       order                — the priority order (top-to-bottom = ascending),
                              a tuple of LaneOrderEntry (spec §3.3).
+      exclude              — DENYLIST (PR#106 C15). Matchers (same source +
+                             model-glob shape as `order`) for lanes NO entry may
+                             place — not even a `model: "*"` sweep. This is how
+                             a profile kept only for legacy references (e.g. the
+                             EM-324 command-a-2 truncator) is barred from the
+                             bounce walk. Default () ⇒ nothing excluded.
+      discovery            — dynamic lane discovery/refresh (P2). Default OFF ⇒
+                             the static P1 registry, byte-identical. See
+                             DiscoveryParams.
     """
     enabled: bool = False
     max_attempts: int = 3
@@ -886,6 +950,8 @@ class AdaptiveRoutingParams:
     allow_paid: bool = False
     terminal_fallback: str | None = None
     order: tuple[LaneOrderEntry, ...] = ()
+    exclude: tuple[LaneOrderEntry, ...] = ()
+    discovery: DiscoveryParams = field(default_factory=DiscoveryParams)
 
 
 @dataclass
@@ -1151,7 +1217,11 @@ class WarParams:
 
       siege_damage          — building damage per siege (routes through the
                               shared _damage_building path).
+      siege_energy_cost     — energy the BESIEGER burns per siege (the
+                              attack_energy_cost convention; siege is not free).
       exhaustion_per_siege  — exhaustion the besieged owner's faction takes.
+      exhaustion_per_siege_own — the smaller exhaustion the besieger's OWN
+                              faction takes per siege (attrition cuts both ways).
       exhaustion_per_round  — passive war weariness both belligerents accrue
                               at every round boundary while a war is active.
       exhaustion_cap        — at/above this a faction collapses and the war
@@ -1181,9 +1251,57 @@ class WarParams:
     exhaustion_per_casualty: int = 15
     # EM-259 — siege + endgame.
     siege_damage: int = 20
+    siege_energy_cost: float = 4.0
     exhaustion_per_siege: int = 4
+    exhaustion_per_siege_own: int = 2
     exhaustion_per_round: int = 1
     exhaustion_cap: int = 100
+
+
+@dataclass
+class FaithParams:
+    """EM-260 — Religion tunables (config `world.faith`, Wave O Religion track).
+    The engine reads this block via its defensive `_faith_param` accessor with
+    IDENTICAL defaults (the WarParams/_war_param convention), so a world.yaml
+    WITHOUT the `faith` block behaves exactly like these values. Like war this
+    block HAS an `enabled` flag defaulting FALSE: no faith is minted by any
+    default path, no founding/proselytize verb surfaces, no devotion bookkeeping
+    runs, so a default world gains no faith, emits no new prompt line / menu
+    entry / event, and stays byte-identical (the em161 golden + EM-155). This
+    stage ships the DATA + config only; the tunables below are read by EM-261+.
+
+      enabled           — master gate for the whole faith layer.
+      devotion_base     — a founder's starting devotion when they found a faith
+                          (EM-261 — action_found_faith seeds this; > 0).
+      temple_buff       — devotion/energy buff granted at a consecrated temple
+                          (EM-261 — the consecrate/worship site bonus).
+      conversion_chance — proselytize success probability, 0..1 (EM-262).
+      devotion_decay    — per-round devotion cool-off applied at the round
+                          boundary (the grievance_decay analog, EM-262).
+      schism_threshold  — devotion/dissent needed before a schism may split a
+                          faith into a parent-linked child (EM-262).
+      schism_grace      — ticks a freshly founded/schismed faith is shielded
+                          from a further schism (EM-262).
+      congregation_min_size — the smallest shared-faith cluster that becomes a
+                          congregation at the round boundary (EM-262).
+      convert_trust_seed — the warm trust floor a proselytize conversion seals on
+                          the mutual co_religionist edge (trust-positive; never
+                          lowers trust — EM-262).
+      hostility_grievance — the war-grievance heat a founder's declare_hostility
+                          feeds between the two faiths' factions (EM-263 casus-
+                          belli hook; opaque input to the war layer, gated on
+                          war.enabled — inert when war is off / members factionless).
+    """
+    enabled: bool = False
+    devotion_base: int = 10
+    temple_buff: int = 5
+    conversion_chance: float = 0.3
+    devotion_decay: int = 1
+    schism_threshold: int = 50
+    schism_grace: int = 20
+    congregation_min_size: int = 2
+    convert_trust_seed: int = 20
+    hostility_grievance: int = 8
 
 
 @dataclass
@@ -1926,6 +2044,12 @@ class WorldParams:
     # grievance, opens no war, surfaces no war governance, and keeps the em161
     # golden + every pre-EM-256 snapshot byte-identical.
     war: WarParams = field(default_factory=WarParams)
+    # EM-260 — Religion (Wave O Religion track). Additive with a DEFAULT-OFF
+    # `enabled`, so a world.yaml without the `faith` block mints no faith,
+    # surfaces no faith governance/prompt, and keeps the em161 golden + every
+    # pre-EM-260 snapshot byte-identical. The founding/proselytize verbs (EM-261+)
+    # read the tunables here and gate on `enabled` via World.faith_enabled().
+    faith: FaithParams = field(default_factory=FaithParams)
     # EM-315 — The Healing House. Additive, DEFAULT OFF with an EMPTY target pool,
     # so a world.yaml without the `healing_house` block — and every pre-EM-315
     # snapshot — is byte-identical (no `heal` menu entry, no prompt line, no swap,
@@ -2025,6 +2149,12 @@ class WorldParams:
     # block into every turn (zero extra LLM calls — rides the existing turn).
     universalization: UniversalizationParams = field(
         default_factory=UniversalizationParams)
+    # EM-299 (Wave Q) — parametric building recipes. Additive with a DEFAULT-OFF
+    # gate: an absent `building_recipes` block is byte-identical to pre-EM-299
+    # (prompt golden + snapshot key set). Flip enabled:true to let models author
+    # building shapes (zero extra LLM calls — the recipe rides the build turn).
+    building_recipes: BuildingRecipesParams = field(
+        default_factory=BuildingRecipesParams)
     # EM-224 — PIANO coherence for multi-action turns. Additive with an
     # engine-matching default; DEFAULT OFF, so a world.yaml without the
     # `coherence` block is byte-identical to pre-EM-224 (prompt golden +
@@ -2387,6 +2517,19 @@ def _parse_universalization(raw: dict | None) -> UniversalizationParams:
     )
 
 
+def _parse_building_recipes(raw: dict | None) -> BuildingRecipesParams:
+    """Parse the optional `world.building_recipes` block (EM-299).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-299 (prompt golden +
+    snapshot key set)."""
+    if not isinstance(raw, dict):
+        return BuildingRecipesParams()
+    d = BuildingRecipesParams()
+    return BuildingRecipesParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+    )
+
+
 _COHERENCE_STRATEGIES = ("annotate", "drop")
 
 
@@ -2605,6 +2748,28 @@ def _parse_lane_order(raw: Any) -> tuple[LaneOrderEntry, ...]:
     return tuple(out)
 
 
+def _parse_discovery(raw: Any) -> DiscoveryParams:
+    """Parse the optional `adaptive_routing.discovery` sub-block (spec P2 §4).
+    Absent/empty/malformed ⇒ the OFF defaults (byte-identical: static P1
+    registry, no fetches). Accepts BOTH the yaml shape and the config_json
+    asdict shape (same flat scalar keys) so the fork/replay round-trip
+    normalizes cleanly. `every_turns` clamped >= 1."""
+    d = DiscoveryParams()
+    if not isinstance(raw, dict):
+        return d
+    try:
+        every = max(1, int(raw.get("every_turns", d.every_turns)))
+    except (TypeError, ValueError):
+        every = d.every_turns
+    return DiscoveryParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        every_turns=every,
+        freellmapi_models=bool(raw.get("freellmapi_models", d.freellmapi_models)),
+        direct_keys=bool(raw.get("direct_keys", d.direct_keys)),
+        admin_quota=bool(raw.get("admin_quota", d.admin_quota)),
+    )
+
+
 def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
     """Parse the optional `adaptive_routing` block (spec 2026-07-07 §3.3).
     Absent/empty/malformed -> router-matching defaults (routing OFF ⇒
@@ -2640,6 +2805,13 @@ def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
         allow_paid=bool(raw.get("allow_paid", d.allow_paid)),
         terminal_fallback=terminal_fallback,
         order=_parse_lane_order(raw.get("order")),
+        # PR#106 C15 — the denylist reuses the order-entry shape/parser, so the
+        # config_json asdict round-trip normalizes it for free.
+        exclude=_parse_lane_order(raw.get("exclude")),
+        # P2 — dynamic discovery/refresh. Absent ⇒ OFF defaults (byte-identical
+        # static registry). asdict serializes it to a flat dict that this
+        # parser round-trips.
+        discovery=_parse_discovery(raw.get("discovery")),
     )
 
 
@@ -2664,18 +2836,26 @@ def _load_lanes_yaml_adaptive_routing(config_dir: Path | None) -> dict | None:
 
 
 def _parse_fingerprint_ticker(raw: dict | None) -> FingerprintTickerParams:
-    """Parse the optional `world.fingerprint_ticker` block (EM-313). Absent/empty
-    ⇒ defaults (enabled OFF). VIEWER-only; no engine consumer."""
+    """Parse the optional `world.fingerprint_ticker` block (EM-313). Absent/
+    empty/malformed ⇒ defaults (enabled OFF). VIEWER-only; no engine consumer —
+    a bad block (e.g. `fingerprint_ticker: true`) must never fail config load."""
     d = FingerprintTickerParams()
-    if not raw:
+    if not isinstance(raw, dict):
         return d
+
+    def _num(key: str, default, cast):
+        try:
+            return cast(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
     return FingerprintTickerParams(
         enabled=bool(raw.get("enabled", d.enabled)),
-        reference_runs=int(raw.get("reference_runs", d.reference_runs)),
-        temperature=float(raw.get("temperature", d.temperature)),
-        lock_threshold=float(raw.get("lock_threshold", d.lock_threshold)),
-        min_turns=int(raw.get("min_turns", d.min_turns)),
-        max_series_points=int(raw.get("max_series_points", d.max_series_points)),
+        reference_runs=_num("reference_runs", d.reference_runs, int),
+        temperature=_num("temperature", d.temperature, float),
+        lock_threshold=_num("lock_threshold", d.lock_threshold, float),
+        min_turns=_num("min_turns", d.min_turns, int),
+        max_series_points=_num("max_series_points", d.max_series_points, int),
     )
 
 
@@ -2928,9 +3108,47 @@ def _parse_war(raw: dict | None) -> WarParams:
             "exhaustion_per_casualty", d.exhaustion_per_casualty),
         # EM-259 — siege + endgame.
         siege_damage=_int("siege_damage", d.siege_damage),
+        siege_energy_cost=_float("siege_energy_cost", d.siege_energy_cost),
         exhaustion_per_siege=_int("exhaustion_per_siege", d.exhaustion_per_siege),
+        exhaustion_per_siege_own=_int(
+            "exhaustion_per_siege_own", d.exhaustion_per_siege_own),
         exhaustion_per_round=_int("exhaustion_per_round", d.exhaustion_per_round),
         exhaustion_cap=_int("exhaustion_cap", d.exhaustion_cap),
+    )
+
+
+def _parse_faith(raw: dict | None) -> FaithParams:
+    """Parse the optional `world.faith` block (EM-260).
+    Absent/empty/malformed -> engine-matching defaults (enabled stays FALSE, the
+    inert Wave-O default). Each key falls back to its default individually (a
+    malformed value never breaks the block). Mirrors `_parse_war`."""
+    if not isinstance(raw, dict):
+        return FaithParams()
+    d = FaithParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return FaithParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        devotion_base=_int("devotion_base", d.devotion_base),
+        temple_buff=_int("temple_buff", d.temple_buff),
+        conversion_chance=_float("conversion_chance", d.conversion_chance),
+        devotion_decay=_int("devotion_decay", d.devotion_decay),
+        schism_threshold=_int("schism_threshold", d.schism_threshold),
+        schism_grace=_int("schism_grace", d.schism_grace),
+        congregation_min_size=_int("congregation_min_size", d.congregation_min_size),
+        convert_trust_seed=_int("convert_trust_seed", d.convert_trust_seed),
+        hostility_grievance=_int("hostility_grievance", d.hostility_grievance),
     )
 
 
@@ -3490,6 +3708,7 @@ def _parse_world(
         crime=_parse_crime(w.get("crime")),
         comm=_parse_comm(w.get("comm")),
         war=_parse_war(w.get("war")),
+        faith=_parse_faith(w.get("faith")),
         healing_house=_parse_healing_house(w.get("healing_house")),
         charters=_parse_charters(w.get("charters")),
         needs=_parse_needs(w.get("needs")),
@@ -3507,6 +3726,7 @@ def _parse_world(
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
         universalization=_parse_universalization(w.get("universalization")),
+        building_recipes=_parse_building_recipes(w.get("building_recipes")),
         coherence=_parse_coherence(w.get("coherence")),
         chimera_twins=_parse_chimera_twins(w.get("chimera_twins")),
         miracles=_parse_miracles(w.get("miracles")),

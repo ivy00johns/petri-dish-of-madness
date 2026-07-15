@@ -182,6 +182,41 @@ def test_glob_does_not_grab_a_lane_a_concrete_entry_names_later():
     assert {l.profile for l in out} == {"x", "y", "auto"}
 
 
+def test_exclude_denylists_a_lane_from_the_glob_sweep():
+    """PR#106 C15: a legacy-only profile (command-a-2, the EM-324 truncator)
+    must not be re-placed by the `*` sweep — the exclude matcher bars it."""
+    universe = [_lane("a", "m-a"), _lane("command-a", "command-a-2")]
+    order = [LaneOrderEntry("freellmapi", "*")]
+    out = SortingList(
+        order, exclude=[LaneOrderEntry("freellmapi", "command-a-2")],
+    ).apply(universe)
+    assert [l.profile for l in out] == ["a"]   # swept lane in, denylisted out
+
+
+def test_exclude_beats_a_concrete_entry_naming_the_same_model():
+    """Exclusion is absolute: even a concrete order entry cannot place a
+    denylisted lane."""
+    universe = [_lane("a", "m-a"), _lane("command-a", "command-a-2")]
+    order = [LaneOrderEntry("freellmapi", "command-a-2"),
+             LaneOrderEntry("freellmapi", "*")]
+    out = SortingList(
+        order, exclude=[LaneOrderEntry("freellmapi", "command-a-2")],
+    ).apply(universe)
+    assert [l.profile for l in out] == ["a"]
+
+
+def test_exclude_is_source_scoped():
+    # An exclude matcher only covers its own source; a same-model lane of
+    # another source is untouched.
+    universe = [_lane("g", "shared-id", source="gemini"),
+                _lane("f", "shared-id")]
+    order = [LaneOrderEntry("freellmapi", "*"), LaneOrderEntry("gemini", "*")]
+    out = SortingList(
+        order, exclude=[LaneOrderEntry("freellmapi", "shared-id")],
+    ).apply(universe)
+    assert [l.profile for l in out] == ["g"]
+
+
 def test_registry_ordered_and_get():
     lanes = [replace(_lane("a", "m-a"), priority=2),
              replace(_lane("b", "m-b"), priority=0)]
@@ -480,6 +515,30 @@ def test_parse_clamps_max_attempts_and_skips_malformed_entries():
     assert [(e.source, e.model) for e in d.order] == [("freellmapi", "*")]
 
 
+def test_parse_reads_exclude_denylist():
+    d = _parse_adaptive_routing({
+        "exclude": [{"source": "freellmapi", "model": "command-a-2"}],
+    })
+    assert [(e.source, e.model) for e in d.exclude] == [
+        ("freellmapi", "command-a-2")]
+    # Absent / malformed ⇒ empty (nothing excluded).
+    assert _parse_adaptive_routing({}).exclude == ()
+    assert _parse_adaptive_routing({"exclude": "nope"}).exclude == ()
+
+
+def test_exclude_survives_config_json_asdict_round_trip():
+    """PR#106 C15: the denylist must survive the fork/replay seam, or a
+    replayed run would re-place the excluded lane."""
+    original = _parse_adaptive_routing({
+        "enabled": True,
+        "order": [{"source": "freellmapi", "model": "*"}],
+        "exclude": [{"source": "freellmapi", "model": "command-a-2"}],
+    })
+    reparsed = _parse_adaptive_routing(asdict(original))
+    assert reparsed == original
+    assert reparsed.exclude[0].model == "command-a-2"
+
+
 def test_config_json_asdict_round_trip():
     """The fork/replay seam serializes via asdict (order → list of dicts) and
     reparses; the entries must survive the round-trip."""
@@ -585,3 +644,37 @@ def test_real_config_glob_matchers_resolve_against_real_profiles():
 
     sorted_lanes = SortingList(ar.order, allow_paid=ar.allow_paid).apply(universe)
     assert not any(ln.source == "anthropic" for ln in sorted_lanes)
+
+
+def test_real_config_freellmapi_model_ids_are_plain_catalog_ids():
+    """PR#106 C5 (the EM-321/EM-323 class): FreeLLMAPI catalog ids are PLAIN —
+    a `vendor/`-prefixed (OpenRouter-style) or `@cf/`-prefixed model_id 404s on
+    the proxy, so its lane silently burns a bounce attempt per walk. deepseek-pro
+    shipped `deepseek-ai/deepseek-v4-pro` (dead); the catalog id is
+    `deepseek-v4-pro`. Pin the invariant for every freellmapi profile."""
+    cfg = load_config()
+    router = Router(cfg.profiles, cache_enabled=False,
+                    adaptive_routing=cfg.world.adaptive_routing)
+    for lane in router._build_lane_universe():
+        if lane.source != "freellmapi":
+            continue
+        assert "/" not in lane.model_id and not lane.model_id.startswith("@"), (
+            f"profile {lane.profile!r} model_id {lane.model_id!r} is vendor-"
+            f"prefixed — not a FreeLLMAPI catalog id (404s on the proxy; C5)."
+        )
+
+
+def test_real_config_registry_excludes_the_command_a_truncator():
+    """PR#106 C15: the shipped lanes.yaml `*` sweep re-placed command-a-2 (the
+    EM-324 strict-JSON truncator, kept in profiles.yaml only for legacy
+    references) at sweep priority. The `exclude` denylist must keep it out of
+    the live registry entirely."""
+    cfg = load_config()
+    ar = cfg.world.adaptive_routing
+    assert any(e.model == "command-a-2" for e in ar.exclude), (
+        "expected the command-a-2 denylist entry in lanes.yaml adaptive_routing.exclude")
+    router = Router(cfg.profiles, cache_enabled=False, adaptive_routing=ar)
+    registry_models = [ln["model_id"] for ln in router.lane_registry_snapshot()]
+    assert "command-a-2" not in registry_models
+    # The denylist bars ONLY the truncator — the sweep still places other lanes.
+    assert len(registry_models) > 0
