@@ -912,3 +912,45 @@ export interface AppState {
   connected: boolean;
   mockMode: boolean;
 }
+
+// ── Lab Setup admin panel ──────────────────────────────────────────────
+export interface FlagsResponse {
+  baked: Record<string, boolean>;
+  groups: { prompt_weight: string[]; routing_ops: string[] };
+}
+export interface EstimateBreakdownRow { key: string; tokens: number; }
+export interface EstimateResult {
+  ok: boolean;
+  error?: string;
+  total_input_tokens?: number;
+  output_budget?: number;
+  tokenizer?: 'cl100k_base' | 'heuristic';
+  base_note?: string;
+  breakdown?: EstimateBreakdownRow[];
+}
+export type Reliability = 'clean' | 'reasoning' | 'unknown';
+export interface CapabilityLane {
+  id: string; provider: string; free: boolean;
+  context_window: number | null; reliability: Reliability;
+}
+export interface CapabilityResponse {
+  lanes: CapabilityLane[];
+  cast_pins: Record<string, string>;
+}
+export type Verdict = 'free_clean_ok' | 'free_at_risk' | 'needs_paid';
+export interface Recommendation {
+  verdict: Verdict;
+  banner: string;
+  safe: string[];
+  risky: string[];
+  castPinRisks: { agent: string; lane: string; reason: string }[];
+}
+export interface ApplyResult {
+  ok: boolean;
+  diff: { flag: string; from: boolean; to: boolean }[];
+  restart_required: boolean;
+  message: string;
+  /** Optional (backend also returns these; not required by the plan). */
+  unapplied?: string[];
+  unknown?: string[];
+}
