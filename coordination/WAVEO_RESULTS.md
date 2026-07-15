@@ -14,6 +14,40 @@ Substrate ridden (all merged EM-250 keystone, verified present):
 - reserved round-start slots documented at world.py 2400 (recompute_factions → diffuse_culture → recompute_congregations → advance_war → age_agents)
 - War verb wiring as prior-art mirror: TOOL_REGISTRY (runtime.py 553), menu gate (197/273), schema (380), dispatch (6620), governance gate (2244)
 
+## Ship summary (2026-07-15 overnight)
+
+**All 9 items shipped, 0 skipped/deferred.** Culture track EM-251–255 COMPLETE; Religion track EM-260–263 COMPLETE. One commit per item (9 commits, `337bd5e`→`5b659c0`), each gated green before the next.
+
+**Final gates:**
+- Backend: `.venv/bin/python -m pytest backend/tests/ -q` → **2704 passed, 1 skipped** (baseline was 2475/1 → +229 new tests across the wave).
+- Typecheck: `cd web && /usr/local/bin/npx tsc -b --force` → **clean (exit 0)**.
+- Frontend: `cd web && node node_modules/vitest/vitest.mjs run` → **1594 passed, 125 files** (baseline 1472 → +122).
+
+**Both engines are behind default-OFF gates — the em161/em250/em256/em260 goldens stay byte-identical.** Every item shipped a flag-off golden test proving zero new events/menu/prompt/snapshot keys when disabled.
+
+### How to flip live + the marquee to watch
+Both blocks live in the run's `world.yaml` (config `world.comm` / `world.faith`):
+```yaml
+world:
+  comm:
+    enabled: true          # Culture: rumors, letters, memes, diffusion, camps, canonize/ban_gossip
+    # diffusion_chance 0.20, dominance_threshold 6, camp_min_shared 2 … (tune in CommunicationParams)
+  faith:
+    enabled: true          # Religion: found_faith, proselytize, worship, congregations, schism, hostility
+    conversion_chance: 0.3 # raise to see conversions faster; schism_threshold 50 / schism_grace 20 → LOWER both to force a visible schism
+```
+Config bakes per-run — **restart the sim to adopt** (do NOT `--reload`; see the dev-reload memory). Watch the feed + the new **Meme Lineage** and **Faith** panels (left column, beside the War panel) for:
+- **A meme mutating as it spreads** — an agent paints an image (`create_image`), another `adopt_meme`s it and the drifted child repaints ("fox in a crown" → "fox in a paper crown"); the Meme Lineage panel shows the image family tree, ending in a `meme_dominant` 🦊 banner.
+- **A rumor distorting per hop** — `spread_rumor`/passive `diffuse_culture` runs text through `_distort_text` ("borrowed" → "stole"); `meme_mutated` cards, generation climbs.
+- **A faith founding + congregation + schism** — `found_faith` → `consecrate_faith` (70% vote anchors a temple) → `proselytize`/`worship` grow a `congregation` → after `schism_grace` rounds of divergence a child faith forks (`faith_schism`); `declare_hostility` feeds war grievance when war is also on.
+
+### Notes / caveats for review
+- Builds on **PR #108** (the 2026-07-15 fix pack) — merge this AFTER #108. Belligerence-derived-from-war_band and exiled-excluded-from-electorates idioms from the fix pack were respected (not the stale #92 idioms).
+- `web/node_modules` in this worktree is a symlink to the main repo's (gitignored; the worktree lacked one). Not committed.
+- New world stores added this wave (all serialize only-when-non-empty, restore-to-default): `dominant_meme_ids` (EM-253), `congregations` + `schism_pending` (EM-262). New config: `CommunicationParams` (pre-existing EM-250), `FaithParams` (EM-260) + `devotion_base`/`congregation_min_size`/`convert_trust_seed`/`hostility_grievance`. New design token `--faith-tint`.
+- Round-start canonical chain is now fully live + tested: `recompute_factions → diffuse_culture → recompute_congregations → advance_war → age_agents`.
+- Live visual sign-off is the USER's (ledger rows kept in-progress, not done).
+
 ## Progress log
 
 - **EM-263 religion conflict + frontend — SHIPPED (Religion track COMPLETE).** Backend: `action_excommunicate` (founder-gated, no co-location, removes member + zeroes devotion + tears co_religionist web; `excommunicated`) + `action_declare_hostility` (founder-gated, sets `faith.hostile_to`; when war on, feeds `add_grievance` between the faiths' factions, `reason="faith_hostility"`, deterministic; `faith_hostility_declared`). +`FaithParams.hostility_grievance`. Frontend: `co_religionist` in RelationshipType, `Faith` interface + optional `Agent.faith_id/devotion` + `WorldState.faiths/congregations/schism_pending`, 15 religion EventKinds; new `FaithPanel.tsx` (faith badges ✞/☾, mean devotion, ⚔ hostility marker, congregation chips reusing camp chrome, schism/parent hint; null when faith-free) mounted beside MemeLineagePanel; new `--faith-tint` token; new 🕯 `faith` feed lane. world.py +162, runtime.py +117, loader.py +6, +frontend. New `test_em263_conflict.py` (24) + `test_em263_schema.py` (9) + `FaithPanel.test.tsx` (12) + `EventFeed.faith.test.tsx` (50). Backend 2704 passed / 1 skipped; tsc clean; vitest 1594 passed.
