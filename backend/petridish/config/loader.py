@@ -704,6 +704,26 @@ class UniversalizationParams:
 
 
 @dataclass
+class BuildingRecipesParams:
+    """EM-299 (Wave Q) — parametric building recipes (config `world.building_recipes`).
+
+    A build turn may carry an OPTIONAL closed-enum `recipe` authoring the
+    building's SHAPE (footprint/floors/roof/material/palette/window_density/trim).
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-299 — the recipe is
+    ignored, no recipe is stored or serialized, and the build menu carries no
+    recipe clause (prompt goldens unchanged). The engine + prompt both read via
+    the defensive `_building_recipes_enabled` accessors with the IDENTICAL default,
+    so an absent block behaves the same (config-absent = OFF). Flip `enabled: true`
+    to let models author skylines (zero extra LLM calls — the recipe rides the
+    existing build turn; the frontend derives a procedural mesh from it).
+
+      enabled — master toggle (default False = zero behavioral change).
+    """
+    enabled: bool = False
+
+
+@dataclass
 class CoherenceParams:
     """EM-224 — PIANO coherence for multi-action turns (config `world.coherence`).
 
@@ -2029,6 +2049,12 @@ class WorldParams:
     # block into every turn (zero extra LLM calls — rides the existing turn).
     universalization: UniversalizationParams = field(
         default_factory=UniversalizationParams)
+    # EM-299 (Wave Q) — parametric building recipes. Additive with a DEFAULT-OFF
+    # gate: an absent `building_recipes` block is byte-identical to pre-EM-299
+    # (prompt golden + snapshot key set). Flip enabled:true to let models author
+    # building shapes (zero extra LLM calls — the recipe rides the build turn).
+    building_recipes: BuildingRecipesParams = field(
+        default_factory=BuildingRecipesParams)
     # EM-224 — PIANO coherence for multi-action turns. Additive with an
     # engine-matching default; DEFAULT OFF, so a world.yaml without the
     # `coherence` block is byte-identical to pre-EM-224 (prompt golden +
@@ -2387,6 +2413,19 @@ def _parse_universalization(raw: dict | None) -> UniversalizationParams:
         return UniversalizationParams()
     d = UniversalizationParams()
     return UniversalizationParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+    )
+
+
+def _parse_building_recipes(raw: dict | None) -> BuildingRecipesParams:
+    """Parse the optional `world.building_recipes` block (EM-299).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-299 (prompt golden +
+    snapshot key set)."""
+    if not isinstance(raw, dict):
+        return BuildingRecipesParams()
+    d = BuildingRecipesParams()
+    return BuildingRecipesParams(
         enabled=bool(raw.get("enabled", d.enabled)),
     )
 
@@ -3508,6 +3547,7 @@ def _parse_world(
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
         universalization=_parse_universalization(w.get("universalization")),
+        building_recipes=_parse_building_recipes(w.get("building_recipes")),
         coherence=_parse_coherence(w.get("coherence")),
         chimera_twins=_parse_chimera_twins(w.get("chimera_twins")),
         miracles=_parse_miracles(w.get("miracles")),
