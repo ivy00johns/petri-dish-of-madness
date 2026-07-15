@@ -4557,6 +4557,16 @@ class World:
         # never flag-gated); their per-effect validation below rejects them
         # while war is disabled, and the runtime gate/menu never offer them
         # then, so a peacetime world is byte-identical.
+        # EM-254 — canonize_meme / ban_gossip: the culture governance lane. Both
+        # stay in this set UNCONDITIONALLY (the declare_war/peace_treaty
+        # convention — the world method is never flag-gated); their per-effect
+        # validation below rejects them while comm is disabled, and the runtime
+        # gate/menu never offer them then, so a culture-free world is
+        # byte-identical (the em250 golden). canonize_meme is a one-shot
+        # payload-carrying ACT (like declare_war/trial — the 70% supermajority
+        # lane, ZERO new tally code); ban_gossip is a persistent AGREEMENT-GATE
+        # rule (clones ban_stealing end-to-end — simple majority, no on-ratify
+        # side effect, blocks spread_rumor while active).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
                          "name_town", "demolish", "promote_image", "trial",
@@ -4565,6 +4575,7 @@ class World:
                          "adopt_master_plan",  # EM-245 (S3b)
                          "set_zone_rule",  # EM-265 (SB)
                          "declare_war", "peace_treaty",  # EM-257 (Wave O war)
+                         "canonize_meme", "ban_gossip",  # EM-254 (Wave O culture)
                          "heal"}  # EM-315 (Healing House)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
@@ -4853,6 +4864,31 @@ class World:
                                    f"(got {amount})"), None
             payload = {"war_id": wid, "reparations": amount,
                        "faction_id": suing_f["id"]}
+        # EM-254 — canonize_meme carries the target meme id on the payload (like
+        # promote_image's image_id / demolish's target). The id arrives on the
+        # generic `target` arg (the runtime maps args.meme_id → target too).
+        # Validate BEFORE a vote opens (the demolish convention): culture must be
+        # enabled, and the target must name a real meme still in circulation.
+        # This is the 70%-supermajority "popular meme → institution" bridge; the
+        # passing vote sets town_motif_ref in _on_rule_activated.
+        if effect == "canonize_meme":
+            if not self._comm_enabled():
+                return False, ("culture is not transmitted in this town "
+                               "(comm disabled)"), None
+            mid = str(target or "").strip()
+            if self.memes.get(mid) is None:
+                return False, (f"canonize_meme requires a real meme id "
+                               f"(got {mid!r})"), None
+            payload = {"meme_id": mid}
+        # EM-254 — ban_gossip is a persistent AGREEMENT-GATE rule (ban_stealing's
+        # twin): it carries NO payload and takes NO target, and BLOCKS
+        # spread_rumor while active (simple majority — NOT the 70% lane). Comm
+        # must be enabled (the culture-lane gate), else it is un-proposable, so a
+        # culture-free world never admits it (byte-identical, the em250 golden).
+        if effect == "ban_gossip":
+            if not self._comm_enabled():
+                return False, ("gossip cannot be legislated in this town "
+                               "(comm disabled)"), None
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -4932,6 +4968,18 @@ class World:
                     return False, (f"a peace vote for {payload.get('war_id')!r} "
                                    f"is already open"), None
                 continue
+            # EM-254 — canonize_meme is scoped per MEME_ID (two distinct memes may
+            # have open canonization votes at once; the SAME meme may not be
+            # double-proposed) — mirrors declare_war's per-pair dedup / demolish-
+            # per-target. ban_gossip is NOT here: as a persistent agreement-gate
+            # rule (ban_stealing's twin) it falls through to the single-open-per-
+            # effect default below, exactly like ban_stealing.
+            if effect == "canonize_meme":
+                if (rule.payload or {}).get("meme_id") == payload.get("meme_id"):
+                    return False, (f"a canonize vote for "
+                                   f"{payload.get('meme_id')!r} is already "
+                                   f"open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -4952,6 +5000,7 @@ class World:
                               "adopt_master_plan",  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
                               "set_zone_rule",  # EM-265 (SB) — one-shot per-zone act
                               "declare_war", "peace_treaty",  # EM-257 — one-shot acts per pair/war
+                              "canonize_meme",  # EM-254 — one-shot per meme (ban_gossip renews like ban_stealing)
                               "heal") else None  # EM-315 — one-shot transplant per patient
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
@@ -5031,7 +5080,13 @@ class World:
                                            # "renewed" against the first and
                                            # never applied — no war would open.
                                            "declare_war",
-                                           "peace_treaty") else None
+                                           "peace_treaty",
+                                           # EM-254 — canonize_meme is a one-shot
+                                           # per-meme ACT (like demolish/trial):
+                                           # each passing vote canonizes afresh, it
+                                           # never "renews". ban_gossip is NOT here —
+                                           # it renews like its twin ban_stealing.
+                                           "canonize_meme") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -5277,6 +5332,30 @@ class World:
                 amount = int(self._war_param("reparations_base", 25))
             self._settle_war(war, loser, amount, event_kind="peace_signed",
                              payload_extra={"proposal_id": rule.id})
+            return
+        # EM-254 — canonize_meme: a passing 70% SUPERMAJORITY elevates a popular
+        # meme to the town's canonical motif (self.town_motif_ref — the
+        # plaza_banner_ref analog, EM-253). A ONE-SHOT governance ACT (like
+        # declare_war / trial): it applies its effect here on ratify and does NOT
+        # linger as an active blocking rule. A meme that vanished from self.memes
+        # before the vote ratified is a SILENT no-op (the demolish vanished-target
+        # convention; the vote still applied). The meme_canonized event parks in
+        # the SAME outbox name_town/declare_war use (drained + emitted by the
+        # loop's _flush_spawn_events); actor_id anchors DETERMINISTICALLY on the
+        # meme's origin_agent_id (the meme_dominant recipe, EM-155).
+        if rule.effect == "canonize_meme":
+            rule.applied = True
+            meme_id = str((rule.payload or {}).get("meme_id") or "")
+            meme = self.memes.get(meme_id)
+            if meme is None:
+                return
+            self.town_motif_ref = meme_id
+            self.pending_spawn_events.append(self._faction_event(
+                "meme_canonized", meme.origin_agent_id,
+                f"🏛 By vote, \"{_truncate(meme.text, 60)}\" becomes the town's "
+                f"canon.",
+                {"meme_id": meme_id, "proposal_id": rule.id},
+            ))
             return
         # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
         # article in the living constitution. The op + payload were validated at
@@ -5677,6 +5756,7 @@ class World:
                            "adopt_master_plan",  # EM-245 (S3b) — structural city morph → 0.7
                            "set_zone_rule",  # EM-265 (SB) — structural city policy → 0.7
                            "declare_war", "peace_treaty",  # EM-257 — faction-scoped 70% (electorate substituted above)
+                           "canonize_meme",  # EM-254 — a popular meme → institution: the 70% supermajority lane (town-wide, NOT faction-scoped)
                            "heal"):  # EM-315 — remaking a mind is a weighty act → 70% supermajority
             if rule.effect == "amend_constitution":
                 try:
@@ -9387,6 +9467,16 @@ class World:
             return self._fail_event(
                 agent.id, "spread_rumor", "comm disabled",
                 f"{agent.name} murmurs a rumor no one is here to catch.")
+        # EM-254 — ban_gossip agreement-gate (ban_stealing's twin, cf.
+        # action_steal): a ratified ban forbids spreading rumors. Placed AFTER the
+        # comm gate so a comm-off world returns the identical "comm disabled" fail
+        # (ban_gossip is itself un-proposable without comm ⇒ never active there),
+        # keeping the em250 golden byte-identical.
+        if self.has_active_rule("ban_gossip"):
+            return self._fail_event(
+                agent.id, "spread_rumor", "ban_gossip rule is active",
+                f"{agent.name} bites their tongue — gossip is banned in this "
+                f"town.")
         if agent.id == target.id:
             return self._fail_event(
                 agent.id, "spread_rumor", "self",

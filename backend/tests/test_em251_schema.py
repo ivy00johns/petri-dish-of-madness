@@ -47,12 +47,17 @@ def _sys(agent, world) -> str:
 
 # ── static contract: registry + schema entries exist (they cancel in golden) ──
 
-def test_both_verbs_registered_reflex_no_gates():
+def test_both_verbs_registered_reflex_no_location_gate():
     for verb in ("spread_rumor", "send_letter"):
         meta = TOOL_REGISTRY[verb]
         assert meta["tier"] == "reflex"
         assert meta["location_gate"] is None       # co-location is world-enforced
-        assert meta["agreement_gate"] is None
+    # EM-254 — spread_rumor now carries the ban_gossip agreement_gate (a ratified
+    # ban hides it from the menu + the validator rejects it, ban_stealing's twin);
+    # send_letter stays ungated (a letter is not gossip). Inert until a ban_gossip
+    # rule is active, which itself requires comm — so the default-OFF golden holds.
+    assert TOOL_REGISTRY["spread_rumor"]["agreement_gate"] == "ban_gossip"
+    assert TOOL_REGISTRY["send_letter"]["agreement_gate"] is None
 
 
 def test_both_verbs_in_the_action_enum():

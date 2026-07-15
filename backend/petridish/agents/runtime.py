@@ -593,10 +593,14 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # EM-251 — culture transmission verbs 🟢, both REFLEX (zero extra LLM calls).
     # spread_rumor's co-location gate is war-style — enforced by the world action
     # (like recruit), NOT a place gate; send_letter has NO location gate BY DESIGN
-    # (the first absent-target channel). No agreement_gate. Offered ONLY while
-    # comm.enabled (see _assemble_context), so the default-OFF menu — and the
-    # em161 golden — never change.
-    "spread_rumor":     {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # (the first absent-target channel). Offered ONLY while comm.enabled (see
+    # _assemble_context), so the default-OFF menu — and the em161 golden — never
+    # change. EM-254 — spread_rumor now carries the ban_gossip agreement_gate
+    # (steal→ban_stealing's twin): a ratified ban hides it from the menu (via
+    # _gate_ok) AND the validator rejects it. ban_gossip is itself un-proposable
+    # without comm, so a comm-off world never activates it ⇒ the gate is inert
+    # there ⇒ byte-identical. send_letter stays ungated (a letter is not gossip).
+    "spread_rumor":     {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_gossip"},
     "send_letter":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-253 — culture lifecycle verbs (Wave O Culture stage), both reflex, no
     # gates. create_meme coins an idea (no target, ungated by co-location);
@@ -2158,6 +2162,12 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             return target_error
 
     elif action == "spread_rumor":
+        # EM-254 — a ratified ban_gossip forbids spreading rumors (steal's
+        # ban_stealing gate shape). The world action re-checks it too; this front
+        # gate rejects early with clear guidance (and the menu hides the verb via
+        # _gate_ok). Placed first so a banned town never dangles the verb.
+        if world.has_active_rule("ban_gossip"):
+            return "ban_gossip rule is active — spread_rumor is forbidden"
         # EM-251 — spread_rumor targets a CO-LOCATED agent (resolved + validated
         # like deceive/clash: reachable + alive + here). The world action re-checks
         # comm.enabled + self-target + co-location and mints/plants the drift, so
@@ -2329,6 +2339,15 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if getattr(world, "war_enabled", None) and world.war_enabled():
             valid_effects.add("declare_war")
             valid_effects.add("peace_treaty")
+        # EM-254 — the culture governance lane rides ONLY when comm is enabled
+        # (the war-lane recipe): default OFF ⇒ not in the set ⇒ rejected as an
+        # invalid effect ⇒ agent behavior byte-identical when dormant (the em250
+        # golden). The world method stays directly callable (its own comm-disabled
+        # reason). canonize_meme = the 70% "popular meme → institution" bridge;
+        # ban_gossip = a simple-majority spread_rumor ban (ban_stealing's twin).
+        if getattr(world, "_comm_enabled", None) and world._comm_enabled():
+            valid_effects.add("canonize_meme")
+            valid_effects.add("ban_gossip")
         # EM-315 — the Healing House `heal` lane rides ONLY when the flag is on
         # (the war/set_zone_rule recipe): default OFF ⇒ not in the set ⇒ rejected
         # as an invalid effect ⇒ agent behavior byte-identical when dormant. The
@@ -2504,6 +2523,16 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                         return "peace_treaty reparations must be >= 0"
                 except (TypeError, ValueError):
                     return "peace_treaty reparations must be a non-negative integer"
+        # EM-254 — canonize_meme: mirror promote_image's existence check (the id
+        # may arrive on args.meme_id OR the generic args.target — the world
+        # handler maps either key) so the gate AGREES with world.action_propose_rule
+        # (EM-108 menu/resolution rule). Only runs when comm is enabled (the effect
+        # passed the set above). ban_gossip needs no args (ban_stealing's twin).
+        if effect == "canonize_meme":
+            _mid = str(args.get("meme_id") or args.get("target") or "").strip()
+            if _mid not in (getattr(world, "memes", {}) or {}):
+                return ("canonize_meme requires args.meme_id = the id of a real "
+                        "meme in circulation to elevate to the town's canon")
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -3108,7 +3137,11 @@ def _assemble_context(
     # targets that actually resolve. getattr keeps callers safe if the seam is
     # ever absent.
     if getattr(world, "_comm_enabled", None) and world._comm_enabled():
-        if co_located:
+        # EM-254 — _gate_ok folds in spread_rumor's ban_gossip agreement_gate:
+        # a ratified ban HIDES the verb from the menu (as ban_stealing hides
+        # steal). Without a ban it is inert, so the pre-EM-254 comm-on menu is
+        # unchanged.
+        if co_located and _gate_ok("spread_rumor"):
             valid_actions.append(
                 "spread_rumor (target, rumor) - whisper a rumor to someone here; "
                 "it distorts as it passes: "
@@ -3315,6 +3348,32 @@ def _assemble_context(
                     f"; heal needs target=<a citizen's name or id, e.g. "
                     f"{_patient.name}> to SENTENCE them to the Healing House, where "
                     f"the town hot-swaps their model — decided on a 70% vote")
+        # EM-254 — the culture governance lane surfaces ONLY when comm is enabled
+        # (the war-lane recipe): default OFF ⇒ NO new text ⇒ the prompt is
+        # byte-identical (the em250 golden). canonize_meme elevates a popular meme
+        # to the town's canon on a 70% vote — named a concrete meme (the
+        # promote_image FINDING 1(b) recipe, preferring one that is NOT already the
+        # motif) so the model targets one that resolves. ban_gossip forbids
+        # spread_rumor on a simple majority; offered only while no such ban is
+        # already in force (so the menu never dangles a redundant re-ban).
+        if getattr(world, "_comm_enabled", None) and world._comm_enabled():
+            _memes_now = getattr(world, "memes", {}) or {}
+            if _memes_now:
+                _motif = getattr(world, "town_motif_ref", None)
+                _canon = next(
+                    (m for m in sorted(_memes_now.values(), key=lambda m: m.id)
+                     if m.id != _motif),
+                    None)
+                if _canon is None:                       # only the motif exists
+                    _canon = sorted(_memes_now.values(), key=lambda m: m.id)[0]
+                propose_line += "|canonize_meme"
+                propose_tail += (
+                    f"; canonize_meme needs meme_id=<a meme's id, e.g. "
+                    f"{_canon.id}> to elevate it to the town's canon by 70% vote")
+            if not world.has_active_rule("ban_gossip"):
+                propose_line += "|ban_gossip"
+                propose_tail += ("; ban_gossip forbids spreading rumors "
+                                 "(simple-majority vote)")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -7118,7 +7177,10 @@ class AgentRuntime:
             # PROTOTYPE (god-channel) — name_town carries the proposed name.
             name = args.get("name")
             # Wave K / EM-219 — demolish carries the target building id.
-            target = args.get("target") or args.get("building_id")
+            # EM-254 — canonize_meme carries the meme id; the model may put it on
+            # args.meme_id, so fold that into the generic target the world reads.
+            target = args.get("target") or args.get("building_id") or (
+                args.get("meme_id") if effect == "canonize_meme" else None)
             # Wave I / EM-212 — promote_image carries the gallery image id.
             image_id = args.get("image_id")
             # EM-236 — amend_constitution carries op (add|edit|remove) + an optional
