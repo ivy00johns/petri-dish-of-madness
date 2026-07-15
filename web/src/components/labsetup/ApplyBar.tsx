@@ -21,9 +21,13 @@ export function ApplyBar({ diff, onApply, result, busy }: {
         {busy ? 'Applying…' : 'Apply & restart'}
       </button>
       {result && (
-        <p className="labsetup-applymsg" role="status">
-          {result.message}{result.restart_required ? ' (restart ./dev to bake)' : ''}
-        </p>
+        result.ok === false ? (
+          <p className="labsetup-applymsg error" role="alert">Apply failed: {result.error}</p>
+        ) : (
+          <p className="labsetup-applymsg" role="status">
+            {result.message}{result.restart_required ? ' (restart ./dev to bake)' : ''}
+          </p>
+        )
       )}
     </div>
   );

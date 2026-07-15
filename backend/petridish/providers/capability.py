@@ -4,7 +4,6 @@ knowledge — the curated lanes.yaml `order` is the hand-ranked clean set; the
 `exclude` denylist + a seed reasoning-model set are the truncators."""
 from __future__ import annotations
 import fnmatch
-from typing import Any
 
 # EM-324 findings: models that emit reasoning preamble and truncate strict-JSON
 # on the heavy agent prompt (finish_reason='length'). gpt-oss-120b is clean-JSON

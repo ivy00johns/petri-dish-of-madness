@@ -82,6 +82,11 @@ export function LabSetupView() {
   if (!flags) return <div className="labsetup"><p>Loading Lab Setup…</p></div>;
   return (
     <div className="labsetup">
+      {loadError && (
+        <p role="alert" className="labsetup-loaderror">
+          Some Lab Setup data failed to load ({loadError}) — showing what loaded.
+        </p>
+      )}
       <h2>Lab Setup — compose the next run</h2>
       <div className="labsetup-grid">
         <FlagBoard flags={flags} pending={pending} onToggle={onToggle} />

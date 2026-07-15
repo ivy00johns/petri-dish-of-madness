@@ -17,7 +17,7 @@ export function CapabilityTable({ cap }: { cap: CapabilityResponse | null }) {
             <td>{l.id}</td>
             <td>{l.provider}</td>
             <td>{l.free ? 'free' : 'paid'}</td>
-            <td>{l.context_window ? `${(l.context_window / 1000) | 0}k` : '—'}</td>
+            <td>{l.context_window ? `${Math.floor(l.context_window / 1000)}k` : '—'}</td>
             <td>{TAG_LABEL[l.reliability] ?? l.reliability}</td>
           </tr>
         ))}
