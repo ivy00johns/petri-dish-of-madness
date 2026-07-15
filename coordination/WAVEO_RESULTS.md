@@ -16,5 +16,6 @@ Substrate ridden (all merged EM-250 keystone, verified present):
 
 ## Progress log
 
+- **EM-252 diffuse_culture round boundary — SHIPPED.** `diffuse_culture()` inserted at its reserved slot in `_apply_round_start` (recompute_factions → **diffuse_culture** → advance_war → age_agents; recompute_congregations slot still reserved for EM-262). Three mechanics: seeded co-located passive diffusion (drifted child meme per infection, `_seed_int % 100 < diffusion_chance*100`, capped `max_diffusions`) + half-life virality `//` decay + zero-carrier decay-prune (`meme_died`). Gated on comm.enabled → `[]` no-op. world.py +140; new `test_em252_diffusion.py` (15) incl. round-order invariant + flag-off golden + image-cost guard. Suite 2518 passed / 1 skipped.
 - **EM-251 transmission verbs — SHIPPED.** `action_spread_rumor` (co-located, trust-positive, no crime; distorts one hop via `_distort_text`, mints a drifted child meme parent_id/generation+1, plants distorted belief) + `action_send_letter`/`deliver_letters` (no co-location gate — write to an absent agent; mailbox FIFO cap `letter_cap`; drained once at recipient's next-turn start). Wired into TOOL_REGISTRY/ACTION_SCHEMA/menu (comm-gated, mirrors war track)/dispatch. world.py +140, runtime.py +133; new tests `test_em251_schema.py` (9) + `test_em251_transmission.py` (19). Suite 2503 passed / 1 skipped.
 </content>

@@ -2393,13 +2393,22 @@ class World:
         # newborn's family edges count toward this round's clusters. Diff-
         # driven events park in the same pending_spawn_events outbox.
         self.recompute_factions()
-        # EM-256 — the once-per-round war subsystem, AFTER the faction
-        # recompute (war reads the FRESH faction set) and BEFORE the aging
-        # sweep at this method's tail — the plan's contended-seam order,
-        # asserted by an order-invariant test (test_em256_grievance). RESERVED
-        # SLOTS (Wave O round systems NOT built this pass): diffuse_culture
-        # (EM-252) then recompute_congregations (EM-262) belong BETWEEN
-        # recompute_factions and advance_war — the canonical chain is
+        # EM-252 — the once-per-round PASSIVE culture-diffusion sweep, AFTER the
+        # faction recompute and BEFORE advance_war (the reserved slot, now LIVE).
+        # Pure compute (zero LLM): co-located memes hop to non-carriers (seeded,
+        # capped), virality half-life-decays, and zero-carrier aged-out memes are
+        # pruned. Events SELF-PARK in the pending_spawn_events outbox (same drain
+        # as recompute_factions). Gated on comm.enabled: OFF (the default) ⇒ [] that
+        # parks nothing and mutates nothing (golden-safe). TEXT ONLY — never
+        # touches self.gallery (the free-first cost rule).
+        self.diffuse_culture()
+        # EM-256 — the once-per-round war subsystem, AFTER the faction recompute
+        # (war reads the FRESH faction set) and the culture sweep, and BEFORE the
+        # aging sweep at this method's tail — the plan's contended-seam order,
+        # asserted by order-invariant tests (test_em256_grievance /
+        # test_em252_diffusion). RESERVED SLOT (a Wave O round system NOT built
+        # this pass): recompute_congregations (EM-262) belongs BETWEEN
+        # diffuse_culture and advance_war — the canonical chain is
         # recompute_factions → diffuse_culture → recompute_congregations →
         # advance_war → age_agents. War disabled (the default) ⇒ a no-op that
         # parks nothing (golden-safe).
@@ -9434,6 +9443,130 @@ class World:
                             "from_id": letter.get("from_id")},
             })
         agent.mailbox = []
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-252 — Passive culture diffusion (the once-per-round Wave-O round system,
+    # inserted into _apply_round_start between recompute_factions and advance_war).
+    # Three PURE-COMPUTE mechanics — zero LLM, no clock, no RNG (EM-155): seeded
+    # co-located diffusion, half-life virality decay, and zero-carrier decay-prune.
+    # Gated on comm.enabled (default OFF), so a default world runs it as a no-op
+    # that parks nothing and mutates nothing (the em161 golden). TEXT ONLY — a hop
+    # mints a drifted CHILD meme and NEVER auto-generates an image / touches
+    # self.gallery (the free-first cost rule; a visual repaint is create_image,
+    # EM-253, NOT this sweep). Events SELF-PARK like recompute_factions.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def diffuse_culture(self) -> list[dict]:
+        """EM-252 — the once-per-round passive culture-diffusion sweep. Walks
+        memes (sorted by id) then their carriers (sorted by id) in deterministic
+        order; for each carrier, every co-located OTHER living non-carrier is a
+        candidate whose infection is gated by the seeded roll
+        `_seed_int("diffuse", city_seed, meme.id, carrier.id, target.id, tick)
+        % 100 < int(diffusion_chance * 100)` (never random/clock — EM-155; the
+        roll is fixed by the participant ids, so the outcome is INDEPENDENT of the
+        walk order). A hit mints a DRIFTED CHILD meme (parent_id + generation+1 +
+        _distort_text, seeded on the target), attaches it to the target, and emits
+        a `meme_mutated` event; the sweep is capped at comm.max_diffusions total
+        infections. Then virality half-life-decays (idle >= comm.half_life_ticks
+        ⇒ halved with `//` floor, never round/float — the EM-155 drift guard) and
+        a zero-carrier meme idle >= comm.decay_ticks is pruned from self.memes
+        with a `meme_died` event ("death of an idea"); a meme that still has
+        carriers is NEVER pruned.
+
+        Events SELF-PARK in the pending_spawn_events outbox (same drain as
+        recompute_factions) and are ALSO returned. Gated on comm.enabled: disabled
+        ⇒ returns [] immediately, parking nothing and mutating nothing (the em161
+        golden). Pure compute — zero LLM calls; TEXT ONLY — never touches
+        self.gallery / sets an image_id on a child (the free-first cost rule; a
+        visual-meme repaint needs an explicit create_image turn, EM-253)."""
+        if not self._comm_enabled():
+            return []
+        from ..animals.runtime import _seed_int
+        events: list[dict] = []
+        threshold = int(float(self._comm_param("diffusion_chance", 0.20)) * 100)
+        max_diff = max(0, int(self._comm_param("max_diffusions", 12)))
+        half_life = int(self._comm_param("half_life_ticks", 30))
+        decay_ticks = int(self._comm_param("decay_ticks", 80))
+
+        # 1) Passive seeded diffusion. Snapshot the SOURCE memes (sorted by id)
+        # BEFORE any mint so a child minted THIS sweep is never itself re-walked.
+        sources = sorted(self.memes.values(), key=lambda m: m.id)
+        infections = 0
+        for meme in sources:
+            if infections >= max_diff:
+                break
+            for cid in sorted(meme.carriers):
+                if infections >= max_diff:
+                    break
+                carrier = self.agents.get(cid)
+                if carrier is None or not carrier.alive:
+                    continue
+                candidates = sorted(
+                    (a for a in self.agents_at(carrier.location)
+                     if a.id != carrier.id and meme.id not in a.held_memes),
+                    key=lambda a: a.id,
+                )
+                for target in candidates:
+                    if infections >= max_diff:
+                        break
+                    roll = _seed_int("diffuse", self.city_seed, meme.id,
+                                     carrier.id, target.id, self.tick)
+                    if roll % 100 >= threshold:
+                        continue
+                    child = self.mint_meme(
+                        meme.kind,
+                        self._distort_text(meme.text, target.id, self.tick),
+                        meme.origin_agent_id,
+                        parent_id=meme.id,
+                        generation=meme.generation + 1,
+                    )
+                    # Only a GENUINELY new attachment counts as an infection: an
+                    # idempotent re-derivation (same seeded child already held)
+                    # is a no-op — no double-count, no spurious event.
+                    if not self._attach_meme(target, child):
+                        continue
+                    infections += 1
+                    events.append({
+                        "kind": "meme_mutated",
+                        "actor_id": carrier.id,
+                        "target_id": target.id,
+                        "actor_type": "system",
+                        "text": (f"{self._agent_name(carrier.id)}'s "
+                                 f"{meme.kind} drifts to "
+                                 f"{self._agent_name(target.id)}."),
+                        "payload": {"meme_id": child.id, "parent_id": meme.id,
+                                    "generation": child.generation},
+                    })
+
+        # 2) Half-life virality decay — a meme idle >= half_life_ticks halves its
+        # virality with `//` floor (never round/float — the EM-155 drift guard).
+        # A child minted above carries last_spread_tick == self.tick, so it is
+        # immune this round (0 >= half_life is false for a positive window).
+        if half_life > 0:
+            for meme in self.memes.values():
+                if self.tick - meme.last_spread_tick >= half_life:
+                    meme.virality = meme.virality // 2
+
+        # 3) Decay-prune ("death of an idea") — a meme with ZERO carriers idle
+        # >= decay_ticks is deleted; a meme that still has carriers is NEVER
+        # pruned. Snapshot the ids first (we mutate self.memes in the loop) and
+        # walk them sorted for deterministic event order.
+        for mid in sorted(self.memes):
+            meme = self.memes[mid]
+            if meme.carriers:
+                continue
+            if self.tick - meme.last_spread_tick >= decay_ticks:
+                del self.memes[mid]
+                events.append(self._faction_event(
+                    "meme_died", meme.origin_agent_id,
+                    f'The {meme.kind} "{meme.text[:40]}" fades from memory.',
+                    {"meme_id": meme.id, "kind": meme.kind,
+                     "generation": meme.generation},
+                ))
+
+        if events:
+            self.pending_spawn_events.extend(events)
         return events
 
     # ──────────────────────────────────────────────────────────────────────────
