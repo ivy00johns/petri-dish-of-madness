@@ -46,6 +46,18 @@ def _block_get(block: Any, key: str, default: Any) -> Any:
     return getattr(block, key, default)
 
 
+def _restore_recipe(raw: Any) -> dict | None:
+    """EM-299 (Wave Q) — restore Building.recipe from a snapshot value. A stored
+    dict is re-coerced through the canonical validator (idempotent for a clean
+    recipe → byte-identical round-trip; repairs a hand-edited/garbage one so it
+    still renders a shape). A missing / non-dict value ⇒ None (pre-EM-299 shape)."""
+    if not isinstance(raw, dict):
+        return None
+    from .building_recipe import coerce_recipe
+    recipe, _ = coerce_recipe(raw)
+    return recipe.as_value_dict()
+
+
 def _clamp_need(value: Any, default: float = 100.0) -> float:
     """EM-229 — coerce a restored need (knowledge/influence) to a float clamped
     to 0..100. Absent (None) or malformed → the full default (fail-safe: a
@@ -1134,6 +1146,16 @@ class Building:
     # Serialized in to_dict + restored in from_snapshot ONLY when set, so pre-F1
     # snapshots are byte-identical. None ⇒ frontend falls back to assignBuildingLots.
     position: tuple[float, float] | None = None
+    # EM-299 (Wave Q) — an OPTIONAL parametric building RECIPE authoring the
+    # building's shape (footprint/floors/roof/material/palette/window_density/
+    # trim), a canonical value-dict (engine.building_recipe). Set ONLY when the
+    # `building_recipes.enabled` flag is on AND the agent authored a salvageable
+    # recipe; None otherwise (unsalvageable recipe ⇒ normal catalog build). The
+    # frontend derives a procedural mesh from it (computeBuildingMesh); absent ⇒
+    # today's catalog/silhouette render, never a hole. Serialized in to_dict +
+    # restored in from_snapshot ONLY when set, so a recipe-free world (flag off or
+    # no recipe authored) is byte-identical to pre-EM-299.
+    recipe: dict | None = None
 
     @property
     def condition_label(self) -> str:
@@ -1172,6 +1194,11 @@ class Building:
         # pre-F1 build (or the flag off) serializes byte-identically.
         if self.position:
             d["position"] = [self.position[0], self.position[1]]
+        # EM-299 (Wave Q) — the parametric recipe rides the shape ONLY when set,
+        # so a recipe-free build (flag off / no recipe) serializes byte-identically
+        # to pre-EM-299. The stored dict is already a canonical value-dict.
+        if self.recipe:
+            d["recipe"] = dict(self.recipe)
         return d
 
 
@@ -2577,6 +2604,13 @@ class World:
 
     def _buildings_cfg(self) -> Any:
         return getattr(self.params, "buildings", None)
+
+    def _building_recipes_enabled(self) -> bool:
+        """EM-299 (Wave Q) — config gate `world.building_recipes.enabled` (default
+        False). OFF ⇒ `recipe` on a build turn is ignored entirely and no recipe
+        is ever stored or serialized: the world is byte-identical to pre-EM-299."""
+        return bool(_block_get(
+            getattr(self.params, "building_recipes", None), "enabled", False))
 
     def _bld_param(self, name: str, default: Any) -> Any:
         cfg = self._buildings_cfg()
@@ -5740,9 +5774,18 @@ class World:
         function: str | None = None,
         place: str | None = None,
         zone_id: str | None = None,
+        recipe: Any = None,
     ) -> dict:
         """Create a Building status=planned at owner=public.
         Emits structure_state_changed{to:planned} + project_proposed.
+
+        EM-299 (Wave Q): an OPTIONAL `recipe` object authors the building's SHAPE
+        (footprint/floors/roof/material/palette/window_density/trim). Gated on
+        `building_recipes.enabled` (default OFF ⇒ recipe ignored entirely,
+        byte-identical). Flag ON ⇒ a salvageable recipe (any dict) is coerced to a
+        canonical value-dict and stored on the Building; an unsalvageable one
+        (non-dict) drops to a normal no-recipe build. The build ALWAYS succeeds —
+        a bad shape never rejects or wastes the turn (probe §6 three-tier posture).
 
         Wave K / EM-182: an OPTIONAL `place` arg lets the agent build in a CHOSEN
         district ("build a house in the industrial district"). When `place` is a
@@ -5853,6 +5896,18 @@ class World:
                 building.position = place_one(
                     building, list(self.buildings.values()),
                     (0.0, 0.0), self.city_seed)
+        # EM-299 (Wave Q) — an OPTIONAL parametric recipe authors the building's
+        # shape. Gated on `building_recipes.enabled` (default OFF ⇒ ignored
+        # entirely, byte-identical). Flag ON ⇒ a salvageable recipe (any dict) is
+        # coerced to a canonical value-dict + stored; a non-dict drops to a normal
+        # no-recipe build. PURE — no clock/random on the tick path (EM-155). The
+        # recorded repairs ride the proposed event payload for observability only.
+        recipe_repairs: list[str] = []
+        if self._building_recipes_enabled():
+            from .building_recipe import normalize_recipe
+            recipe_value, recipe_repairs = normalize_recipe(recipe)
+            if recipe_value is not None:
+                building.recipe = recipe_value
         # EM-266 (SC) — record defiance (observation ONLY; NO penalty, NO block). Only
         # under a stored zone with a ZoneRule: a build defies its zone when it is OVER
         # the density cap (count of LIVE buildings whose zone_id == this zone, THIS one
@@ -5914,6 +5969,12 @@ class World:
         if rule is not None:
             proposed_evt["payload"]["commemorative"] = True
             proposed_evt["payload"]["rule_id"] = rule.id
+        # EM-299 — the authored shape (+ any coercion repairs) rides the payload
+        # ONLY when a recipe was stored, so a recipe-free proposal is byte-identical.
+        if building.recipe is not None:
+            proposed_evt["payload"]["recipe"] = dict(building.recipe)
+            if recipe_repairs:
+                proposed_evt["payload"]["recipe_repairs"] = list(recipe_repairs)
         state_evt = self._structure_state_changed_event(
             building, "none", "planned", "proposed", agent.id
         )
@@ -10877,6 +10938,12 @@ class World:
                 position=((float(d["position"][0]), float(d["position"][1]))
                           if isinstance(d.get("position"), (list, tuple))
                           and len(d["position"]) == 2 else None),
+                # EM-299 (Wave Q) — restore the parametric recipe (pre-EM-299
+                # snapshots lack the key ⇒ None, byte-identical default). Re-coerced
+                # through the canonical validator so a clean stored recipe round-trips
+                # byte-identically and a hand-edited/garbage one still yields a valid
+                # shape — never a hole on restore.
+                recipe=_restore_recipe(d.get("recipe")),
             )
             world.buildings[b.id] = b
 
