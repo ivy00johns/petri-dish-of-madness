@@ -226,6 +226,26 @@ def test_building_near_a_settlement_joins_it(monkeypatch):
     assert w.settlement_of("c") == sid                # loosely associated
 
 
+def test_join_on_build_moves_home_with_membership(monkeypatch):
+    """C10 regression — the EM-110 lock-step invariant: joining IS (re)homing.
+    A build landing in a settlement's reach used to move the loose membership
+    but leave home_settlement_id behind (unlike found_settlement and the
+    arrival migration), desyncing the per-city perception horizon and
+    travel_to's origin from where the agent actually belongs."""
+    monkeypatch.setattr(rt, "FREE_PLACEMENT_ENABLED", True)
+    w = _world()
+    evt = w.action_found_settlement(w.agents["b"], "Plazaville")  # at plaza ≈ origin
+    sid = evt["payload"]["settlement_id"]
+    w.agents["c"] = AgentState(id="c", name="Cyd", personality="", profile="mock",
+                               location="plaza", energy=80.0, credits=20)
+    assert w.agents["c"].home_settlement_id is None   # unhomed newcomer
+    r = w.action_propose_project(w.agents["c"], name="Hut", kind="home",
+                                 funds_required=0)
+    assert any(e["kind"] == "settlement_joined" for e in r["_multi"])
+    assert w.settlement_of("c") == sid                # membership moved …
+    assert w.agents["c"].home_settlement_id == sid    # … and home WITH it
+
+
 def test_member_building_at_home_emits_no_join(monkeypatch):
     monkeypatch.setattr(rt, "FREE_PLACEMENT_ENABLED", True)
     w = _world()

@@ -2244,6 +2244,16 @@ class World:
             due = self._due_ids(self.round)
             if due:
                 break
+            # An empty due set with every living agent still off-board means the
+            # all-in-transit fast-forward in _apply_round_start had no resolvable
+            # arrival to land (a tampered/forked-corrupt transit pair) — advancing
+            # more rounds can never surface a due agent, so stop here instead of
+            # spinning per-round subsystems (UBI/births/factions/war) max-cadence
+            # times on every next_agent call. Any on-board living agent keeps the
+            # pre-existing bounded cadence walk (it comes due within max-cadence).
+            living = self.living_agents()
+            if living and all(self._in_transit(a) for a in living):
+                break
         self._turn_order = due
         self._turn_index = 0
         # EM-235 — a fresh round resets the per-agent boost-buy budget (the
@@ -2406,6 +2416,20 @@ class World:
         # is computed (in _start_new_round, after this returns), so a just-arrived
         # traveler migrates home and rejoins THIS round's rotation. No-op +
         # byte-identical when settlements are disabled (no agent is in transit).
+        # When EVERY living agent is off-board, world.tick can never advance (it
+        # only moves inside an executed turn, and there is nobody to execute one)
+        # — so a future transit_arrival_tick would never come due: a permanent
+        # freeze. Fast-forward the clock to the earliest scheduled arrival so the
+        # sweep below lands at least one traveler. Pure fn of world state (agent
+        # transit fields + tick, no random/clock — EM-155): same-state worlds jump
+        # to the same tick, and the jump rides the next snapshot exactly like a
+        # turn-advanced tick, so replay/fork restore it verbatim.
+        living = self.living_agents()
+        if living and all(self._in_transit(a) for a in living):
+            arrivals = [a.transit_arrival_tick for a in living
+                        if getattr(a, "transit_arrival_tick", None) is not None]
+            if arrivals:
+                self.tick = max(self.tick, min(arrivals))
         self.resolve_travel_arrivals()
         ubi_rule = self._active_rule("ubi")
         if ubi_rule:
@@ -6219,6 +6243,13 @@ class World:
                 float(building.position[0]), float(building.position[1]),
                 SETTLEMENT_R)
             if near_sid is not None and self._settlement_reassociate(agent.id, near_sid):
+                # EM-110 — joining IS (re)homing: the durable home_settlement_id
+                # stays in lock-step with the loose membership (the invariant
+                # found_settlement and the arrival migration both keep — the
+                # per-city perception horizon + travel_to's origin read from
+                # home). Only inside the enabled path, so a settlements-OFF
+                # world never touches it.
+                agent.home_settlement_id = near_sid
                 s_name = self.settlements[near_sid].get("name", near_sid)
                 turn_events.append({
                     "kind": "settlement_joined",

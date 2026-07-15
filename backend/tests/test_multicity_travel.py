@@ -255,6 +255,80 @@ def test_restored_traveler_still_offboard_then_arrives_on_schedule():
     assert restored.agents["b"].home_settlement_id == sid  # arrives on schedule
 
 
+# ── (d) all-living-in-transit: fast-forward, never a permanent freeze ──────────
+
+def test_all_living_in_transit_fast_forwards_and_unfreezes():
+    """C1 regression — tick only advances inside an executed turn, so with EVERY
+    living agent off-board no turn can run and a future transit_arrival_tick
+    would never come due: next_agent returned None forever while each call spun
+    _start_new_round max-cadence rounds deep (UBI/births/factions re-ran every
+    time). The round start now fast-forwards the clock to the earliest scheduled
+    arrival (a pure fn of world state), lands the travelers, and resumes."""
+    w = _world(n=3)
+    genesis = w.agents["b"].home_settlement_id
+    sid = _found_second(w, agent_id="a")             # 'a' now homes to Ridgehold
+    evts = [w.action_travel_to(w.agents["a"], genesis),
+            w.action_travel_to(w.agents["b"], sid),
+            w.action_travel_to(w.agents["c"], sid)]
+    assert all(e["kind"] == "travel_departed" for e in evts)
+    arrival = min(e["payload"]["arrival_tick"] for e in evts)
+    assert arrival > w.tick                          # scheduled in the future
+    assert all(w._in_transit(a) for a in w.living_agents())
+
+    agent = w.next_agent()
+    assert agent is not None                         # the world UNFROZE
+    assert w.tick == arrival                         # jumped to the arrival, not past it
+    assert w.round == 1                              # ONE round, not max-cadence per call
+    for a in w.living_agents():                      # every traveler landed
+        assert a.in_transit_to is None and a.transit_arrival_tick is None
+    assert w.agents["a"].home_settlement_id == genesis
+    assert w.agents["b"].home_settlement_id == sid
+    assert w.agents["c"].home_settlement_id == sid
+    arrived = [e for e in w.pending_spawn_events if e["kind"] == "travel_arrived"]
+    assert len(arrived) == 3                         # parked once, no re-run pileup
+    # the rotation resumes normally: the rest of the round follows in id order
+    assert agent.id == "a"
+    assert [w.next_agent().id, w.next_agent().id] == ["b", "c"]
+
+
+def test_fast_forward_lands_only_the_earliest_arrival():
+    """The jump goes to min(transit_arrival_tick) — a later traveler stays
+    off-board until its own tick comes due (never teleported early)."""
+    w = _world(n=3)
+    genesis = w.agents["b"].home_settlement_id
+    sid = _found_second(w, agent_id="a")
+    first = w.action_travel_to(w.agents["b"], sid)["payload"]["arrival_tick"]
+    w.tick = 4                                       # 'a'/'c' depart later
+    later_a = w.action_travel_to(w.agents["a"], genesis)["payload"]["arrival_tick"]
+    later_c = w.action_travel_to(w.agents["c"], sid)["payload"]["arrival_tick"]
+    assert first < min(later_a, later_c)
+
+    agent = w.next_agent()
+    assert agent is not None and agent.id == "b"     # only 'b' is due
+    assert w.tick == first                           # min arrival, not the max
+    assert w.agents["b"].in_transit_to is None
+    assert w.agents["a"].in_transit_to == genesis    # still on the road
+    assert w.agents["c"].in_transit_to == sid
+    assert w._turn_order == ["b"]
+
+
+def test_unresolvable_all_in_transit_never_spins_subsystems():
+    """A tampered/forked-corrupt transit pair (in_transit_to set, arrival tick
+    None) can never land — the round start must stop after ONE round instead of
+    spinning per-round subsystems max-cadence times on every next_agent call."""
+    w = _world(n=2)
+    sid = _found_second(w, agent_id="a")
+    genesis = w.agents["b"].home_settlement_id
+    w.action_travel_to(w.agents["a"], genesis)
+    w.action_travel_to(w.agents["b"], sid)
+    for a in w.agents.values():
+        a.transit_arrival_tick = None                # corrupt: unresolvable
+    for i in range(1, 6):
+        assert w.next_agent() is None                # genuinely nothing to run
+        assert w.round == i                          # +1 per call, never +max-cadence
+    assert w.tick == 0                               # no arrival to jump to
+
+
 # ── settlements OFF: the scheduler is byte-identical (no in-transit path) ──────
 
 def test_off_scheduler_due_set_unchanged():
