@@ -61,11 +61,22 @@ re-check after the fix soaks.
    ALL settlements with the same ease. Gates: tsc clean, vitest 1537/0 (+17). Deferred: 2D-map
    clicks (the map routes no clicks at all today).
 
-## Still running overnight (Opus — independent of the Fable budget)
+8. **Wave O COMPLETE → PR #111**: Culture (EM-251–255) + Religion (EM-260–263), all 9 items,
+   0 skipped — transmission verbs, diffuse_culture, meme lifecycle + image drift + camps,
+   canonize/ban_gossip, Meme Lineage panel; Faith plumbing, founding + temple seat,
+   proselytize/worship/congregations/schism, conflict surface + FaithPanel. Both engines behind
+   default-OFF `world.comm.enabled` / `world.faith.enabled` with per-item byte-identical
+   goldens; the canonical round-start chain is live + tested. Gates: backend **2704/0 (+229)**,
+   tsc clean, vitest **1594/0 (+122)**. Go-live + the marquee demo list:
+   `../petri-dish-waveo/coordination/WAVEO_RESULTS.md`. Merges AFTER #108 (its diff currently
+   includes the fix pack's commits, incl. the node_modules symlink deletion — it shrinks to
+   pure Wave O once #108 lands). Ledger: the 9 rows flipped to built-pending-sign-off;
+   EM-249/250/256–259 flipped to done-pending-sweep.
 
-- **waveo-builder** → `build/wave-o-culture-religion` (fix pack merged in): Culture EM-251→255
-  then Religion EM-260→263, per-item goldens + commits, one PR at the end (merges after #108).
-  Progress log: `../petri-dish-waveo/coordination/WAVEO_RESULTS.md`.
+**NIGHT COMPLETE — nothing left running.** Final merge order: **#108 → #107 → #109 → #110 →
+#111**, then the multi-city branch sign-off. Flag flips owed after merges: `comm.enabled`,
+`faith.enabled`, `building_recipes.enabled`, `adaptive_routing.discovery.enabled` — one at a
+time, RESTART (never --reload), watch the feed.
 
 ## Morning checklist (for you)
 
