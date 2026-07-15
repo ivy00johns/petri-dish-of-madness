@@ -12,11 +12,15 @@ of the live world. fix-don't-hide: it must NEVER fabricate a number — any
 builder failure surfaces as {ok: false, error}, never a faked total.
 
 `/api/config/apply` writes staged flag flips to config/world.yaml via
-ruamel's comment-preserving round-trip loader and returns the diff +
-restart_required (config bakes per-run — the dev-reload-kills-live-sim ban
-means this never restarts in-process). `discovery` is the one flag that does
-NOT live in world.yaml (it's config/lanes.yaml's adaptive_routing.discovery)
-so it must come back in `unapplied`, never silently written as a dead key.
+ruamel's comment-preserving round-trip loader (atomically — temp file +
+os.replace) and returns the diff + restart_required (config bakes per-run —
+the dev-reload-kills-live-sim ban means this never restarts in-process).
+`discovery` is the one flag that does NOT live in world.yaml (it's
+config/lanes.yaml's adaptive_routing.discovery) so it must come back in
+`unapplied`, never silently written as a dead key. A typo'd/unknown override
+key must come back in `unknown`, also never written. A true no-op (empty
+overrides, all-unapplied/unknown, or values already matching disk) must not
+touch the file at all, and `restart_required` reflects that (`bool(diff)`).
 
 Context-manager TestClient idiom (the test_capability.py idiom): a bare
 `TestClient(app)` does NOT run the app's lifespan, so `_config`/`_world`
@@ -79,18 +83,20 @@ def test_estimate_failure_is_reported_not_faked():
 
 def test_apply_returns_diff_and_restart_required(tmp_path, monkeypatch):
     # Point the writer at a temp copy of world.yaml so the test never edits the
-    # real config.
+    # real config. `comm` ships enabled: true in world.yaml, so flipping it to
+    # False is a real change (a real no-change is covered by the noop test).
     src = "config/world.yaml"
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
     with TestClient(app, raise_server_exceptions=True) as client:
-        r = client.post("/api/config/apply", json={"overrides": {"comm": True}})
+        r = client.post("/api/config/apply", json={"overrides": {"comm": False}})
         assert r.status_code in (200, 503)
         if r.status_code == 200:
             body = r.json()
             assert body["restart_required"] is True
             assert isinstance(body["diff"], list)
+            assert {"flag": "comm", "from": True, "to": False} in body["diff"]
 
 
 def test_apply_creates_absent_flag_block_and_writes_it_to_disk(tmp_path, monkeypatch):
@@ -135,3 +141,78 @@ def test_apply_discovery_is_unapplied_not_written_to_world_yaml(tmp_path, monkey
     with open(dst) as fh:
         doc = yaml.load(fh)
     assert "discovery" not in doc["world"]
+
+
+def test_apply_noop_does_not_rewrite_file(tmp_path, monkeypatch):
+    # Empty overrides -> empty diff -> the file must not be touched at all
+    # (Fix 1): a no-op apply must never needlessly rewrite/reformat the
+    # hand-maintained world.yaml.
+    src = "config/world.yaml"
+    dst = tmp_path / "world.yaml"
+    shutil.copy(src, dst)
+    monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
+    before_bytes = dst.read_bytes()
+    before_mtime = dst.stat().st_mtime_ns
+    with TestClient(app, raise_server_exceptions=True) as client:
+        r = client.post("/api/config/apply", json={"overrides": {}})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["diff"] == []
+        assert body["restart_required"] is False
+        assert "no changes" in body["message"].lower()
+    assert dst.read_bytes() == before_bytes
+    assert dst.stat().st_mtime_ns == before_mtime
+
+
+def test_apply_absent_flag_false_is_noop(tmp_path, monkeypatch):
+    # `faith` is absent from world.yaml (an absent block implicitly defaults
+    # to False). Posting False for an absent flag is therefore a no-op — it
+    # must NOT create a `faith: {enabled: false}` block, must not appear in
+    # `diff`, and must not write the file (Fix 2).
+    src = "config/world.yaml"
+    dst = tmp_path / "world.yaml"
+    shutil.copy(src, dst)
+    monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
+    before_bytes = dst.read_bytes()
+    with TestClient(app, raise_server_exceptions=True) as client:
+        r = client.post("/api/config/apply", json={"overrides": {"faith": False}})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["diff"] == []
+        assert body["restart_required"] is False
+    assert dst.read_bytes() == before_bytes
+
+    yaml = ruamel.yaml.YAML()
+    with open(dst) as fh:
+        doc = yaml.load(fh)
+    assert "faith" not in doc["world"]
+
+
+def test_apply_unknown_flag_reported_not_written(tmp_path, monkeypatch):
+    # A typo'd/unknown override key (not in _PROMPT_WEIGHT_FLAGS or
+    # _ROUTING_OPS_FLAGS) must never be baked as a dead key under `world:` —
+    # the loader would never read it back. It must be surfaced honestly via
+    # `unknown`, and must never appear in `diff` (Fix 3).
+    src = "config/world.yaml"
+    dst = tmp_path / "world.yaml"
+    shutil.copy(src, dst)
+    monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
+    before_bytes = dst.read_bytes()
+    with TestClient(app, raise_server_exceptions=True) as client:
+        r = client.post(
+            "/api/config/apply",
+            json={"overrides": {"totally_bogus_flag_xyz": True}},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["unknown"] == ["totally_bogus_flag_xyz"]
+        assert all(d["flag"] != "totally_bogus_flag_xyz" for d in body["diff"])
+        # An unknown-only override set is also a no-op write (Fix 1 tie-in).
+        assert body["diff"] == []
+        assert body["restart_required"] is False
+    assert dst.read_bytes() == before_bytes
+
+    yaml = ruamel.yaml.YAML()
+    with open(dst) as fh:
+        doc = yaml.load(fh)
+    assert "totally_bogus_flag_xyz" not in doc["world"]

@@ -745,52 +745,99 @@ async def post_config_apply(body: ApplyBody):
     """Write the staged flag flips to config/world.yaml (comment-preserving) and
     tell the caller a fresh ./dev restart is required to bake them. Never silent:
     returns the exact diff plus any flags that could NOT be written here (e.g.
-    `discovery`, which lives in config/lanes.yaml). Does NOT restart in-process
-    (the --reload ban)."""
+    `discovery`, which lives in config/lanes.yaml, via `unapplied`) and any
+    override keys that aren't a real flag at all (via `unknown` — never baked
+    as a dead key under `world:`). A true no-op (empty overrides, all-unapplied,
+    or values that already match what's on disk) never opens the file for
+    writing, so `restart_required` reflects whether anything actually changed.
+    Does NOT restart in-process (the --reload ban).
+
+    Known v1 residual: ruamel's round-trip loader preserves every comment and
+    value, but on an ACTUAL write it still cosmetically normalizes ~25 lines
+    of world.yaml (e.g. `null` -> blank, flow-mapping alignment padding) that
+    are semantically identical either way. Fix 1 (the no-op guard above) means
+    this only fires when something real changed, not on every apply call.
+    Tracked as a known limitation, not a bug — a future v2 could diff at the
+    ruamel-node level to suppress even that."""
     import os
+    import tempfile
     from ruamel.yaml import YAML
     if _config is None:
         raise HTTPException(503, "Not initialized")
     path = os.environ.get("PETRIDISH_WORLD_YAML", "config/world.yaml")
-    # ruamel round-trip loader (typ='rt', the default) — comment-preserving AND
-    # safe: it does NOT construct arbitrary Python like PyYAML's unsafe
-    # yaml.load(). Never swap this for PyYAML yaml.load()/unsafe_load().
-    yaml = YAML()
-    yaml.preserve_quotes = True
-    # Calibrated to world.yaml's own hand-authored style (verified against
-    # both the top-level `animals:` list and the nested `charters.
-    # seed_ambitions:` list): ruamel's unset defaults would otherwise flatten
-    # every block-sequence dash to column 0 AND rewrap any flow mapping past
-    # the 80-col default width — turning a one-flag toggle into a huge,
-    # unrelated-looking diff. width=4096 stops the rewrap; the explicit
-    # indent reproduces this file's 2-space list indent.
-    yaml.width = 4096
-    yaml.indent(mapping=2, sequence=4, offset=2)
-    with open(path) as fh:
-        doc = yaml.load(fh)
-    world_block = doc.get("world", doc)
-    unapplied = [f for f in body.overrides if f in _LANES_YAML_FLAGS]
-    diff = []
-    for flag, val in body.overrides.items():
-        if flag in _LANES_YAML_FLAGS:
-            continue  # reported via `unapplied`, never written to world.yaml
-        block = world_block.get(flag)
-        if block is None:
-            world_block[flag] = {"enabled": bool(val)}
-            diff.append({"flag": flag, "from": False, "to": bool(val)})
-            continue
-        prev = bool(block.get("enabled", False))
-        if prev != bool(val):
-            block["enabled"] = bool(val)
-            diff.append({"flag": flag, "from": prev, "to": bool(val)})
-    with open(path, "w") as fh:
-        yaml.dump(doc, fh)
-    message = "Config written. Restart ./dev to bake the new combo into a fresh run."
+    try:
+        # ruamel round-trip loader (typ='rt', the default) — comment-preserving
+        # AND safe: it does NOT construct arbitrary Python like PyYAML's unsafe
+        # yaml.load(). Never swap this for PyYAML yaml.load()/unsafe_load().
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        # Calibrated to world.yaml's own hand-authored style (verified against
+        # both the top-level `animals:` list and the nested `charters.
+        # seed_ambitions:` list): ruamel's unset defaults would otherwise flatten
+        # every block-sequence dash to column 0 AND rewrap any flow mapping past
+        # the 80-col default width — turning a one-flag toggle into a huge,
+        # unrelated-looking diff. width=4096 stops the rewrap; the explicit
+        # indent reproduces this file's 2-space list indent.
+        yaml.width = 4096
+        yaml.indent(mapping=2, sequence=4, offset=2)
+        with open(path) as fh:
+            doc = yaml.load(fh)
+        world_block = doc.get("world", doc)
+        # Valid flag inventory — anything else is a typo/stale name. Writing it
+        # anyway would bake a dead key the loader never reads (the exact hazard
+        # `discovery`'s `unapplied` carve-out exists for); surface it honestly
+        # via `unknown` instead.
+        KNOWN = set(_PROMPT_WEIGHT_FLAGS + _ROUTING_OPS_FLAGS)
+        unknown = [f for f in body.overrides if f not in KNOWN]
+        unapplied = [f for f in body.overrides if f in _LANES_YAML_FLAGS]
+        diff = []
+        for flag, val in body.overrides.items():
+            if flag not in KNOWN:
+                continue  # reported via `unknown`, never written — dead-key guard
+            if flag in _LANES_YAML_FLAGS:
+                continue  # reported via `unapplied`, never written to world.yaml
+            block = world_block.get(flag)
+            if block is None:
+                if not bool(val):
+                    continue  # absent flag implicitly defaults False -> no-op
+                world_block[flag] = {"enabled": True}
+                diff.append({"flag": flag, "from": False, "to": True})
+                continue
+            prev = bool(block.get("enabled", False))
+            if prev != bool(val):
+                block["enabled"] = bool(val)
+                diff.append({"flag": flag, "from": prev, "to": bool(val)})
+        if diff:
+            # Atomic write: dump to a temp file in the SAME directory (so
+            # os.replace is same-filesystem-atomic), then swap it into place.
+            # A crash/permission-error/disk-full mid-dump leaves the temp file
+            # orphaned and world.yaml — the one hand-maintained, backup-less
+            # source of truth — untouched, instead of half-written/corrupt.
+            tmp_dir = os.path.dirname(path) or "."
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", dir=tmp_dir, delete=False, suffix=".tmp")
+            try:
+                yaml.dump(doc, tmp)
+                tmp.close()
+                os.replace(tmp.name, path)
+            except Exception:
+                tmp.close()
+                if os.path.exists(tmp.name):
+                    os.unlink(tmp.name)
+                raise
+    except Exception as exc:  # fix-don't-hide: surface, never corrupt silently
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if diff:
+        message = "Config written. Restart ./dev to bake the new combo into a fresh run."
+    else:
+        message = "No changes to apply."
     if unapplied:
         message += (f" NOT written here — {', '.join(unapplied)} lives in "
                      "config/lanes.yaml, not world.yaml.")
-    return {"ok": True, "diff": diff, "unapplied": unapplied, "restart_required": True,
-            "message": message}
+    if unknown:
+        message += f" Unknown flag(s) ignored, not written: {', '.join(unknown)}."
+    return {"ok": True, "diff": diff, "unapplied": unapplied, "unknown": unknown,
+            "restart_required": bool(diff), "message": message}
 
 
 @app.get("/api/profiles")
