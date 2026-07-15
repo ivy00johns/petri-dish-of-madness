@@ -1214,6 +1214,11 @@ class FaithParams:
                           faith into a parent-linked child (EM-262).
       schism_grace      — ticks a freshly founded/schismed faith is shielded
                           from a further schism (EM-262).
+      congregation_min_size — the smallest shared-faith cluster that becomes a
+                          congregation at the round boundary (EM-262).
+      convert_trust_seed — the warm trust floor a proselytize conversion seals on
+                          the mutual co_religionist edge (trust-positive; never
+                          lowers trust — EM-262).
     """
     enabled: bool = False
     devotion_base: int = 10
@@ -1222,6 +1227,8 @@ class FaithParams:
     devotion_decay: int = 1
     schism_threshold: int = 50
     schism_grace: int = 20
+    congregation_min_size: int = 2
+    convert_trust_seed: int = 20
 
 
 @dataclass
@@ -3004,6 +3011,8 @@ def _parse_faith(raw: dict | None) -> FaithParams:
         devotion_decay=_int("devotion_decay", d.devotion_decay),
         schism_threshold=_int("schism_threshold", d.schism_threshold),
         schism_grace=_int("schism_grace", d.schism_grace),
+        congregation_min_size=_int("congregation_min_size", d.congregation_min_size),
+        convert_trust_seed=_int("convert_trust_seed", d.convert_trust_seed),
     )
 
 

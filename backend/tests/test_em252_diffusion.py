@@ -243,28 +243,32 @@ def test_young_zero_carrier_meme_survives():
 
 def test_round_start_chain_order_factions_diffuse_war_aging():
     """The canonical Wave-O chain: recompute_factions → diffuse_culture →
-    (reserved: recompute_congregations) → advance_war → age_agents. Mirrors
-    test_em256_grievance's order test, adding the now-LIVE diffuse_culture slot
-    between recompute_factions and advance_war."""
+    recompute_congregations (EM-262, now LIVE) → advance_war → age_agents. Mirrors
+    test_em256_grievance's order test, pinning the now-LIVE diffuse_culture +
+    recompute_congregations slots between recompute_factions and advance_war."""
     w = _world([_a("ada")])
     calls: list[str] = []
-    orig_rf, orig_dc, orig_aw, orig_age = (
-        w.recompute_factions, w.diffuse_culture, w.advance_war, w.age_agents)
+    orig_rf, orig_dc, orig_rc, orig_aw, orig_age = (
+        w.recompute_factions, w.diffuse_culture, w.recompute_congregations,
+        w.advance_war, w.age_agents)
     w.recompute_factions = (
         lambda: (calls.append("recompute_factions"), orig_rf())[1])
     w.diffuse_culture = (
         lambda: (calls.append("diffuse_culture"), orig_dc())[1])
+    w.recompute_congregations = (
+        lambda: (calls.append("recompute_congregations"), orig_rc())[1])
     w.advance_war = lambda: (calls.append("advance_war"), orig_aw())[1]
     w.age_agents = (
         lambda pre: (calls.append("age_agents"), orig_age(pre))[1])
 
     w._apply_round_start()
 
-    for name in ("recompute_factions", "diffuse_culture", "advance_war",
-                 "age_agents"):
+    for name in ("recompute_factions", "diffuse_culture",
+                 "recompute_congregations", "advance_war", "age_agents"):
         assert name in calls
     assert (calls.index("recompute_factions")
             < calls.index("diffuse_culture")
+            < calls.index("recompute_congregations")
             < calls.index("advance_war")
             < calls.index("age_agents"))
 

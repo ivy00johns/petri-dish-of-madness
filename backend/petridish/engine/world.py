@@ -1824,6 +1824,21 @@ class World:
         # pre-EM-260 snapshot — stays byte-identical (EM-155). Gated behind the
         # world.faith config block (faith_enabled, default OFF).
         self.faiths: dict[str, Faith] = {}
+        # EM-262 — Religion emergence (Wave O). Two collections beside faiths:
+        # congregations {id: {name, founded_tick, members}} — the shared-faith
+        # cluster (recomputed each round by recompute_congregations via the shared
+        # _recompute_groups clusterer, kind="congregation", cng_ ids; mirrors
+        # culture_camps) — and schism_pending {faith_id: tick} — the DETERMINISTIC
+        # schism grace latch: the tick a faith's co_religionist web first tore into
+        # 2+ disconnected components (mirrors grievances — seeded ids + tick
+        # arithmetic only, NO RNG / NO clock). When the divergence persists
+        # schism_grace rounds, the splinter forks into a parent-linked child faith.
+        # Both serialized in to_snapshot() only when non-empty (the culture_camps /
+        # grievances pattern), so a faith-off / faithless world — and every
+        # pre-EM-262 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore, byte-identical, EM-155). Gated behind faith_enabled (default OFF).
+        self.congregations: dict[str, dict] = {}
+        self.schism_pending: dict[str, int] = {}
         # EM-269 (F2) — agent-founded settlements: {id: {name, center,
         # founded_tick, founder_id, members}}. `center` is a WORLD-frame [x, z]
         # (±33 — the EM-268 placement frame; the logical→world conversion happens
@@ -2537,16 +2552,23 @@ class World:
         # parks nothing and mutates nothing (golden-safe). TEXT ONLY — never
         # touches self.gallery (the free-first cost rule).
         self.diffuse_culture()
+        # EM-262 — the once-per-round Religion subsystem (now LIVE — this was the
+        # RESERVED slot): recompute the shared-faith congregations, cool devotion,
+        # and advance any pending schism. Runs AFTER diffuse_culture (a faith rides
+        # the culture meme graph) and BEFORE advance_war — the canonical Wave-O
+        # chain recompute_factions → diffuse_culture → recompute_congregations →
+        # advance_war → age_agents, asserted by the order-invariant tests
+        # (test_em252_diffusion / test_em256_grievance / test_em262_emergence).
+        # Pure compute (zero LLM). Events SELF-PARK in pending_spawn_events (same
+        # drain as recompute_factions). Gated on faith_enabled: OFF (the default)
+        # ⇒ a no-op that parks nothing and mutates nothing (golden-safe).
+        self.recompute_congregations()
         # EM-256 — the once-per-round war subsystem, AFTER the faction recompute
-        # (war reads the FRESH faction set) and the culture sweep, and BEFORE the
-        # aging sweep at this method's tail — the plan's contended-seam order,
-        # asserted by order-invariant tests (test_em256_grievance /
-        # test_em252_diffusion). RESERVED SLOT (a Wave O round system NOT built
-        # this pass): recompute_congregations (EM-262) belongs BETWEEN
-        # diffuse_culture and advance_war — the canonical chain is
-        # recompute_factions → diffuse_culture → recompute_congregations →
-        # advance_war → age_agents. War disabled (the default) ⇒ a no-op that
-        # parks nothing (golden-safe).
+        # (war reads the FRESH faction set), the culture sweep, and the Religion
+        # sweep, and BEFORE the aging sweep at this method's tail — the plan's
+        # contended-seam order, asserted by order-invariant tests
+        # (test_em256_grievance / test_em252_diffusion / test_em262_emergence).
+        # War disabled (the default) ⇒ a no-op that parks nothing (golden-safe).
         self.advance_war()
         # EM-233 — the once-per-round memory consolidation ("sleep"), AFTER births
         # so a newborn (whose only belief is its birth line) is well under the
@@ -9578,6 +9600,157 @@ class World:
             self.pending_spawn_events.extend(events)
         return events
 
+    def recompute_congregations(self) -> list[dict]:
+        """EM-262 — the once-per-round Religion round subsystem, called from
+        _apply_round_start BETWEEN diffuse_culture and advance_war (the reserved
+        slot, now LIVE). Three PURE-COMPUTE mechanics (zero LLM, no clock/RNG —
+        EM-155):
+
+          1) CONGREGATIONS — a THIN caller of the shared _recompute_groups
+             clusterer (kind="congregation", cng_ ids, the recompute_factions /
+             recompute_culture_camps template): two LIVING agents share an edge when
+             both hold a faith_id and it is the SAME faith_id. Components of >=
+             faith.congregation_min_size (default 2) members become congregations.
+             Diff events (congregation_formed/joined/left/dissolved) park in
+             pending_spawn_events (same drain as recompute_factions).
+          2) DEVOTION DECAY — every living faith member cools by faith.devotion_decay
+             (deterministic, floored >= 0 — the grievance_decay analog).
+          3) SCHISM — _advance_schisms forks a faith whose co_religionist web has
+             torn (see there).
+
+        Gated on faith_enabled: OFF (the default) ⇒ returns [] immediately, parking
+        nothing and mutating nothing (no congregation store write, no snapshot key —
+        the em260 golden). Returns the parked events ([] when stable/disabled)."""
+        if not self.faith_enabled():
+            return []
+        min_size = max(1, int(self._faith_param("congregation_min_size", 2)))
+
+        def _edge(a: AgentState, b: AgentState) -> bool:
+            return bool(a.faith_id) and a.faith_id == b.faith_id
+
+        new_store, events = self._recompute_groups(
+            _edge, self.congregations, min_size, "congregation")
+        self.congregations = new_store
+        # Per-round devotion cool-off (deterministic, clamped >= 0) — the
+        # grievance-decay analog, walked in sorted-id order for replay-stable
+        # bookkeeping (it emits no events, so order is cosmetic — kept for clarity).
+        decay = max(0, int(self._faith_param("devotion_decay", 1)))
+        if decay:
+            for aid in sorted(self.agents):
+                agent = self.agents[aid]
+                if agent.alive and agent.faith_id:
+                    agent.devotion = max(0, agent.devotion - decay)
+        # Deterministic schism forking (its own parked events).
+        events.extend(self._advance_schisms())
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
+    def _co_religionist_edge(self, a: AgentState, b: AgentState) -> bool:
+        """EM-262 — a schism-graph edge: a co_religionist RELATIONSHIP bond exists
+        in EITHER direction (proselytize seals it MUTUALLY; either-direction keeps
+        the graph robust to a one-sided shift). Distinct from the CONGREGATION edge
+        (shared faith_id): the congregation is who NOMINALLY shares the faith, this
+        graph is who is actually BOUND by the conversion web — when it tears, the
+        faith has diverged."""
+        rel_ab = a.relationships.get(b.id)
+        rel_ba = b.relationships.get(a.id)
+        return ((rel_ab is not None and rel_ab.type == "co_religionist")
+                or (rel_ba is not None and rel_ba.type == "co_religionist"))
+
+    def _components_among(self, ids: list[str], edge_fn) -> list[list[str]]:
+        """EM-262 — connected components over `edge_fn` among a SPECIFIC id set
+        (the _edge_components walk, scoped to one faith's members instead of all
+        living agents). Deterministic: ids walked in sorted order, so components
+        come out ordered by their lowest member id, members sorted."""
+        members = sorted(set(str(i) for i in ids))
+        adjacency: dict[str, list[str]] = {m: [] for m in members}
+        for i, aid in enumerate(members):
+            a = self.agents.get(aid)
+            if a is None:
+                continue
+            for bid in members[i + 1:]:
+                b = self.agents.get(bid)
+                if b is not None and edge_fn(a, b):
+                    adjacency[aid].append(bid)
+                    adjacency[bid].append(aid)
+        components: list[list[str]] = []
+        seen: set[str] = set()
+        for m in members:
+            if m in seen:
+                continue
+            stack, comp = [m], []
+            seen.add(m)
+            while stack:
+                cur = stack.pop()
+                comp.append(cur)
+                for nxt in adjacency[cur]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            components.append(sorted(comp))
+        return components
+
+    def _advance_schisms(self) -> list[dict]:
+        """EM-262 — DETERMINISTIC schism forking (seeded ids + tick arithmetic only,
+        NO RNG / NO clock). For each faith (sorted-id walk), the living members'
+        co_religionist RELATIONSHIP web is split into connected components. When it
+        has torn into 2+ components, the SPLINTER = every member NOT in the KEEPER
+        (the largest component; a size tie breaks to the LOWEST lowest-member-id, so
+        the parent faith keeps the dominant bloc). The divergence REGISTERS as
+        pending only when the splinter has >= schism_threshold members (a min
+        splinter size — a lone dropout never triggers; the default 50 is deliberately
+        conservative, schisms are rare, so drive it low to exercise).
+
+        A registered divergence starts / keeps a grace latch in self.schism_pending
+        (faith_id → the tick it was FIRST seen); a faith that re-coalesces clears its
+        latch. When the divergence has persisted >= schism_grace ticks, the splinter
+        FORKS: mint_faith(founder=<splinter's lowest-id member>, parent_id=<faith>),
+        the splinter's members' faith_id is reassigned to the child, and a
+        faith_schism event fires. Every id is seeded (mint_faith), the grace latch is
+        pure tick math, so two identical worlds schism byte-identically (EM-155)."""
+        events: list[dict] = []
+        threshold = max(1, int(self._faith_param("schism_threshold", 50)))
+        grace = max(0, int(self._faith_param("schism_grace", 20)))
+        for fid in sorted(self.faiths):
+            faith = self.faiths[fid]
+            living = [m for m in faith.members
+                      if (a := self.agents.get(m)) is not None and a.alive]
+            comps = self._components_among(living, self._co_religionist_edge)
+            if len(comps) < 2:
+                self.schism_pending.pop(fid, None)     # coalesced ⇒ clear latch
+                continue
+            keeper = max(comps, key=len)               # largest; tie → lowest id
+            keeper_set = set(keeper)
+            splinter = sorted(m for m in living if m not in keeper_set)
+            if len(splinter) < threshold:              # too small to count
+                self.schism_pending.pop(fid, None)
+                continue
+            first = self.schism_pending.get(fid)
+            if first is None:
+                self.schism_pending[fid] = self.tick   # start the grace latch
+                continue
+            if self.tick - int(first) < grace:
+                continue                               # still within grace
+            # Grace elapsed — FORK the splinter into a parent-linked child faith.
+            self.schism_pending.pop(fid, None)
+            founder = splinter[0]                       # splinter's lowest-id member
+            child = self.mint_faith(founder, parent_id=fid)
+            for mid in splinter:
+                self.agents[mid].faith_id = child.id
+            child.members = list(splinter)
+            faith.members = [m for m in faith.members if m not in set(splinter)]
+            events.append({
+                "kind": "faith_schism",
+                "actor_id": founder,
+                "actor_type": "system",
+                "text": (f"🕯 {child.name} breaks away from {faith.name} in "
+                         f"schism ({len(splinter)} depart)."),
+                "payload": {"parent_faith_id": fid, "faith_id": child.id,
+                            "name": child.name, "members": list(splinter)},
+            })
+        return events
+
     # ──────────────────────────────────────────────────────────────────────────
     # EM-250 — Communication & Culture substrate (Wave O keystone). Build-once
     # seams shared by Culture (EM-251+), Religion (EM-260+), and War-adjacent
@@ -9987,6 +10160,161 @@ class World:
             "payload": {"action": "found_faith", "faith_id": faith.id,
                         "name": faith.name, "deity": faith.deity,
                         "meme_id": meme.id},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-262 — Religion emergence (Wave O): the two devotee REFLEX verbs
+    # (proselytize + worship), both faith-gated. proselytize is the
+    # TRUST-POSITIVE conversion channel (the spread_rumor recipe: plant a belief
+    # via the shared _plant_belief seam, NO crime, NO trust crater); worship is
+    # action_work's buff-at-place clone anchored on the _faith_seat_here temple.
+    # Deterministic — a seeded conversion roll, no clock/RNG (EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_proselytize(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-262 — preach the actor's faith to a CO-LOCATED target (the
+        spread_rumor recipe, gated on faith_enabled). The actor MUST hold a
+        faith_id; the target must be co-located (the deceive/clash gate). Plants
+        the faith's pitch in the target's beliefs via the SHARED _plant_belief
+        seam — TRUST-POSITIVE like spread_rumor: NO _register_crime, NO trust
+        crater (a conversion only ever FLOORS trust UP, never down).
+
+        Conversion is SEEDED (EM-155): a faithless target converts when
+        `_seed_int("proselytize", city_seed, actor.id, target.id, tick) % 100 <
+        int(conversion_chance*100)`. On CONVERSION: the target adopts the actor's
+        faith_id, joins faith.members, gains devotion, and a MUTUAL co_religionist
+        relationship edge is sealed (the accept_contract ally-ring recipe) — emits
+        proselytized + faith_joined (a _multi chain). On RESISTANCE: emits
+        proselytize_resisted (still zero trust damage). A target who ALREADY shares
+        the faith is a gentle no-op (a small +devotion reinforcement, NO re-join); a
+        target of a DIFFERENT faith always resists (no forced steal — only faithless
+        targets convert)."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "proselytize", "faith disabled",
+                f"{agent.name} preaches to an empty sky.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "proselytize", "self",
+                f"{agent.name} cannot preach to themselves.")
+        if not agent.faith_id:
+            return self._fail_event(
+                agent.id, "proselytize", "faithless",
+                f"{agent.name} has no faith to share.")
+        if not target.alive or agent.location != target.location:
+            return self._fail_event(
+                agent.id, "proselytize", "not co-located",
+                f"{agent.name} finds no one here to preach to.")
+        faith = self.faiths.get(agent.faith_id)
+        if faith is None:                                   # actor's faith vanished
+            return self._fail_event(
+                agent.id, "proselytize", "faith gone",
+                f"{agent.name}'s faith has faded from memory.")
+        from ..animals.runtime import _seed_int
+        # The sermon: a SEEDED tenet of the faith (deterministic — the same
+        # actor/target/tick always preaches the same line), planted trust-positive.
+        if faith.tenets:
+            pitch = faith.tenets[
+                _seed_int("proselytize-pitch", faith.id, agent.id, target.id,
+                          self.tick) % len(faith.tenets)]
+        else:  # pragma: no cover - a minted faith always carries tenets
+            pitch = faith.name
+        self._plant_belief(target, agent.name, pitch)
+        # A co-religionist already shares the faith ⇒ a gentle no-op: a small
+        # reinforcement of devotion, NEVER a re-join (idempotent, deterministic).
+        if target.faith_id == agent.faith_id:
+            target.devotion = max(0, min(100, target.devotion + 1))
+            return {
+                "kind": "proselytized",
+                "actor_id": agent.id,
+                "target_id": target.id,
+                "text": (f"🕯 {agent.name} and {target.name} share the faith of "
+                         f"{faith.name}."),
+                "payload": {"action": "proselytize", "faith_id": faith.id,
+                            "target_id": target.id, "converted": False,
+                            "already": True},
+            }
+        # A target who keeps a DIFFERENT faith always resists (no forced steal);
+        # only a FAITHLESS target may convert, on the seeded roll.
+        threshold = int(float(self._faith_param("conversion_chance", 0.3)) * 100)
+        roll = _seed_int("proselytize", self.city_seed, agent.id, target.id,
+                         self.tick)
+        convert = (not target.faith_id) and (roll % 100 < threshold)
+        if not convert:
+            return {
+                "kind": "proselytize_resisted",
+                "actor_id": agent.id,
+                "target_id": target.id,
+                "text": (f"{target.name} hears {agent.name}'s sermon on "
+                         f"{faith.name} but is unmoved."),
+                "payload": {"action": "proselytize", "faith_id": faith.id,
+                            "target_id": target.id, "converted": False},
+            }
+        # CONVERSION — adopt the faith, join, gain devotion, seal the co_religionist
+        # ring. All deterministic + clamped; trust is FLOORED up (never craters).
+        target.faith_id = faith.id
+        if target.id not in faith.members:
+            faith.members.append(target.id)
+        base = max(1, int(self._faith_param("devotion_base", 10)))
+        target.devotion = max(0, min(100, max(target.devotion, base)))
+        # Seal a MUTUAL co_religionist edge (the accept_contract / muster ally-ring
+        # recipe): set the type both ways, FLOOR trust to a warm co-religionist
+        # seed — never lowers trust, so no crater (the plan's trust-positive law).
+        seed = int(self._faith_param("convert_trust_seed", 20))
+        for a, b in ((agent, target), (target, agent)):
+            rel = a.relationships.get(b.id)
+            if rel is None:
+                rel = RelationshipState()
+                a.relationships[b.id] = rel
+            rel.trust = max(-100, min(100, max(rel.trust, seed)))
+            rel.type = "co_religionist"
+            rel.since_tick = self.tick
+        proselytized = {
+            "kind": "proselytized",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"🕯 {agent.name} brings {target.name} into {faith.name}.",
+            "payload": {"action": "proselytize", "faith_id": faith.id,
+                        "target_id": target.id, "converted": True},
+        }
+        joined = {
+            "kind": "faith_joined",
+            "actor_id": target.id,
+            "target_id": agent.id,
+            "text": f"{target.name} embraces the faith of {faith.name}.",
+            "payload": {"action": "proselytize", "faith_id": faith.id,
+                        "convert_id": target.id, "by": agent.id},
+        }
+        return {"_multi": [proselytized, joined]}
+
+    def action_worship(self, agent: AgentState) -> dict:
+        """EM-262 — worship at a co-located consecrated temple seat (action_work's
+        buff-at-place clone, gated on faith_enabled). `_faith_seat_here` (EM-261)
+        returns the operational temple commemorating the AGENT'S OWN faith at their
+        place, or None (faithless / no temple / a DIFFERENT faith's temple). On
+        success: a small energy buff + devotion += temple_buff (both clamped), and
+        a `worshipped` event. No seat ⇒ a clear _fail_event (the demolish
+        vanished-target convention). Deterministic — pure arithmetic, no clock/RNG
+        (EM-155)."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "worship", "faith disabled",
+                f"{agent.name} bows their head, but no faith holds here.")
+        seat = self._faith_seat_here(agent)
+        if seat is None:
+            return self._fail_event(
+                agent.id, "worship", "no seat",
+                f"{agent.name} finds no temple of their faith to worship at.")
+        buff = max(0, int(self._faith_param("temple_buff", 5)))
+        # A small energy buff (temple_buff-sized) + a devotion bump; both clamped.
+        agent.energy = max(0.0, min(100.0, agent.energy + buff))
+        agent.devotion = max(0, min(100, agent.devotion + buff))
+        return {
+            "kind": "worshipped",
+            "actor_id": agent.id,
+            "text": f"🕯 {agent.name} worships at {seat.name}.",
+            "payload": {"action": "worship", "faith_id": agent.faith_id,
+                        "temple_id": seat.id, "devotion": agent.devotion},
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -11272,6 +11600,20 @@ class World:
             snap["faiths"] = {
                 str(fid): f.to_dict() for fid, f in self.faiths.items()
             }
+        # EM-262 — congregations + the schism grace latch (Wave O Religion
+        # emergence). Serialized only when non-empty (the culture_camps /
+        # grievances pattern), so a faithless / faith-off world — and every
+        # pre-EM-262 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore). Congregation dicts are JSON-cloned VERBATIM (the culture_camps
+        # convention); schism_pending is a plain {faith_id: tick} map (grievances).
+        if self.congregations:
+            snap["congregations"] = {
+                str(cid): dict(c) for cid, c in self.congregations.items()
+            }
+        if self.schism_pending:
+            snap["schism_pending"] = {
+                str(k): int(v) for k, v in self.schism_pending.items()
+            }
         # EM-269 (F2) — settlements {id: {name, center, founded_tick,
         # founder_id, members}}. Serialized only when non-empty (the factions
         # pattern), so a settlement-free world — and every pre-EM-269
@@ -12082,6 +12424,21 @@ class World:
                            else None),
             )
         world.faiths = restored_faiths
+        # EM-262 — restore congregations + the schism grace latch (additive:
+        # pre-EM-262 snapshots lack the keys and restore {} / {}, so a faithless
+        # fork/replay is byte-identical). Defensive: a congregation row that is not
+        # a dict / has a blank id is dropped (the culture_camps recipe); a
+        # schism_pending entry keeps only a valid faith_id → int tick (the grievance
+        # recipe), so the grace latch round-trips as pure tick arithmetic.
+        world.congregations = {
+            str(cid): dict(c)
+            for cid, c in (state.get("congregations") or {}).items()
+            if cid and isinstance(c, dict)
+        }
+        world.schism_pending = {}
+        for skey, sval in (state.get("schism_pending") or {}).items():
+            if skey:
+                world.schism_pending[str(skey)] = _int(sval)
         # EM-269 (F2) — restore settlements (additive: pre-EM-269 snapshots
         # lack the key and restore {} — identity continuity survives a
         # fork/restore: ids, names, centers and loose membership all come back

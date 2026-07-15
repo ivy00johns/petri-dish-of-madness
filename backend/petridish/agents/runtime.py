@@ -212,6 +212,10 @@ ACTION_SCHEMA = {
                 # EM-261 — found a faith and become its first devotee (reflex,
                 # free; offered only while faith_enabled AND the agent is faithless).
                 "found_faith",
+                # EM-262 — religion emergence (reflex; faith_enabled). proselytize
+                # converts a co-located faithless agent to the actor's faith;
+                # worship draws a devotion buff at a co-located consecrated temple.
+                "proselytize", "worship",
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
@@ -289,6 +293,8 @@ ACTION_SCHEMA = {
                             "create_meme", "adopt_meme",
                             # EM-261 — found a faith (reflex; faith_enabled + faithless).
                             "found_faith",
+                            # EM-262 — religion emergence (reflex; faith_enabled).
+                            "proselytize", "worship",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
                         ],
@@ -429,6 +435,13 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "adopt_meme"}}},
          "then": {"properties": {"args": {"required": ["meme_id"], "properties": {
              "meme_id": {"type": "string"},
+         }}}}},
+        # EM-262 — proselytize requires a co-located target (name or id, resolved
+        # like clash/spread_rumor); worship takes no args (the seat is at the
+        # agent's own place), so it needs no allOf entry.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "proselytize"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
          }}}}},
     ],
 }
@@ -620,6 +633,16 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # at resolution in action_found_faith, which rejects a faith-off/already-faithful
     # attempt). No args, like found_settlement.
     "found_faith":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-262 — religion emergence 🟢, both REFLEX (zero extra LLM calls — the
+    # engine resolves the seeded conversion / temple buff). proselytize targets a
+    # co-located agent (the co-location + faith gates are faith-specific, enforced
+    # by the world action like clash/recruit — NOT a place gate); worship carries
+    # no location_gate either (the seat is checked per-turn by _faith_seat_here,
+    # like build_step's @building but faith-scoped). No agreement_gate. Offered
+    # ONLY while faith is enabled AND the agent has a faith (see _assemble_context),
+    # so the faith-off prompt/menu — and the em260 golden — never change.
+    "proselytize":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "worship":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-269 (F2) — found a settlement at your current place; offered anywhere
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
@@ -1723,7 +1746,10 @@ _TARGETED_ACTIONS = frozenset(
      # the model can address a letter by name, but its resolution stays PERMISSIVE
      # (the world action / validator does NOT require co-location or presence —
      # _resolve_agent_target already matches an ABSENT living agent by name).
-     "spread_rumor", "send_letter"}
+     "spread_rumor", "send_letter",
+     # EM-262 — proselytize targets a co-located agent (resolved + co-location-
+     # validated like deceive/clash). worship takes NO target (EXCLUDED).
+     "proselytize"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -2168,6 +2194,16 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         # self-correct. muster/siege need no front gate (no agent target;
         # action_muster / action_siege own every war-specific check).
         target_error = _validate_target(args, agent, world, "clash")
+        if target_error:
+            return target_error
+
+    elif action == "proselytize":
+        # EM-262 — proselytize targets a CO-LOCATED agent (resolved + validated
+        # like clash/spread_rumor: reachable + alive + here). The world action
+        # re-checks faith_enabled + self-target + the actor holding a faith +
+        # co-location and mints/plants the conversion, so this front gate only
+        # ensures a reachable target — a clear rejection lets the model self-correct.
+        target_error = _validate_target(args, agent, world, "proselytize")
         if target_error:
             return target_error
 
@@ -3207,6 +3243,24 @@ def _assemble_context(
             valid_actions.append(
                 "found_faith - found a new faith and become its first devotee "
                 "(others can join it as it spreads)")
+        else:
+            # EM-262 — a FAITHFUL agent may proselytize a co-located FAITHLESS
+            # target (only faithless targets convert — the menu/resolution-agree
+            # rule, EM-108) and worship at a co-located consecrated temple of
+            # their OWN faith. Concrete names / the seat ride each line (the
+            # promote_image recipe) so the model is offered choices that resolve.
+            _unfaithed = [a for a in co_located if not a.faith_id]
+            if _unfaithed:
+                valid_actions.append(
+                    "proselytize (target) - preach your faith to someone here who "
+                    "has none; they may convert and join you: "
+                    + ", ".join(a.name for a in _unfaithed))
+            _seat = (world._faith_seat_here(agent)
+                     if getattr(world, "_faith_seat_here", None) else None)
+            if _seat is not None:
+                valid_actions.append(
+                    f"worship - pray at {_building_field(_seat, 'name')} (a temple "
+                    "of your faith stands here) to deepen your devotion")
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -7447,6 +7501,24 @@ class AgentRuntime:
         elif action == "found_faith":
             return _emit_world_result(
                 self.world.action_found_faith(agent), base, thought)
+
+        # ── EM-262 — religion emergence: proselytize (convert a co-located
+        # faithless target) + worship (temple buff). action_proselytize returns a
+        # single event OR a {"_multi": [proselytized, faith_joined]} chain on a
+        # conversion; action_worship returns a single event. Both may fail-event —
+        # _emit_world_result consumes every shape, like clash/found_faith.
+        elif action == "proselytize":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to proselytize but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_proselytize(agent, target), base, thought)
+
+        elif action == "worship":
+            return _emit_world_result(
+                self.world.action_worship(agent), base, thought)
 
         # ── EM-269 (F2) — found a settlement at the agent's current place ───────
         elif action == "found_settlement":
