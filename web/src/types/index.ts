@@ -102,6 +102,10 @@ export type RelationshipType =
   | 'family'
   | 'mentor'
   | 'feud'
+  // Wave O (EM-262/263, Religion) — the mutual conversion bond a proselytize seals
+  // (and an excommunication tears). Engine-assigned; the chips/graph tolerate it
+  // via the open union, falling back to the neutral register when unknown.
+  | 'co_religionist'
   | (string & {});
 
 // Wave D2 (EM-158): scheduler cadence tier. Protagonists act every round,
@@ -152,6 +156,17 @@ export interface Agent {
   // The feed twin lens reads this to pair the strands + find the divergence.
   // Optional so pre-EM-310 backends/snapshots stay valid; absent ⇒ not a twin.
   twin?: TwinLink | null;
+  // Wave O (EM-251–255, additive) — the meme ids this agent currently carries.
+  // Serialized only-when-non-empty (Agent.to_dict); a culture-free agent — and
+  // every pre-Wave-O snapshot — omits it ⇒ tolerate absent.
+  held_memes?: string[];
+  // Wave O (EM-260–263, Religion, additive) — the faith this agent keeps and
+  // their devotion to it. faith_id serializes only-when-set, devotion only-when
+  // > 0 (Agent.to_dict), so a faithless agent — and every pre-Religion snapshot —
+  // omits both ⇒ tolerate absent/null. The FaithPanel joins members → agents to
+  // aggregate a faith's devotion.
+  faith_id?: string | null;
+  devotion?: number;
 }
 
 // EM-310 — the twin link carried on each half of a Chimera pair. `of` is the
@@ -361,6 +376,77 @@ export interface War {
   exhaustion?: Record<string, number>; // faction id → 0..100 war-weariness
 }
 
+// ============================================================
+// Culture (Wave O / EM-251–255) — the meme layer. A Meme is an idea the town
+// SPREADS: authored by one agent, carried by many, and MUTATING across
+// generations (a `parent_id` chain — "fox in a crown" drifting to "fox in a
+// paper crown"). Mirrors the backend Meme.to_dict; serialized into world_state
+// under `memes` ONLY when non-empty (a culture-free world — and every pre-Wave-O
+// snapshot — omits it ⇒ tolerate absent). `kind` is an OPEN union: Religion
+// (EM-260–263) adds 'faith' with no schema migration.
+// ============================================================
+
+export type MemeKind = 'rumor' | 'idea' | 'ideology' | 'image' | (string & {});
+
+export interface Meme {
+  id: string;
+  kind: MemeKind;
+  text: string;
+  origin_agent_id: string;
+  origin_tick: number;
+  generation: number;         // 0 = a root meme; +1 for each mutation down a chain
+  carriers: string[];         // agent ids currently holding it
+  last_spread_tick: number;
+  virality: number;           // spread pressure (drives the ⭐ / dominance sort)
+  // Only-when-set (Meme.to_dict): an image meme carries the gallery `image_id`
+  // it drifted from (join image_id → gallery entry's `url` for the thumbnail),
+  // and a mutated meme carries its `parent_id` (the family-tree edge). A plain
+  // text root meme omits both ⇒ tolerate absent.
+  image_id?: string | null;
+  parent_id?: string | null;
+}
+
+// ============================================================
+// CultureCamp (Wave O / EM-251–255) — a belief circle the town clusters, the
+// SAME record shape as a Faction (name/founded_tick/members) but keyed by a
+// `cmp_`-prefixed id. Serialized into world_state under `culture_camps` ONLY
+// when non-empty (like factions ⇒ tolerate absent). Rendered as faction-style
+// chips in the culture (mint) register.
+// ============================================================
+
+export interface CultureCamp {
+  name: string;
+  founded_tick: number;
+  members: string[];        // agent ids
+}
+
+// ============================================================
+// Faith (Wave O / EM-260–263) — a shared creed with an INVENTED deity + tenets,
+// founded by an agent and joined by devotees. Mirrors the backend Faith.to_dict:
+// the scalar core (id/name/deity/founder_id/founded_tick/tenets) always rides;
+// members/temple_id/meme_id/hostile_to/parent_id ride ONLY when non-default
+// (a fresh faith omits them ⇒ tolerate absent). Serialized into world_state under
+// `faiths` ONLY when the world has at least one faith (a religion-free world — and
+// every pre-Religion snapshot — omits the key ⇒ absent means no religion). The
+// FaithPanel + the feed's faith lane read it; the golden religion-free UI is
+// unchanged.
+// ============================================================
+
+export interface Faith {
+  id: string;                     // seeded fth_<8hex>
+  name: string;                   // seeded INVENTED (never a real religion)
+  deity: string;                  // seeded INVENTED (never a real deity)
+  founder_id: string;
+  founded_tick: number;
+  tenets: string[];               // seeded INVENTED (never real scripture)
+  // Only-when-non-default (Faith.to_dict): a fresh faith omits these.
+  members?: string[];             // agent ids (the founder + converts)
+  temple_id?: string | null;      // EM-261 consecrated-temple seat
+  meme_id?: string | null;        // the Culture join: a kind="faith" meme
+  hostile_to?: string[];          // EM-263 rival faith ids (⚔ marker)
+  parent_id?: string | null;      // EM-262 schism lineage (the faith it split from)
+}
+
 export interface ModelProfile {
   name: string;
   adapter: string;
@@ -500,6 +586,30 @@ export interface WorldState {
   // world renders no markers. SettlementLabels renders a floating name at each
   // world-frame center.
   settlements?: Record<string, Settlement> | null;
+  // Wave O (EM-251–255, additive) — the culture layer. `memes` (keyed by meme
+  // id) is the spread/mutation graph the MemeLineagePanel renders as a family
+  // tree; `culture_camps` (keyed `cmp_<id>`) are faction-shaped belief circles;
+  // `town_motif_ref` is the canonized dominant meme id (drives the motif
+  // banner); `dominant_meme_ids` is the sorted set of memes past the dominance
+  // threshold (drives the ⭐ marker). All serialized ONLY when non-empty / set
+  // (a culture-free world — and every pre-Wave-O snapshot — omits them ⇒ absent
+  // means no culture). The culture UI is entirely gated on their presence, so
+  // the golden culture-free UI is byte-identical.
+  memes?: Record<string, Meme>;
+  culture_camps?: Record<string, CultureCamp>;
+  town_motif_ref?: string | null;
+  dominant_meme_ids?: string[];
+  // Wave O (EM-260–263, Religion, additive) — the faith layer. `faiths` (keyed by
+  // faith id) is the creed registry the FaithPanel renders; `congregations` (keyed
+  // `cng_<id>`) are shared-faith clusters that SHARE the faction/camp shape
+  // (name/founded_tick/members); `schism_pending` is the DETERMINISTIC grace latch
+  // {faith_id: tick} the schism engine keeps while a faith's web is torn. All
+  // serialized ONLY when non-empty (a religion-free world — and every pre-Religion
+  // snapshot — omits them ⇒ absent means no religion). The whole religion UI is
+  // gated on `faiths` presence, so the golden religion-free UI is byte-identical.
+  faiths?: Record<string, Faith>;
+  congregations?: Record<string, CultureCamp>;
+  schism_pending?: Record<string, number>;
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -613,6 +723,48 @@ export type EventKind =
   | 'peace_signed'
   | 'war_exhausted'
   | 'exiled'
+  // Wave O (EM-251–255) — culture. The meme lifecycle: meme_created (an agent
+  // authors an idea), meme_adopted / rumor_spread (it spreads to a carrier),
+  // meme_mutated (a `parent_id` child drifts off it), letter_sent / letter_read
+  // (agent-to-agent notes carrying memes), meme_canonized / meme_dominant (it
+  // becomes the town's motif) / meme_died (it fades out), plus the
+  // culture_camp lifecycle (formed/joined/left/dissolved — faction-shaped).
+  // Emitted only when world.culture.enabled — absent histories are the norm.
+  | 'meme_created'
+  | 'meme_adopted'
+  | 'rumor_spread'
+  | 'meme_mutated'
+  | 'letter_sent'
+  | 'letter_read'
+  | 'meme_canonized'
+  | 'meme_dominant'
+  | 'meme_died'
+  | 'culture_camp_formed'
+  | 'culture_camp_joined'
+  | 'culture_camp_left'
+  | 'culture_camp_dissolved'
+  // Wave O (EM-260–263) — Religion. Founding + consecration (faith_founded,
+  // faith_consecrated, temple_consecrated); the devotee verbs (proselytized,
+  // proselytize_resisted, worshipped, faith_joined, faith_left); emergence
+  // (faith_schism, plus the congregation lifecycle formed/joined/left/dissolved —
+  // faction-shaped); and the conflict surface (excommunicated,
+  // faith_hostility_declared). Emitted only when world.faith.enabled — absent
+  // histories are the religion-free norm; the whole arc reads in the faith lane.
+  | 'faith_founded'
+  | 'faith_consecrated'
+  | 'temple_consecrated'
+  | 'proselytized'
+  | 'proselytize_resisted'
+  | 'worshipped'
+  | 'faith_joined'
+  | 'faith_left'
+  | 'faith_schism'
+  | 'excommunicated'
+  | 'faith_hostility_declared'
+  | 'congregation_formed'
+  | 'congregation_joined'
+  | 'congregation_left'
+  | 'congregation_dissolved'
   // EM-317 — The Prophecy Board (god-channel). prophecy_posted {prophecy_id,
   // predicate, params, posted_tick, deadline_tick, horizon, omen} (actor 'god',
   // the omen on the replay surface); prophecy_resolved {prophecy_id, predicate,

@@ -200,6 +200,27 @@ ACTION_SCHEMA = {
                 # Offered only while the agent's faction is at war (peacetime
                 # golden intact — see _assemble_context).
                 "muster", "clash", "siege",
+                # EM-251 — culture transmission verbs (Wave O Culture stage),
+                # both reflex: spread_rumor whispers a distorting rumor to a
+                # co-located agent; send_letter mails ANY citizen (present or
+                # absent). Offered only while comm.enabled (see _assemble_context)
+                # — the default-OFF prompt/menu stays byte-identical (em161).
+                "spread_rumor", "send_letter",
+                # EM-253 — culture lifecycle verbs (reflex): create_meme coins an
+                # idea; adopt_meme takes up an existing meme (image memes drift).
+                "create_meme", "adopt_meme",
+                # EM-261 — found a faith and become its first devotee (reflex,
+                # free; offered only while faith_enabled AND the agent is faithless).
+                "found_faith",
+                # EM-262 — religion emergence (reflex; faith_enabled). proselytize
+                # converts a co-located faithless agent to the actor's faith;
+                # worship draws a devotion buff at a co-located consecrated temple.
+                "proselytize", "worship",
+                # EM-263 — the religion conflict surface (reflex; faith_enabled,
+                # FOUNDER-only). excommunicate casts a member out of the founder's
+                # faith (no co-location); declare_hostility marks a rival faith
+                # hostile (and, with war on, feeds a religious grievance).
+                "excommunicate", "declare_hostility",
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
@@ -271,6 +292,16 @@ ACTION_SCHEMA = {
                             "build_road",
                             # EM-258/EM-259 — the war verbs (reflex).
                             "muster", "clash", "siege",
+                            # EM-251 — culture transmission verbs (reflex).
+                            "spread_rumor", "send_letter",
+                            # EM-253 — culture lifecycle verbs (reflex).
+                            "create_meme", "adopt_meme",
+                            # EM-261 — found a faith (reflex; faith_enabled + faithless).
+                            "found_faith",
+                            # EM-262 — religion emergence (reflex; faith_enabled).
+                            "proselytize", "worship",
+                            # EM-263 — religion conflict surface (reflex; founder).
+                            "excommunicate", "declare_hostility",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
                         ],
@@ -393,6 +424,49 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "siege"}}},
          "then": {"properties": {"args": {"required": ["building_id"], "properties": {
              "building_id": {"type": "string"},
+         }}}}},
+        # EM-251 — spread_rumor requires a co-located target (name or id, resolved
+        # like clash/deceive); the rumor free-text is optional (a carried meme_id
+        # can source it instead), so only `target` is structurally required.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "spread_rumor"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
+         }}}}},
+        # EM-251 — send_letter requires a target (any living citizen, present or
+        # absent) AND the letter text.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "send_letter"}}},
+         "then": {"properties": {"args": {"required": ["target", "text"], "properties": {
+             "target": {"type": "string"}, "text": {"type": "string"},
+         }}}}},
+        # EM-253 — create_meme requires the idea text; adopt_meme requires the
+        # target meme_id (an existing registered meme, not a name → NOT in
+        # _TARGETED_ACTIONS).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "create_meme"}}},
+         "then": {"properties": {"args": {"required": ["text"], "properties": {
+             "text": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "adopt_meme"}}},
+         "then": {"properties": {"args": {"required": ["meme_id"], "properties": {
+             "meme_id": {"type": "string"},
+         }}}}},
+        # EM-262 — proselytize requires a co-located target (name or id, resolved
+        # like clash/spread_rumor); worship takes no args (the seat is at the
+        # agent's own place), so it needs no allOf entry.
+        {"if": {"required": ["action"], "properties": {"action": {"const": "proselytize"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
+         }}}}},
+        # EM-263 — excommunicate requires an agent `target` (a member of the
+        # founder's faith, resolved by name/id — NOT co-location gated);
+        # declare_hostility requires a `faith_id` (a rival faith's id, resolved
+        # against world.faiths — not an agent target, like adopt_meme's meme_id).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "excommunicate"}}},
+         "then": {"properties": {"args": {"required": ["target"], "properties": {
+             "target": {"type": "string"},
+         }}}}},
+        {"if": {"required": ["action"], "properties": {"action": {"const": "declare_hostility"}}},
+         "then": {"properties": {"args": {"required": ["faith_id"], "properties": {
+             "faith_id": {"type": "string"},
          }}}}},
     ],
 }
@@ -559,6 +633,52 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "muster":           {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "clash":            {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "siege":            {"tier": "reflex", "location_gate": "@building",     "agreement_gate": None},
+    # EM-251 — culture transmission verbs 🟢, both REFLEX (zero extra LLM calls).
+    # spread_rumor's co-location gate is war-style — enforced by the world action
+    # (like recruit), NOT a place gate; send_letter has NO location gate BY DESIGN
+    # (the first absent-target channel). Offered ONLY while comm.enabled (see
+    # _assemble_context), so the default-OFF menu — and the em161 golden — never
+    # change. EM-254 — spread_rumor now carries the ban_gossip agreement_gate
+    # (steal→ban_stealing's twin): a ratified ban hides it from the menu (via
+    # _gate_ok) AND the validator rejects it. ban_gossip is itself un-proposable
+    # without comm, so a comm-off world never activates it ⇒ the gate is inert
+    # there ⇒ byte-identical. send_letter stays ungated (a letter is not gossip).
+    "spread_rumor":     {"tier": "reflex", "location_gate": None,            "agreement_gate": "ban_gossip"},
+    "send_letter":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-253 — culture lifecycle verbs (Wave O Culture stage), both reflex, no
+    # gates. create_meme coins an idea (no target, ungated by co-location);
+    # adopt_meme takes up an existing meme by id (an image meme drifts a child
+    # image). Offered ONLY while comm.enabled — and adopt_meme only with an
+    # adoptable meme — see _assemble_context, so the default-OFF menu (and the
+    # em161 golden) never change.
+    "create_meme":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "adopt_meme":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-261 — found a faith; offered anywhere (the real gates — faith.enabled +
+    # the agent being faithless — are computed in _assemble_context and re-enforced
+    # at resolution in action_found_faith, which rejects a faith-off/already-faithful
+    # attempt). No args, like found_settlement.
+    "found_faith":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-262 — religion emergence 🟢, both REFLEX (zero extra LLM calls — the
+    # engine resolves the seeded conversion / temple buff). proselytize targets a
+    # co-located agent (the co-location + faith gates are faith-specific, enforced
+    # by the world action like clash/recruit — NOT a place gate); worship carries
+    # no location_gate either (the seat is checked per-turn by _faith_seat_here,
+    # like build_step's @building but faith-scoped). No agreement_gate. Offered
+    # ONLY while faith is enabled AND the agent has a faith (see _assemble_context),
+    # so the faith-off prompt/menu — and the em260 golden — never change.
+    "proselytize":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "worship":          {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-263 — the religion conflict surface, both REFLEX + FOUNDER-only (the real
+    # gates — faith.enabled + the actor being their faith's founder — are computed
+    # in _assemble_context and re-enforced at resolution in the world actions).
+    # excommunicate carries NO location_gate (a founder acts from afar; the target
+    # need not be co-located — the send_letter recipe, not clash's); declare_-
+    # hostility takes a faith_id, not an agent, and is likewise ungated here. No
+    # agreement_gate. Offered ONLY while faith is enabled AND the agent founded a
+    # faith (see _assemble_context), so the faith-off menu — and the em260 golden —
+    # never change.
+    "excommunicate":    {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    "declare_hostility": {"tier": "reflex", "location_gate": None,           "agreement_gate": None},
     # EM-269 (F2) — found a settlement at your current place; offered anywhere
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
@@ -1664,7 +1784,21 @@ _TARGETED_ACTIONS = frozenset(
      # EM-258 — clash targets a co-located enemy belligerent name in
      # args["target"] (resolved to an id before dispatch, like attack). muster
      # takes NO target and siege takes a building_id — both EXCLUDED here.
-     "clash"}
+     "clash",
+     # EM-251 — spread_rumor targets a co-located agent (resolved + co-location-
+     # validated like deceive/clash). send_letter ALSO resolves a name→id here so
+     # the model can address a letter by name, but its resolution stays PERMISSIVE
+     # (the world action / validator does NOT require co-location or presence —
+     # _resolve_agent_target already matches an ABSENT living agent by name).
+     "spread_rumor", "send_letter",
+     # EM-262 — proselytize targets a co-located agent (resolved + co-location-
+     # validated like deceive/clash). worship takes NO target (EXCLUDED).
+     "proselytize",
+     # EM-263 — excommunicate resolves an agent target by NAME→id like the others,
+     # BUT is NOT co-location gated (a founder casts out a member from afar — the
+     # send_letter recipe: _resolve_agent_target already matches an ABSENT living
+     # agent by name). declare_hostility takes a faith_id, not an agent (EXCLUDED).
+     "excommunicate"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -2112,6 +2246,80 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if target_error:
             return target_error
 
+    elif action == "proselytize":
+        # EM-262 — proselytize targets a CO-LOCATED agent (resolved + validated
+        # like clash/spread_rumor: reachable + alive + here). The world action
+        # re-checks faith_enabled + self-target + the actor holding a faith +
+        # co-location and mints/plants the conversion, so this front gate only
+        # ensures a reachable target — a clear rejection lets the model self-correct.
+        target_error = _validate_target(args, agent, world, "proselytize")
+        if target_error:
+            return target_error
+
+    elif action == "excommunicate":
+        # EM-263 — excommunicate resolves an agent target but is NOT co-location
+        # gated (a founder casts a member out from afar — the send_letter recipe,
+        # not clash's). This front gate only ensures the (resolved) id names a
+        # real, LIVING agent; the world action owns the founder + own-faith-member
+        # checks and returns a clear fail event on any miss.
+        target_id = args.get("target")
+        if not target_id:
+            return "excommunicate requires target"
+        _member = world.agents.get(target_id)
+        if _member is None:
+            return (f"unknown target '{target_id}' — excommunicate needs a member "
+                    "of your faith (by name or id)")
+        if not _member.alive:
+            return f"target '{_member.name}' is dead"
+
+    elif action == "declare_hostility":
+        # EM-263 — declare_hostility carries a faith_id (a rival faith's id), not an
+        # agent target. This front gate mirrors consecrate_faith's existence check:
+        # the id must name a real, DIFFERENT faith; the world action owns the
+        # founder gate. A faith-off world never surfaces the verb (menu-gated) and
+        # the world action re-rejects it, so this only fires on an off-menu invention.
+        fid = args.get("faith_id")
+        if not fid:
+            return "declare_hostility requires faith_id"
+        _faiths = getattr(world, "faiths", None) or {}
+        if fid not in _faiths:
+            return (f"unknown faith '{fid}' — declare_hostility needs a rival "
+                    "faith's id")
+        if getattr(agent, "faith_id", None) == fid:
+            return "declare_hostility cannot target your own faith"
+
+    elif action == "spread_rumor":
+        # EM-254 — a ratified ban_gossip forbids spreading rumors (steal's
+        # ban_stealing gate shape). The world action re-checks it too; this front
+        # gate rejects early with clear guidance (and the menu hides the verb via
+        # _gate_ok). Placed first so a banned town never dangles the verb.
+        if world.has_active_rule("ban_gossip"):
+            return "ban_gossip rule is active — spread_rumor is forbidden"
+        # EM-251 — spread_rumor targets a CO-LOCATED agent (resolved + validated
+        # like deceive/clash: reachable + alive + here). The world action re-checks
+        # comm.enabled + self-target + co-location and mints/plants the drift, so
+        # this front gate only ensures a reachable target — a clear rejection lets
+        # the model self-correct.
+        target_error = _validate_target(args, agent, world, "spread_rumor")
+        if target_error:
+            return target_error
+
+    elif action == "send_letter":
+        # EM-251 — send_letter is the first NON-co-located channel: the target may
+        # be ABSENT (do NOT require co-location or presence), so this gate ONLY
+        # checks the (resolved) id names a real, LIVING agent. The world action
+        # re-checks comm.enabled + self-target + non-empty text and parks the
+        # letter in the recipient's mailbox for reflex delivery next turn.
+        target_id = args.get("target")
+        if not target_id:
+            return "send_letter requires target"
+        _recipient = world.agents.get(target_id)
+        if _recipient is None:
+            return (f"unknown target '{target_id}' — send_letter needs a citizen's "
+                    "name or id")
+        if not _recipient.alive:
+            return f"target '{_recipient.name}' is dead"
+
     elif action in ("teach_skill", "request_skill"):
         # EM-228 — both verbs target a co-located agent (resolved like steal). The
         # world action re-checks co-location + self-target + (for teach) the
@@ -2258,6 +2466,22 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if getattr(world, "war_enabled", None) and world.war_enabled():
             valid_effects.add("declare_war")
             valid_effects.add("peace_treaty")
+        # EM-254 — the culture governance lane rides ONLY when comm is enabled
+        # (the war-lane recipe): default OFF ⇒ not in the set ⇒ rejected as an
+        # invalid effect ⇒ agent behavior byte-identical when dormant (the em250
+        # golden). The world method stays directly callable (its own comm-disabled
+        # reason). canonize_meme = the 70% "popular meme → institution" bridge;
+        # ban_gossip = a simple-majority spread_rumor ban (ban_stealing's twin).
+        if getattr(world, "_comm_enabled", None) and world._comm_enabled():
+            valid_effects.add("canonize_meme")
+            valid_effects.add("ban_gossip")
+        # EM-261 — the Religion governance lane rides ONLY when faith is enabled
+        # (the culture-lane recipe, but gated on faith_enabled NOT comm): default
+        # OFF ⇒ not in the set ⇒ rejected as an invalid effect ⇒ agent behavior
+        # byte-identical when dormant (the em260 golden). consecrate_faith = the
+        # 70% "faith → temple seat" bridge (canonize_meme's religion twin).
+        if getattr(world, "faith_enabled", None) and world.faith_enabled():
+            valid_effects.add("consecrate_faith")
         # EM-315 — the Healing House `heal` lane rides ONLY when the flag is on
         # (the war/set_zone_rule recipe): default OFF ⇒ not in the set ⇒ rejected
         # as an invalid effect ⇒ agent behavior byte-identical when dormant. The
@@ -2433,6 +2657,26 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
                         return "peace_treaty reparations must be >= 0"
                 except (TypeError, ValueError):
                     return "peace_treaty reparations must be a non-negative integer"
+        # EM-254 — canonize_meme: mirror promote_image's existence check (the id
+        # may arrive on args.meme_id OR the generic args.target — the world
+        # handler maps either key) so the gate AGREES with world.action_propose_rule
+        # (EM-108 menu/resolution rule). Only runs when comm is enabled (the effect
+        # passed the set above). ban_gossip needs no args (ban_stealing's twin).
+        if effect == "canonize_meme":
+            _mid = str(args.get("meme_id") or args.get("target") or "").strip()
+            if _mid not in (getattr(world, "memes", {}) or {}):
+                return ("canonize_meme requires args.meme_id = the id of a real "
+                        "meme in circulation to elevate to the town's canon")
+        # EM-261 — consecrate_faith: mirror canonize's existence check (the id may
+        # arrive on args.faith_id OR the generic args.target — the world handler
+        # maps either key) so the gate AGREES with world.action_propose_rule
+        # (EM-108 menu/resolution rule). Only runs when faith is enabled (the
+        # effect passed the set above, which is faith_enabled-gated).
+        if effect == "consecrate_faith":
+            _fid = str(args.get("faith_id") or args.get("target") or "").strip()
+            if _fid not in (getattr(world, "faiths", {}) or {}):
+                return ("consecrate_faith requires args.faith_id = the id of a "
+                        "real faith to anchor to its temple seat")
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -3027,6 +3271,105 @@ def _assemble_context(
                             f"siege (building_id={_building_field(b, 'id')}) - "
                             f"lay siege to the enemy structure "
                             f"{_building_field(b, 'name')}")
+    # EM-251 — the culture-transmission menu (Wave O Culture stage), surfaced
+    # ONLY when comm is enabled (world.comm.enabled; default OFF ⇒ NO line ⇒ the
+    # prompt stays byte-identical — the em161 golden, mirroring the war block
+    # above). spread_rumor needs a co-located target (the telephone-game hop
+    # plants a drifting belief); send_letter is the first NON-co-located channel
+    # (write to ANY other living citizen, present or absent). Concrete names ride
+    # each line (the promote_image FINDING 1(b) recipe) so the model is offered
+    # targets that actually resolve. getattr keeps callers safe if the seam is
+    # ever absent.
+    if getattr(world, "_comm_enabled", None) and world._comm_enabled():
+        # EM-254 — _gate_ok folds in spread_rumor's ban_gossip agreement_gate:
+        # a ratified ban HIDES the verb from the menu (as ban_stealing hides
+        # steal). Without a ban it is inert, so the pre-EM-254 comm-on menu is
+        # unchanged.
+        if co_located and _gate_ok("spread_rumor"):
+            valid_actions.append(
+                "spread_rumor (target, rumor) - whisper a rumor to someone here; "
+                "it distorts as it passes: "
+                + ", ".join(a.name for a in co_located))
+        _letter_targets = sorted(
+            (a for a in world.living_agents() if a.id != agent.id),
+            key=lambda a: (a.name, a.id))
+        if _letter_targets:
+            valid_actions.append(
+                "send_letter (target, text) - write a letter to any citizen, even "
+                "one who is elsewhere (delivered on their next turn): "
+                + ", ".join(a.name for a in _letter_targets))
+        # EM-253 — culture lifecycle: create_meme is always offered under comm
+        # (an author needs no audience); adopt_meme is offered ONLY when a meme
+        # this agent does NOT already carry is in circulation (the adopt/
+        # pitch_contribution eligible-target gate) — a few concrete ids ride the
+        # line (the promote_image recipe) so the model targets memes that resolve.
+        valid_actions.append(
+            "create_meme (text) - coin an idea others can adopt and spread")
+        _adoptable = sorted(
+            (m for m in world.memes.values() if m.id not in agent.held_memes),
+            key=lambda m: m.id)
+        if _adoptable:
+            valid_actions.append(
+                "adopt_meme (meme_id) - take up an idea in circulation: "
+                + ", ".join(f'{m.id} ("{m.text[:24]}")' for m in _adoptable[:6]))
+    # EM-261 — the Religion menu (Wave O Religion stage), surfaced ONLY when faith
+    # is enabled (world.faith.enabled; default OFF ⇒ NO line ⇒ the prompt stays
+    # byte-identical — the em260 golden, mirroring the culture block above). The
+    # found_faith reflex is offered ONLY to a FAITHLESS agent (one membership at a
+    # time, in lock-step with action_found_faith's already-faithful reject —
+    # EM-108 menu/resolution agreement). getattr keeps callers safe if the seam is
+    # ever absent.
+    if getattr(world, "faith_enabled", None) and world.faith_enabled():
+        if not agent.faith_id:
+            valid_actions.append(
+                "found_faith - found a new faith and become its first devotee "
+                "(others can join it as it spreads)")
+        else:
+            # EM-262 — a FAITHFUL agent may proselytize a co-located FAITHLESS
+            # target (only faithless targets convert — the menu/resolution-agree
+            # rule, EM-108) and worship at a co-located consecrated temple of
+            # their OWN faith. Concrete names / the seat ride each line (the
+            # promote_image recipe) so the model is offered choices that resolve.
+            _unfaithed = [a for a in co_located if not a.faith_id]
+            if _unfaithed:
+                valid_actions.append(
+                    "proselytize (target) - preach your faith to someone here who "
+                    "has none; they may convert and join you: "
+                    + ", ".join(a.name for a in _unfaithed))
+            _seat = (world._faith_seat_here(agent)
+                     if getattr(world, "_faith_seat_here", None) else None)
+            if _seat is not None:
+                valid_actions.append(
+                    f"worship - pray at {_building_field(_seat, 'name')} (a temple "
+                    "of your faith stands here) to deepen your devotion")
+            # EM-263 — the FOUNDER-only conflict verbs. Offered ONLY to a faith's
+            # founder (menu/resolution agree — EM-108, mirroring action_excommunicate
+            # / action_declare_hostility's founder gate): excommunicate when >= 1
+            # LIVING non-founder member exists (named so the target resolves — the
+            # promote_image recipe); declare_hostility when another faith exists
+            # (named by id so the model can address it).
+            _own_faith = (world.faiths.get(agent.faith_id)
+                          if getattr(world, "faiths", None) else None)
+            if _own_faith is not None and agent.id == _own_faith.founder_id:
+                _flock = [
+                    world.agents[m] for m in _own_faith.members
+                    if m != _own_faith.founder_id and m in world.agents
+                    and world.agents[m].alive
+                ]
+                if _flock:
+                    valid_actions.append(
+                        "excommunicate (target) - cast a member out of your faith "
+                        "(a founder's decree; no need to be near them): "
+                        + ", ".join(a.name for a in _flock))
+                _rivals = [
+                    f for fid, f in sorted(world.faiths.items())
+                    if fid != agent.faith_id
+                ]
+                if _rivals:
+                    valid_actions.append(
+                        "declare_hostility (faith_id) - declare your faith hostile "
+                        "to a rival faith (a casus belli if war is brewing): "
+                        + ", ".join(f"{f.id} ({f.name})" for f in _rivals[:6]))
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -3207,6 +3550,50 @@ def _assemble_context(
                     f"; heal needs target=<a citizen's name or id, e.g. "
                     f"{_patient.name}> to SENTENCE them to the Healing House, where "
                     f"the town hot-swaps their model — decided on a 70% vote")
+        # EM-254 — the culture governance lane surfaces ONLY when comm is enabled
+        # (the war-lane recipe): default OFF ⇒ NO new text ⇒ the prompt is
+        # byte-identical (the em250 golden). canonize_meme elevates a popular meme
+        # to the town's canon on a 70% vote — named a concrete meme (the
+        # promote_image FINDING 1(b) recipe, preferring one that is NOT already the
+        # motif) so the model targets one that resolves. ban_gossip forbids
+        # spread_rumor on a simple majority; offered only while no such ban is
+        # already in force (so the menu never dangles a redundant re-ban).
+        if getattr(world, "_comm_enabled", None) and world._comm_enabled():
+            _memes_now = getattr(world, "memes", {}) or {}
+            if _memes_now:
+                _motif = getattr(world, "town_motif_ref", None)
+                _canon = next(
+                    (m for m in sorted(_memes_now.values(), key=lambda m: m.id)
+                     if m.id != _motif),
+                    None)
+                if _canon is None:                       # only the motif exists
+                    _canon = sorted(_memes_now.values(), key=lambda m: m.id)[0]
+                propose_line += "|canonize_meme"
+                propose_tail += (
+                    f"; canonize_meme needs meme_id=<a meme's id, e.g. "
+                    f"{_canon.id}> to elevate it to the town's canon by 70% vote")
+            if not world.has_active_rule("ban_gossip"):
+                propose_line += "|ban_gossip"
+                propose_tail += ("; ban_gossip forbids spreading rumors "
+                                 "(simple-majority vote)")
+        # EM-261 — the Religion governance lane surfaces ONLY when faith is
+        # enabled (the culture-lane recipe, gated on faith_enabled): default OFF
+        # ⇒ NO new text ⇒ the prompt is byte-identical (the em260 golden).
+        # consecrate_faith anchors a faith to an operational temple (its devotion
+        # seat) on a 70% vote — named a concrete UNCONSECRATED faith (the
+        # canonize recipe) so the model targets one that resolves.
+        if getattr(world, "faith_enabled", None) and world.faith_enabled():
+            _faiths_now = getattr(world, "faiths", {}) or {}
+            _unconsecrated = [f for f in sorted(_faiths_now.values(),
+                                                key=lambda f: f.id)
+                              if not f.temple_id]
+            if _unconsecrated:
+                _fpick = _unconsecrated[0]
+                propose_line += "|consecrate_faith"
+                propose_tail += (
+                    f"; consecrate_faith needs faith_id=<a faith's id, e.g. "
+                    f"{_fpick.id}> to anchor it to a temple as its seat by 70% "
+                    f"vote")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -5296,6 +5683,17 @@ class AgentRuntime:
         god_whispers = _pw.pop(agent.id, []) if isinstance(_pw, dict) else []
         board_notes = self._unseen_god_board_notes(agent)
 
+        # EM-251 — drain any letters parked in this agent's mailbox at the START
+        # of its own turn (reflex delivery, mirroring the god-whisper pop above).
+        # _plant_belief lands each letter in beliefs BEFORE the prompt is
+        # assembled, so a fresh letter rides THIS turn's context exactly like a
+        # whisper; deliver_letters clears the mailbox and returns legible
+        # letter_read feed events. Gated on comm.enabled so a default world never
+        # parks — nor drains — a letter (the em161 golden; zero extra LLM calls).
+        mail_events: list[dict] = []
+        if getattr(self.world, "_comm_enabled", None) and self.world._comm_enabled():
+            mail_events = self.world.deliver_letters(agent)
+
         # EM-222 — the memory block: relevance-scored long-term retrieval merged
         # with the recent tail (protagonist/supporting), or the unchanged
         # blind-recency slice (background / disabled / embeddings down). It owns
@@ -5313,8 +5711,10 @@ class AgentRuntime:
             memory_prebounded=True,
         )
 
-        # The legible half of EM-145: watchers see the god's voice land.
-        delivery_events: list[dict] = []
+        # The legible half of EM-145: watchers see the god's voice land. EM-251 —
+        # any letters drained above ride the same delivery tail (they surface even
+        # on a turn that later fails to parse, like the god's voice).
+        delivery_events: list[dict] = list(mail_events)
         if god_whispers:
             delivery_events.append({
                 "kind": "god_voice_heard",
@@ -6667,6 +7067,51 @@ class AgentRuntime:
                 self.world.action_siege(agent, args.get("building_id", "")),
                 base, thought)
 
+        # EM-251 — culture transmission verbs (Wave O Culture stage), both
+        # reflex. Each world action returns a ready event dict (rumor_spread /
+        # letter_sent) — or a {"_multi": [...]} chain (spread_rumor appends
+        # meme_mutated when the hop drifted the text) — or a clear parse_failure;
+        # _emit_world_result consumes both shapes, exactly like recruit/clash.
+        elif action == "spread_rumor":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to spread a rumor but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_spread_rumor(
+                    agent, target,
+                    args.get("rumor", "") or args.get("text", ""),
+                    args.get("meme_id")),
+                base, thought)
+
+        elif action == "send_letter":
+            # The recipient may be ABSENT (the whole point) — resolve by id only;
+            # a name was already resolved to an id by _normalize_args.
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to send a letter but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_send_letter(agent, target, args.get("text", "")),
+                base, thought)
+
+        # EM-253 — culture lifecycle verbs (Wave O Culture stage), both reflex.
+        # create_meme coins an idea (no target); adopt_meme takes up a meme by id
+        # (an image meme drifts a child, returned as a {"_multi": [...]} chain).
+        # Each world action returns a ready event dict OR a clear _fail_event —
+        # _emit_world_result consumes both shapes, exactly like create_image.
+        elif action == "create_meme":
+            return _emit_world_result(
+                self.world.action_create_meme(agent, args.get("text", "")),
+                base, thought)
+
+        elif action == "adopt_meme":
+            return _emit_world_result(
+                self.world.action_adopt_meme(agent, args.get("meme_id", "")),
+                base, thought)
+
         # EM-240 — economy & corruption verbs (Task 7). launder takes NO target
         # and returns (ok, reason, fee); bribe resolves an enforcer target and
         # returns (ok, reason, paid). Both mirror steal's tuple-dispatch shape.
@@ -6966,7 +7411,13 @@ class AgentRuntime:
             # PROTOTYPE (god-channel) — name_town carries the proposed name.
             name = args.get("name")
             # Wave K / EM-219 — demolish carries the target building id.
-            target = args.get("target") or args.get("building_id")
+            # EM-254 — canonize_meme carries the meme id; the model may put it on
+            # args.meme_id, so fold that into the generic target the world reads.
+            # EM-261 — consecrate_faith carries the faith id; fold args.faith_id
+            # into the same generic target (the canonize recipe).
+            target = args.get("target") or args.get("building_id") or (
+                args.get("meme_id") if effect == "canonize_meme" else None) or (
+                args.get("faith_id") if effect == "consecrate_faith" else None)
             # Wave I / EM-212 — promote_image carries the gallery image id.
             image_id = args.get("image_id")
             # EM-236 — amend_constitution carries op (add|edit|remove) + an optional
@@ -7169,6 +7620,52 @@ class AgentRuntime:
         elif action == "build_road":
             result = self.world.action_build_road(agent, args)
             return _emit_world_result(result, base, thought)
+
+        # ── EM-261 — found a faith and become its first devotee (reflex) ────────
+        # action_found_faith returns a ready event dict (faith_founded) OR a clear
+        # _fail_event (faith disabled / already faithful) — _emit_world_result
+        # consumes both, exactly like create_meme.
+        elif action == "found_faith":
+            return _emit_world_result(
+                self.world.action_found_faith(agent), base, thought)
+
+        # ── EM-262 — religion emergence: proselytize (convert a co-located
+        # faithless target) + worship (temple buff). action_proselytize returns a
+        # single event OR a {"_multi": [proselytized, faith_joined]} chain on a
+        # conversion; action_worship returns a single event. Both may fail-event —
+        # _emit_world_result consumes every shape, like clash/found_faith.
+        elif action == "proselytize":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to proselytize but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_proselytize(agent, target), base, thought)
+
+        elif action == "worship":
+            return _emit_world_result(
+                self.world.action_worship(agent), base, thought)
+
+        # ── EM-263 — the religion conflict surface: excommunicate (cast a member
+        # out of the founder's faith — target resolved by name/id, need NOT be
+        # co-located) + declare_hostility (mark a rival faith hostile — carries a
+        # faith_id, not an agent target). Both may fail-event (faith off / non-
+        # founder / bad target) — _emit_world_result consumes every shape.
+        elif action == "excommunicate":
+            target = self.world.agents.get(args.get("target", ""))
+            if target is None:
+                return {**base, "kind": "parse_failure",
+                        "text": f"{agent.name} tried to excommunicate but target not found",
+                        "payload": {"error": "target_not_found"}}
+            return _emit_world_result(
+                self.world.action_excommunicate(agent, target), base, thought)
+
+        elif action == "declare_hostility":
+            return _emit_world_result(
+                self.world.action_declare_hostility(
+                    agent, str(args.get("faith_id") or "")),
+                base, thought)
 
         # ── EM-269 (F2) — found a settlement at the agent's current place ───────
         elif action == "found_settlement":

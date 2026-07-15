@@ -1250,6 +1250,52 @@ class WarParams:
 
 
 @dataclass
+class FaithParams:
+    """EM-260 — Religion tunables (config `world.faith`, Wave O Religion track).
+    The engine reads this block via its defensive `_faith_param` accessor with
+    IDENTICAL defaults (the WarParams/_war_param convention), so a world.yaml
+    WITHOUT the `faith` block behaves exactly like these values. Like war this
+    block HAS an `enabled` flag defaulting FALSE: no faith is minted by any
+    default path, no founding/proselytize verb surfaces, no devotion bookkeeping
+    runs, so a default world gains no faith, emits no new prompt line / menu
+    entry / event, and stays byte-identical (the em161 golden + EM-155). This
+    stage ships the DATA + config only; the tunables below are read by EM-261+.
+
+      enabled           — master gate for the whole faith layer.
+      devotion_base     — a founder's starting devotion when they found a faith
+                          (EM-261 — action_found_faith seeds this; > 0).
+      temple_buff       — devotion/energy buff granted at a consecrated temple
+                          (EM-261 — the consecrate/worship site bonus).
+      conversion_chance — proselytize success probability, 0..1 (EM-262).
+      devotion_decay    — per-round devotion cool-off applied at the round
+                          boundary (the grievance_decay analog, EM-262).
+      schism_threshold  — devotion/dissent needed before a schism may split a
+                          faith into a parent-linked child (EM-262).
+      schism_grace      — ticks a freshly founded/schismed faith is shielded
+                          from a further schism (EM-262).
+      congregation_min_size — the smallest shared-faith cluster that becomes a
+                          congregation at the round boundary (EM-262).
+      convert_trust_seed — the warm trust floor a proselytize conversion seals on
+                          the mutual co_religionist edge (trust-positive; never
+                          lowers trust — EM-262).
+      hostility_grievance — the war-grievance heat a founder's declare_hostility
+                          feeds between the two faiths' factions (EM-263 casus-
+                          belli hook; opaque input to the war layer, gated on
+                          war.enabled — inert when war is off / members factionless).
+    """
+    enabled: bool = False
+    devotion_base: int = 10
+    temple_buff: int = 5
+    conversion_chance: float = 0.3
+    devotion_decay: int = 1
+    schism_threshold: int = 50
+    schism_grace: int = 20
+    congregation_min_size: int = 2
+    convert_trust_seed: int = 20
+    hostility_grievance: int = 8
+
+
+@dataclass
 class HealingHouseParams:
     """EM-315 — The Healing House (config `world.healing_house`). Hands the
     per-agent model-swap scalpel to the SOCIETY: a 70% governance vote can
@@ -1989,6 +2035,12 @@ class WorldParams:
     # grievance, opens no war, surfaces no war governance, and keeps the em161
     # golden + every pre-EM-256 snapshot byte-identical.
     war: WarParams = field(default_factory=WarParams)
+    # EM-260 — Religion (Wave O Religion track). Additive with a DEFAULT-OFF
+    # `enabled`, so a world.yaml without the `faith` block mints no faith,
+    # surfaces no faith governance/prompt, and keeps the em161 golden + every
+    # pre-EM-260 snapshot byte-identical. The founding/proselytize verbs (EM-261+)
+    # read the tunables here and gate on `enabled` via World.faith_enabled().
+    faith: FaithParams = field(default_factory=FaithParams)
     # EM-315 — The Healing House. Additive, DEFAULT OFF with an EMPTY target pool,
     # so a world.yaml without the `healing_house` block — and every pre-EM-315
     # snapshot — is byte-identical (no `heal` menu entry, no prompt line, no swap,
@@ -3039,6 +3091,41 @@ def _parse_war(raw: dict | None) -> WarParams:
     )
 
 
+def _parse_faith(raw: dict | None) -> FaithParams:
+    """Parse the optional `world.faith` block (EM-260).
+    Absent/empty/malformed -> engine-matching defaults (enabled stays FALSE, the
+    inert Wave-O default). Each key falls back to its default individually (a
+    malformed value never breaks the block). Mirrors `_parse_war`."""
+    if not isinstance(raw, dict):
+        return FaithParams()
+    d = FaithParams()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return FaithParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        devotion_base=_int("devotion_base", d.devotion_base),
+        temple_buff=_int("temple_buff", d.temple_buff),
+        conversion_chance=_float("conversion_chance", d.conversion_chance),
+        devotion_decay=_int("devotion_decay", d.devotion_decay),
+        schism_threshold=_int("schism_threshold", d.schism_threshold),
+        schism_grace=_int("schism_grace", d.schism_grace),
+        congregation_min_size=_int("congregation_min_size", d.congregation_min_size),
+        convert_trust_seed=_int("convert_trust_seed", d.convert_trust_seed),
+        hostility_grievance=_int("hostility_grievance", d.hostility_grievance),
+    )
+
+
 def _parse_healing_house(raw: dict | None) -> HealingHouseParams:
     """Parse the optional `world.healing_house` block (EM-315).
     Absent/empty/malformed -> engine-matching defaults (enabled FALSE, an EMPTY
@@ -3595,6 +3682,7 @@ def _parse_world(
         crime=_parse_crime(w.get("crime")),
         comm=_parse_comm(w.get("comm")),
         war=_parse_war(w.get("war")),
+        faith=_parse_faith(w.get("faith")),
         healing_house=_parse_healing_house(w.get("healing_house")),
         charters=_parse_charters(w.get("charters")),
         needs=_parse_needs(w.get("needs")),

@@ -278,9 +278,14 @@ def _humanize_project_name(raw: str) -> str:
 # Wave E / EM-113 — the full relationship-type vocabulary (contracts/wave-e.md
 # shared vocabulary). The first five predate Wave E and must never break in
 # snapshots or prompts; the last four are additive.
+# EM-260 — `co_religionist` (Wave O Religion track) is additive on the END so a
+# stored edge's type never shifts. It is ENGINE-ASSIGNED only (proselytize sets
+# it in EM-262 — like `family` is birth-assigned), so it rides RELATIONSHIP_TYPES
+# but is DELIBERATELY absent from DECLARABLE_RELATIONSHIP_TYPES below (agents may
+# not hand-declare it). The frontend union stays pre-EM-260 until EM-263.
 RELATIONSHIP_TYPES = (
     "neutral", "ally", "friend", "rival", "enemy",
-    "partner", "family", "mentor", "feud",
+    "partner", "family", "mentor", "feud", "co_religionist",
 )
 
 # Wave E / EM-113 — agent-declarable subset of RELATIONSHIP_TYPES. `family` is
@@ -393,6 +398,60 @@ class WarState:
             d["casualties"] = list(self.casualties)
         if self.exhaustion:
             d["exhaustion"] = {str(k): int(v) for k, v in self.exhaustion.items()}
+        return d
+
+
+# EM-260 — the shared-belief record (Wave O Religion track). A Faith is a named
+# creed with an INVENTED deity + tenets, founded by an agent and joined by
+# members. It plugs into TWO existing Wave-O primitives instead of reshaping
+# them: `meme_id` is the canonical kind="faith" Meme (the Culture join — EM-261
+# sets it so a faith spreads through the meme graph) and `hostile_to` feeds the
+# EM-263 war/grievance surface. `temple_id` is the EM-261 consecrated-temple
+# hook (the devotion/energy buff site) and `parent_id` records schism lineage
+# (EM-262). Ids are SEEDED (World.mint_faith — sha1, never uuid/clock) and
+# name/deity/tenets are SEEDED-picked from the INVENTED pools, so replay/fork
+# mints byte-identical faiths (EM-155; the open_war/mint_meme recipe). This
+# stage is PLUMBING ONLY — the founding/joining/proselytize VERBS land in
+# EM-261+.
+@dataclass
+class Faith:
+    id: str                       # seeded fth_<8hex> (World.mint_faith)
+    name: str                     # seeded INVENTED (never a real religion)
+    deity: str                    # seeded INVENTED (never a real deity)
+    founder_id: str
+    founded_tick: int
+    tenets: list[str]             # seeded INVENTED (never real scripture)
+    members: list[str] = field(default_factory=list)
+    temple_id: str | None = None  # EM-261 consecrated-temple hook
+    meme_id: str | None = None    # the Culture join: a kind="faith" Meme (EM-261)
+    hostile_to: list[str] = field(default_factory=list)  # EM-263 war hook (faith ids)
+    parent_id: str | None = None  # EM-262 schism lineage
+
+    def to_dict(self) -> dict:
+        """JSON-safe record. members/temple_id/meme_id/hostile_to/parent_id ride
+        ONLY when non-default (the WarState casualties/exhaustion convention) so a
+        fresh faith keeps a minimal, byte-stable shape; the scalar core — id,
+        name, deity, founder_id, founded_tick, tenets (all seeded at mint) —
+        always rides (the whole `faiths` collection is already only-when-non-
+        empty)."""
+        d = {
+            "id": self.id,
+            "name": self.name,
+            "deity": self.deity,
+            "founder_id": self.founder_id,
+            "founded_tick": self.founded_tick,
+            "tenets": list(self.tenets),
+        }
+        if self.members:
+            d["members"] = list(self.members)
+        if self.temple_id is not None:
+            d["temple_id"] = self.temple_id
+        if self.meme_id is not None:
+            d["meme_id"] = self.meme_id
+        if self.hostile_to:
+            d["hostile_to"] = list(self.hostile_to)
+        if self.parent_id is not None:
+            d["parent_id"] = self.parent_id
         return d
 
 
@@ -736,6 +795,18 @@ class AgentState:
     # defensively, so a letter-free agent — and every pre-EM-250 snapshot —
     # keeps the exact prior dict shape.
     mailbox: list[dict] = field(default_factory=list)
+    # EM-260 — Religion plumbing (Wave O). TWO additive scalars join this agent to
+    # a Faith (World.faiths): `faith_id` is the fth_<8hex> of the faith it belongs
+    # to (None = unfaithful) and `devotion` is a 0..100 fervor meter (the notoriety
+    # analog — the EM-261 temple buff and EM-262 proselytize/decay read & write it).
+    # ADDITIVE with default None / 0 → serialized in to_dict ONLY when set / > 0 and
+    # restored defensively (absent/garbage → None / 0, devotion clamped 0..100), so
+    # an unfaithful agent — and every pre-EM-260 snapshot — keeps the exact prior
+    # dict shape (the EM-155 byte-identical guarantee + the em161 golden, since
+    # world.faith defaults OFF and NO default path mints a faith or sets these).
+    # Membership is set only by the EM-261+ founding/joining/proselytize verbs.
+    faith_id: str | None = None
+    devotion: int = 0
     # EM-315 — The Healing House transplant record. THREE additive scalars carry
     # the society-wielded model swap:
     #   healings           — how many times the town has sentenced this citizen to
@@ -902,6 +973,14 @@ class AgentState:
             d["held_memes"] = list(self.held_memes)
         if self.mailbox:
             d["mailbox"] = [dict(e) for e in self.mailbox]
+        # EM-260 — faith membership serialized ONLY when set / non-zero, so an
+        # unfaithful agent (and every pre-EM-260 snapshot) keeps the exact prior
+        # dict shape (the em161 golden + the byte-identical guarantee). With
+        # world.faith OFF nothing sets these, so both stay at their defaults.
+        if self.faith_id is not None:
+            d["faith_id"] = self.faith_id
+        if self.devotion > 0:
+            d["devotion"] = self.devotion
         # EM-315 — Healing House transplant record serialized ONLY when the town
         # has treated this citizen at least once, so an untreated agent (and every
         # pre-EM-315 snapshot) keeps the exact prior dict shape (the em161 golden +
@@ -1347,6 +1426,14 @@ BUILD_TYPES: tuple[dict[str, str], ...] = (
 # semantics already exist. Off-list types stay cosmetic+labelled (no buff).
 _WORK_BUFF_KINDS = frozenset({"workshop", "smithy", "forge", "tavern", "market", "bakery", "dock"})
 _FORAGE_BUFF_KINDS = frozenset({"garden", "farm", "granary", "park"})
+# EM-261 (Wave O Religion) — the catalogued-but-empty `temple` kind becomes a
+# DEVOTION SEAT: an operational temple that `commemorates` a faith is a
+# buff-granting site for that faith's co-located members (the _WORK_BUFF_KINDS
+# recipe — a frozenset so a future variant, e.g. "shrine", joins here). The
+# co-location + commemorates check lives in _faith_seat_here; the per-turn buff
+# it grants is the EM-262 `worship` verb (EM-261 establishes the seat + the
+# consecration blessing that reads faith.temple_buff).
+_FAITH_SEAT_KINDS = frozenset({"temple"})
 
 
 # ── EM-266 (SC) — building-kind → ZoneRule.hint category (observation only) ─────
@@ -1414,6 +1501,40 @@ _SETTLEMENT_NAMES: list[str] = [
     "Ashvale", "Kettlebrook", "Farwatch", "Mossmarket", "Emberfield",
     "Thornmere", "Gullhaven", "Larkspur", "Quietwater", "Redbarrow",
     "Stonereach", "Windrow",
+]
+
+# EM-260 — FULLY INVENTED faith name / deity / tenet pools (Wave O Religion
+# track), picked SEEDED by World.mint_faith when a founder names nothing (the
+# _PROCGEN_NAMES / _SETTLEMENT_NAMES discipline: display-string pools, no new
+# art, no new kinds; a _seed_int walk, wall-clock-free, replay-identical).
+# CRITICAL: these are made-up fantasy words ONLY — never a real-world religion,
+# deity, prophet, or scripture (the denylist test in test_em260_schema.py
+# enforces this). Keep the register EW-dense (gritty, superstitious), not cozy.
+_FAITH_NAMES: list[str] = [
+    "The Ashen Covenant", "The Verdant Circle", "Keepers of the Hollow Flame",
+    "The Tidebound Order", "Gathering of the Pale Root", "The Emberwake Fellowship",
+    "Order of the Silent Spire", "The Gloamward Path", "Wardens of the Sunken Vow",
+    "The Cinderthorn Assembly", "The Marrow Communion", "The Rustbound Choir",
+]
+_FAITH_DEITIES: list[str] = [
+    "Vharûn the Unseen", "Ysmelda of the Deep Loam", "Korthaal the Ninefold",
+    "The Weeping Marrow", "Aeslin the Tidewright", "Grumroth Under-the-Hill",
+    "The Pale Cartographer", "Zyn-Vael the Hollow", "Thessa of the Split Sky",
+    "The Ember Sovereign", "Oskavel the Rustked", "The Drowned Warden",
+]
+_FAITH_TENETS: list[str] = [
+    "Hoard nothing the river can carry",
+    "Speak the name of every debt aloud",
+    "Burn the first loaf for the ones below",
+    "Never sleep beneath an unfinished roof",
+    "Count your enemies among your kin",
+    "Let no lantern outlive its keeper",
+    "Bury your coin before you bury your dead",
+    "Answer the door thrice or not at all",
+    "Salt the threshold against the listening dark",
+    "Give the road its due before you walk it",
+    "Owe nothing to a face you cannot name",
+    "Keep one candle for the ones who did not return",
 ]
 
 _PROCGEN_MAX_PLACES = 12  # hard cap on generated town places (prompt-size gate)
@@ -1703,6 +1824,13 @@ class World:
         self.memes: dict[str, Meme] = {}
         self.culture_camps: dict[str, dict] = {}
         self.town_motif_ref: str | None = None
+        # EM-253 — the ids of memes that have crossed comm.dominance_threshold
+        # live carriers and already fired their ONCE `meme_dominant` event. A
+        # snapshot-safe transition latch beside town_motif_ref: a meme drops
+        # out when it falls below threshold (so re-crossing re-fires) and is
+        # discarded when the meme is pruned. Serialized only-when-non-empty (as
+        # a SORTED list), so a culture-free world stays byte-identical (EM-155).
+        self.dominant_meme_ids: set[str] = set()
         # EM-256 — the Wave O war substrate. Two collections beside factions:
         # wars {id: WarState} (minted seeded via open_war — the declare_war
         # governance effect is the only production writer this stage) and
@@ -1716,6 +1844,28 @@ class World:
         # stays byte-identical (EM-155).
         self.wars: dict[str, WarState] = {}
         self.grievances: dict[str, int] = {}
+        # EM-260 — the Wave O Religion substrate: faiths {id: Faith} (minted
+        # seeded via mint_faith — the founding VERBS are the only production
+        # writers, landing EM-261). Serialized in to_snapshot() only when
+        # non-empty (the wars pattern), so a faithless world — and every
+        # pre-EM-260 snapshot — stays byte-identical (EM-155). Gated behind the
+        # world.faith config block (faith_enabled, default OFF).
+        self.faiths: dict[str, Faith] = {}
+        # EM-262 — Religion emergence (Wave O). Two collections beside faiths:
+        # congregations {id: {name, founded_tick, members}} — the shared-faith
+        # cluster (recomputed each round by recompute_congregations via the shared
+        # _recompute_groups clusterer, kind="congregation", cng_ ids; mirrors
+        # culture_camps) — and schism_pending {faith_id: tick} — the DETERMINISTIC
+        # schism grace latch: the tick a faith's co_religionist web first tore into
+        # 2+ disconnected components (mirrors grievances — seeded ids + tick
+        # arithmetic only, NO RNG / NO clock). When the divergence persists
+        # schism_grace rounds, the splinter forks into a parent-linked child faith.
+        # Both serialized in to_snapshot() only when non-empty (the culture_camps /
+        # grievances pattern), so a faith-off / faithless world — and every
+        # pre-EM-262 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore, byte-identical, EM-155). Gated behind faith_enabled (default OFF).
+        self.congregations: dict[str, dict] = {}
+        self.schism_pending: dict[str, int] = {}
         # EM-269 (F2) — agent-founded settlements: {id: {name, center,
         # founded_tick, founder_id, members}}. `center` is a WORLD-frame [x, z]
         # (±33 — the EM-268 placement frame; the logical→world conversion happens
@@ -2420,16 +2570,32 @@ class World:
         # newborn's family edges count toward this round's clusters. Diff-
         # driven events park in the same pending_spawn_events outbox.
         self.recompute_factions()
-        # EM-256 — the once-per-round war subsystem, AFTER the faction
-        # recompute (war reads the FRESH faction set) and BEFORE the aging
-        # sweep at this method's tail — the plan's contended-seam order,
-        # asserted by an order-invariant test (test_em256_grievance). RESERVED
-        # SLOTS (Wave O round systems NOT built this pass): diffuse_culture
-        # (EM-252) then recompute_congregations (EM-262) belong BETWEEN
-        # recompute_factions and advance_war — the canonical chain is
-        # recompute_factions → diffuse_culture → recompute_congregations →
-        # advance_war → age_agents. War disabled (the default) ⇒ a no-op that
-        # parks nothing (golden-safe).
+        # EM-252 — the once-per-round PASSIVE culture-diffusion sweep, AFTER the
+        # faction recompute and BEFORE advance_war (the reserved slot, now LIVE).
+        # Pure compute (zero LLM): co-located memes hop to non-carriers (seeded,
+        # capped), virality half-life-decays, and zero-carrier aged-out memes are
+        # pruned. Events SELF-PARK in the pending_spawn_events outbox (same drain
+        # as recompute_factions). Gated on comm.enabled: OFF (the default) ⇒ [] that
+        # parks nothing and mutates nothing (golden-safe). TEXT ONLY — never
+        # touches self.gallery (the free-first cost rule).
+        self.diffuse_culture()
+        # EM-262 — the once-per-round Religion subsystem (now LIVE — this was the
+        # RESERVED slot): recompute the shared-faith congregations, cool devotion,
+        # and advance any pending schism. Runs AFTER diffuse_culture (a faith rides
+        # the culture meme graph) and BEFORE advance_war — the canonical Wave-O
+        # chain recompute_factions → diffuse_culture → recompute_congregations →
+        # advance_war → age_agents, asserted by the order-invariant tests
+        # (test_em252_diffusion / test_em256_grievance / test_em262_emergence).
+        # Pure compute (zero LLM). Events SELF-PARK in pending_spawn_events (same
+        # drain as recompute_factions). Gated on faith_enabled: OFF (the default)
+        # ⇒ a no-op that parks nothing and mutates nothing (golden-safe).
+        self.recompute_congregations()
+        # EM-256 — the once-per-round war subsystem, AFTER the faction recompute
+        # (war reads the FRESH faction set), the culture sweep, and the Religion
+        # sweep, and BEFORE the aging sweep at this method's tail — the plan's
+        # contended-seam order, asserted by order-invariant tests
+        # (test_em256_grievance / test_em252_diffusion / test_em262_emergence).
+        # War disabled (the default) ⇒ a no-op that parks nothing (golden-safe).
         self.advance_war()
         # EM-233 — the once-per-round memory consolidation ("sleep"), AFTER births
         # so a newborn (whose only belief is its birth line) is well under the
@@ -2668,6 +2834,48 @@ class World:
         is here, so the caller applies the bonus exactly once (no stacking)."""
         for b in self.buildings.values():
             if b.location == place_id and b.kind in kinds and b.status == "operational":
+                return b
+        return None
+
+    def _faith_seat_here(self, agent: AgentState) -> "Building | None":
+        """EM-261 (Wave O Religion) — the DEVOTION SEAT for `agent`: a co-located
+        operational temple whose `commemorates` names the agent's OWN faith (the
+        _operational_buff_building_at cousin, extended with the faith-membership
+        predicate). None when the agent is faithless, no operational temple is at
+        their place, or the temple here commemorates a DIFFERENT faith. Walked in
+        the buildings' insertion order; returns the FIRST match so a member draws
+        the seat's buff exactly once (the no-stacking convention). The per-turn
+        buff this seat grants is the EM-262 `worship` verb; EM-261 uses this only
+        to detect the seat (and the consecration blessing reads faith.temple_buff)."""
+        fid = agent.faith_id
+        if not fid:
+            return None
+        for b in self.buildings.values():
+            if (b.location == agent.location
+                    and b.kind in _FAITH_SEAT_KINDS
+                    and b.status == "operational"
+                    and b.commemorates == fid):
+                return b
+        return None
+
+    def _consecration_temple_for(self, faith: "Faith") -> "Building | None":
+        """EM-261 — the operational temple `consecrate_faith` anchors `faith` to
+        on ratify, or None. Prefers the faith's ALREADY-consecrated temple when
+        it is still an operational temple commemorating this faith (idempotent —
+        a re-consecration re-anchors the same seat, never thrashes). Otherwise the
+        LOWEST-id operational temple that is FREE (commemorates nothing) or
+        already this faith's — a temple already dedicated to a DIFFERENT faith is
+        never hijacked. None ⇒ the caller no-ops (the demolish vanished-target
+        convention). Sorted by building id ⇒ deterministic (EM-155)."""
+        current = self.buildings.get(faith.temple_id or "")
+        if (current is not None and current.kind in _FAITH_SEAT_KINDS
+                and current.status == "operational"
+                and current.commemorates == faith.id):
+            return current
+        for bid in sorted(self.buildings):
+            b = self.buildings[bid]
+            if (b.kind in _FAITH_SEAT_KINDS and b.status == "operational"
+                    and b.commemorates in (None, "", faith.id)):
                 return b
         return None
 
@@ -4575,6 +4783,16 @@ class World:
         # never flag-gated); their per-effect validation below rejects them
         # while war is disabled, and the runtime gate/menu never offer them
         # then, so a peacetime world is byte-identical.
+        # EM-254 — canonize_meme / ban_gossip: the culture governance lane. Both
+        # stay in this set UNCONDITIONALLY (the declare_war/peace_treaty
+        # convention — the world method is never flag-gated); their per-effect
+        # validation below rejects them while comm is disabled, and the runtime
+        # gate/menu never offer them then, so a culture-free world is
+        # byte-identical (the em250 golden). canonize_meme is a one-shot
+        # payload-carrying ACT (like declare_war/trial — the 70% supermajority
+        # lane, ZERO new tally code); ban_gossip is a persistent AGREEMENT-GATE
+        # rule (clones ban_stealing end-to-end — simple majority, no on-ratify
+        # side effect, blocks spread_rumor while active).
         valid_effects = {"ban_stealing", "ubi", "recharge_subsidy", "work_bonus",
                          "ban_arson", "ban_extortion", "ban_vandalism",
                          "name_town", "demolish", "promote_image", "trial",
@@ -4583,6 +4801,8 @@ class World:
                          "adopt_master_plan",  # EM-245 (S3b)
                          "set_zone_rule",  # EM-265 (SB)
                          "declare_war", "peace_treaty",  # EM-257 (Wave O war)
+                         "canonize_meme", "ban_gossip",  # EM-254 (Wave O culture)
+                         "consecrate_faith",  # EM-261 (Wave O religion)
                          "heal"}  # EM-315 (Healing House)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
@@ -4871,6 +5091,46 @@ class World:
                                    f"(got {amount})"), None
             payload = {"war_id": wid, "reparations": amount,
                        "faction_id": suing_f["id"]}
+        # EM-254 — canonize_meme carries the target meme id on the payload (like
+        # promote_image's image_id / demolish's target). The id arrives on the
+        # generic `target` arg (the runtime maps args.meme_id → target too).
+        # Validate BEFORE a vote opens (the demolish convention): culture must be
+        # enabled, and the target must name a real meme still in circulation.
+        # This is the 70%-supermajority "popular meme → institution" bridge; the
+        # passing vote sets town_motif_ref in _on_rule_activated.
+        if effect == "canonize_meme":
+            if not self._comm_enabled():
+                return False, ("culture is not transmitted in this town "
+                               "(comm disabled)"), None
+            mid = str(target or "").strip()
+            if self.memes.get(mid) is None:
+                return False, (f"canonize_meme requires a real meme id "
+                               f"(got {mid!r})"), None
+            payload = {"meme_id": mid}
+        # EM-261 — consecrate_faith EXTENDS the canonize_meme lane: a sibling 70%
+        # supermajority ACT that anchors a faith to an operational temple (its
+        # devotion seat). Gated on faith_enabled() (NOT comm — this is the
+        # Religion track), and the target must name a real faith still in
+        # self.faiths. The faith id arrives on the generic `target` arg (the
+        # runtime maps args.faith_id → target too), mirroring canonize's meme id.
+        if effect == "consecrate_faith":
+            if not self.faith_enabled():
+                return False, ("no faith is kept in this town "
+                               "(faith disabled)"), None
+            fid = str(target or "").strip()
+            if self.faiths.get(fid) is None:
+                return False, (f"consecrate_faith requires a real faith id "
+                               f"(got {fid!r})"), None
+            payload = {"faith_id": fid}
+        # EM-254 — ban_gossip is a persistent AGREEMENT-GATE rule (ban_stealing's
+        # twin): it carries NO payload and takes NO target, and BLOCKS
+        # spread_rumor while active (simple majority — NOT the 70% lane). Comm
+        # must be enabled (the culture-lane gate), else it is un-proposable, so a
+        # culture-free world never admits it (byte-identical, the em250 golden).
+        if effect == "ban_gossip":
+            if not self._comm_enabled():
+                return False, ("gossip cannot be legislated in this town "
+                               "(comm disabled)"), None
         # Duplicate guard: only one OPEN proposal per effect at a time. EXCEPTION:
         # demolish is scoped per TARGET (two distinct buildings may have open
         # demolish votes at once) — only a duplicate vote for the SAME target is
@@ -4950,6 +5210,27 @@ class World:
                     return False, (f"a peace vote for {payload.get('war_id')!r} "
                                    f"is already open"), None
                 continue
+            # EM-254 — canonize_meme is scoped per MEME_ID (two distinct memes may
+            # have open canonization votes at once; the SAME meme may not be
+            # double-proposed) — mirrors declare_war's per-pair dedup / demolish-
+            # per-target. ban_gossip is NOT here: as a persistent agreement-gate
+            # rule (ban_stealing's twin) it falls through to the single-open-per-
+            # effect default below, exactly like ban_stealing.
+            if effect == "canonize_meme":
+                if (rule.payload or {}).get("meme_id") == payload.get("meme_id"):
+                    return False, (f"a canonize vote for "
+                                   f"{payload.get('meme_id')!r} is already "
+                                   f"open"), None
+                continue
+            # EM-261 — consecrate_faith is scoped per FAITH_ID (two distinct
+            # faiths may have open consecration votes at once; the SAME faith may
+            # not be double-proposed) — the canonize-per-meme dedup twin.
+            if effect == "consecrate_faith":
+                if (rule.payload or {}).get("faith_id") == payload.get("faith_id"):
+                    return False, (f"a consecration vote for "
+                                   f"{payload.get('faith_id')!r} is already "
+                                   f"open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -4970,6 +5251,8 @@ class World:
                               "adopt_master_plan",  # EM-245 (S3b) — one-shot (one-active guard blocks dupes)
                               "set_zone_rule",  # EM-265 (SB) — one-shot per-zone act
                               "declare_war", "peace_treaty",  # EM-257 — one-shot acts per pair/war
+                              "canonize_meme",  # EM-254 — one-shot per meme (ban_gossip renews like ban_stealing)
+                              "consecrate_faith",  # EM-261 — one-shot per faith (like canonize)
                               "heal") else None  # EM-315 — one-shot transplant per patient
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
@@ -5049,7 +5332,18 @@ class World:
                                            # "renewed" against the first and
                                            # never applied — no war would open.
                                            "declare_war",
-                                           "peace_treaty") else None
+                                           "peace_treaty",
+                                           # EM-254 — canonize_meme is a one-shot
+                                           # per-meme ACT (like demolish/trial):
+                                           # each passing vote canonizes afresh, it
+                                           # never "renews". ban_gossip is NOT here —
+                                           # it renews like its twin ban_stealing.
+                                           "canonize_meme",
+                                           # EM-261 — consecrate_faith is a one-shot
+                                           # per-faith ACT (canonize's religion twin):
+                                           # each passing vote anchors afresh, never
+                                           # "renews".
+                                           "consecrate_faith") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -5295,6 +5589,73 @@ class World:
                 amount = int(self._war_param("reparations_base", 25))
             self._settle_war(war, loser, amount, event_kind="peace_signed",
                              payload_extra={"proposal_id": rule.id})
+            return
+        # EM-254 — canonize_meme: a passing 70% SUPERMAJORITY elevates a popular
+        # meme to the town's canonical motif (self.town_motif_ref — the
+        # plaza_banner_ref analog, EM-253). A ONE-SHOT governance ACT (like
+        # declare_war / trial): it applies its effect here on ratify and does NOT
+        # linger as an active blocking rule. A meme that vanished from self.memes
+        # before the vote ratified is a SILENT no-op (the demolish vanished-target
+        # convention; the vote still applied). The meme_canonized event parks in
+        # the SAME outbox name_town/declare_war use (drained + emitted by the
+        # loop's _flush_spawn_events); actor_id anchors DETERMINISTICALLY on the
+        # meme's origin_agent_id (the meme_dominant recipe, EM-155).
+        if rule.effect == "canonize_meme":
+            rule.applied = True
+            meme_id = str((rule.payload or {}).get("meme_id") or "")
+            meme = self.memes.get(meme_id)
+            if meme is None:
+                return
+            self.town_motif_ref = meme_id
+            self.pending_spawn_events.append(self._faction_event(
+                "meme_canonized", meme.origin_agent_id,
+                f"🏛 By vote, \"{_truncate(meme.text, 60)}\" becomes the town's "
+                f"canon.",
+                {"meme_id": meme_id, "proposal_id": rule.id},
+            ))
+            return
+        # EM-261 — consecrate_faith: a passing 70% SUPERMAJORITY anchors a faith
+        # to an operational `temple` (its DEVOTION SEAT — the canonize_meme
+        # religion twin). Sets faith.temple_id + the temple's `commemorates`
+        # (reusing the Building field — the rule-commemoration path) and grants
+        # the CONSECRATION BLESSING: every LIVING member of the faith gains
+        # faith.temple_buff devotion (clamped 0..100 — this is where EM-261 reads
+        # the config; the PER-TURN seat buff at the temple is the EM-262 `worship`
+        # verb). A vanished faith, an ALREADY-consecrated faith (dedup via
+        # _consecration_temple_for), or NO free operational temple ⇒ a SILENT
+        # no-op (the demolish vanished-target convention; the vote still applied).
+        # Two events park in the SAME outbox trial's verdict pair uses:
+        # faith_consecrated then temple_consecrated. actor_id anchors on the
+        # faith's founder (the meme_canonized origin recipe — deterministic, EM-155).
+        if rule.effect == "consecrate_faith":
+            rule.applied = True
+            faith_id = str((rule.payload or {}).get("faith_id") or "")
+            faith = self.faiths.get(faith_id)
+            if faith is None:
+                return
+            temple = self._consecration_temple_for(faith)
+            if temple is None:
+                return
+            faith.temple_id = temple.id
+            temple.commemorates = faith.id
+            buff = int(self._faith_param("temple_buff", 5))
+            for mid in faith.members:
+                member = self.agents.get(mid)
+                if member is not None and member.alive:
+                    member.devotion = max(0, min(100, member.devotion + buff))
+            self.pending_spawn_events.append(self._faction_event(
+                "faith_consecrated", faith.founder_id,
+                f"🕯 By vote, {faith.name} is consecrated — {temple.name} "
+                f"becomes its seat.",
+                {"faith_id": faith.id, "temple_id": temple.id,
+                 "proposal_id": rule.id},
+            ))
+            self.pending_spawn_events.append(self._faction_event(
+                "temple_consecrated", faith.founder_id,
+                f"⛪ {temple.name} is dedicated to {faith.deity}.",
+                {"faith_id": faith.id, "temple_id": temple.id,
+                 "building_id": temple.id, "proposal_id": rule.id},
+            ))
             return
         # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
         # article in the living constitution. The op + payload were validated at
@@ -5695,6 +6056,8 @@ class World:
                            "adopt_master_plan",  # EM-245 (S3b) — structural city morph → 0.7
                            "set_zone_rule",  # EM-265 (SB) — structural city policy → 0.7
                            "declare_war", "peace_treaty",  # EM-257 — faction-scoped 70% (electorate substituted above)
+                           "canonize_meme",  # EM-254 — a popular meme → institution: the 70% supermajority lane (town-wide, NOT faction-scoped)
+                           "consecrate_faith",  # EM-261 — anchoring a faith to its temple seat: the 70% supermajority lane (town-wide)
                            "heal"):  # EM-315 — remaking a mind is a weighty act → 70% supermajority
             if rule.effect == "amend_constitution":
                 try:
@@ -6654,16 +7017,32 @@ class World:
             return self._fail_event(
                 agent.id, "create_image", "image_gen_disabled",
                 f"{agent.name} reached for the brushes, but the atelier is closed today.")
+        # EM-253 — when comm AND comm.meme_images are BOTH on, the posted image
+        # is ALSO registered as a kind="image" meme (riding the SAME seeded
+        # image_id) so it can spread + drift via adopt_meme. The meme_id rides
+        # the payload only when minted. GOLDEN-CRITICAL: with either flag off
+        # (the default world) this whole block is skipped and image_posted is
+        # BYTE-IDENTICAL to pre-EM-253 (create_image runs in every world).
+        meme_id: str | None = None
+        if self._comm_enabled() and bool(self._comm_param("meme_images", True)):
+            meme = self.mint_meme("image", minted["prompt"], agent.id,
+                                  image_id=minted["image_id"])
+            self._attach_meme(agent, meme)
+            meme.virality = 1
+            meme_id = meme.id
+        payload = {
+            "image_id": minted["image_id"],
+            "prompt": minted["prompt"],
+            "url": minted["url"],
+            "place": minted["place"],
+        }
+        if meme_id is not None:
+            payload["meme_id"] = meme_id
         return {
             "kind": "image_posted",
             "actor_id": agent.id,
             "text": f"🎨 {agent.name} paints \"{_truncate(minted['prompt'], 60)}\".",
-            "payload": {
-                "image_id": minted["image_id"],
-                "prompt": minted["prompt"],
-                "url": minted["url"],
-                "place": minted["place"],
-            },
+            "payload": payload,
         }
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -7582,6 +7961,23 @@ class World:
         boost_enabled / victory_arch_enabled) — the runtime menu/validator
         gate on it."""
         return bool(self._war_param("enabled", False))
+
+    def _faith_param(self, name: str, default: Any) -> Any:
+        """EM-260 — defensive accessor for the `world.faith` config block
+        (FaithParams dataclass OR dict OR absent — EM-155 conventions, like
+        _war_param). An absent block ⇒ every default ⇒ pre-EM-260 worlds run
+        unchanged (enabled defaults FALSE). `default` is only a fallback for a
+        key missing from the block, so keep these call-site defaults ==
+        FaithParams defaults."""
+        return _block_get(getattr(self.params, "faith", None), name, default)
+
+    def faith_enabled(self) -> bool:
+        """EM-260 — config gate `world.faith.enabled` (default OFF). Disabled ⇒
+        no faith is minted by any default path, no faith prompt line / menu
+        entry / event, no devotion bookkeeping — byte-identical pre-Wave-O
+        behavior (the em161 golden). PUBLIC (like war_enabled / boost_enabled) —
+        the EM-261+ runtime menu/validator gate the founding verbs on it."""
+        return bool(self._faith_param("enabled", False))
 
     def _healing_param(self, name: str, default: Any) -> Any:
         """EM-315 — defensive accessor for the `world.healing_house` config block
@@ -9238,6 +9634,184 @@ class World:
             self.pending_spawn_events.extend(events)
         return events
 
+    def recompute_culture_camps(self) -> list[dict]:
+        """EM-253 — the once-per-round culture-camp recompute, a THIN caller of
+        the shared _recompute_groups clusterer (kind="culture_camp", the
+        recompute_factions template): two LIVING agents share an edge when their
+        held_memes overlap by >= comm.camp_min_shared; components of >=
+        comm.camp_min_size members become camps (cmp_ ids, "…'s camp" names).
+        Diff events (culture_camp_formed/joined/left/dissolved) park in the
+        pending_spawn_events outbox (same drain as recompute_factions). Called at
+        the END of diffuse_culture, so it rides the same comm.enabled gate; gated
+        here too so a direct call on a default world is a no-op (byte-identical —
+        the em161 golden). Deterministic — the seeded clusterer, no clock/RNG
+        (EM-155). Returns the parked events ([] when stable/disabled)."""
+        if not self._comm_enabled():
+            return []
+        min_shared = max(1, int(self._comm_param("camp_min_shared", 2)))
+        min_size = max(1, int(self._comm_param("camp_min_size", 3)))
+
+        def _edge(a: AgentState, b: AgentState) -> bool:
+            return len(set(a.held_memes) & set(b.held_memes)) >= min_shared
+
+        new_store, events = self._recompute_groups(
+            _edge, self.culture_camps, min_size, "culture_camp")
+        self.culture_camps = new_store
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
+    def recompute_congregations(self) -> list[dict]:
+        """EM-262 — the once-per-round Religion round subsystem, called from
+        _apply_round_start BETWEEN diffuse_culture and advance_war (the reserved
+        slot, now LIVE). Three PURE-COMPUTE mechanics (zero LLM, no clock/RNG —
+        EM-155):
+
+          1) CONGREGATIONS — a THIN caller of the shared _recompute_groups
+             clusterer (kind="congregation", cng_ ids, the recompute_factions /
+             recompute_culture_camps template): two LIVING agents share an edge when
+             both hold a faith_id and it is the SAME faith_id. Components of >=
+             faith.congregation_min_size (default 2) members become congregations.
+             Diff events (congregation_formed/joined/left/dissolved) park in
+             pending_spawn_events (same drain as recompute_factions).
+          2) DEVOTION DECAY — every living faith member cools by faith.devotion_decay
+             (deterministic, floored >= 0 — the grievance_decay analog).
+          3) SCHISM — _advance_schisms forks a faith whose co_religionist web has
+             torn (see there).
+
+        Gated on faith_enabled: OFF (the default) ⇒ returns [] immediately, parking
+        nothing and mutating nothing (no congregation store write, no snapshot key —
+        the em260 golden). Returns the parked events ([] when stable/disabled)."""
+        if not self.faith_enabled():
+            return []
+        min_size = max(1, int(self._faith_param("congregation_min_size", 2)))
+
+        def _edge(a: AgentState, b: AgentState) -> bool:
+            return bool(a.faith_id) and a.faith_id == b.faith_id
+
+        new_store, events = self._recompute_groups(
+            _edge, self.congregations, min_size, "congregation")
+        self.congregations = new_store
+        # Per-round devotion cool-off (deterministic, clamped >= 0) — the
+        # grievance-decay analog, walked in sorted-id order for replay-stable
+        # bookkeeping (it emits no events, so order is cosmetic — kept for clarity).
+        decay = max(0, int(self._faith_param("devotion_decay", 1)))
+        if decay:
+            for aid in sorted(self.agents):
+                agent = self.agents[aid]
+                if agent.alive and agent.faith_id:
+                    agent.devotion = max(0, agent.devotion - decay)
+        # Deterministic schism forking (its own parked events).
+        events.extend(self._advance_schisms())
+        if events:
+            self.pending_spawn_events.extend(events)
+        return events
+
+    def _co_religionist_edge(self, a: AgentState, b: AgentState) -> bool:
+        """EM-262 — a schism-graph edge: a co_religionist RELATIONSHIP bond exists
+        in EITHER direction (proselytize seals it MUTUALLY; either-direction keeps
+        the graph robust to a one-sided shift). Distinct from the CONGREGATION edge
+        (shared faith_id): the congregation is who NOMINALLY shares the faith, this
+        graph is who is actually BOUND by the conversion web — when it tears, the
+        faith has diverged."""
+        rel_ab = a.relationships.get(b.id)
+        rel_ba = b.relationships.get(a.id)
+        return ((rel_ab is not None and rel_ab.type == "co_religionist")
+                or (rel_ba is not None and rel_ba.type == "co_religionist"))
+
+    def _components_among(self, ids: list[str], edge_fn) -> list[list[str]]:
+        """EM-262 — connected components over `edge_fn` among a SPECIFIC id set
+        (the _edge_components walk, scoped to one faith's members instead of all
+        living agents). Deterministic: ids walked in sorted order, so components
+        come out ordered by their lowest member id, members sorted."""
+        members = sorted(set(str(i) for i in ids))
+        adjacency: dict[str, list[str]] = {m: [] for m in members}
+        for i, aid in enumerate(members):
+            a = self.agents.get(aid)
+            if a is None:
+                continue
+            for bid in members[i + 1:]:
+                b = self.agents.get(bid)
+                if b is not None and edge_fn(a, b):
+                    adjacency[aid].append(bid)
+                    adjacency[bid].append(aid)
+        components: list[list[str]] = []
+        seen: set[str] = set()
+        for m in members:
+            if m in seen:
+                continue
+            stack, comp = [m], []
+            seen.add(m)
+            while stack:
+                cur = stack.pop()
+                comp.append(cur)
+                for nxt in adjacency[cur]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            components.append(sorted(comp))
+        return components
+
+    def _advance_schisms(self) -> list[dict]:
+        """EM-262 — DETERMINISTIC schism forking (seeded ids + tick arithmetic only,
+        NO RNG / NO clock). For each faith (sorted-id walk), the living members'
+        co_religionist RELATIONSHIP web is split into connected components. When it
+        has torn into 2+ components, the SPLINTER = every member NOT in the KEEPER
+        (the largest component; a size tie breaks to the LOWEST lowest-member-id, so
+        the parent faith keeps the dominant bloc). The divergence REGISTERS as
+        pending only when the splinter has >= schism_threshold members (a min
+        splinter size — a lone dropout never triggers; the default 50 is deliberately
+        conservative, schisms are rare, so drive it low to exercise).
+
+        A registered divergence starts / keeps a grace latch in self.schism_pending
+        (faith_id → the tick it was FIRST seen); a faith that re-coalesces clears its
+        latch. When the divergence has persisted >= schism_grace ticks, the splinter
+        FORKS: mint_faith(founder=<splinter's lowest-id member>, parent_id=<faith>),
+        the splinter's members' faith_id is reassigned to the child, and a
+        faith_schism event fires. Every id is seeded (mint_faith), the grace latch is
+        pure tick math, so two identical worlds schism byte-identically (EM-155)."""
+        events: list[dict] = []
+        threshold = max(1, int(self._faith_param("schism_threshold", 50)))
+        grace = max(0, int(self._faith_param("schism_grace", 20)))
+        for fid in sorted(self.faiths):
+            faith = self.faiths[fid]
+            living = [m for m in faith.members
+                      if (a := self.agents.get(m)) is not None and a.alive]
+            comps = self._components_among(living, self._co_religionist_edge)
+            if len(comps) < 2:
+                self.schism_pending.pop(fid, None)     # coalesced ⇒ clear latch
+                continue
+            keeper = max(comps, key=len)               # largest; tie → lowest id
+            keeper_set = set(keeper)
+            splinter = sorted(m for m in living if m not in keeper_set)
+            if len(splinter) < threshold:              # too small to count
+                self.schism_pending.pop(fid, None)
+                continue
+            first = self.schism_pending.get(fid)
+            if first is None:
+                self.schism_pending[fid] = self.tick   # start the grace latch
+                continue
+            if self.tick - int(first) < grace:
+                continue                               # still within grace
+            # Grace elapsed — FORK the splinter into a parent-linked child faith.
+            self.schism_pending.pop(fid, None)
+            founder = splinter[0]                       # splinter's lowest-id member
+            child = self.mint_faith(founder, parent_id=fid)
+            for mid in splinter:
+                self.agents[mid].faith_id = child.id
+            child.members = list(splinter)
+            faith.members = [m for m in faith.members if m not in set(splinter)]
+            events.append({
+                "kind": "faith_schism",
+                "actor_id": founder,
+                "actor_type": "system",
+                "text": (f"🕯 {child.name} breaks away from {faith.name} in "
+                         f"schism ({len(splinter)} depart)."),
+                "payload": {"parent_faith_id": fid, "faith_id": child.id,
+                            "name": child.name, "members": list(splinter)},
+            })
+        return events
+
     # ──────────────────────────────────────────────────────────────────────────
     # EM-250 — Communication & Culture substrate (Wave O keystone). Build-once
     # seams shared by Culture (EM-251+), Religion (EM-260+), and War-adjacent
@@ -9358,6 +9932,775 @@ class World:
         return out[:200]
 
     # ──────────────────────────────────────────────────────────────────────────
+    # EM-251 — Culture transmission verbs (Wave O Culture track). Two REFLEX
+    # channels (zero extra LLM calls — the MAX-call-rate ethos), both gated on
+    # comm.enabled (default OFF ⇒ unreachable ⇒ byte-identical pre-Wave-O; the
+    # em161 golden). spread_rumor is the "telephone game" hop: it clones
+    # action_deceive's belief-plant + action_recruit's co-location gate but
+    # stays TRUST-POSITIVE and CRIME-FREE — no _register_crime, no trust hit —
+    # and carries a drifted Meme so the distortion has lineage. send_letter is
+    # the first NON-co-located directed channel: it parks a letter in ANY living
+    # agent's mailbox (present or absent), delivered on the recipient's next
+    # turn by deliver_letters. Deterministic — seeded meme ids, no clock/RNG.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_spread_rumor(self, agent: AgentState, target: AgentState,
+                            rumor: str = "",
+                            meme_id: str | None = None) -> dict:
+        """EM-251 — whisper a rumor to a CO-LOCATED target: distort it one hop
+        (_distort_text), plant the drifted text in the target's beliefs
+        (_plant_belief — the SAME seam action_deceive uses), and carry the drift
+        as a child Meme (parent_id + generation+1) attached to BOTH the actor and
+        the target so lineage survives. Unlike deceive this is a TRUST-POSITIVE
+        channel: NO _register_crime, NO trust crater (trust is left untouched).
+
+        The source rumor is an existing carried meme (`meme_id` when it names a
+        registered meme) or, failing that, a fresh kind="rumor" meme minted from
+        the free-text `rumor`. Emits `rumor_spread`, plus `meme_mutated` when the
+        hop actually changed the text (a `_multi` chain then). Deterministic —
+        mint_meme/_distort_text are seeded, no clock/RNG (EM-155)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "spread_rumor", "comm disabled",
+                f"{agent.name} murmurs a rumor no one is here to catch.")
+        # EM-254 — ban_gossip agreement-gate (ban_stealing's twin, cf.
+        # action_steal): a ratified ban forbids spreading rumors. Placed AFTER the
+        # comm gate so a comm-off world returns the identical "comm disabled" fail
+        # (ban_gossip is itself un-proposable without comm ⇒ never active there),
+        # keeping the em250 golden byte-identical.
+        if self.has_active_rule("ban_gossip"):
+            return self._fail_event(
+                agent.id, "spread_rumor", "ban_gossip rule is active",
+                f"{agent.name} bites their tongue — gossip is banned in this "
+                f"town.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "spread_rumor", "self",
+                f"{agent.name} cannot spread a rumor to themselves.")
+        if agent.location != target.location:
+            return self._fail_event(
+                agent.id, "spread_rumor", "not co-located",
+                f"{agent.name} found no one here to whisper to.")
+        source: Meme | None = None
+        if meme_id:
+            source = self.memes.get(str(meme_id))
+        if source is None:
+            text = (rumor or "").strip()
+            if not text:
+                return self._fail_event(
+                    agent.id, "spread_rumor", "empty",
+                    f"{agent.name} has no rumor to spread.")
+            source = self.mint_meme("rumor", text, agent.id)
+        # The drifted CHILD: one telephone-game hop, seeded on the target so a
+        # replay reproduces the exact distortion (EM-155). Attached to BOTH the
+        # actor (the carrier who spread it) and the co-located target.
+        child = self.mint_meme(
+            "rumor", self._distort_text(source.text, target.id), agent.id,
+            parent_id=source.id, generation=source.generation + 1)
+        self._attach_meme(agent, child)
+        self._attach_meme(target, child)
+        self._plant_belief(target, agent.name, child.text)
+        spread = {
+            "kind": "rumor_spread",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"{agent.name} whispers a rumor to {target.name}.",
+            "payload": {"action": "spread_rumor", "meme_id": child.id,
+                        "parent_id": source.id, "generation": child.generation},
+        }
+        if child.text == source.text:
+            return spread
+        # The drift is visible — a second legible line, like a clash kill's chain.
+        return {"_multi": [spread, {
+            "kind": "meme_mutated",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"…and it mutates on the way to {target.name}.",
+            "payload": {"action": "spread_rumor", "meme_id": child.id,
+                        "parent_id": source.id, "generation": child.generation},
+        }]}
+
+    def action_send_letter(self, agent: AgentState, target: AgentState,
+                           text: str) -> dict:
+        """EM-251 — the first NON-co-located directed channel: park a letter in
+        `target`'s mailbox (FIFO-capped at comm.letter_cap; OLDEST dropped on
+        overflow) — NO co-location gate, so you can write to an ABSENT citizen.
+        Delivered reflexively on the recipient's OWN next turn (deliver_letters).
+        Emits `letter_sent`. Deterministic — no clock/RNG (the tick stamp is the
+        world's own logical tick, snapshot-durable like pending_skill_requests)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "send_letter", "comm disabled",
+                f"{agent.name} pens a letter with nowhere to send it.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "send_letter", "self",
+                f"{agent.name} cannot send a letter to themselves.")
+        body = (text or "").strip()
+        if not body:
+            return self._fail_event(
+                agent.id, "send_letter", "empty",
+                f"{agent.name} has nothing to write.")
+        target.mailbox.append({"from_id": agent.id, "from_name": agent.name,
+                               "text": body, "tick": self.tick})
+        cap = max(1, int(self._comm_param("letter_cap", 8)))
+        while len(target.mailbox) > cap:
+            target.mailbox.pop(0)          # FIFO overflow — drop the OLDEST
+        return {
+            "kind": "letter_sent",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"{agent.name} sends a letter to {target.name}.",
+            "payload": {"action": "send_letter"},
+        }
+
+    def deliver_letters(self, agent: AgentState) -> list[dict]:
+        """EM-251 — drain `agent`'s mailbox at the START of its OWN turn: plant
+        each parked letter's body in beliefs (_plant_belief, prefixed "(letter) ")
+        and emit a `letter_read` event, then clear the mailbox. REFLEX (no LLM),
+        deterministic, EXACTLY once per letter. Gated on comm.enabled — a default
+        world never parks a letter, so this is a no-op (the em161 golden). The
+        runtime calls this once per turn (mirroring the god-whisper pop)."""
+        if not self._comm_enabled() or not agent.mailbox:
+            return []
+        events: list[dict] = []
+        for letter in agent.mailbox:
+            if not isinstance(letter, dict):
+                continue
+            from_name = str(letter.get("from_name")
+                            or letter.get("from_id") or "Someone")
+            body = str(letter.get("text") or "")
+            self._plant_belief(agent, from_name, "(letter) " + body)
+            events.append({
+                "kind": "letter_read",
+                "actor_id": agent.id,
+                "text": f"{agent.name} reads a letter from {from_name}.",
+                "payload": {"action": "letter_read",
+                            "from_id": letter.get("from_id")},
+            })
+        agent.mailbox = []
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-253 — Culture lifecycle verbs (Wave O Culture stage). Two REFLEX
+    # authoring channels (zero extra LLM calls — the MAX-call-rate ethos), both
+    # gated on comm.enabled (default OFF ⇒ unreachable ⇒ byte-identical pre-Wave-O
+    # — the em161 golden). create_meme coins a fresh idea (ungated by co-location:
+    # an author needs no audience); adopt_meme takes up an existing meme and, for
+    # an IMAGE meme, mints a DRIFTED CHILD image through the free gallery seam so
+    # a visual meme MUTATES as it spreads (fox in a crown → fox in a paper crown).
+    # Deterministic — seeded meme/image ids, no clock/RNG; the child PNG is
+    # off-replay chrome (the free-first cost rule; NO paid text→image).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_create_meme(self, agent: AgentState, text: str) -> dict:
+        """EM-253 — mint a fresh kind="idea" meme and carry it. REFLEX, UNGATED
+        by co-location. Empty text ⇒ _fail_event. The author becomes the sole
+        carrier and the meme opens at virality 1 (consistent with adopt's +1 on
+        a fresh catch). Emits `meme_created`. Deterministic — mint_meme is
+        seeded, no clock/RNG (EM-155)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "create_meme", "comm disabled",
+                f"{agent.name} has an idea no one is here to catch.")
+        body = (text or "").strip()
+        if not body:
+            return self._fail_event(
+                agent.id, "create_meme", "empty",
+                f"{agent.name} reaches for an idea and finds none.")
+        meme = self.mint_meme("idea", body, agent.id)
+        self._attach_meme(agent, meme)
+        meme.virality = 1
+        return {
+            "kind": "meme_created",
+            "actor_id": agent.id,
+            "text": f"💡 {agent.name} coins an idea: \"{_truncate(body, 60)}\".",
+            "payload": {"action": "create_meme", "meme_id": meme.id,
+                        "kind": meme.kind},
+        }
+
+    def action_adopt_meme(self, agent: AgentState, meme_id: str) -> dict:
+        """EM-253 — adopt an EXISTING registered meme into your held set. REFLEX.
+        The meme must be in self.memes (else _fail_event). Attaching is
+        idempotent, so an already-carrier adopt is a no-op fail. A genuine adopt
+        bumps virality (+1, consistent with create) and emits `meme_adopted`.
+
+        IMAGE-MEME DRIFT: adopting a kind="image" meme WHILE comm.meme_images
+        mints a DRIFTED CHILD image meme — a distorted prompt
+        (_distort_text(meme.text, agent.id, tick)) minted through the SAME free
+        gallery seam create_image uses (_mint_gallery_image → a seeded,
+        replay-safe image_id; the PNG is off-replay chrome), then registered
+        (parent_id + generation+1 + the fresh image_id) and attached to the
+        adopter. A second `meme_created` rides the marquee "meme mutates as it
+        spreads" moment. Determinism holds — every id is seeded (EM-155); the
+        child image is the ONLY new image, minted on this explicit agent turn via
+        the FREE lane (the free-first cost rule; NO paid text→image)."""
+        if not self._comm_enabled():
+            return self._fail_event(
+                agent.id, "adopt_meme", "comm disabled",
+                f"{agent.name} reaches for an idea that isn't here.")
+        meme = self.memes.get(str(meme_id))
+        if meme is None:
+            return self._fail_event(
+                agent.id, "adopt_meme", "unknown meme",
+                f"{agent.name} tried to adopt an idea no one has heard of.")
+        if not self._attach_meme(agent, meme):
+            return self._fail_event(
+                agent.id, "adopt_meme", "already held",
+                f"{agent.name} already carries that idea.")
+        meme.virality += 1
+        adopted = {
+            "kind": "meme_adopted",
+            "actor_id": agent.id,
+            "text": f"🔁 {agent.name} takes up \"{_truncate(meme.text, 60)}\".",
+            "payload": {"action": "adopt_meme", "meme_id": meme.id,
+                        "kind": meme.kind},
+        }
+        # Image-meme drift — the marquee "it repaints as it spreads" moment.
+        if meme.kind == "image" and bool(self._comm_param("meme_images", True)):
+            drifted_prompt = self._distort_text(meme.text, agent.id, self.tick)
+            minted = self._mint_gallery_image(agent, drifted_prompt)
+            if minted is not None:
+                child = self.mint_meme(
+                    "image", drifted_prompt, agent.id,
+                    image_id=minted["image_id"], parent_id=meme.id,
+                    generation=meme.generation + 1)
+                self._attach_meme(agent, child)
+                return {"_multi": [adopted, {
+                    "kind": "meme_created",
+                    "actor_id": agent.id,
+                    "text": (f"🎨 …and it repaints in {agent.name}'s hands: "
+                             f"\"{_truncate(child.text, 60)}\"."),
+                    "payload": {"action": "adopt_meme", "meme_id": child.id,
+                                "parent_id": meme.id,
+                                "generation": child.generation,
+                                "image_id": child.image_id},
+                }]}
+        return adopted
+
+    def action_found_faith(self, agent: AgentState) -> dict:
+        """EM-261 (Wave O Religion) — found a new faith and become its first
+        devotee. REFLEX, deterministic, zero extra LLM calls (the create_meme
+        recipe). Gated on world.faith_enabled(): a faith-off world rejects it
+        (byte-identical control, the em161 golden). One membership at a time — an
+        already-faithful agent is rejected (_fail_event).
+
+        The founding mints a SEEDED Faith (mint_faith — replay-stable, EM-260),
+        makes the founder its sole member, sets agent.faith_id + a base devotion
+        (faith.devotion_base, > 0), and forges the CULTURE JOIN: a canonical
+        kind="faith" Meme (mint_meme + _attach_meme — the faith name is the meme
+        text) whose id is stamped on faith.meme_id, so a faith spreads through the
+        SAME meme graph culture rides (EM-250/EM-253). Emits `faith_founded`.
+        Every id is seeded (EM-155): a replay/fork founds the byte-identical
+        faith + meme."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "found_faith", "faith disabled",
+                f"{agent.name} reaches for a faith no one here shares.")
+        if agent.faith_id:
+            existing = self.faiths.get(agent.faith_id)
+            fname = existing.name if existing is not None else "a faith"
+            return self._fail_event(
+                agent.id, "found_faith", "already faithful",
+                f"{agent.name} already keeps the faith of {fname}.")
+        faith = self.mint_faith(agent.id)
+        faith.members = [agent.id]
+        agent.faith_id = faith.id
+        base = max(1, int(self._faith_param("devotion_base", 10)))
+        agent.devotion = max(0, min(100, base))
+        # The Culture join — a canonical kind="faith" meme carrying the faith's
+        # name, attached to the founder so the faith rides the meme graph.
+        meme = self.mint_meme("faith", faith.name, agent.id)
+        self._attach_meme(agent, meme)
+        faith.meme_id = meme.id
+        return {
+            "kind": "faith_founded",
+            "actor_id": agent.id,
+            "text": (f"🕯 {agent.name} founds {faith.name}, faith of "
+                     f"{faith.deity}."),
+            "payload": {"action": "found_faith", "faith_id": faith.id,
+                        "name": faith.name, "deity": faith.deity,
+                        "meme_id": meme.id},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-262 — Religion emergence (Wave O): the two devotee REFLEX verbs
+    # (proselytize + worship), both faith-gated. proselytize is the
+    # TRUST-POSITIVE conversion channel (the spread_rumor recipe: plant a belief
+    # via the shared _plant_belief seam, NO crime, NO trust crater); worship is
+    # action_work's buff-at-place clone anchored on the _faith_seat_here temple.
+    # Deterministic — a seeded conversion roll, no clock/RNG (EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_proselytize(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-262 — preach the actor's faith to a CO-LOCATED target (the
+        spread_rumor recipe, gated on faith_enabled). The actor MUST hold a
+        faith_id; the target must be co-located (the deceive/clash gate). Plants
+        the faith's pitch in the target's beliefs via the SHARED _plant_belief
+        seam — TRUST-POSITIVE like spread_rumor: NO _register_crime, NO trust
+        crater (a conversion only ever FLOORS trust UP, never down).
+
+        Conversion is SEEDED (EM-155): a faithless target converts when
+        `_seed_int("proselytize", city_seed, actor.id, target.id, tick) % 100 <
+        int(conversion_chance*100)`. On CONVERSION: the target adopts the actor's
+        faith_id, joins faith.members, gains devotion, and a MUTUAL co_religionist
+        relationship edge is sealed (the accept_contract ally-ring recipe) — emits
+        proselytized + faith_joined (a _multi chain). On RESISTANCE: emits
+        proselytize_resisted (still zero trust damage). A target who ALREADY shares
+        the faith is a gentle no-op (a small +devotion reinforcement, NO re-join); a
+        target of a DIFFERENT faith always resists (no forced steal — only faithless
+        targets convert)."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "proselytize", "faith disabled",
+                f"{agent.name} preaches to an empty sky.")
+        if agent.id == target.id:
+            return self._fail_event(
+                agent.id, "proselytize", "self",
+                f"{agent.name} cannot preach to themselves.")
+        if not agent.faith_id:
+            return self._fail_event(
+                agent.id, "proselytize", "faithless",
+                f"{agent.name} has no faith to share.")
+        if not target.alive or agent.location != target.location:
+            return self._fail_event(
+                agent.id, "proselytize", "not co-located",
+                f"{agent.name} finds no one here to preach to.")
+        faith = self.faiths.get(agent.faith_id)
+        if faith is None:                                   # actor's faith vanished
+            return self._fail_event(
+                agent.id, "proselytize", "faith gone",
+                f"{agent.name}'s faith has faded from memory.")
+        from ..animals.runtime import _seed_int
+        # The sermon: a SEEDED tenet of the faith (deterministic — the same
+        # actor/target/tick always preaches the same line), planted trust-positive.
+        if faith.tenets:
+            pitch = faith.tenets[
+                _seed_int("proselytize-pitch", faith.id, agent.id, target.id,
+                          self.tick) % len(faith.tenets)]
+        else:  # pragma: no cover - a minted faith always carries tenets
+            pitch = faith.name
+        self._plant_belief(target, agent.name, pitch)
+        # A co-religionist already shares the faith ⇒ a gentle no-op: a small
+        # reinforcement of devotion, NEVER a re-join (idempotent, deterministic).
+        if target.faith_id == agent.faith_id:
+            target.devotion = max(0, min(100, target.devotion + 1))
+            return {
+                "kind": "proselytized",
+                "actor_id": agent.id,
+                "target_id": target.id,
+                "text": (f"🕯 {agent.name} and {target.name} share the faith of "
+                         f"{faith.name}."),
+                "payload": {"action": "proselytize", "faith_id": faith.id,
+                            "target_id": target.id, "converted": False,
+                            "already": True},
+            }
+        # A target who keeps a DIFFERENT faith always resists (no forced steal);
+        # only a FAITHLESS target may convert, on the seeded roll.
+        threshold = int(float(self._faith_param("conversion_chance", 0.3)) * 100)
+        roll = _seed_int("proselytize", self.city_seed, agent.id, target.id,
+                         self.tick)
+        convert = (not target.faith_id) and (roll % 100 < threshold)
+        if not convert:
+            return {
+                "kind": "proselytize_resisted",
+                "actor_id": agent.id,
+                "target_id": target.id,
+                "text": (f"{target.name} hears {agent.name}'s sermon on "
+                         f"{faith.name} but is unmoved."),
+                "payload": {"action": "proselytize", "faith_id": faith.id,
+                            "target_id": target.id, "converted": False},
+            }
+        # CONVERSION — adopt the faith, join, gain devotion, seal the co_religionist
+        # ring. All deterministic + clamped; trust is FLOORED up (never craters).
+        target.faith_id = faith.id
+        if target.id not in faith.members:
+            faith.members.append(target.id)
+        base = max(1, int(self._faith_param("devotion_base", 10)))
+        target.devotion = max(0, min(100, max(target.devotion, base)))
+        # Seal a MUTUAL co_religionist edge (the accept_contract / muster ally-ring
+        # recipe): set the type both ways, FLOOR trust to a warm co-religionist
+        # seed — never lowers trust, so no crater (the plan's trust-positive law).
+        seed = int(self._faith_param("convert_trust_seed", 20))
+        for a, b in ((agent, target), (target, agent)):
+            rel = a.relationships.get(b.id)
+            if rel is None:
+                rel = RelationshipState()
+                a.relationships[b.id] = rel
+            rel.trust = max(-100, min(100, max(rel.trust, seed)))
+            rel.type = "co_religionist"
+            rel.since_tick = self.tick
+        proselytized = {
+            "kind": "proselytized",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"🕯 {agent.name} brings {target.name} into {faith.name}.",
+            "payload": {"action": "proselytize", "faith_id": faith.id,
+                        "target_id": target.id, "converted": True},
+        }
+        joined = {
+            "kind": "faith_joined",
+            "actor_id": target.id,
+            "target_id": agent.id,
+            "text": f"{target.name} embraces the faith of {faith.name}.",
+            "payload": {"action": "proselytize", "faith_id": faith.id,
+                        "convert_id": target.id, "by": agent.id},
+        }
+        return {"_multi": [proselytized, joined]}
+
+    def action_worship(self, agent: AgentState) -> dict:
+        """EM-262 — worship at a co-located consecrated temple seat (action_work's
+        buff-at-place clone, gated on faith_enabled). `_faith_seat_here` (EM-261)
+        returns the operational temple commemorating the AGENT'S OWN faith at their
+        place, or None (faithless / no temple / a DIFFERENT faith's temple). On
+        success: a small energy buff + devotion += temple_buff (both clamped), and
+        a `worshipped` event. No seat ⇒ a clear _fail_event (the demolish
+        vanished-target convention). Deterministic — pure arithmetic, no clock/RNG
+        (EM-155)."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "worship", "faith disabled",
+                f"{agent.name} bows their head, but no faith holds here.")
+        seat = self._faith_seat_here(agent)
+        if seat is None:
+            return self._fail_event(
+                agent.id, "worship", "no seat",
+                f"{agent.name} finds no temple of their faith to worship at.")
+        buff = max(0, int(self._faith_param("temple_buff", 5)))
+        # A small energy buff (temple_buff-sized) + a devotion bump; both clamped.
+        agent.energy = max(0.0, min(100.0, agent.energy + buff))
+        agent.devotion = max(0, min(100, agent.devotion + buff))
+        return {
+            "kind": "worshipped",
+            "actor_id": agent.id,
+            "text": f"🕯 {agent.name} worships at {seat.name}.",
+            "payload": {"action": "worship", "faith_id": agent.faith_id,
+                        "temple_id": seat.id, "devotion": agent.devotion},
+        }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-263 — Religion conflict surface (Wave O Religion, final stage): the two
+    # FOUNDER-ONLY REFLEX verbs. excommunicate casts a member out of the founder's
+    # own faith (a purely internal state edit — remove membership, zero devotion,
+    # tear the co_religionist web to the founder + remaining members); it has NO
+    # co-location gate (a founder excommunicates from afar). declare_hostility
+    # marks a rival faith on the founder's faith.hostile_to and, when war is on,
+    # feeds religious grievance between the two faiths' factions through the SHARED
+    # add_grievance seam (the plan's opaque casus-belli hook — the caller owns WHY,
+    # the war layer owns the ledger). Both gate on faith_enabled (default OFF ⇒ the
+    # verbs never surface, byte-identical control — the em260 golden). Deterministic
+    # — pure state edits + sorted-iteration grievance, no clock/RNG (EM-155).
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def action_excommunicate(self, agent: AgentState, target: AgentState) -> dict:
+        """EM-263 — cast a member out of the founder's OWN faith (FOUNDER-GATED,
+        REFLEX, gated on faith_enabled). Only the faith's founder may excommunicate,
+        and only a NON-founder MEMBER of that same faith (the founder cannot
+        excommunicate themselves). NO co-location gate — the founder acts from afar
+        (the send_letter absent-target convention, not the clash co-location one).
+
+        Effect (all deterministic, pure state edits — EM-155): remove `target` from
+        `faith.members`, clear `target.faith_id`, ZERO `target.devotion`, and TEAR
+        the mutual `co_religionist` relationship web binding the target to the
+        founder AND to every remaining member (each such edge neutralizes to the
+        default "neutral" type both ways, so the next recompute_congregations drops
+        the target from the congregation and the schism web reflects the split).
+        Emits `excommunicated`. A non-founder / factionless-of-faith / self / non-
+        member attempt is a clear _fail_event (the demolish vanished-target
+        convention)."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "excommunicate", "faith disabled",
+                f"{agent.name} reaches for a faith no one here shares.")
+        if not agent.faith_id:
+            return self._fail_event(
+                agent.id, "excommunicate", "faithless",
+                f"{agent.name} keeps no faith to cast anyone out of.")
+        faith = self.faiths.get(agent.faith_id)
+        if faith is None:                                   # actor's faith vanished
+            return self._fail_event(
+                agent.id, "excommunicate", "faith gone",
+                f"{agent.name}'s faith has faded from memory.")
+        if agent.id != faith.founder_id:
+            return self._fail_event(
+                agent.id, "excommunicate", "not founder",
+                f"only {faith.name}'s founder may excommunicate its members.")
+        if target.id == faith.founder_id:                   # covers self (agent IS founder)
+            return self._fail_event(
+                agent.id, "excommunicate", "founder",
+                f"{agent.name} cannot excommunicate the founder of {faith.name}.")
+        if target.faith_id != faith.id or target.id not in faith.members:
+            return self._fail_event(
+                agent.id, "excommunicate", "not a member",
+                f"{target.name} is not a member of {faith.name}.")
+        # Remove membership + zero the faith bond (both keys drop from to_dict when
+        # cleared — devotion serializes only when > 0, faith_id only when set).
+        faith.members.remove(target.id)
+        target.faith_id = None
+        target.devotion = 0
+        # Tear the co_religionist web: neutralize the target's mutual edges to the
+        # founder AND to every remaining member (sorted for deterministic order —
+        # cosmetic here since edits are commutative, kept for replay clarity).
+        for other_id in sorted({faith.founder_id, *faith.members}):
+            other = self.agents.get(other_id)
+            if other is None or other.id == target.id:
+                continue
+            for a, b in ((target, other), (other, target)):
+                rel = a.relationships.get(b.id)
+                if rel is not None and rel.type == "co_religionist":
+                    rel.type = "neutral"
+                    rel.since_tick = self.tick
+        return {
+            "kind": "excommunicated",
+            "actor_id": agent.id,
+            "target_id": target.id,
+            "text": f"⛔ {agent.name} casts {target.name} out of {faith.name}.",
+            "payload": {"action": "excommunicate", "faith_id": faith.id,
+                        "target_id": target.id},
+        }
+
+    def action_declare_hostility(self, agent: AgentState,
+                                 target_faith_id: str) -> dict:
+        """EM-263 — declare the founder's OWN faith hostile to a RIVAL faith
+        (FOUNDER-GATED, REFLEX, gated on faith_enabled). Only the faith's founder
+        may declare; the target must be a real, DIFFERENT faith. Adds the rival's
+        id to `faith.hostile_to` (IDEMPOTENT — a re-declaration is a clean no-op
+        that still emits). NO co-location gate.
+
+        War casus-belli hook (best-effort, deterministic): when war is enabled,
+        feed religious grievance between the two faiths' FACTIONS through the shared
+        `add_grievance` seam — for every distinct declaring-faith faction × target-
+        faith faction pair (sorted iteration, no RNG/clock), so the war layer reads
+        an opaque religious grievance without knowing WHY. Skips cleanly when war is
+        off or members are factionless. Emits `faith_hostility_declared`. A non-
+        founder / self-faith / unknown-faith attempt is a clear _fail_event."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "declare_hostility", "faith disabled",
+                f"{agent.name} rails against a faith no one here keeps.")
+        if not agent.faith_id:
+            return self._fail_event(
+                agent.id, "declare_hostility", "faithless",
+                f"{agent.name} keeps no faith to declare hostilities for.")
+        faith = self.faiths.get(agent.faith_id)
+        if faith is None:                                   # actor's faith vanished
+            return self._fail_event(
+                agent.id, "declare_hostility", "faith gone",
+                f"{agent.name}'s faith has faded from memory.")
+        if agent.id != faith.founder_id:
+            return self._fail_event(
+                agent.id, "declare_hostility", "not founder",
+                f"only {faith.name}'s founder may declare its hostilities.")
+        tfid = str(target_faith_id or "")
+        if not tfid or tfid == faith.id:
+            return self._fail_event(
+                agent.id, "declare_hostility", "self faith",
+                f"{agent.name} cannot declare {faith.name} hostile to itself.")
+        target_faith = self.faiths.get(tfid)
+        if target_faith is None:
+            return self._fail_event(
+                agent.id, "declare_hostility", "unknown faith",
+                f"{agent.name} declares hostility toward a faith that does not exist.")
+        if tfid not in faith.hostile_to:
+            faith.hostile_to.append(tfid)
+        # War casus-belli hook — best-effort, deterministic, inert unless war is on.
+        self._feed_faith_grievance(faith, target_faith)
+        return {
+            "kind": "faith_hostility_declared",
+            "actor_id": agent.id,
+            "text": (f"⚔ {agent.name} declares {faith.name} hostile to "
+                     f"{target_faith.name}."),
+            "payload": {"action": "declare_hostility", "faith_id": faith.id,
+                        "target_faith_id": tfid},
+        }
+
+    def _feed_faith_grievance(self, faith: "Faith", target_faith: "Faith") -> None:
+        """EM-263 — feed religious grievance between two faiths' factions through
+        the ONE public add_grievance seam (the plan's opaque casus-belli input to
+        the war layer). Gated on war.enabled (add_grievance self-gates too, but we
+        skip the walk cleanly when war is off). Collects the DISTINCT factions each
+        faith's members belong to (sorted), then bumps grievance for every cross-
+        faction pair — deterministic (sorted iteration, no RNG/clock, EM-155);
+        factionless members contribute nothing (best-effort)."""
+        if not self.war_enabled():
+            return
+        amount = max(0, int(self._faith_param("hostility_grievance", 8)))
+        if amount <= 0:
+            return
+        src_factions = sorted({
+            f["id"] for m in sorted(faith.members)
+            if (f := self.faction_of(m)) is not None
+        })
+        dst_factions = sorted({
+            f["id"] for m in sorted(target_faith.members)
+            if (f := self.faction_of(m)) is not None
+        })
+        for src in src_factions:
+            for dst in dst_factions:
+                if src != dst:
+                    self.add_grievance(src, dst, amount, "faith_hostility")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # EM-252 — Passive culture diffusion (the once-per-round Wave-O round system,
+    # inserted into _apply_round_start between recompute_factions and advance_war).
+    # Three PURE-COMPUTE mechanics — zero LLM, no clock, no RNG (EM-155): seeded
+    # co-located diffusion, half-life virality decay, and zero-carrier decay-prune.
+    # Gated on comm.enabled (default OFF), so a default world runs it as a no-op
+    # that parks nothing and mutates nothing (the em161 golden). TEXT ONLY — a hop
+    # mints a drifted CHILD meme and NEVER auto-generates an image / touches
+    # self.gallery (the free-first cost rule; a visual repaint is create_image,
+    # EM-253, NOT this sweep). Events SELF-PARK like recompute_factions.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def diffuse_culture(self) -> list[dict]:
+        """EM-252 — the once-per-round passive culture-diffusion sweep. Walks
+        memes (sorted by id) then their carriers (sorted by id) in deterministic
+        order; for each carrier, every co-located OTHER living non-carrier is a
+        candidate whose infection is gated by the seeded roll
+        `_seed_int("diffuse", city_seed, meme.id, carrier.id, target.id, tick)
+        % 100 < int(diffusion_chance * 100)` (never random/clock — EM-155; the
+        roll is fixed by the participant ids, so the outcome is INDEPENDENT of the
+        walk order). A hit mints a DRIFTED CHILD meme (parent_id + generation+1 +
+        _distort_text, seeded on the target), attaches it to the target, and emits
+        a `meme_mutated` event; the sweep is capped at comm.max_diffusions total
+        infections. Then virality half-life-decays (idle >= comm.half_life_ticks
+        ⇒ halved with `//` floor, never round/float — the EM-155 drift guard) and
+        a zero-carrier meme idle >= comm.decay_ticks is pruned from self.memes
+        with a `meme_died` event ("death of an idea"); a meme that still has
+        carriers is NEVER pruned.
+
+        Events SELF-PARK in the pending_spawn_events outbox (same drain as
+        recompute_factions) and are ALSO returned. Gated on comm.enabled: disabled
+        ⇒ returns [] immediately, parking nothing and mutating nothing (the em161
+        golden). Pure compute — zero LLM calls; TEXT ONLY — never touches
+        self.gallery / sets an image_id on a child (the free-first cost rule; a
+        visual-meme repaint needs an explicit create_image turn, EM-253)."""
+        if not self._comm_enabled():
+            return []
+        from ..animals.runtime import _seed_int
+        events: list[dict] = []
+        threshold = int(float(self._comm_param("diffusion_chance", 0.20)) * 100)
+        max_diff = max(0, int(self._comm_param("max_diffusions", 12)))
+        half_life = int(self._comm_param("half_life_ticks", 30))
+        decay_ticks = int(self._comm_param("decay_ticks", 80))
+
+        # 1) Passive seeded diffusion. Snapshot the SOURCE memes (sorted by id)
+        # BEFORE any mint so a child minted THIS sweep is never itself re-walked.
+        sources = sorted(self.memes.values(), key=lambda m: m.id)
+        infections = 0
+        for meme in sources:
+            if infections >= max_diff:
+                break
+            for cid in sorted(meme.carriers):
+                if infections >= max_diff:
+                    break
+                carrier = self.agents.get(cid)
+                if carrier is None or not carrier.alive:
+                    continue
+                candidates = sorted(
+                    (a for a in self.agents_at(carrier.location)
+                     if a.id != carrier.id and meme.id not in a.held_memes),
+                    key=lambda a: a.id,
+                )
+                for target in candidates:
+                    if infections >= max_diff:
+                        break
+                    roll = _seed_int("diffuse", self.city_seed, meme.id,
+                                     carrier.id, target.id, self.tick)
+                    if roll % 100 >= threshold:
+                        continue
+                    child = self.mint_meme(
+                        meme.kind,
+                        self._distort_text(meme.text, target.id, self.tick),
+                        meme.origin_agent_id,
+                        parent_id=meme.id,
+                        generation=meme.generation + 1,
+                    )
+                    # Only a GENUINELY new attachment counts as an infection: an
+                    # idempotent re-derivation (same seeded child already held)
+                    # is a no-op — no double-count, no spurious event.
+                    if not self._attach_meme(target, child):
+                        continue
+                    infections += 1
+                    # EM-253 — a passive catch is a spread: the freshly-caught
+                    # child opens at virality 1 (consistent with create/adopt —
+                    # a meme with a carrier is never virality 0).
+                    child.virality += 1
+                    events.append({
+                        "kind": "meme_mutated",
+                        "actor_id": carrier.id,
+                        "target_id": target.id,
+                        "actor_type": "system",
+                        "text": (f"{self._agent_name(carrier.id)}'s "
+                                 f"{meme.kind} drifts to "
+                                 f"{self._agent_name(target.id)}."),
+                        "payload": {"meme_id": child.id, "parent_id": meme.id,
+                                    "generation": child.generation},
+                    })
+
+        # 2) Half-life virality decay — a meme idle >= half_life_ticks halves its
+        # virality with `//` floor (never round/float — the EM-155 drift guard).
+        # A child minted above carries last_spread_tick == self.tick, so it is
+        # immune this round (0 >= half_life is false for a positive window).
+        if half_life > 0:
+            for meme in self.memes.values():
+                if self.tick - meme.last_spread_tick >= half_life:
+                    meme.virality = meme.virality // 2
+
+        # 3) Decay-prune ("death of an idea") — a meme with ZERO carriers idle
+        # >= decay_ticks is deleted; a meme that still has carriers is NEVER
+        # pruned. Snapshot the ids first (we mutate self.memes in the loop) and
+        # walk them sorted for deterministic event order.
+        for mid in sorted(self.memes):
+            meme = self.memes[mid]
+            if meme.carriers:
+                continue
+            if self.tick - meme.last_spread_tick >= decay_ticks:
+                del self.memes[mid]
+                self.dominant_meme_ids.discard(mid)   # EM-253 — no stale latch
+                events.append(self._faction_event(
+                    "meme_died", meme.origin_agent_id,
+                    f'The {meme.kind} "{meme.text[:40]}" fades from memory.',
+                    {"meme_id": meme.id, "kind": meme.kind,
+                     "generation": meme.generation},
+                ))
+
+        # 4) Dominance ("🦊 dominant motif", EM-253) — a meme whose LIVE carrier
+        # count reaches comm.dominance_threshold and was NOT dominant before
+        # fires `meme_dominant` EXACTLY once; it drops out of the latch (quietly)
+        # when it falls back below threshold, so re-crossing re-fires. Walk memes
+        # sorted for deterministic event order (EM-155). Pure compute — text only.
+        dom_threshold = max(1, int(self._comm_param("dominance_threshold", 6)))
+        for mid in sorted(self.memes):
+            meme = self.memes[mid]
+            live = sum(
+                1 for cid in meme.carriers
+                if (a := self.agents.get(cid)) is not None and a.alive
+            )
+            if live >= dom_threshold:
+                if mid not in self.dominant_meme_ids:
+                    self.dominant_meme_ids.add(mid)
+                    events.append(self._faction_event(
+                        "meme_dominant", meme.origin_agent_id,
+                        f'🦊 "{meme.text[:40]}" is now the dominant motif '
+                        f'({live} carriers).',
+                        {"meme_id": mid, "kind": meme.kind, "carriers": live},
+                    ))
+            else:
+                self.dominant_meme_ids.discard(mid)   # quiet fall — re-crossing re-fires
+
+        if events:
+            self.pending_spawn_events.extend(events)
+        # 5) Culture camps (EM-253) — cluster living agents who share memes. The
+        # camp recompute SELF-PARKS its own diff events (same outbox as
+        # recompute_factions), so it is NOT folded into `events` here. Both this
+        # and the sweep above are already past the comm.enabled gate, so the
+        # round-order chain stays factions → diffuse_culture → advance_war → age
+        # (no new _apply_round_start slot).
+        self.recompute_culture_camps()
+        return events
+
+    # ──────────────────────────────────────────────────────────────────────────
     # EM-256 — War data model + grievance substrate (Wave O War track). The
     # read-only faction layer promoted to belligerent actors: directional
     # group grievance (the notoriety analog), seeded WarState minting, and the
@@ -9441,6 +10784,47 @@ class World:
         )
         self.wars[wid] = war
         return war
+
+    def mint_faith(self, founder_id: str, *, parent_id: str | None = None) -> "Faith":
+        """EM-260 — mint + register a Faith with a SEEDED id (sha1 of
+        founder:parent:tick — never the salted builtin hash, never uuid/clock):
+        fth_<8hex>, so replay/fork mints the byte-identical faith (EM-155; the
+        open_war/mint_meme recipe). name/deity/tenets are SEEDED-picked from the
+        INVENTED pools (a _seed_int walk on the stable faith id — no RNG, no
+        clock, no real-world religion), so a faith is reproducible across runs +
+        replay. IDEMPOTENT: re-minting the same key returns the already-
+        registered Faith. Registration alone joins no member and sets no
+        temple/meme — the founding/joining VERBS land in EM-261+; this is the
+        mint primitive only."""
+        from ..animals.runtime import _seed_int
+        fid = str(founder_id)
+        pid = str(parent_id or "")
+        key = f"{fid}:{pid}:{self.tick}".encode()
+        faith_id = f"fth_{hashlib.sha1(key).hexdigest()[:8]}"
+        existing = self.faiths.get(faith_id)
+        if existing is not None:
+            return existing
+        name = _FAITH_NAMES[_seed_int("faith-name", faith_id) % len(_FAITH_NAMES)]
+        deity = _FAITH_DEITIES[
+            _seed_int("faith-deity", faith_id) % len(_FAITH_DEITIES)]
+        # A SEEDED spread of DISTINCT tenets: walk from a seeded start index over
+        # the pool (the _SETTLEMENT_NAMES walk), collecting three consecutive
+        # entries — distinct by construction while the pool holds >= 3 (EM-155:
+        # the same faith id always yields the same three tenets in the same order).
+        start = _seed_int("faith-tenets", faith_id)
+        n = len(_FAITH_TENETS)
+        tenets = [_FAITH_TENETS[(start + i) % n] for i in range(min(3, n))]
+        faith = Faith(
+            id=faith_id,
+            name=name,
+            deity=deity,
+            founder_id=fid,
+            founded_tick=self.tick,
+            tenets=tenets,
+            parent_id=(str(parent_id) if parent_id else None),
+        )
+        self.faiths[faith_id] = faith
+        return faith
 
     def active_war_between(self, fid_a: str, fid_b: str) -> WarState | None:
         """EM-256 — the ACTIVE war between two groups, or None. Walked in
@@ -10413,6 +11797,12 @@ class World:
             }
         if self.town_motif_ref:
             snap["town_motif_ref"] = self.town_motif_ref
+        # EM-253 — the dominance latch. Serialized only-when-non-empty as a
+        # SORTED list (deterministic, EM-155), so a world with no dominant meme —
+        # and every pre-EM-253 snapshot — omits the key (absent ⇒ empty set on
+        # restore); the byte-identical golden holds.
+        if self.dominant_meme_ids:
+            snap["dominant_meme_ids"] = sorted(self.dominant_meme_ids)
         # EM-256 — wars + grievances (the Wave O war substrate). Serialized
         # only when non-empty (the factions pattern), so a peaceful world —
         # and every pre-EM-256 snapshot — keeps the exact prior key set
@@ -10423,6 +11813,29 @@ class World:
         if self.grievances:
             snap["grievances"] = {
                 str(k): int(v) for k, v in self.grievances.items()
+            }
+        # EM-260 — faiths (the Wave O Religion substrate). Serialized only when
+        # non-empty (the wars pattern), so a faithless world — and every
+        # pre-EM-260 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore). Faith.to_dict owns the per-faith shape (members/temple_id/
+        # meme_id/hostile_to/parent_id ride only-when-non-default).
+        if self.faiths:
+            snap["faiths"] = {
+                str(fid): f.to_dict() for fid, f in self.faiths.items()
+            }
+        # EM-262 — congregations + the schism grace latch (Wave O Religion
+        # emergence). Serialized only when non-empty (the culture_camps /
+        # grievances pattern), so a faithless / faith-off world — and every
+        # pre-EM-262 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore). Congregation dicts are JSON-cloned VERBATIM (the culture_camps
+        # convention); schism_pending is a plain {faith_id: tick} map (grievances).
+        if self.congregations:
+            snap["congregations"] = {
+                str(cid): dict(c) for cid, c in self.congregations.items()
+            }
+        if self.schism_pending:
+            snap["schism_pending"] = {
+                str(k): int(v) for k, v in self.schism_pending.items()
             }
         # EM-269 (F2) — settlements {id: {name, center, founded_tick,
         # founder_id, members}}. Serialized only when non-empty (the factions
@@ -10889,6 +12302,16 @@ class World:
                     max_ambitions=charter_caps_for(params)[0],
                     creed_cap=charter_caps_for(params)[1],
                 ),
+                # EM-260 — faith membership: additive. Pre-EM-260 snapshots lack
+                # the keys and restore None / 0; a present faith_id is coerced to
+                # a non-blank str (blank/non-str → None, fail-safe) and devotion
+                # is clamped 0..100 (a malformed/out-of-range value never breaks
+                # the restore). Byte-stable round-trip (EM-155): an unfaithful /
+                # zero-devotion agent is never re-emitted, so its dict is unchanged.
+                faith_id=(str(d["faith_id"])
+                          if isinstance(d.get("faith_id"), str)
+                          and str(d.get("faith_id")).strip() else None),
+                devotion=max(0, min(100, _int(d.get("devotion")))),
             )
             a.relationships = {
                 str(aid): RelationshipState(
@@ -11164,6 +12587,12 @@ class World:
         }
         _motif = state.get("town_motif_ref")
         world.town_motif_ref = str(_motif) if _motif else None
+        # EM-253 — restore the dominance latch (additive: pre-EM-253 snapshots
+        # lack the key and restore an empty set, so a culture-free fork/replay is
+        # byte-identical). Defensive: coerce to str, drop falsy entries.
+        world.dominant_meme_ids = {
+            str(x) for x in (state.get("dominant_meme_ids") or []) if x
+        }
         # EM-256 — restore wars + grievances (additive: pre-EM-256 snapshots
         # lack the keys and restore {} / {}, so a peaceful fork/replay is
         # byte-identical). Defensive: a war row that is not a dict, has a
@@ -11198,6 +12627,47 @@ class World:
             heat = _int(gval)
             if gkey and "->" in str(gkey) and heat > 0:
                 world.grievances[str(gkey)] = min(100, heat)
+        # EM-260 — restore faiths (additive: pre-EM-260 snapshots lack the key
+        # and restore {}, so a faithless fork/replay is byte-identical).
+        # Defensive: a faith row that is not a dict or has a blank id is dropped;
+        # scalars coerce fail-safe; the only-when-non-default optional fields
+        # restore to their defaults when absent (members [], temple/meme/parent
+        # None), so a legit faith round-trips byte-stably (EM-155).
+        restored_faiths: dict[str, Faith] = {}
+        for f_id, frec in (state.get("faiths") or {}).items():
+            if not isinstance(frec, dict) or not f_id:
+                continue
+            restored_faiths[str(f_id)] = Faith(
+                id=str(f_id),
+                name=str(frec.get("name", "")),
+                deity=str(frec.get("deity", "")),
+                founder_id=str(frec.get("founder_id", "")),
+                founded_tick=_int(frec.get("founded_tick")),
+                tenets=[str(t) for t in (frec.get("tenets") or [])],
+                members=[str(m) for m in (frec.get("members") or [])],
+                temple_id=(str(frec["temple_id"]) if frec.get("temple_id")
+                           else None),
+                meme_id=(str(frec["meme_id"]) if frec.get("meme_id") else None),
+                hostile_to=[str(h) for h in (frec.get("hostile_to") or [])],
+                parent_id=(str(frec["parent_id"]) if frec.get("parent_id")
+                           else None),
+            )
+        world.faiths = restored_faiths
+        # EM-262 — restore congregations + the schism grace latch (additive:
+        # pre-EM-262 snapshots lack the keys and restore {} / {}, so a faithless
+        # fork/replay is byte-identical). Defensive: a congregation row that is not
+        # a dict / has a blank id is dropped (the culture_camps recipe); a
+        # schism_pending entry keeps only a valid faith_id → int tick (the grievance
+        # recipe), so the grace latch round-trips as pure tick arithmetic.
+        world.congregations = {
+            str(cid): dict(c)
+            for cid, c in (state.get("congregations") or {}).items()
+            if cid and isinstance(c, dict)
+        }
+        world.schism_pending = {}
+        for skey, sval in (state.get("schism_pending") or {}).items():
+            if skey:
+                world.schism_pending[str(skey)] = _int(sval)
         # EM-269 (F2) — restore settlements (additive: pre-EM-269 snapshots
         # lack the key and restore {} — identity continuity survives a
         # fork/restore: ids, names, centers and loose membership all come back
