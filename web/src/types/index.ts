@@ -152,6 +152,10 @@ export interface Agent {
   // The feed twin lens reads this to pair the strands + find the divergence.
   // Optional so pre-EM-310 backends/snapshots stay valid; absent ⇒ not a twin.
   twin?: TwinLink | null;
+  // Wave O (EM-251–255, additive) — the meme ids this agent currently carries.
+  // Serialized only-when-non-empty (Agent.to_dict); a culture-free agent — and
+  // every pre-Wave-O snapshot — omits it ⇒ tolerate absent.
+  held_memes?: string[];
 }
 
 // EM-310 — the twin link carried on each half of a Chimera pair. `of` is the
@@ -329,6 +333,50 @@ export interface War {
   exhaustion?: Record<string, number>; // faction id → 0..100 war-weariness
 }
 
+// ============================================================
+// Culture (Wave O / EM-251–255) — the meme layer. A Meme is an idea the town
+// SPREADS: authored by one agent, carried by many, and MUTATING across
+// generations (a `parent_id` chain — "fox in a crown" drifting to "fox in a
+// paper crown"). Mirrors the backend Meme.to_dict; serialized into world_state
+// under `memes` ONLY when non-empty (a culture-free world — and every pre-Wave-O
+// snapshot — omits it ⇒ tolerate absent). `kind` is an OPEN union: Religion
+// (EM-260–263) adds 'faith' with no schema migration.
+// ============================================================
+
+export type MemeKind = 'rumor' | 'idea' | 'ideology' | 'image' | (string & {});
+
+export interface Meme {
+  id: string;
+  kind: MemeKind;
+  text: string;
+  origin_agent_id: string;
+  origin_tick: number;
+  generation: number;         // 0 = a root meme; +1 for each mutation down a chain
+  carriers: string[];         // agent ids currently holding it
+  last_spread_tick: number;
+  virality: number;           // spread pressure (drives the ⭐ / dominance sort)
+  // Only-when-set (Meme.to_dict): an image meme carries the gallery `image_id`
+  // it drifted from (join image_id → gallery entry's `url` for the thumbnail),
+  // and a mutated meme carries its `parent_id` (the family-tree edge). A plain
+  // text root meme omits both ⇒ tolerate absent.
+  image_id?: string | null;
+  parent_id?: string | null;
+}
+
+// ============================================================
+// CultureCamp (Wave O / EM-251–255) — a belief circle the town clusters, the
+// SAME record shape as a Faction (name/founded_tick/members) but keyed by a
+// `cmp_`-prefixed id. Serialized into world_state under `culture_camps` ONLY
+// when non-empty (like factions ⇒ tolerate absent). Rendered as faction-style
+// chips in the culture (mint) register.
+// ============================================================
+
+export interface CultureCamp {
+  name: string;
+  founded_tick: number;
+  members: string[];        // agent ids
+}
+
 export interface ModelProfile {
   name: string;
   adapter: string;
@@ -468,6 +516,19 @@ export interface WorldState {
   // world renders no markers. SettlementLabels renders a floating name at each
   // world-frame center.
   settlements?: Record<string, Settlement> | null;
+  // Wave O (EM-251–255, additive) — the culture layer. `memes` (keyed by meme
+  // id) is the spread/mutation graph the MemeLineagePanel renders as a family
+  // tree; `culture_camps` (keyed `cmp_<id>`) are faction-shaped belief circles;
+  // `town_motif_ref` is the canonized dominant meme id (drives the motif
+  // banner); `dominant_meme_ids` is the sorted set of memes past the dominance
+  // threshold (drives the ⭐ marker). All serialized ONLY when non-empty / set
+  // (a culture-free world — and every pre-Wave-O snapshot — omits them ⇒ absent
+  // means no culture). The culture UI is entirely gated on their presence, so
+  // the golden culture-free UI is byte-identical.
+  memes?: Record<string, Meme>;
+  culture_camps?: Record<string, CultureCamp>;
+  town_motif_ref?: string | null;
+  dominant_meme_ids?: string[];
 }
 
 // Permissive: the feed default-renders unknown kinds, and W6–W8 add more kinds
@@ -581,6 +642,26 @@ export type EventKind =
   | 'peace_signed'
   | 'war_exhausted'
   | 'exiled'
+  // Wave O (EM-251–255) — culture. The meme lifecycle: meme_created (an agent
+  // authors an idea), meme_adopted / rumor_spread (it spreads to a carrier),
+  // meme_mutated (a `parent_id` child drifts off it), letter_sent / letter_read
+  // (agent-to-agent notes carrying memes), meme_canonized / meme_dominant (it
+  // becomes the town's motif) / meme_died (it fades out), plus the
+  // culture_camp lifecycle (formed/joined/left/dissolved — faction-shaped).
+  // Emitted only when world.culture.enabled — absent histories are the norm.
+  | 'meme_created'
+  | 'meme_adopted'
+  | 'rumor_spread'
+  | 'meme_mutated'
+  | 'letter_sent'
+  | 'letter_read'
+  | 'meme_canonized'
+  | 'meme_dominant'
+  | 'meme_died'
+  | 'culture_camp_formed'
+  | 'culture_camp_joined'
+  | 'culture_camp_left'
+  | 'culture_camp_dissolved'
   // EM-317 — The Prophecy Board (god-channel). prophecy_posted {prophecy_id,
   // predicate, params, posted_tick, deadline_tick, horizon, omen} (actor 'god',
   // the omen on the replay surface); prophecy_resolved {prophecy_id, predicate,

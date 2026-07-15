@@ -33,6 +33,7 @@ import { StorySoFar } from './components/feed/StorySoFar';
 import { BillboardPanel } from './components/feed/BillboardPanel';
 import { GalleryPanel } from './components/feed/GalleryPanel';
 import { WarPanel } from './components/panels/WarPanel';
+import { MemeLineagePanel } from './components/panels/MemeLineagePanel';
 import { StorylinesRail, useStorylines } from './components/feed/StorylinesRail';
 import { STORYLINES_RAIL_ENABLED } from './lib/featureFlags';
 import { TwinLens } from './components/panels/TwinLens';
@@ -301,6 +302,11 @@ function LiveLayout({ sim }: { sim: Sim }) {
               grievances driving them. Renders NOTHING in peacetime (no wars,
               no grievances ⇒ null), so it adds zero chrome until war fires. */}
           <WarPanel world={world} />
+          {/* Wave O (EM-251–255): the culture panel — the town's meme family
+              tree, the belief camps clustering around them, and the canonized
+              motif banner. Renders NOTHING in a culture-free world (no memes,
+              no camps ⇒ null), so it adds zero chrome until culture fires. */}
+          <MemeLineagePanel world={world} />
           {/* EM-312 (Storylines Rail): the feed's drama index — recurring
               rivalries / redemptions / power grabs, promoted from the event log
               with zero LLM. Gated OFF by default; renders nothing until a thread
