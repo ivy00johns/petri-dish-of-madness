@@ -209,6 +209,9 @@ ACTION_SCHEMA = {
                 # EM-253 — culture lifecycle verbs (reflex): create_meme coins an
                 # idea; adopt_meme takes up an existing meme (image memes drift).
                 "create_meme", "adopt_meme",
+                # EM-261 — found a faith and become its first devotee (reflex,
+                # free; offered only while faith_enabled AND the agent is faithless).
+                "found_faith",
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
@@ -284,6 +287,8 @@ ACTION_SCHEMA = {
                             "spread_rumor", "send_letter",
                             # EM-253 — culture lifecycle verbs (reflex).
                             "create_meme", "adopt_meme",
+                            # EM-261 — found a faith (reflex; faith_enabled + faithless).
+                            "found_faith",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
                         ],
@@ -610,6 +615,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # em161 golden) never change.
     "create_meme":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     "adopt_meme":       {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-261 — found a faith; offered anywhere (the real gates — faith.enabled +
+    # the agent being faithless — are computed in _assemble_context and re-enforced
+    # at resolution in action_found_faith, which rejects a faith-off/already-faithful
+    # attempt). No args, like found_settlement.
+    "found_faith":      {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # EM-269 (F2) — found a settlement at your current place; offered anywhere
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
@@ -2348,6 +2358,13 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
         if getattr(world, "_comm_enabled", None) and world._comm_enabled():
             valid_effects.add("canonize_meme")
             valid_effects.add("ban_gossip")
+        # EM-261 — the Religion governance lane rides ONLY when faith is enabled
+        # (the culture-lane recipe, but gated on faith_enabled NOT comm): default
+        # OFF ⇒ not in the set ⇒ rejected as an invalid effect ⇒ agent behavior
+        # byte-identical when dormant (the em260 golden). consecrate_faith = the
+        # 70% "faith → temple seat" bridge (canonize_meme's religion twin).
+        if getattr(world, "faith_enabled", None) and world.faith_enabled():
+            valid_effects.add("consecrate_faith")
         # EM-315 — the Healing House `heal` lane rides ONLY when the flag is on
         # (the war/set_zone_rule recipe): default OFF ⇒ not in the set ⇒ rejected
         # as an invalid effect ⇒ agent behavior byte-identical when dormant. The
@@ -2533,6 +2550,16 @@ def _validate_world(action_dict: dict, agent: AgentState, world: World) -> str |
             if _mid not in (getattr(world, "memes", {}) or {}):
                 return ("canonize_meme requires args.meme_id = the id of a real "
                         "meme in circulation to elevate to the town's canon")
+        # EM-261 — consecrate_faith: mirror canonize's existence check (the id may
+        # arrive on args.faith_id OR the generic args.target — the world handler
+        # maps either key) so the gate AGREES with world.action_propose_rule
+        # (EM-108 menu/resolution rule). Only runs when faith is enabled (the
+        # effect passed the set above, which is faith_enabled-gated).
+        if effect == "consecrate_faith":
+            _fid = str(args.get("faith_id") or args.get("target") or "").strip()
+            if _fid not in (getattr(world, "faiths", {}) or {}):
+                return ("consecrate_faith requires args.faith_id = the id of a "
+                        "real faith to anchor to its temple seat")
 
     # ── W7 construction actions (world-model.md §W7) ───────────────────────────
     elif action == "propose_project":
@@ -3168,6 +3195,18 @@ def _assemble_context(
             valid_actions.append(
                 "adopt_meme (meme_id) - take up an idea in circulation: "
                 + ", ".join(f'{m.id} ("{m.text[:24]}")' for m in _adoptable[:6]))
+    # EM-261 — the Religion menu (Wave O Religion stage), surfaced ONLY when faith
+    # is enabled (world.faith.enabled; default OFF ⇒ NO line ⇒ the prompt stays
+    # byte-identical — the em260 golden, mirroring the culture block above). The
+    # found_faith reflex is offered ONLY to a FAITHLESS agent (one membership at a
+    # time, in lock-step with action_found_faith's already-faithful reject —
+    # EM-108 menu/resolution agreement). getattr keeps callers safe if the seam is
+    # ever absent.
+    if getattr(world, "faith_enabled", None) and world.faith_enabled():
+        if not agent.faith_id:
+            valid_actions.append(
+                "found_faith - found a new faith and become its first devotee "
+                "(others can join it as it spreads)")
     # EM-232 — Victory Arch pitch line, offered ONLY when the arch is configured ON
     # (a positive cadence). The default-OFF world (the absent block, AND the em161
     # golden fixture) never shows this line ⇒ the lawful-citizen golden is
@@ -3374,6 +3413,24 @@ def _assemble_context(
                 propose_line += "|ban_gossip"
                 propose_tail += ("; ban_gossip forbids spreading rumors "
                                  "(simple-majority vote)")
+        # EM-261 — the Religion governance lane surfaces ONLY when faith is
+        # enabled (the culture-lane recipe, gated on faith_enabled): default OFF
+        # ⇒ NO new text ⇒ the prompt is byte-identical (the em260 golden).
+        # consecrate_faith anchors a faith to an operational temple (its devotion
+        # seat) on a 70% vote — named a concrete UNCONSECRATED faith (the
+        # canonize recipe) so the model targets one that resolves.
+        if getattr(world, "faith_enabled", None) and world.faith_enabled():
+            _faiths_now = getattr(world, "faiths", {}) or {}
+            _unconsecrated = [f for f in sorted(_faiths_now.values(),
+                                                key=lambda f: f.id)
+                              if not f.temple_id]
+            if _unconsecrated:
+                _fpick = _unconsecrated[0]
+                propose_line += "|consecrate_faith"
+                propose_tail += (
+                    f"; consecrate_faith needs faith_id=<a faith's id, e.g. "
+                    f"{_fpick.id}> to anchor it to a temple as its seat by 70% "
+                    f"vote")
         valid_actions.append(f"{propose_line} ({propose_tail}; it is decided by majority vote)")
     if _gate_ok("vote") and proposed_rules:
         rule_list = "; ".join(f"id={r.id} effect={r.effect} text={r.text!r}" for r in proposed_rules)
@@ -7179,8 +7236,11 @@ class AgentRuntime:
             # Wave K / EM-219 — demolish carries the target building id.
             # EM-254 — canonize_meme carries the meme id; the model may put it on
             # args.meme_id, so fold that into the generic target the world reads.
+            # EM-261 — consecrate_faith carries the faith id; fold args.faith_id
+            # into the same generic target (the canonize recipe).
             target = args.get("target") or args.get("building_id") or (
-                args.get("meme_id") if effect == "canonize_meme" else None)
+                args.get("meme_id") if effect == "canonize_meme" else None) or (
+                args.get("faith_id") if effect == "consecrate_faith" else None)
             # Wave I / EM-212 — promote_image carries the gallery image id.
             image_id = args.get("image_id")
             # EM-236 — amend_constitution carries op (add|edit|remove) + an optional
@@ -7379,6 +7439,14 @@ class AgentRuntime:
         elif action == "build_road":
             result = self.world.action_build_road(agent, args)
             return _emit_world_result(result, base, thought)
+
+        # ── EM-261 — found a faith and become its first devotee (reflex) ────────
+        # action_found_faith returns a ready event dict (faith_founded) OR a clear
+        # _fail_event (faith disabled / already faithful) — _emit_world_result
+        # consumes both, exactly like create_meme.
+        elif action == "found_faith":
+            return _emit_world_result(
+                self.world.action_found_faith(agent), base, thought)
 
         # ── EM-269 (F2) — found a settlement at the agent's current place ───────
         elif action == "found_settlement":

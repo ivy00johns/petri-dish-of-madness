@@ -1203,6 +1203,8 @@ class FaithParams:
     stage ships the DATA + config only; the tunables below are read by EM-261+.
 
       enabled           — master gate for the whole faith layer.
+      devotion_base     — a founder's starting devotion when they found a faith
+                          (EM-261 — action_found_faith seeds this; > 0).
       temple_buff       — devotion/energy buff granted at a consecrated temple
                           (EM-261 — the consecrate/worship site bonus).
       conversion_chance — proselytize success probability, 0..1 (EM-262).
@@ -1214,6 +1216,7 @@ class FaithParams:
                           from a further schism (EM-262).
     """
     enabled: bool = False
+    devotion_base: int = 10
     temple_buff: int = 5
     conversion_chance: float = 0.3
     devotion_decay: int = 1
@@ -2995,6 +2998,7 @@ def _parse_faith(raw: dict | None) -> FaithParams:
 
     return FaithParams(
         enabled=bool(raw.get("enabled", d.enabled)),
+        devotion_base=_int("devotion_base", d.devotion_base),
         temple_buff=_int("temple_buff", d.temple_buff),
         conversion_chance=_float("conversion_chance", d.conversion_chance),
         devotion_decay=_int("devotion_decay", d.devotion_decay),

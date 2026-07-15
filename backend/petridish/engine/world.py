@@ -1399,6 +1399,14 @@ BUILD_TYPES: tuple[dict[str, str], ...] = (
 # semantics already exist. Off-list types stay cosmetic+labelled (no buff).
 _WORK_BUFF_KINDS = frozenset({"workshop", "smithy", "forge", "tavern", "market", "bakery", "dock"})
 _FORAGE_BUFF_KINDS = frozenset({"garden", "farm", "granary", "park"})
+# EM-261 (Wave O Religion) — the catalogued-but-empty `temple` kind becomes a
+# DEVOTION SEAT: an operational temple that `commemorates` a faith is a
+# buff-granting site for that faith's co-located members (the _WORK_BUFF_KINDS
+# recipe — a frozenset so a future variant, e.g. "shrine", joins here). The
+# co-location + commemorates check lives in _faith_seat_here; the per-turn buff
+# it grants is the EM-262 `worship` verb (EM-261 establishes the seat + the
+# consecration blessing that reads faith.temple_buff).
+_FAITH_SEAT_KINDS = frozenset({"temple"})
 
 
 # ── EM-266 (SC) — building-kind → ZoneRule.hint category (observation only) ─────
@@ -2770,6 +2778,48 @@ class World:
         is here, so the caller applies the bonus exactly once (no stacking)."""
         for b in self.buildings.values():
             if b.location == place_id and b.kind in kinds and b.status == "operational":
+                return b
+        return None
+
+    def _faith_seat_here(self, agent: AgentState) -> "Building | None":
+        """EM-261 (Wave O Religion) — the DEVOTION SEAT for `agent`: a co-located
+        operational temple whose `commemorates` names the agent's OWN faith (the
+        _operational_buff_building_at cousin, extended with the faith-membership
+        predicate). None when the agent is faithless, no operational temple is at
+        their place, or the temple here commemorates a DIFFERENT faith. Walked in
+        the buildings' insertion order; returns the FIRST match so a member draws
+        the seat's buff exactly once (the no-stacking convention). The per-turn
+        buff this seat grants is the EM-262 `worship` verb; EM-261 uses this only
+        to detect the seat (and the consecration blessing reads faith.temple_buff)."""
+        fid = agent.faith_id
+        if not fid:
+            return None
+        for b in self.buildings.values():
+            if (b.location == agent.location
+                    and b.kind in _FAITH_SEAT_KINDS
+                    and b.status == "operational"
+                    and b.commemorates == fid):
+                return b
+        return None
+
+    def _consecration_temple_for(self, faith: "Faith") -> "Building | None":
+        """EM-261 — the operational temple `consecrate_faith` anchors `faith` to
+        on ratify, or None. Prefers the faith's ALREADY-consecrated temple when
+        it is still an operational temple commemorating this faith (idempotent —
+        a re-consecration re-anchors the same seat, never thrashes). Otherwise the
+        LOWEST-id operational temple that is FREE (commemorates nothing) or
+        already this faith's — a temple already dedicated to a DIFFERENT faith is
+        never hijacked. None ⇒ the caller no-ops (the demolish vanished-target
+        convention). Sorted by building id ⇒ deterministic (EM-155)."""
+        current = self.buildings.get(faith.temple_id or "")
+        if (current is not None and current.kind in _FAITH_SEAT_KINDS
+                and current.status == "operational"
+                and current.commemorates == faith.id):
+            return current
+        for bid in sorted(self.buildings):
+            b = self.buildings[bid]
+            if (b.kind in _FAITH_SEAT_KINDS and b.status == "operational"
+                    and b.commemorates in (None, "", faith.id)):
                 return b
         return None
 
@@ -4696,6 +4746,7 @@ class World:
                          "set_zone_rule",  # EM-265 (SB)
                          "declare_war", "peace_treaty",  # EM-257 (Wave O war)
                          "canonize_meme", "ban_gossip",  # EM-254 (Wave O culture)
+                         "consecrate_faith",  # EM-261 (Wave O religion)
                          "heal"}  # EM-315 (Healing House)
         if effect not in valid_effects:
             return False, f"invalid effect: {effect!r}", None
@@ -5000,6 +5051,21 @@ class World:
                 return False, (f"canonize_meme requires a real meme id "
                                f"(got {mid!r})"), None
             payload = {"meme_id": mid}
+        # EM-261 — consecrate_faith EXTENDS the canonize_meme lane: a sibling 70%
+        # supermajority ACT that anchors a faith to an operational temple (its
+        # devotion seat). Gated on faith_enabled() (NOT comm — this is the
+        # Religion track), and the target must name a real faith still in
+        # self.faiths. The faith id arrives on the generic `target` arg (the
+        # runtime maps args.faith_id → target too), mirroring canonize's meme id.
+        if effect == "consecrate_faith":
+            if not self.faith_enabled():
+                return False, ("no faith is kept in this town "
+                               "(faith disabled)"), None
+            fid = str(target or "").strip()
+            if self.faiths.get(fid) is None:
+                return False, (f"consecrate_faith requires a real faith id "
+                               f"(got {fid!r})"), None
+            payload = {"faith_id": fid}
         # EM-254 — ban_gossip is a persistent AGREEMENT-GATE rule (ban_stealing's
         # twin): it carries NO payload and takes NO target, and BLOCKS
         # spread_rumor while active (simple majority — NOT the 70% lane). Comm
@@ -5100,6 +5166,15 @@ class World:
                                    f"{payload.get('meme_id')!r} is already "
                                    f"open"), None
                 continue
+            # EM-261 — consecrate_faith is scoped per FAITH_ID (two distinct
+            # faiths may have open consecration votes at once; the SAME faith may
+            # not be double-proposed) — the canonize-per-meme dedup twin.
+            if effect == "consecrate_faith":
+                if (rule.payload or {}).get("faith_id") == payload.get("faith_id"):
+                    return False, (f"a consecration vote for "
+                                   f"{payload.get('faith_id')!r} is already "
+                                   f"open"), None
+                continue
             return False, f"rule with effect {effect!r} already proposed", None
         # W11b / EM-087 — re-proposing an effect identical to an ACTIVE rule is a
         # RENEWAL of that rule, not a new stackable law. The proposal is allowed
@@ -5121,6 +5196,7 @@ class World:
                               "set_zone_rule",  # EM-265 (SB) — one-shot per-zone act
                               "declare_war", "peace_treaty",  # EM-257 — one-shot acts per pair/war
                               "canonize_meme",  # EM-254 — one-shot per meme (ban_gossip renews like ban_stealing)
+                              "consecrate_faith",  # EM-261 — one-shot per faith (like canonize)
                               "heal") else None  # EM-315 — one-shot transplant per patient
         )
         # EM-203 — governance renewal cooldown. An unchanged ACTIVE effect-rule
@@ -5206,7 +5282,12 @@ class World:
                                            # each passing vote canonizes afresh, it
                                            # never "renews". ban_gossip is NOT here —
                                            # it renews like its twin ban_stealing.
-                                           "canonize_meme") else None
+                                           "canonize_meme",
+                                           # EM-261 — consecrate_faith is a one-shot
+                                           # per-faith ACT (canonize's religion twin):
+                                           # each passing vote anchors afresh, never
+                                           # "renews".
+                                           "consecrate_faith") else None
                 )
                 if existing is not None and existing.id != rule.id:
                     rule.status = "renewed"
@@ -5475,6 +5556,49 @@ class World:
                 f"🏛 By vote, \"{_truncate(meme.text, 60)}\" becomes the town's "
                 f"canon.",
                 {"meme_id": meme_id, "proposal_id": rule.id},
+            ))
+            return
+        # EM-261 — consecrate_faith: a passing 70% SUPERMAJORITY anchors a faith
+        # to an operational `temple` (its DEVOTION SEAT — the canonize_meme
+        # religion twin). Sets faith.temple_id + the temple's `commemorates`
+        # (reusing the Building field — the rule-commemoration path) and grants
+        # the CONSECRATION BLESSING: every LIVING member of the faith gains
+        # faith.temple_buff devotion (clamped 0..100 — this is where EM-261 reads
+        # the config; the PER-TURN seat buff at the temple is the EM-262 `worship`
+        # verb). A vanished faith, an ALREADY-consecrated faith (dedup via
+        # _consecration_temple_for), or NO free operational temple ⇒ a SILENT
+        # no-op (the demolish vanished-target convention; the vote still applied).
+        # Two events park in the SAME outbox trial's verdict pair uses:
+        # faith_consecrated then temple_consecrated. actor_id anchors on the
+        # faith's founder (the meme_canonized origin recipe — deterministic, EM-155).
+        if rule.effect == "consecrate_faith":
+            rule.applied = True
+            faith_id = str((rule.payload or {}).get("faith_id") or "")
+            faith = self.faiths.get(faith_id)
+            if faith is None:
+                return
+            temple = self._consecration_temple_for(faith)
+            if temple is None:
+                return
+            faith.temple_id = temple.id
+            temple.commemorates = faith.id
+            buff = int(self._faith_param("temple_buff", 5))
+            for mid in faith.members:
+                member = self.agents.get(mid)
+                if member is not None and member.alive:
+                    member.devotion = max(0, min(100, member.devotion + buff))
+            self.pending_spawn_events.append(self._faction_event(
+                "faith_consecrated", faith.founder_id,
+                f"🕯 By vote, {faith.name} is consecrated — {temple.name} "
+                f"becomes its seat.",
+                {"faith_id": faith.id, "temple_id": temple.id,
+                 "proposal_id": rule.id},
+            ))
+            self.pending_spawn_events.append(self._faction_event(
+                "temple_consecrated", faith.founder_id,
+                f"⛪ {temple.name} is dedicated to {faith.deity}.",
+                {"faith_id": faith.id, "temple_id": temple.id,
+                 "building_id": temple.id, "proposal_id": rule.id},
             ))
             return
         # EM-236 — amend_constitution: a ratified amendment add/edit/removes an
@@ -5877,6 +6001,7 @@ class World:
                            "set_zone_rule",  # EM-265 (SB) — structural city policy → 0.7
                            "declare_war", "peace_treaty",  # EM-257 — faction-scoped 70% (electorate substituted above)
                            "canonize_meme",  # EM-254 — a popular meme → institution: the 70% supermajority lane (town-wide, NOT faction-scoped)
+                           "consecrate_faith",  # EM-261 — anchoring a faith to its temple seat: the 70% supermajority lane (town-wide)
                            "heal"):  # EM-315 — remaking a mind is a weighty act → 70% supermajority
             if rule.effect == "amend_constitution":
                 try:
@@ -9818,6 +9943,51 @@ class World:
                                 "image_id": child.image_id},
                 }]}
         return adopted
+
+    def action_found_faith(self, agent: AgentState) -> dict:
+        """EM-261 (Wave O Religion) — found a new faith and become its first
+        devotee. REFLEX, deterministic, zero extra LLM calls (the create_meme
+        recipe). Gated on world.faith_enabled(): a faith-off world rejects it
+        (byte-identical control, the em161 golden). One membership at a time — an
+        already-faithful agent is rejected (_fail_event).
+
+        The founding mints a SEEDED Faith (mint_faith — replay-stable, EM-260),
+        makes the founder its sole member, sets agent.faith_id + a base devotion
+        (faith.devotion_base, > 0), and forges the CULTURE JOIN: a canonical
+        kind="faith" Meme (mint_meme + _attach_meme — the faith name is the meme
+        text) whose id is stamped on faith.meme_id, so a faith spreads through the
+        SAME meme graph culture rides (EM-250/EM-253). Emits `faith_founded`.
+        Every id is seeded (EM-155): a replay/fork founds the byte-identical
+        faith + meme."""
+        if not self.faith_enabled():
+            return self._fail_event(
+                agent.id, "found_faith", "faith disabled",
+                f"{agent.name} reaches for a faith no one here shares.")
+        if agent.faith_id:
+            existing = self.faiths.get(agent.faith_id)
+            fname = existing.name if existing is not None else "a faith"
+            return self._fail_event(
+                agent.id, "found_faith", "already faithful",
+                f"{agent.name} already keeps the faith of {fname}.")
+        faith = self.mint_faith(agent.id)
+        faith.members = [agent.id]
+        agent.faith_id = faith.id
+        base = max(1, int(self._faith_param("devotion_base", 10)))
+        agent.devotion = max(0, min(100, base))
+        # The Culture join — a canonical kind="faith" meme carrying the faith's
+        # name, attached to the founder so the faith rides the meme graph.
+        meme = self.mint_meme("faith", faith.name, agent.id)
+        self._attach_meme(agent, meme)
+        faith.meme_id = meme.id
+        return {
+            "kind": "faith_founded",
+            "actor_id": agent.id,
+            "text": (f"🕯 {agent.name} founds {faith.name}, faith of "
+                     f"{faith.deity}."),
+            "payload": {"action": "found_faith", "faith_id": faith.id,
+                        "name": faith.name, "deity": faith.deity,
+                        "meme_id": meme.id},
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # EM-252 — Passive culture diffusion (the once-per-round Wave-O round system,
