@@ -707,13 +707,16 @@ export interface SpawnSpec {
 // Camera focus (W11a EM-095/EM-099) — what the 3D village camera is locked
 // onto. 'agent'/'animal' FOLLOW the entity until the user drags; 'place' is a
 // one-shot zoom-to-place (id may be a Place id OR a W7 Building id — the
-// resolver in CozyWorld checks both). null = free camera.
+// resolver in CozyWorld checks both). 'settlement' (EM-121) is a one-shot
+// zoom-to-city (id is a world.settlements key; the camera frames the whole
+// cluster, not a single building). null = free camera.
 // ============================================================
 
 export type FocusTarget =
   | { type: 'agent'; id: string }
   | { type: 'animal'; id: string }
-  | { type: 'place'; id: string };
+  | { type: 'place'; id: string }
+  | { type: 'settlement'; id: string };
 
 // ============================================================
 // App state

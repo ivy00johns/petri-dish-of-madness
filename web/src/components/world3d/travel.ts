@@ -185,3 +185,24 @@ export function dropInTransitPositions<V>(
 ): void {
   for (const id of inTransit) positions.delete(id);
 }
+
+/**
+ * EM-121 — the follow-across-cities focus chain for one agent: its live
+ * animated in-city position when it has one (resident: home before departure,
+ * destination after the arrival re-seed), else its route-marker position while
+ * off-board (in transit), else null (unresolvable — the camera holds still
+ * rather than snapping anywhere). The camera director EASES toward whatever
+ * this resolves each frame, so the home → marker → destination handoff is a
+ * glide, never a jump-cut. Pure; the CozyWorld resolver feeds it the same maps
+ * the renderers use (animMap / travelMarkerEntries positions).
+ */
+export function focusChainPos(
+  id: string,
+  animPositions: ReadonlyMap<string, { x: number; z: number }>,
+  travelPositions: ReadonlyMap<string, XZ>,
+): { x: number; z: number } | null {
+  const live = animPositions.get(id);
+  if (live) return { x: live.x, z: live.z };
+  const marker = travelPositions.get(id);
+  return marker ? { x: marker[0], z: marker[1] } : null;
+}

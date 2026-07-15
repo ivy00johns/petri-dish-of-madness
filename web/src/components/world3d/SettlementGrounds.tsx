@@ -21,8 +21,11 @@
  *     grid stays crisp and a distant settlement gets its own town square.
  *   • DETERMINISTIC per-settlement accent: hashUnit(id) picks a fixed tint, so
  *     two cities read distinctly and a replay renders identically. No RNG/clock.
- *   • NON-INTERACTIVE set dressing: plain decorative meshes, no pointer
- *     handlers ⇒ never raycast-picked (the Ground-disc precedent).
+ *   • CLICK SURFACE = the PAVED CORE only (EM-121 zoom-to-city): the 6.5u town
+ *     square is a deliberate, bounded pick target; the wide grass wash + rim
+ *     stay inert (the Ground-disc precedent) so ordinary ground drags/clicks
+ *     near a city are never swallowed. A drag that ends on the core is
+ *     filtered by pointer travel (e.delta) — only a true click zooms.
  *   • TOLERANT: reuses settlementLabelEntries — an absent/empty map or a
  *     malformed entry contributes nothing (never a hole, never a crash), and a
  *     settlements-OFF world renders NOTHING here (single-settlement/no-settlement
@@ -32,6 +35,7 @@
  * design-token system — the same convention as Ground/CityScape/BUILDING_STYLES.
  */
 
+import type { ThreeEvent } from '@react-three/fiber';
 import { toonMaterial } from './toon';
 import { settlementTint } from './worldSpace';
 import { settlementLabelEntries } from './SettlementLabels';
@@ -81,6 +85,10 @@ const WASH_OPACITY = 0.26;
 /** Opacity of the paved core — reads as a real town square, not a tint. */
 const CORE_OPACITY = 0.82;
 
+/** Max pointer travel (px, pointerdown→up) still read as a CLICK on the core —
+ *  an orbit/pan drag that ends on the big pad must never zoom the city. */
+export const CORE_CLICK_MAX_DELTA = 6;
+
 /**
  * All settlement ground footprints. Absent/empty map ⇒ renders nothing (a
  * settlements-OFF world is unchanged). Mounted by CozyWorld's Scene beside
@@ -88,8 +96,11 @@ const CORE_OPACITY = 0.82;
  */
 export function SettlementGrounds({
   settlements,
+  onPick,
 }: {
   settlements?: Record<string, Settlement> | null;
+  /** EM-121: a settlement's paved core was clicked (zoom-to-city). */
+  onPick?: (settlementId: string) => void;
 }) {
   const entries = settlementGroundEntries(settlements);
   if (entries.length === 0) return null;
@@ -111,11 +122,21 @@ export function SettlementGrounds({
           >
             <circleGeometry args={[SETTLEMENT_WASH_RADIUS, 48]} />
           </mesh>
-          {/* Paved town-square core — sits ABOVE the wash, BELOW the road tiles. */}
+          {/* Paved town-square core — sits ABOVE the wash, BELOW the road tiles.
+              EM-121: the city's click surface (drag-filtered — see header). */}
           <mesh
             rotation={[-Math.PI / 2, 0, 0]}
             position={[e.x, 0.012, e.z]}
             receiveShadow
+            onClick={
+              onPick
+                ? (ev: ThreeEvent<MouseEvent>) => {
+                    if (ev.delta > CORE_CLICK_MAX_DELTA) return;
+                    ev.stopPropagation();
+                    onPick(e.id);
+                  }
+                : undefined
+            }
             material={toonMaterial(SETTLEMENT_PAVING, {
               transparent: true,
               opacity: CORE_OPACITY,

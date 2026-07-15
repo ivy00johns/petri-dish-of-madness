@@ -12,9 +12,14 @@
  * 3D component tests headless).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
-import { SettlementGrounds, settlementGroundEntries, settlementTint } from './SettlementGrounds';
+import {
+  SettlementGrounds,
+  settlementGroundEntries,
+  settlementTint,
+  CORE_CLICK_MAX_DELTA,
+} from './SettlementGrounds';
 import type { Settlement } from '../../types';
 
 const two: Record<string, Settlement> = {
@@ -67,5 +72,57 @@ describe('SettlementGrounds component (EM-109)', () => {
     expect(SettlementGrounds({ settlements: undefined })).toBeNull();
     expect(SettlementGrounds({ settlements: null })).toBeNull();
     expect(SettlementGrounds({ settlements: {} })).toBeNull();
+  });
+});
+
+// ── EM-121: the paved core is the zoom-to-city click surface ─────────────────
+
+type ClickEvent = { delta: number; stopPropagation: () => void };
+
+/** The [wash, core, rim] mesh elements of one settlement's ground group. */
+function clusterMeshes(
+  el: ReactElement,
+  name: string,
+): Array<{ onClick?: (e: ClickEvent) => void }> {
+  const clusters = (el.props as { children: ReactElement[] }).children;
+  const cluster = clusters.find((c) => (c.props as { name: string }).name === name)!;
+  return ((cluster.props as { children: ReactElement[] }).children).map(
+    (m) => m.props as { onClick?: (e: ClickEvent) => void },
+  );
+}
+
+describe('EM-121 — clicking the paved core is zoom-to-city', () => {
+  it('only the CORE carries a handler — the wide wash + rim stay inert', () => {
+    const onPick = vi.fn();
+    const el = SettlementGrounds({ settlements: two, onPick }) as ReactElement;
+    const [wash, core, rim] = clusterMeshes(el, 'settlement-ground-genesis');
+    expect(wash.onClick).toBeUndefined();
+    expect(typeof core.onClick).toBe('function');
+    expect(rim.onClick).toBeUndefined();
+  });
+
+  it('a true click picks THAT settlement id (propagation stopped)', () => {
+    const onPick = vi.fn();
+    const el = SettlementGrounds({ settlements: two, onPick }) as ReactElement;
+    const [, core] = clusterMeshes(el, 'settlement-ground-stl_2');
+    const stop = vi.fn();
+    core.onClick!({ delta: 0, stopPropagation: stop });
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(onPick).toHaveBeenCalledWith('stl_2');
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it('a DRAG that ends on the core is filtered by pointer travel (never zooms)', () => {
+    const onPick = vi.fn();
+    const el = SettlementGrounds({ settlements: two, onPick }) as ReactElement;
+    const [, core] = clusterMeshes(el, 'settlement-ground-genesis');
+    core.onClick!({ delta: CORE_CLICK_MAX_DELTA + 1, stopPropagation: () => {} });
+    expect(onPick).not.toHaveBeenCalled();
+  });
+
+  it('without onPick the core carries no handler (inert set dressing, as before)', () => {
+    const el = SettlementGrounds({ settlements: two }) as ReactElement;
+    const [, core] = clusterMeshes(el, 'settlement-ground-genesis');
+    expect(core.onClick).toBeUndefined();
   });
 });
