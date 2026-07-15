@@ -947,9 +947,10 @@ export interface Recommendation {
 }
 export interface ApplyResult {
   ok: boolean;
-  diff: { flag: string; from: boolean; to: boolean }[];
-  restart_required: boolean;
-  message: string;
+  error?: string;
+  diff?: { flag: string; from: boolean; to: boolean }[];
+  restart_required?: boolean;
+  message?: string;
   /** Optional (backend also returns these; not required by the plan). */
   unapplied?: string[];
   unknown?: string[];
