@@ -63,6 +63,29 @@ _config: WorldConfig | None = None
 # WebSocket connection manager
 _connections: set[WebSocket] = set()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Lab Setup flag inventory (v1). Prompt-weight flags move the estimate; routing/ops
+# flags do not change prompt size. `discovery` lives under adaptive_routing.
+# ──────────────────────────────────────────────────────────────────────────────
+_PROMPT_WEIGHT_FLAGS = [
+    "comm", "settlements", "faith", "war", "factions", "universalization",
+    "memory_retrieval", "buildings", "planning", "narrator", "miracles",
+    "children", "animals", "image_gen", "healing_house", "charters",
+    "chimera_twins", "coherence", "generations",
+]
+_ROUTING_OPS_FLAGS = [
+    "lane_failover", "overflow_lane", "cap_governor", "usage_caps", "cache",
+    "discovery",
+]
+
+
+def _flag_baked(params: Any, flag: str) -> bool:
+    from ..engine.world import _block_get
+    if flag == "discovery":
+        ar = getattr(params, "adaptive_routing", None)
+        return bool(_block_get(getattr(ar, "discovery", None), "enabled", False))
+    return bool(_block_get(getattr(params, flag, None), "enabled", False))
+
 
 def _on_ws_send_done(task: asyncio.Task, ws: WebSocket) -> None:
     """Done-callback for scheduled WS sends (audit B10): consume the task's
@@ -663,6 +686,45 @@ async def get_config():
         raise HTTPException(503, "Not initialized")
     params = _config.world
     return {k: getattr(params, k) for k in vars(params) if not k.startswith("_")}
+
+
+@app.get("/api/config/flags")
+async def get_config_flags():
+    """Current run's BAKED flag state + group membership. Merges explicit
+    world.yaml blocks, absent-defaulted blocks (e.g. faith), and adaptive_routing
+    — so 'why now / why not before' is answerable in one place."""
+    if _config is None:
+        raise HTTPException(503, "Not initialized")
+    params = _config.world
+    baked = {f: _flag_baked(params, f) for f in _PROMPT_WEIGHT_FLAGS + _ROUTING_OPS_FLAGS}
+    return {"baked": baked,
+            "groups": {"prompt_weight": _PROMPT_WEIGHT_FLAGS,
+                       "routing_ops": _ROUTING_OPS_FLAGS}}
+
+
+class EstimateBody(BaseModel):
+    overrides: dict[str, bool] = Field(default_factory=dict)
+
+
+@app.post("/api/estimate")
+async def post_estimate(body: EstimateBody):
+    """Predict the prompt size of a flag combo. Runs the real builder against a
+    flag-overridden shallow copy of the live world. Never fabricates a number:
+    on any failure returns {ok: false, error}."""
+    if _config is None:
+        raise HTTPException(503, "Not initialized")
+    if _world is None:
+        return {"ok": False, "error": "world not initialized"}
+    from ..engine.estimator import estimate_prompt
+    agents = _world.living_agents()
+    if not agents:
+        return {"ok": False, "error": "no living agents to estimate against"}
+    agent = next((a for a in agents if getattr(a, "cadence_tier", "") == "protagonist"), agents[0])
+    try:
+        result = estimate_prompt(_world, agent, _config.world, body.overrides, _PROMPT_WEIGHT_FLAGS)
+    except Exception as exc:  # fix-don't-hide: surface, never fake a number
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, **result}
 
 
 @app.get("/api/profiles")
