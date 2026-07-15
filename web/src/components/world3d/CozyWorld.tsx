@@ -24,8 +24,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { Environment, OrbitControls, Sky, SoftShadows, useGLTF } from '@react-three/drei';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Environment, OrbitControls, Sky, useGLTF } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
 import type { WorldState, WorldEvent, FocusTarget } from '../../types';
@@ -212,6 +212,16 @@ function CameraDirector({
   onFocusBreak?: () => void;
 }) {
   const controlsRef = useRef<OrbitControlsImpl>(null);
+  // Adaptive resolution driven by ZOOM DISTANCE (not fps). Zoomed out, the
+  // whole organic city fills the frame and the per-fragment work (toon shade +
+  // PCSS soft shadows + fog) runs over ~every pixel, so we step DPR down as the
+  // orbit radius grows. Distance is monotonic in the zoom gesture, so a Schmitt
+  // trigger (separate up/down edges) changes DPR at most once per zoom and
+  // NEVER thrashes the drawing buffer the way an fps-driven monitor does at the
+  // overhead fps floor — that buffer churn was the overhead flicker. Floor 1.5
+  // keeps the PCSS shadows from undersampling into ringing halos around objects.
+  const setDpr = useThree((s) => s.setDpr);
+  const dprTierRef = useRef(0); // 0 = close, 1 = mid, 2 = far
   const modeRef = useRef<CamMode>('free');
   const focusRef = useRef<FocusTarget | null>(focus);
   // EM-082: the idle auto-rotate is a motion nicety — off under reduced motion.
@@ -347,6 +357,25 @@ function CameraDirector({
     controls.target.x = THREE.MathUtils.clamp(controls.target.x, -PAN_BOUND, PAN_BOUND);
     controls.target.z = THREE.MathUtils.clamp(controls.target.z, -PAN_BOUND, PAN_BOUND);
     controls.target.y = THREE.MathUtils.clamp(controls.target.y, 0, 12);
+
+    // Zoom-distance → DPR tier (Schmitt trigger; fires setDpr ONLY on a tier
+    // change, so a full zoom-out costs one buffer resize, never a per-frame
+    // churn). Wide dead-bands (50/60 and 95/105) absorb damping jitter.
+    const zoomDist = cam.position.distanceTo(controls.target);
+    let tier = dprTierRef.current;
+    if (tier === 0) {
+      if (zoomDist > 60) tier = 1;
+    } else if (tier === 1) {
+      if (zoomDist < 50) tier = 0;
+      else if (zoomDist > 105) tier = 2;
+    } else if (zoomDist < 95) {
+      tier = 1;
+    }
+    if (tier !== dprTierRef.current) {
+      dprTierRef.current = tier;
+      const cap = Math.min(window.devicePixelRatio || 1, 2);
+      setDpr(tier === 0 ? cap : tier === 1 ? Math.min(cap, 1.75) : Math.min(cap, 1.5));
+    }
   });
 
   return (
@@ -671,7 +700,13 @@ export function CozyWorld({
         <color attach="background" args={[GOLDEN_HOUR.background]} />
         {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
             feathered golden-hour shadows instead of hard stencils. */}
-        <SoftShadows size={24} samples={10} focus={0.5} />
+        {/* Shadows: the Canvas default PCFSoftShadowMap — soft-edged but
+            TEMPORALLY STABLE. We dropped drei <SoftShadows> (PCSS): its
+            stochastic penumbra "boiled" frame-to-frame (the flicker on every
+            object with the camera dead still) AND splayed a wide soft ring
+            (the halo). PCF has a fixed kernel — no boil, no halo. The
+            directional light's shadow-radius (below) carries the golden-hour
+            softness instead. */}
         <Scene
           world={world}
           bubblesByAgent={bubblesByAgent}
@@ -875,6 +910,7 @@ function Scene({
         shadow-camera-bottom={-48}
         shadow-bias={-0.0004}
         shadow-normalBias={0.04}
+        shadow-radius={3}
       />
       {/* Fog band pushed out (was 80/215) for the organic/radial city, which is
           WIDER than the old compact grid: at the 130u zoom-out limit the whole city
