@@ -266,9 +266,14 @@ def _humanize_project_name(raw: str) -> str:
 # Wave E / EM-113 — the full relationship-type vocabulary (contracts/wave-e.md
 # shared vocabulary). The first five predate Wave E and must never break in
 # snapshots or prompts; the last four are additive.
+# EM-260 — `co_religionist` (Wave O Religion track) is additive on the END so a
+# stored edge's type never shifts. It is ENGINE-ASSIGNED only (proselytize sets
+# it in EM-262 — like `family` is birth-assigned), so it rides RELATIONSHIP_TYPES
+# but is DELIBERATELY absent from DECLARABLE_RELATIONSHIP_TYPES below (agents may
+# not hand-declare it). The frontend union stays pre-EM-260 until EM-263.
 RELATIONSHIP_TYPES = (
     "neutral", "ally", "friend", "rival", "enemy",
-    "partner", "family", "mentor", "feud",
+    "partner", "family", "mentor", "feud", "co_religionist",
 )
 
 # Wave E / EM-113 — agent-declarable subset of RELATIONSHIP_TYPES. `family` is
@@ -381,6 +386,60 @@ class WarState:
             d["casualties"] = list(self.casualties)
         if self.exhaustion:
             d["exhaustion"] = {str(k): int(v) for k, v in self.exhaustion.items()}
+        return d
+
+
+# EM-260 — the shared-belief record (Wave O Religion track). A Faith is a named
+# creed with an INVENTED deity + tenets, founded by an agent and joined by
+# members. It plugs into TWO existing Wave-O primitives instead of reshaping
+# them: `meme_id` is the canonical kind="faith" Meme (the Culture join — EM-261
+# sets it so a faith spreads through the meme graph) and `hostile_to` feeds the
+# EM-263 war/grievance surface. `temple_id` is the EM-261 consecrated-temple
+# hook (the devotion/energy buff site) and `parent_id` records schism lineage
+# (EM-262). Ids are SEEDED (World.mint_faith — sha1, never uuid/clock) and
+# name/deity/tenets are SEEDED-picked from the INVENTED pools, so replay/fork
+# mints byte-identical faiths (EM-155; the open_war/mint_meme recipe). This
+# stage is PLUMBING ONLY — the founding/joining/proselytize VERBS land in
+# EM-261+.
+@dataclass
+class Faith:
+    id: str                       # seeded fth_<8hex> (World.mint_faith)
+    name: str                     # seeded INVENTED (never a real religion)
+    deity: str                    # seeded INVENTED (never a real deity)
+    founder_id: str
+    founded_tick: int
+    tenets: list[str]             # seeded INVENTED (never real scripture)
+    members: list[str] = field(default_factory=list)
+    temple_id: str | None = None  # EM-261 consecrated-temple hook
+    meme_id: str | None = None    # the Culture join: a kind="faith" Meme (EM-261)
+    hostile_to: list[str] = field(default_factory=list)  # EM-263 war hook (faith ids)
+    parent_id: str | None = None  # EM-262 schism lineage
+
+    def to_dict(self) -> dict:
+        """JSON-safe record. members/temple_id/meme_id/hostile_to/parent_id ride
+        ONLY when non-default (the WarState casualties/exhaustion convention) so a
+        fresh faith keeps a minimal, byte-stable shape; the scalar core — id,
+        name, deity, founder_id, founded_tick, tenets (all seeded at mint) —
+        always rides (the whole `faiths` collection is already only-when-non-
+        empty)."""
+        d = {
+            "id": self.id,
+            "name": self.name,
+            "deity": self.deity,
+            "founder_id": self.founder_id,
+            "founded_tick": self.founded_tick,
+            "tenets": list(self.tenets),
+        }
+        if self.members:
+            d["members"] = list(self.members)
+        if self.temple_id is not None:
+            d["temple_id"] = self.temple_id
+        if self.meme_id is not None:
+            d["meme_id"] = self.meme_id
+        if self.hostile_to:
+            d["hostile_to"] = list(self.hostile_to)
+        if self.parent_id is not None:
+            d["parent_id"] = self.parent_id
         return d
 
 
@@ -724,6 +783,18 @@ class AgentState:
     # defensively, so a letter-free agent — and every pre-EM-250 snapshot —
     # keeps the exact prior dict shape.
     mailbox: list[dict] = field(default_factory=list)
+    # EM-260 — Religion plumbing (Wave O). TWO additive scalars join this agent to
+    # a Faith (World.faiths): `faith_id` is the fth_<8hex> of the faith it belongs
+    # to (None = unfaithful) and `devotion` is a 0..100 fervor meter (the notoriety
+    # analog — the EM-261 temple buff and EM-262 proselytize/decay read & write it).
+    # ADDITIVE with default None / 0 → serialized in to_dict ONLY when set / > 0 and
+    # restored defensively (absent/garbage → None / 0, devotion clamped 0..100), so
+    # an unfaithful agent — and every pre-EM-260 snapshot — keeps the exact prior
+    # dict shape (the EM-155 byte-identical guarantee + the em161 golden, since
+    # world.faith defaults OFF and NO default path mints a faith or sets these).
+    # Membership is set only by the EM-261+ founding/joining/proselytize verbs.
+    faith_id: str | None = None
+    devotion: int = 0
     # EM-315 — The Healing House transplant record. THREE additive scalars carry
     # the society-wielded model swap:
     #   healings           — how many times the town has sentenced this citizen to
@@ -890,6 +961,14 @@ class AgentState:
             d["held_memes"] = list(self.held_memes)
         if self.mailbox:
             d["mailbox"] = [dict(e) for e in self.mailbox]
+        # EM-260 — faith membership serialized ONLY when set / non-zero, so an
+        # unfaithful agent (and every pre-EM-260 snapshot) keeps the exact prior
+        # dict shape (the em161 golden + the byte-identical guarantee). With
+        # world.faith OFF nothing sets these, so both stay at their defaults.
+        if self.faith_id is not None:
+            d["faith_id"] = self.faith_id
+        if self.devotion > 0:
+            d["devotion"] = self.devotion
         # EM-315 — Healing House transplant record serialized ONLY when the town
         # has treated this citizen at least once, so an untreated agent (and every
         # pre-EM-315 snapshot) keeps the exact prior dict shape (the em161 golden +
@@ -1389,6 +1468,40 @@ _SETTLEMENT_NAMES: list[str] = [
     "Stonereach", "Windrow",
 ]
 
+# EM-260 — FULLY INVENTED faith name / deity / tenet pools (Wave O Religion
+# track), picked SEEDED by World.mint_faith when a founder names nothing (the
+# _PROCGEN_NAMES / _SETTLEMENT_NAMES discipline: display-string pools, no new
+# art, no new kinds; a _seed_int walk, wall-clock-free, replay-identical).
+# CRITICAL: these are made-up fantasy words ONLY — never a real-world religion,
+# deity, prophet, or scripture (the denylist test in test_em260_schema.py
+# enforces this). Keep the register EW-dense (gritty, superstitious), not cozy.
+_FAITH_NAMES: list[str] = [
+    "The Ashen Covenant", "The Verdant Circle", "Keepers of the Hollow Flame",
+    "The Tidebound Order", "Gathering of the Pale Root", "The Emberwake Fellowship",
+    "Order of the Silent Spire", "The Gloamward Path", "Wardens of the Sunken Vow",
+    "The Cinderthorn Assembly", "The Marrow Communion", "The Rustbound Choir",
+]
+_FAITH_DEITIES: list[str] = [
+    "Vharûn the Unseen", "Ysmelda of the Deep Loam", "Korthaal the Ninefold",
+    "The Weeping Marrow", "Aeslin the Tidewright", "Grumroth Under-the-Hill",
+    "The Pale Cartographer", "Zyn-Vael the Hollow", "Thessa of the Split Sky",
+    "The Ember Sovereign", "Oskavel the Rustked", "The Drowned Warden",
+]
+_FAITH_TENETS: list[str] = [
+    "Hoard nothing the river can carry",
+    "Speak the name of every debt aloud",
+    "Burn the first loaf for the ones below",
+    "Never sleep beneath an unfinished roof",
+    "Count your enemies among your kin",
+    "Let no lantern outlive its keeper",
+    "Bury your coin before you bury your dead",
+    "Answer the door thrice or not at all",
+    "Salt the threshold against the listening dark",
+    "Give the road its due before you walk it",
+    "Owe nothing to a face you cannot name",
+    "Keep one candle for the ones who did not return",
+]
+
 _PROCGEN_MAX_PLACES = 12  # hard cap on generated town places (prompt-size gate)
 
 
@@ -1696,6 +1809,13 @@ class World:
         # stays byte-identical (EM-155).
         self.wars: dict[str, WarState] = {}
         self.grievances: dict[str, int] = {}
+        # EM-260 — the Wave O Religion substrate: faiths {id: Faith} (minted
+        # seeded via mint_faith — the founding VERBS are the only production
+        # writers, landing EM-261). Serialized in to_snapshot() only when
+        # non-empty (the wars pattern), so a faithless world — and every
+        # pre-EM-260 snapshot — stays byte-identical (EM-155). Gated behind the
+        # world.faith config block (faith_enabled, default OFF).
+        self.faiths: dict[str, Faith] = {}
         # EM-269 (F2) — agent-founded settlements: {id: {name, center,
         # founded_tick, founder_id, members}}. `center` is a WORLD-frame [x, z]
         # (±33 — the EM-268 placement frame; the logical→world conversion happens
@@ -7634,6 +7754,23 @@ class World:
         gate on it."""
         return bool(self._war_param("enabled", False))
 
+    def _faith_param(self, name: str, default: Any) -> Any:
+        """EM-260 — defensive accessor for the `world.faith` config block
+        (FaithParams dataclass OR dict OR absent — EM-155 conventions, like
+        _war_param). An absent block ⇒ every default ⇒ pre-EM-260 worlds run
+        unchanged (enabled defaults FALSE). `default` is only a fallback for a
+        key missing from the block, so keep these call-site defaults ==
+        FaithParams defaults."""
+        return _block_get(getattr(self.params, "faith", None), name, default)
+
+    def faith_enabled(self) -> bool:
+        """EM-260 — config gate `world.faith.enabled` (default OFF). Disabled ⇒
+        no faith is minted by any default path, no faith prompt line / menu
+        entry / event, no devotion bookkeeping — byte-identical pre-Wave-O
+        behavior (the em161 golden). PUBLIC (like war_enabled / boost_enabled) —
+        the EM-261+ runtime menu/validator gate the founding verbs on it."""
+        return bool(self._faith_param("enabled", False))
+
     def _healing_param(self, name: str, default: Any) -> Any:
         """EM-315 — defensive accessor for the `world.healing_house` config block
         (HealingHouseParams dataclass OR dict OR absent — EM-155 conventions, like
@@ -9927,6 +10064,47 @@ class World:
         self.wars[wid] = war
         return war
 
+    def mint_faith(self, founder_id: str, *, parent_id: str | None = None) -> "Faith":
+        """EM-260 — mint + register a Faith with a SEEDED id (sha1 of
+        founder:parent:tick — never the salted builtin hash, never uuid/clock):
+        fth_<8hex>, so replay/fork mints the byte-identical faith (EM-155; the
+        open_war/mint_meme recipe). name/deity/tenets are SEEDED-picked from the
+        INVENTED pools (a _seed_int walk on the stable faith id — no RNG, no
+        clock, no real-world religion), so a faith is reproducible across runs +
+        replay. IDEMPOTENT: re-minting the same key returns the already-
+        registered Faith. Registration alone joins no member and sets no
+        temple/meme — the founding/joining VERBS land in EM-261+; this is the
+        mint primitive only."""
+        from ..animals.runtime import _seed_int
+        fid = str(founder_id)
+        pid = str(parent_id or "")
+        key = f"{fid}:{pid}:{self.tick}".encode()
+        faith_id = f"fth_{hashlib.sha1(key).hexdigest()[:8]}"
+        existing = self.faiths.get(faith_id)
+        if existing is not None:
+            return existing
+        name = _FAITH_NAMES[_seed_int("faith-name", faith_id) % len(_FAITH_NAMES)]
+        deity = _FAITH_DEITIES[
+            _seed_int("faith-deity", faith_id) % len(_FAITH_DEITIES)]
+        # A SEEDED spread of DISTINCT tenets: walk from a seeded start index over
+        # the pool (the _SETTLEMENT_NAMES walk), collecting three consecutive
+        # entries — distinct by construction while the pool holds >= 3 (EM-155:
+        # the same faith id always yields the same three tenets in the same order).
+        start = _seed_int("faith-tenets", faith_id)
+        n = len(_FAITH_TENETS)
+        tenets = [_FAITH_TENETS[(start + i) % n] for i in range(min(3, n))]
+        faith = Faith(
+            id=faith_id,
+            name=name,
+            deity=deity,
+            founder_id=fid,
+            founded_tick=self.tick,
+            tenets=tenets,
+            parent_id=(str(parent_id) if parent_id else None),
+        )
+        self.faiths[faith_id] = faith
+        return faith
+
     def active_war_between(self, fid_a: str, fid_b: str) -> WarState | None:
         """EM-256 — the ACTIVE war between two groups, or None. Walked in
         sorted-id order (deterministic; at most one is expected — declare_war
@@ -10915,6 +11093,15 @@ class World:
             snap["grievances"] = {
                 str(k): int(v) for k, v in self.grievances.items()
             }
+        # EM-260 — faiths (the Wave O Religion substrate). Serialized only when
+        # non-empty (the wars pattern), so a faithless world — and every
+        # pre-EM-260 snapshot — keeps the exact prior key set (absent ⇒ {} on
+        # restore). Faith.to_dict owns the per-faith shape (members/temple_id/
+        # meme_id/hostile_to/parent_id ride only-when-non-default).
+        if self.faiths:
+            snap["faiths"] = {
+                str(fid): f.to_dict() for fid, f in self.faiths.items()
+            }
         # EM-269 (F2) — settlements {id: {name, center, founded_tick,
         # founder_id, members}}. Serialized only when non-empty (the factions
         # pattern), so a settlement-free world — and every pre-EM-269
@@ -11380,6 +11567,16 @@ class World:
                     max_ambitions=charter_caps_for(params)[0],
                     creed_cap=charter_caps_for(params)[1],
                 ),
+                # EM-260 — faith membership: additive. Pre-EM-260 snapshots lack
+                # the keys and restore None / 0; a present faith_id is coerced to
+                # a non-blank str (blank/non-str → None, fail-safe) and devotion
+                # is clamped 0..100 (a malformed/out-of-range value never breaks
+                # the restore). Byte-stable round-trip (EM-155): an unfaithful /
+                # zero-devotion agent is never re-emitted, so its dict is unchanged.
+                faith_id=(str(d["faith_id"])
+                          if isinstance(d.get("faith_id"), str)
+                          and str(d.get("faith_id")).strip() else None),
+                devotion=max(0, min(100, _int(d.get("devotion")))),
             )
             a.relationships = {
                 str(aid): RelationshipState(
@@ -11689,6 +11886,32 @@ class World:
             heat = _int(gval)
             if gkey and "->" in str(gkey) and heat > 0:
                 world.grievances[str(gkey)] = min(100, heat)
+        # EM-260 — restore faiths (additive: pre-EM-260 snapshots lack the key
+        # and restore {}, so a faithless fork/replay is byte-identical).
+        # Defensive: a faith row that is not a dict or has a blank id is dropped;
+        # scalars coerce fail-safe; the only-when-non-default optional fields
+        # restore to their defaults when absent (members [], temple/meme/parent
+        # None), so a legit faith round-trips byte-stably (EM-155).
+        restored_faiths: dict[str, Faith] = {}
+        for f_id, frec in (state.get("faiths") or {}).items():
+            if not isinstance(frec, dict) or not f_id:
+                continue
+            restored_faiths[str(f_id)] = Faith(
+                id=str(f_id),
+                name=str(frec.get("name", "")),
+                deity=str(frec.get("deity", "")),
+                founder_id=str(frec.get("founder_id", "")),
+                founded_tick=_int(frec.get("founded_tick")),
+                tenets=[str(t) for t in (frec.get("tenets") or [])],
+                members=[str(m) for m in (frec.get("members") or [])],
+                temple_id=(str(frec["temple_id"]) if frec.get("temple_id")
+                           else None),
+                meme_id=(str(frec["meme_id"]) if frec.get("meme_id") else None),
+                hostile_to=[str(h) for h in (frec.get("hostile_to") or [])],
+                parent_id=(str(frec["parent_id"]) if frec.get("parent_id")
+                           else None),
+            )
+        world.faiths = restored_faiths
         # EM-269 (F2) — restore settlements (additive: pre-EM-269 snapshots
         # lack the key and restore {} — identity continuity survives a
         # fork/restore: ids, names, centers and loose membership all come back
