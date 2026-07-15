@@ -10,7 +10,8 @@ advance_war (round boundary, AFTER recompute_factions / BEFORE age_agents)
 grinds both belligerents by exhaustion_per_round, auto-resolves a collapsed
 side through the SAME _settle_war lane the EM-257 peace_treaty vote uses
 (reparations + exile, announced as war_exhausted), then SWEEPS: settled
-wars are deleted, bands disband, `belligerent` markers clear. The
+wars are deleted and bands disband (belligerence is DERIVED from band
+membership — the W31 C3 fix — so the sweep clears nothing else). The
 declare → muster → clash → siege → peace integration pins the whole arc.
 """
 from petridish.engine.world import World, AgentState, PlaceState, Building
@@ -123,10 +124,13 @@ def test_siege_damages_through_the_shared_path():
         "damage": 20, "health": 80}
     assert b.health == 80 and b.status == "damaged"
     assert state_evt["kind"] == "structure_state_changed"
-    # NOT a crime: no notoriety, no grievance — exhaustion instead.
+    # NOT a crime: no notoriety, no grievance — exhaustion instead. W31 C14:
+    # siege is not free — the besieger burns energy and grinds their OWN
+    # circle too (exhaustion_per_siege_own).
     assert w.agents["ada"].notoriety == 0
+    assert w.agents["ada"].energy == 76.0        # 80 - siege_energy_cost
     assert w.grievances == {}
-    assert war.exhaustion == {FB: 4}             # exhaustion_per_siege
+    assert war.exhaustion == {FB: 4, FA: 2}      # per_siege / per_siege_own
 
 
 def test_siege_destroys_at_zero_health():
@@ -208,23 +212,24 @@ def test_band_collapse_loses_while_the_enemy_still_fields_one():
 
 # ── the sweep ─────────────────────────────────────────────────────────────────
 
-def test_sweep_disbands_bands_and_clears_belligerent():
+def test_sweep_disbands_bands_and_ends_belligerence():
+    """W31 C3 — belligerence is DERIVED from the band, so dropping the
+    war_band key IS the demobilization (crime_status is never touched)."""
     w = _world()
     war = _at_war(w)
-    w.agents["ada"].crime_status = "belligerent"
-    w.agents["dot"].crime_status = "belligerent"
+    assert w.is_belligerent("ada") and w.is_belligerent("dot")
     war.status = "settled"                       # e.g. a signed peace
     w.advance_war()
     assert w.wars == {}
     assert "war_band" not in w.factions[FA]
     assert "war_band" not in w.factions[FB]
-    assert w.agents["ada"].crime_status is None
-    assert w.agents["dot"].crime_status is None
+    assert not w.is_belligerent("ada")
+    assert not w.is_belligerent("dot")
 
 
 def test_sweep_spares_a_faction_still_at_war():
-    """A faction fighting on a SECOND front keeps its band and markers when
-    the first war settles."""
+    """A faction fighting on a SECOND front keeps its band (and so its
+    members' derived belligerence) when the first war settles."""
     w = _world()
     FC = "fct_ccc33333"
     w.factions[FC] = {"name": "Fay's circle", "founded_tick": 0,
@@ -232,17 +237,15 @@ def test_sweep_spares_a_faction_still_at_war():
     war1 = _at_war(w)                            # FA vs FB
     w.tick = 1
     w.open_war(FA, FC, "two fronts")             # FA vs FC stays active
-    w.agents["ada"].crime_status = "belligerent"
-    w.agents["dot"].crime_status = "belligerent"
     war1.status = "settled"
     w.advance_war()
     assert "war_band" in w.factions[FA]          # still at war (vs FC)
-    assert w.agents["ada"].crime_status == "belligerent"
+    assert w.is_belligerent("ada")
     assert "war_band" not in w.factions[FB]      # FB's war is over
-    assert w.agents["dot"].crime_status is None
+    assert not w.is_belligerent("dot")
 
 
-def test_sweep_never_clears_other_crime_statuses():
+def test_sweep_never_clears_crime_statuses():
     w = _world()
     war = _at_war(w)
     w.agents["dot"].crime_status = "wanted"
@@ -272,12 +275,13 @@ def test_declare_muster_clash_siege_peace_integration():
     assert [e["kind"] for e in w.pending_spawn_events] == ["war_declared"]
     w.pending_spawn_events.clear()
 
-    # MUSTER — both sides raise a band; ally rings seal; markers set.
+    # MUSTER — both sides raise a band; ally rings seal; belligerence derives.
     for aid in ("ada", "bram", "dot"):
         evt = w.action_muster(w.agents[aid])
         assert evt["kind"] == "war_band_joined"
     assert w.factions[FA]["war_band"] == ["ada", "bram"]
-    assert w.agents["ada"].crime_status == "belligerent"
+    assert w.is_belligerent("ada")
+    assert w.agents["ada"].crime_status is None  # W31 C3 — never a status
 
     # CLASH — tick 0, pair (ada, dot): pinned swing +4. ada fields bram's
     # support (+4); dot shelters behind the standing keep (defender terrain
@@ -288,11 +292,12 @@ def test_declare_muster_clash_siege_peace_integration():
     assert w.agents["dot"].energy == 80.0 - 9
     assert war.exhaustion == {FB: 5, FA: 2}
 
-    # SIEGE — the keep takes the shared-path damage; FB grinds further.
+    # SIEGE — the keep takes the shared-path damage; FB grinds further and
+    # (W31 C14) the besieger burns energy + grinds their OWN circle a little.
     evt = w.action_siege(w.agents["ada"], "bld_keep")
     assert evt["_multi"][0]["kind"] == "war_siege"
     assert keep.health == 80
-    assert war.exhaustion == {FB: 9, FA: 2}
+    assert war.exhaustion == {FB: 9, FA: 4}
 
     # PEACE — the battered side sues (concedes): FB's own 70% (2 of 2).
     ok, reason, treaty = w.action_propose_rule(

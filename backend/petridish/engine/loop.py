@@ -225,6 +225,14 @@ class TickLoop:
         # _flush_spawn_events drain.
         self._seed_birth_casting()
 
+        # EM-315 — pin the Healing House target pool to the router's KNOWN
+        # profiles (same construction-time config seam as the birth casting).
+        # A typo'd lane in world.healing_house.target_profiles would otherwise
+        # flow onto the replay-surface agent.profile, fail the live-router
+        # reassign, and silently degrade the agent to mock on a fork/resume —
+        # the never-swap-toward-silence law.
+        self._seed_healing_known_profiles()
+
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
@@ -257,6 +265,29 @@ class TickLoop:
             setter(load_personas(), roster)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("birth casting seed failed: %s", exc)
+
+    def _seed_healing_known_profiles(self) -> None:
+        """EM-315 — inject the router's known profile names as the world's
+        healing allow-list, so _pick_healing_profile can only choose lanes the
+        router can actually route (an unknown lane is never chosen — the swap
+        simply does not happen). Unknown configured entries are warned about
+        ONCE here, at boot, where the operator can fix the config. Defensive:
+        the allow-list is a guard, never a reason a loop fails to construct."""
+        setter = getattr(self._world, "set_healing_known_profiles", None)
+        if not callable(setter):
+            return
+        try:
+            configured = list(self._world.healing_target_profiles())
+            known = [str(n) for n in self._router.profile_names()]
+            setter(known)
+            unknown = [t for t in configured if t not in known]
+            if unknown:
+                log.warning(
+                    "healing_house.target_profiles names lanes unknown to the "
+                    "router — dropped (a heal must never swap an agent onto an "
+                    "unroutable lane): %s", unknown)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("healing known-profile seed failed: %s", exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Control API
@@ -2024,8 +2055,15 @@ class TickLoop:
             return
         try:
             self._router.reassign(str(patient_id), str(to_profile))
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("healing-house router sync failed: %s", exc)
+        except Exception as exc:
+            # The serialized agent.profile already swapped world-side; a failed
+            # live reassign means chip/snapshot and the routing lane now
+            # DISAGREE (and a fork/resume would re-register the unroutable
+            # profile — the mock-degradation path). Loud, not debug.
+            log.warning(
+                "healing-house router sync failed — %s keeps its OLD live "
+                "lane this run while its serialized profile says %r: %s",
+                patient_id, to_profile, exc)
             return
         # Enrich the sentence card's chip color from the freshly-adopted lane so
         # the feed shows the transplanted model's color, not the fallback.

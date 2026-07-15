@@ -16,16 +16,14 @@
 # reservation, an intermittent rate window that 429s the top curated lanes
 # (each still sub-threshold healthy) burned every attempt before the backstop
 # was ever consulted — the documented last resort was unreachable. Worst case
-# is max_attempts x per_attempt_timeout_s = 48s of wall clock, but 429s return
-# fast, so the realistic cascade stays far below the old 86s doom loops.
+# is max_attempts x per_attempt_timeout_s of wall clock, but 429s return fast,
+# so the realistic cascade stays far below the old 86s doom loops.
 #
-# W31/EM-318 — the terminal slot was the proxy's blind `auto` whole-pool router,
-# which returns "All models exhausted" during a rate storm (idle churn). It now
-# points at a DETERMINISTIC free lane (`gpt-oss-120b`, clean-JSON, the most
-# reliable free model), so the guaranteed last attempt is a KNOWN model, not the
-# proxy's blind pick. `auto` stays in the walk as a low-priority resort but is
-# no longer the terminal. Set `terminal_fallback: auto` (and move `auto` last in
-# `order`) to restore the exact W30 blind-pool backstop.
+# W31/EM-318 tried a DETERMINISTIC curated terminal (`gpt-oss-120b`) here;
+# EM-319 REVERTED it to `auto` after a live storm proved every specific lane
+# can be individually rate-limited while the blind pool still routes (see the
+# `terminal_fallback` comment below). The MECHANISM (any profile may hold the
+# reserved slot) remains available.
 #
 # DEFAULT enabled: false ⇒ byte-identical to today (pin → EM-205 `auto` backup).
 # Flip enabled: true to adopt the ordered bounce loop. Config is captured in
@@ -46,10 +44,11 @@ adaptive_routing:
   # gpt-oss-120b terminal itself) can be individually rate-limited and return
   # "All models exhausted". With a specific terminal, ~93% of turns idled →
   # agents stopped eating → starvation death spiral (tick ~3600). `auto` is the
-  # only lane that survives a partial rate storm, so it must be the GUARANTEED
-  # last attempt. The feed-noise reason EM-318 moved away from `auto` is already
-  # solved by the retained feed-silence (EM-318 part 1) — `auto` here is a SILENT
-  # working backstop, not a source of chat error cards.
+  # only lane that survives a partial rate storm, so it stays the GUARANTEED
+  # last attempt on SURVIVABILITY grounds. Exhaustion idles are VISIBLE in the
+  # feed again (the EM-318 feed-silence filter was removed — fix-don't-hide);
+  # they are rare now that EM-324's repin + detour fixed the root cause, and
+  # when one does surface it is real signal, not noise to mask.
   terminal_fallback: auto
 
   # P1 is STATIC — lanes come from this file matched against configured
@@ -69,9 +68,13 @@ adaptive_routing:
   #   gpt-oss-120b*          -> profile gpt-oss-120b
   #
   # EM-324 (2026-07-13) — the bounce pool is the set of PROBE-VERIFIED clean
-  # lanes (each returned finish=stop + valid JSON live, mid rate-storm). Removed
+  # lanes (each returned finish=stop + valid JSON live, mid rate-storm).
   # `command-a-2` (=cohere/command-a-plus preambles + truncates 32/32 on strict-
-  # JSON, run 1388) and `*qwen3-next-80b*` (OpenRouter :free 50 rpd). Order is
+  # JSON, run 1388) is DENYLISTED via `exclude` below — its profile survives in
+  # profiles.yaml for legacy references, so without the denylist the `*` sweep
+  # would re-place it (PR#106 C15). `*qwen3-next-80b*` (OpenRouter :free 50 rpd)
+  # was dropped from the CURATED order but stays reachable via the `*` sweep as
+  # a deliberate last-ditch free lane. Order is
   # by OBSERVED direct-clean reliability from live run 1389: the mistral/llama/
   # gemini/minimax instruct lanes serve finish=stop directly; `gpt-oss-120b` is
   # DEMOTED to just above the sweep — it is a REASONING model whose CoT truncates
@@ -91,3 +94,9 @@ adaptive_routing:
     - { source: freellmapi, model: "*",                      free: true }  # remaining free lanes (sweep)
     - { source: freellmapi, model: "auto" }                                # blind proxy picker — low-priority resort
     - { source: anthropic,  model: "claude-sonnet-5",        free: false } # paid, opt-in, dead last
+
+  # DENYLIST (PR#106 C15) — matchers (same source + model-glob shape as `order`)
+  # for lanes NO entry may place, not even the `*` sweep. This is the mechanism
+  # for barring a legacy-only profile from the bounce walk without deleting it.
+  exclude:
+    - { source: freellmapi, model: "command-a-2" }  # cohere A+ — preambles + truncates strict-JSON (EM-324, run 1388)

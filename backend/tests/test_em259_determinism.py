@@ -70,7 +70,9 @@ def test_disabled_war_verbs_fail_closed_with_zero_state_change():
 
 def _mid_combat_world() -> World:
     """A war caught mid-swing: bands mustered, a casualty taken, exhaustion
-    accrued, a besieged building, belligerent + exiled markers set."""
+    accrued, a besieged building, an exiled marker set. Belligerence is
+    DERIVED from the war_band lists (W31 C3) — the faction records round-trip
+    it; crime_status never carries it."""
     w = _world()
     w.tick = 9
     war = w.open_war(FA, FB, "avenge the market")
@@ -80,9 +82,7 @@ def _mid_combat_world() -> World:
     war.exhaustion = {FA: 12, FB: 47}
     w.grievances = {f"{FB}->{FA}": 55}
     w.agents["eli"].alive = False
-    w.agents["ada"].crime_status = "belligerent"
-    w.agents["bram"].crime_status = "belligerent"
-    w.agents["dot"].crime_status = "belligerent"
+    w.agents["cyn"].crime_status = "exiled"      # a past defeat
     # position pinned explicitly: EM-268 derive-on-load would otherwise ADD
     # one on restore (ratified behavior, orthogonal to the war layer).
     w.buildings["bld_keep"] = Building(

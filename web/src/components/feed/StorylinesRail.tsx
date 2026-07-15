@@ -17,6 +17,12 @@
  * Hysteresis is stateful-but-display-only: the previous pass's active ids live
  * in a ref (NOT sim state) and are fed back into applyHysteresis so a thread
  * hovering at the promote line stays put instead of blinking.
+ *
+ * The scoring lives in the exported useStorylines hook so the PARENT owns the
+ * live scored set: the selection is stored as an ID and re-resolved against
+ * that set each render, so a thread that persists but evolves (a power grab
+ * recruiting new allies) never leaves click-time principals/title stale in the
+ * feed filter or the 3-D tether.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -31,13 +37,42 @@ import '../../inspector/inspector-tokens.css';
 import '../panels/roster-tokens.css';
 
 interface StorylinesRailProps {
-  world: WorldState | null;
-  /** The deep rolling history (newest-first) — NOT the 200-cap feed. */
-  history: WorldEvent[];
+  /** The live promoted threads (from useStorylines — the parent owns them). */
+  storylines: Storyline[];
   /** Currently-selected thread id (drives the feed filter + tether). */
   selectedId: string | null;
   /** Select a thread (or null to clear). The parent owns the selection. */
   onSelect: (storyline: Storyline | null) => void;
+}
+
+/**
+ * Score the log into the promoted, sticky storyline set. Pure presentation
+ * state: the hysteresis feedback lives in a ref, never sim state. `enabled`
+ * short-circuits the O(n) scoring when the rail is flag-gated off (it must be
+ * a render-stable flag — it only toggles what the memos compute, not hooks).
+ */
+export function useStorylines(
+  history: WorldEvent[],
+  world: WorldState | null,
+  enabled = true,
+): Storyline[] {
+  const candidates = useMemo(
+    () => (enabled ? scoreStorylines(history, world) : []),
+    [enabled, history, world],
+  );
+
+  // Two-threshold hysteresis fed from the PREVIOUS pass's active ids (a
+  // display-only ref, never sim state) so the rail is sticky, not flickery.
+  const prevActiveIds = useRef<Set<string>>(new Set());
+  const storylines = useMemo(
+    () => applyHysteresis(candidates, prevActiveIds.current),
+    [candidates],
+  );
+  useEffect(() => {
+    prevActiveIds.current = new Set(storylines.map((s) => s.id));
+  }, [storylines]);
+
+  return storylines;
 }
 
 const COLLAPSE_KEY = 'em.storylines.collapsed';
@@ -63,26 +98,12 @@ function kindMeta(kind: StorylineKind): { label: string; color: string } {
   return KIND_META[kind] ?? { label: String(kind), color: 'var(--marker-crime)' };
 }
 
-export function StorylinesRail({ world, history, selectedId, onSelect }: StorylinesRailProps) {
+export function StorylinesRail({ storylines, selectedId, onSelect }: StorylinesRailProps) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
 
   useEffect(() => {
     try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
   }, [collapsed]);
-
-  // Score the log into candidate threads (pure, deterministic, zero-LLM).
-  const candidates = useMemo(() => scoreStorylines(history, world), [history, world]);
-
-  // Two-threshold hysteresis fed from the PREVIOUS pass's active ids (a
-  // display-only ref, never sim state) so the rail is sticky, not flickery.
-  const prevActiveIds = useRef<Set<string>>(new Set());
-  const storylines = useMemo(
-    () => applyHysteresis(candidates, prevActiveIds.current),
-    [candidates],
-  );
-  useEffect(() => {
-    prevActiveIds.current = new Set(storylines.map((s) => s.id));
-  }, [storylines]);
 
   // If the selected thread decayed out of the active set, drop the selection so
   // the feed filter / tether don't cling to a thread that's no longer shown.

@@ -118,8 +118,12 @@ describe('EventFeed — benign action-rejections are not feed clutter', () => {
   });
 });
 
-describe('EventFeed — feed-silence (EM-318): routing-exhaustion idle-fallbacks are not feed clutter', () => {
-  it('hides a provider_error idle-fallback (all lanes exhausted / All models exhausted)', () => {
+describe('EventFeed — EM-318 removal: provider_error idle-fallbacks follow the normal rules', () => {
+  // Fix-don't-hide: EM-324 fixed the routing root (repin + detour), so the
+  // viewer-only feed-silence filter is gone — a routing-exhaustion
+  // parse_failure is a REAL error card in the ⚠ errors channel, exactly like
+  // a truncated-JSON one.
+  it('shows a provider_error idle-fallback in the default view (errors are not muted)', () => {
     render(<EventFeed events={[
       ev({ kind: 'agent_speech', actor_id: 'a1', text: 'Ada says: "another fine morning"' }),
       ev({
@@ -128,13 +132,11 @@ describe('EventFeed — feed-silence (EM-318): routing-exhaustion idle-fallbacks
         payload: { reason: 'provider_error: All models exhausted' },
       }),
     ]} />);
-    // The exhaustion card is silenced; real chatter stays.
-    expect(screen.queryByText(/All models exhausted/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/idle fallback/)).not.toBeInTheDocument();
+    expect(screen.getByText(/All models exhausted/)).toBeInTheDocument();
     expect(screen.getByText(/another fine morning/)).toBeInTheDocument();
   });
 
-  it('silences a whole rate-window storm of provider_error idle-fallbacks — zero error cards surface', () => {
+  it('a rate-window storm of provider_error idle-fallbacks surfaces every card', () => {
     const storm = Array.from({ length: 6 }, (_, i) =>
       ev({
         kind: 'parse_failure', actor_id: `a${i}`,
@@ -143,18 +145,23 @@ describe('EventFeed — feed-silence (EM-318): routing-exhaustion idle-fallbacks
       }),
     );
     render(<EventFeed events={storm} />);
-    expect(screen.queryByText(/idle fallback/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/provider_error/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/idle fallback/)).toHaveLength(6);
   });
 
-  it('silences provider_error idle-fallbacks even when the Errors channel is focused', () => {
+  it('treats provider_error exactly like a content parse_failure (both render together)', () => {
     render(<EventFeed events={[
       ev({
         kind: 'parse_failure', actor_id: 'a1',
         text: 'Ada failed to produce a valid action (idle fallback): provider_error: connection down',
         payload: { reason: 'provider_error: connection down' },
       }),
+      ev({
+        kind: 'parse_failure', actor_id: 'a2',
+        text: "Bram's turn produced no valid JSON (finish_reason='length')",
+        payload: { reason: "no valid JSON object (finish_reason='length')" },
+      }),
     ]} />);
-    expect(screen.queryByText(/connection down/)).not.toBeInTheDocument();
+    expect(screen.getByText(/connection down/)).toBeInTheDocument();
+    expect(screen.getByText(/no valid JSON/)).toBeInTheDocument();
   });
 });

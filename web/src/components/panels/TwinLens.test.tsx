@@ -7,7 +7,7 @@
  *   - A linked pair ⇒ the divergence card quotes both twins with model chips.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import {
   TwinLens,
   findTwinPair,
@@ -126,5 +126,64 @@ describe('TwinLens (render)', () => {
     expect(screen.queryByLabelText('Divergence point')).toBeNull();
     // The lens itself still renders (the twin header).
     expect(screen.getByText(/TWIN · Vesper/)).toBeTruthy();
+  });
+});
+
+describe('TwinLens — drifted stream lengths stay index-aligned (C21)', () => {
+  /** One answer event per (actor, index): verb + a greppable indexed text. */
+  function answer(actor: string, i: number, verb: string, label: string) {
+    return ev({
+      kind: 'agent_action', tick: i + 1, actor_id: actor,
+      text: `${label}#${i}`, payload: { action: verb },
+    });
+  }
+
+  /** The dual-strand rows (the <ul> under the column-chip header). */
+  function strandRows(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll('ul > li'));
+  }
+
+  it('windows BOTH strands by one shared index range and dots the short side', () => {
+    // A answered 10 times, B only 5 — MAX_STRAND_ROWS=8 ⇒ shared window 2..9.
+    const history = [
+      ...Array.from({ length: 10 }, (_, i) => answer('vesper_a', i, 'work', 'A')),
+      ...Array.from({ length: 5 }, (_, i) => answer('vesper_b', i, 'work', 'B')),
+    ];
+    const { container } = render(
+      <TwinLens world={world({ agents: [twinA(), twinB()] })} history={history} />,
+    );
+
+    const rows = strandRows(container);
+    expect(rows).toHaveLength(8);
+    // Row 0 pairs answer #2 with answer #2 — NOT A#2 with B#0 (the per-twin
+    // offset bug paired different indexes as if aligned).
+    expect(within(rows[0]).getByText(/A#2/)).toBeTruthy();
+    expect(within(rows[0]).getByText(/B#2/)).toBeTruthy();
+    expect(screen.queryByText(/B#0/)).toBeNull(); // below the shared window
+    // Indexes 5..9 have no B answer yet → the muted placeholder dot.
+    expect(screen.getAllByText('·')).toHaveLength(5);
+    expect(within(rows[7]).getByText(/A#9/)).toBeTruthy();
+    expect(within(rows[7]).getByText('·')).toBeTruthy();
+  });
+
+  it('tints exactly the shared divergence index, not an offset row', () => {
+    // Both diverge at answer #2; A then runs ahead to 10 answers vs B's 8, so
+    // the window starts at 2 and the divergence lands on ROW 0 for both sides.
+    const verbsA = ['say', 'say', 'trade', ...Array(7).fill('say')];
+    const verbsB = ['say', 'say', 'report_crime', ...Array(5).fill('say')];
+    const history = [
+      ...verbsA.map((v, i) => answer('vesper_a', i, v, 'A')),
+      ...verbsB.map((v, i) => answer('vesper_b', i, v, 'B')),
+    ];
+    const { container } = render(
+      <TwinLens world={world({ agents: [twinA(), twinB()] })} history={history} />,
+    );
+
+    const tinted = strandRows(container).filter((li) =>
+      (li.getAttribute('style') ?? '').includes('color-mix'),
+    );
+    expect(tinted).toHaveLength(1);
+    expect(within(tinted[0]).getByText(/A#2/)).toBeTruthy();
+    expect(within(tinted[0]).getByText(/B#2/)).toBeTruthy();
   });
 });

@@ -490,6 +490,28 @@ def normalize_charter(
     }
 
 
+def charter_caps_for(params: Any) -> tuple[int, int]:
+    """EM-311 — the EFFECTIVE (max_ambitions, creed_cap) pair: the configured
+    `world.charters` values clamped by the module hard ceiling (the schema /
+    sanitizer bound, so a normalized revision always passes validation). ONE
+    read shared by every seam that bounds a charter — the runtime sanitizer,
+    the apply-time normalize, seed_charter AND from_snapshot — so the write
+    path and the restore path can never disagree on the caps (a non-default
+    creed_cap must round-trip byte-stably, EM-155). Pure/total: garbage
+    config falls back to the module defaults."""
+    block = getattr(params, "charters", None)
+    try:
+        ma = int(_block_get(block, "max_ambitions", CHARTER_MAX_AMBITIONS))
+    except (TypeError, ValueError):
+        ma = CHARTER_MAX_AMBITIONS
+    try:
+        cc = int(_block_get(block, "creed_cap", CHARTER_CREED_CAP))
+    except (TypeError, ValueError):
+        cc = CHARTER_CREED_CAP
+    return (max(1, min(ma, CHARTER_MAX_AMBITIONS)),
+            max(0, min(cc, CHARTER_CREED_CAP)))
+
+
 def normalize_plan(raw: Any) -> dict | None:
     """Wave L / EM-223 — coerce a raw plan into the canonical, bounded shape, or
     None if it lacks a usable goal + steps. Pure/total: never raises, no clock
@@ -586,7 +608,7 @@ class AgentState:
     role: str = "citizen"         # citizen | enforcer — enforcer unlocks justice verbs
     # EM-240 — crime status substrate. ALL additive, serialized only when set.
     notoriety: int = 0                       # 0..100; witnessed-crime heat, decays
-    crime_status: str | None = None          # None|wanted|detained|jailed|exiled|belligerent
+    crime_status: str | None = None          # None|wanted|detained|jailed|exiled
     crime_status_until_tick: int = 0         # release tick for detained/jailed
     rap_sheet: list[dict] = field(default_factory=list)  # capped crime record
     # EM-229 — three-needs psychology. Two decaying drives alongside `energy`
@@ -1621,6 +1643,16 @@ class World:
         # gracefully (Kit-N names; profile derived from living agents).
         self.birth_personas: list[dict] = []
         self.birth_profile_roster: list[str] = []
+        # EM-315 — the Healing House known-lane allow-list. The world has no
+        # view of the router's configured profiles (config-side), so the
+        # TickLoop seeds it at construction via set_healing_known_profiles()
+        # (the set_birth_casting seam). None (direct World construction /
+        # tests) ⇒ no filtering; seeded ⇒ healing_target_profiles drops any
+        # lane the router cannot route, so a typo'd config entry can never
+        # flow onto agent.profile and degrade a fork/resume to mock (the
+        # never-swap-toward-silence law). NOT serialized: config state, not
+        # world state — like the birth roster.
+        self.healing_known_profiles: list[str] | None = None
         # Wave E / EM-120 — factions: {id: {name, founded_tick, members}}.
         # Recomputed (connected components over mutual warm edges) at each
         # round boundary AFTER the birth check; identity is continuous across
@@ -5594,7 +5626,16 @@ class World:
                 str(m)
                 for m in (self.factions.get(_fid) or {}).get("members", [])
             }
-            living = [a for a in living if a.id in _roster]
+            # EM-258 — an EXILED member is PERMANENTLY vote-barred (the
+            # jail-gate never releases exiled), so they leave the substituted
+            # electorate entirely: counting them in ceil(0.7*n) wedges a
+            # small faction (3 members, 1 exiled ⇒ 3 yes needed from 2
+            # eligible — unpassable, and the per-war duplicate guard then
+            # blocks every later peace_treaty for that war). detained/jailed
+            # members STAY counted — their bar expires at a release tick and
+            # an open proposal lingers until every living elector has voted.
+            living = [a for a in living
+                      if a.id in _roster and a.crime_status != "exiled"]
             living_count = len(living)
             if living_count == 0:
                 return "rejected"
@@ -7488,19 +7529,31 @@ class World:
         unchanged (enabled defaults FALSE, target pool empty)."""
         return _block_get(getattr(self.params, "healing_house", None), name, default)
 
+    def set_healing_known_profiles(self, names: list[str] | None) -> None:
+        """EM-315 — install the router's known profile names as the healing
+        allow-list (the set_birth_casting config seam, called by the TickLoop
+        at construction). None clears the filter (direct-World callers)."""
+        self.healing_known_profiles = (
+            [str(n) for n in names] if names is not None else None)
+
     def healing_target_profiles(self) -> list[str]:
         """EM-315 — the curated pool the Healing House swaps INTO (config
         `world.healing_house.target_profiles`). Coerced to a de-duplicated list of
         non-blank strings, with a literal `mock` dropped (never swap toward
-        silence — the standing no-throttling law). Empty ⇒ the `heal` effect is
-        un-proposable (nothing to swap into). PUBLIC — the runtime menu/validator
-        gate on a non-empty pool (menu/resolution agreement)."""
+        silence — the standing no-throttling law) and — when the loop has seeded
+        the router's known profiles — any lane the router cannot route dropped
+        too (an unknown lane on agent.profile silently degrades a fork/resume to
+        mock). Empty ⇒ the `heal` effect is un-proposable (nothing to swap
+        into). PUBLIC — the runtime menu/validator gate on a non-empty pool
+        (menu/resolution agreement)."""
         raw = self._healing_param("target_profiles", ())
+        known = self.healing_known_profiles
         out: list[str] = []
         try:
             for t in raw:
                 s = str(t).strip()
-                if s and s != "mock" and s not in out:
+                if s and s != "mock" and s not in out and \
+                        (known is None or s in known):
                     out.append(s)
         except TypeError:  # pragma: no cover - defensive (non-iterable config)
             return []
@@ -7589,6 +7642,14 @@ class World:
         golden). PUBLIC (like war_enabled) — the runtime prompt/apply gate on it."""
         return bool(self._charter_param("enabled", False))
 
+    def charter_caps(self) -> tuple[int, int]:
+        """EM-311 — the effective (max_ambitions, creed_cap) for THIS world
+        (charter_caps_for over self.params). PUBLIC — the runtime sanitizer and
+        the apply-time normalize read these so the WRITE path bounds a charter
+        with the same caps from_snapshot restores it with (a non-default
+        creed_cap round-trips byte-stably instead of re-truncating on restore)."""
+        return charter_caps_for(self.params)
+
     def seed_charter(self, agent: AgentState) -> None:
         """EM-311 — assign the configured uniform STARTING charter to `agent` when
         charters are enabled and the agent has none yet. Idempotent (an existing
@@ -7599,6 +7660,7 @@ class World:
         grammar), so it is always safe to call."""
         if not self.charters_enabled() or agent.charter:
             return
+        max_ambitions, creed_cap = self.charter_caps()
         seeded = normalize_charter(
             {
                 "ambitions": list(
@@ -7608,9 +7670,8 @@ class World:
                 "revised_tick": self.tick,
                 "revisions": 0,
             },
-            max_ambitions=self._charter_param(
-                "max_ambitions", CHARTER_MAX_AMBITIONS),
-            creed_cap=self._charter_param("creed_cap", CHARTER_CREED_CAP),
+            max_ambitions=max_ambitions,
+            creed_cap=creed_cap,
         )
         if seeded is not None:
             agent.charter = seeded
@@ -8494,9 +8555,10 @@ class World:
              SHARED _settle_war lane (reparations_base + exile) with the
              war_exhausted announce kind.
           4. SWEEP (EM-259) — settled wars are DELETED (the announce events
-             told the story; the snapshot never carries dead wars), factions
-             no longer at war lose their war_band key (the band disbands),
-             and their members' `belligerent` marker clears back to None.
+             told the story; the snapshot never carries dead wars) and
+             factions no longer at war lose their war_band key (the band
+             disbands — belligerence is derived from it, so nothing else
+             needs clearing).
 
         Events park in pending_spawn_events (the EM-141 outbox — drained by
         the loop's _flush_spawn_events) and the newly parked slice is also
@@ -8531,7 +8593,8 @@ class World:
                     int(self._war_param("reparations_base", 25)),
                     event_kind="war_exhausted",
                     payload_extra={"reason": reason})
-        # 4) sweep settled wars + disband bands + clear `belligerent`.
+        # 4) sweep settled wars + disband bands (belligerence is DERIVED from
+        # band membership, so dropping the war_band key IS the demobilization).
         for wid in [w for w in sorted(self.wars)
                     if self.wars[w].status == "settled"]:
             del self.wars[wid]
@@ -8540,13 +8603,6 @@ class World:
         for fid in sorted(self.factions):
             if fid not in at_war and "war_band" in self.factions[fid]:
                 del self.factions[fid]["war_band"]
-        for aid in sorted(self.agents):
-            agent = self.agents[aid]
-            if agent.crime_status != "belligerent":
-                continue
-            fct = self.faction_of(aid)
-            if fct is None or fct["id"] not in at_war:
-                agent.crime_status = None
         return list(self.pending_spawn_events[parked_from:])
 
     def advance_crime(self) -> list[dict]:
@@ -9400,6 +9456,20 @@ class World:
         return [str(m) for m in
                 (self.factions.get(str(fid)) or {}).get("war_band", [])]
 
+    def is_belligerent(self, agent_id: str) -> bool:
+        """EM-258 — DERIVED belligerence: the agent stands in their faction's
+        war band while that faction fights an active war. The band list is
+        the single source of truth — belligerence never rides crime_status
+        (that suppressed the wanted flip and froze notoriety decay; justice
+        applies to soldiers like anyone else). PUBLIC — the runtime prompt
+        reads it. Pure read; no state change, no RNG/clock (EM-155)."""
+        fct = self.faction_of(str(agent_id))
+        if fct is None:
+            return False
+        if not self.active_wars_for(fct["id"]):
+            return False
+        return str(agent_id) in self._war_band_of(fct["id"])
+
     def _war_morale(self, war: WarState, fid: str) -> int:
         """EM-258 — DERIVED morale: 100 − the faction's war exhaustion (plan
         decision: no per-agent morale field; devotion stays separate)."""
@@ -9447,10 +9517,11 @@ class World:
         """EM-258 — join your faction's war band (reflex; zero extra LLM
         calls). Seals an ally ring across the band (the accept_contract
         conspiracy-bond clone: mutual trust floored at band_trust_seed,
-        neutral edges promoted to ally) and marks the agent `belligerent` —
-        a STATUS marker only (the band list is the truth; the jail-gate
-        ignores belligerent). Never clobbers an existing crime_status
-        (wanted stays wanted). Deterministic — no RNG/clock (EM-155)."""
+        neutral edges promoted to ally). Belligerence is DERIVED from band
+        membership (is_belligerent) — it never rides crime_status, which
+        would suppress the wanted flip and freeze notoriety decay (justice
+        applies to soldiers like anyone else). Deterministic — no RNG/clock
+        (EM-155)."""
         if not self.war_enabled():
             return self._fail_event(
                 agent.id, "muster", "war disabled",
@@ -9488,8 +9559,6 @@ class World:
                     rel.since_tick = self.tick
         band.append(agent.id)
         rec["war_band"] = band
-        if agent.crime_status is None:
-            agent.crime_status = "belligerent"
         name = str(rec.get("name", "")) or fct["id"]
         return {
             "kind": "war_band_joined",
@@ -9678,11 +9747,20 @@ class World:
             return self._fail_event(
                 agent.id, "siege", "not mustered",
                 f"{agent.name} must muster with the war band first.")
+        # Siege is not free: the besieger burns energy (the attack_energy_cost
+        # convention — clamped at 0, no affordability gate, the actor's death
+        # check stays with the loop's post-turn sweep) and grinds their OWN
+        # circle a little too, so siege can never dominate clash cost-free.
+        cost = max(0.0, float(self._war_param("siege_energy_cost", 4)))
+        agent.energy = max(0.0, agent.energy - cost)
         damage = max(0, int(self._war_param("siege_damage", 20)))
         state_evt = self._damage_building(building, damage, agent.id, "siege")
         self._bump_exhaustion(
             war, of["id"],
             max(0, int(self._war_param("exhaustion_per_siege", 4))))
+        self._bump_exhaustion(
+            war, af["id"],
+            max(0, int(self._war_param("exhaustion_per_siege_own", 2))))
         fate = ("reduced to rubble" if building.status == "destroyed"
                 else f"{building.health} health left")
         return {"_multi": [
@@ -10645,12 +10723,14 @@ class World:
                 # EM-240 — crime status scalars: additive. Pre-EM-240 snapshots
                 # lack these keys and restore the clean defaults; notoriety is
                 # clamped 0..100 and an unknown crime_status fails safe to None.
-                # EM-258 — `belligerent` (the war-band marker) joins the
-                # whitelist so a mustered agent round-trips (exiled already did).
+                # EM-258 belligerence is DERIVED from war_band membership (the
+                # faction record round-trips it), so a legacy `belligerent`
+                # crime_status coerces to None — it suppressed the wanted flip
+                # and froze notoriety decay when it rode this field.
                 notoriety=max(0, min(100, _int(d.get("notoriety")))),
                 crime_status=(str(d.get("crime_status")) if d.get("crime_status")
-                              in ("wanted", "detained", "jailed", "exiled",
-                                  "belligerent") else None),
+                              in ("wanted", "detained", "jailed", "exiled")
+                              else None),
                 crime_status_until_tick=_int(d.get("crime_status_until_tick")),
                 rap_sheet=[dict(e) for e in (d.get("rap_sheet") or []) if isinstance(e, dict)],
                 # EM-229 — needs: additive. Pre-EM-229 snapshots lack the keys
@@ -10743,12 +10823,10 @@ class World:
                 # verbatim, and an absent charter is never re-emitted.
                 charter=normalize_charter(
                     d.get("charter"),
-                    max_ambitions=_block_get(
-                        getattr(params, "charters", None),
-                        "max_ambitions", CHARTER_MAX_AMBITIONS),
-                    creed_cap=_block_get(
-                        getattr(params, "charters", None),
-                        "creed_cap", CHARTER_CREED_CAP),
+                    # charter_caps_for == the write path's caps (World.charter_
+                    # caps), so a non-default cap restores what it wrote.
+                    max_ambitions=charter_caps_for(params)[0],
+                    creed_cap=charter_caps_for(params)[1],
                 ),
             )
             a.relationships = {
