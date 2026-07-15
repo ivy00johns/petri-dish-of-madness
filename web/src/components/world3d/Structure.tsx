@@ -58,7 +58,7 @@ import {
   structureModelTint,
 } from './structureModel';
 import { MiniMarker } from './Building';
-import { useProximity, structureLabelFade, PLACE_LABEL_DIST } from './useProximity';
+import { useProximity, structureLabelFade, nearLabelFade, PLACE_LABEL_DIST } from './useProximity';
 
 interface StructureProps {
   building: Building;
@@ -137,7 +137,9 @@ function StructureLabel({
     const dy = camera.position.y;
     const dz = camera.position.z - fadePoint.z;
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    const fade = structureLabelFade(d, fadePoint.dist);
+    // Far law fades the label toward its marker on zoom-OUT; nearLabelFade fades it
+    // out on a deep zoom-IN so a close-up shows the geometry, not a wall of text.
+    const fade = structureLabelFade(d, fadePoint.dist) * nearLabelFade(d);
     if (plateRef.current) plateRef.current.opacity = 0.72 * fade;
     if (titleRef.current) {
       titleRef.current.fillOpacity = fade;

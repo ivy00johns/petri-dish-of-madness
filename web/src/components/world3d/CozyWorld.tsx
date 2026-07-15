@@ -24,8 +24,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { Environment, OrbitControls, Sky, SoftShadows, useGLTF } from '@react-three/drei';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Environment, OrbitControls, Sky, useGLTF } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
 import type { WorldState, WorldEvent, FocusTarget } from '../../types';
@@ -52,7 +52,21 @@ import { resolveBuildingPositions, DEFAULT_CITY_SEED } from './cityLayout';
 import { Ambiance } from './Ambiance';
 import { Traffic } from './Traffic';
 import { StreetLabels } from './StreetLabels';
-import { SettlementLabels } from './SettlementLabels';
+import { SettlementLabels, settlementLabelEntries } from './SettlementLabels';
+import { SettlementGrounds } from './SettlementGrounds';
+import { TravelMarkers } from './TravelMarkers';
+import {
+  dropInTransitPositions,
+  focusChainPos,
+  inTransitAgentIds,
+  travelMarkerEntries,
+  type XZ,
+} from './travel';
+import {
+  SETTLEMENT_FOCUS_DIST,
+  settlementOverview,
+  type OverviewFrame,
+} from './cameraFraming';
 import { CityNameChip } from './CityNameChip';
 import type { AnimalModelId } from '../../lib/animalIdentity';
 
@@ -147,6 +161,11 @@ const PAN_BOUND = WORLD_REACH * 0.9;
 const FOCUS_DOLLY_DIST = 20;
 /** Convergence epsilon for transit/reset motion. */
 const ARRIVE_EPS = 0.08;
+// EM-121 — the default framing decomposed (orbit radius + target→camera
+// direction) so every reset home shares the SAME viewing angle while the
+// multi-settlement overview scales only the distance.
+const DEFAULT_VIEW_DIST = DEFAULT_CAMERA.distanceTo(DEFAULT_TARGET);
+const DEFAULT_VIEW_DIR = DEFAULT_CAMERA.clone().sub(DEFAULT_TARGET).normalize();
 
 /** Truncate spoken text for a tidy bubble. */
 function truncate(text: string, max: number): string {
@@ -164,6 +183,9 @@ interface FocusPoint {
   x: number;
   y: number;
   z: number;
+  /** EM-121: comfortable orbit radius for THIS target (settlements need the
+   *  whole-cluster framing); absent ⇒ the single-building FOCUS_DOLLY_DIST. */
+  dist?: number;
 }
 
 type CamMode = 'free' | 'follow' | 'transit' | 'reset';
@@ -194,6 +216,7 @@ function CameraDirector({
   focus,
   resetNonce,
   homeTarget = DEFAULT_TARGET,
+  homeDistance = DEFAULT_VIEW_DIST,
   recenterNonce = 0,
   resolveFocus,
   onFocusBreak,
@@ -204,11 +227,24 @@ function CameraDirector({
   // when the town votes its heart. Defaults to DEFAULT_TARGET (the plaza/origin),
   // so an un-relocated world frames exactly as before.
   homeTarget?: THREE.Vector3;
+  // EM-121 — the home orbit radius. Default = the single-city framing; a
+  // MULTI-settlement world passes the overview distance that fits every city.
+  homeDistance?: number;
   recenterNonce?: number;
   resolveFocus: (f: FocusTarget) => FocusPoint | null;
   onFocusBreak?: () => void;
 }) {
   const controlsRef = useRef<OrbitControlsImpl>(null);
+  // Adaptive resolution driven by ZOOM DISTANCE (not fps). Zoomed out, the
+  // whole organic city fills the frame and the per-fragment work (toon shade +
+  // PCFSoft shadows + fog) runs over ~every pixel, so we step DPR down as the
+  // orbit radius grows. Distance is monotonic in the zoom gesture, so a Schmitt
+  // trigger (separate up/down edges) changes DPR at most once per zoom and
+  // NEVER thrashes the drawing buffer the way an fps-driven monitor does at the
+  // overhead fps floor — that buffer churn was the overhead flicker. Floor 1.5
+  // keeps the soft shadows from undersampling into ringing halos around objects.
+  const setDpr = useThree((s) => s.setDpr);
+  const dprTierRef = useRef(0); // 0 = close, 1 = mid, 2 = far
   const modeRef = useRef<CamMode>('free');
   const focusRef = useRef<FocusTarget | null>(focus);
   // EM-082: the idle auto-rotate is a motion nicety — off under reduced motion.
@@ -218,12 +254,15 @@ function CameraDirector({
   const homeTargetRef = useRef<THREE.Vector3>(homeTarget);
   homeTargetRef.current = homeTarget;
   const homeCameraRef = useRef<THREE.Vector3>(DEFAULT_CAMERA);
-  // Preserve the default framing (camera offset from target) about the new home.
+  // Preserve the default viewing ANGLE about the new home; the orbit radius is
+  // homeDistance (EM-121: the multi-settlement overview widens it to fit all
+  // cities; the default equals the old fixed offset exactly).
   homeCameraRef.current = homeTarget
     .clone()
-    .add(DEFAULT_CAMERA.clone().sub(DEFAULT_TARGET));
+    .add(DEFAULT_VIEW_DIR.clone().multiplyScalar(homeDistance));
 
-  // Focus changes select the programmed mode.
+  // Focus changes select the programmed mode. Places AND settlements (EM-121)
+  // are one-shot zooms; agents/animals are follows.
   useEffect(() => {
     focusRef.current = focus;
     if (!focus) {
@@ -232,7 +271,8 @@ function CameraDirector({
       }
       return;
     }
-    modeRef.current = focus.type === 'place' ? 'transit' : 'follow';
+    modeRef.current =
+      focus.type === 'place' || focus.type === 'settlement' ? 'transit' : 'follow';
   }, [focus]);
 
   // Reset view (skip the mount-time value).
@@ -303,11 +343,13 @@ function CameraDirector({
         cam.position.z += dz;
 
         if (mode === 'transit') {
-          // Zoom-to-place: also ease the orbit radius to a comfortable
-          // viewing distance (clamped by the controls' min/max).
+          // Zoom-to-place/-city: also ease the orbit radius to the target's
+          // comfortable viewing distance — per-target (EM-121: a settlement
+          // frames its whole cluster), clamped by the controls' min/max.
+          const dolly = pos.dist ?? FOCUS_DOLLY_DIST;
           const offset = cam.position.clone().sub(controls.target);
           const len = offset.length();
-          const newLen = len + (FOCUS_DOLLY_DIST - len) * k;
+          const newLen = len + (dolly - len) * k;
           offset.setLength(Math.max(0.001, newLen));
           cam.position.copy(controls.target).add(offset);
 
@@ -317,7 +359,7 @@ function CameraDirector({
             pos.x - controls.target.x,
             pos.z - controls.target.z,
           );
-          if (remaining < ARRIVE_EPS && Math.abs(len - FOCUS_DOLLY_DIST) < 0.5) {
+          if (remaining < ARRIVE_EPS && Math.abs(len - dolly) < 0.5) {
             modeRef.current = 'free';
           }
         }
@@ -344,6 +386,25 @@ function CameraDirector({
     controls.target.x = THREE.MathUtils.clamp(controls.target.x, -PAN_BOUND, PAN_BOUND);
     controls.target.z = THREE.MathUtils.clamp(controls.target.z, -PAN_BOUND, PAN_BOUND);
     controls.target.y = THREE.MathUtils.clamp(controls.target.y, 0, 12);
+
+    // Zoom-distance → DPR tier (Schmitt trigger; fires setDpr ONLY on a tier
+    // change, so a full zoom-out costs one buffer resize, never a per-frame
+    // churn). Wide dead-bands (50/60 and 95/105) absorb damping jitter.
+    const zoomDist = cam.position.distanceTo(controls.target);
+    let tier = dprTierRef.current;
+    if (tier === 0) {
+      if (zoomDist > 60) tier = 1;
+    } else if (tier === 1) {
+      if (zoomDist < 50) tier = 0;
+      else if (zoomDist > 105) tier = 2;
+    } else if (zoomDist < 95) {
+      tier = 1;
+    }
+    if (tier !== dprTierRef.current) {
+      dprTierRef.current = tier;
+      const cap = Math.min(window.devicePixelRatio || 1, 2);
+      setDpr(tier === 0 ? cap : tier === 1 ? Math.min(cap, 1.75) : Math.min(cap, 1.5));
+    }
   });
 
   return (
@@ -497,24 +558,55 @@ export function CozyWorld({
     [places, world?.town_center_id],
   );
 
-  // The orbit HOME point: the center place's world position (y from the default
-  // target). Falls back to DEFAULT_TARGET when there is no place at all.
+  // EM-121 — settlement centers (world-frame, render-safe) for zoom-to-city
+  // and the multi-settlement overview. Same tolerance as the labels/grounds
+  // (settlementLabelEntries), so the camera only targets cities that render.
+  const settlementCenterById = useMemo(() => {
+    const m = new Map<string, { x: number; z: number }>();
+    for (const [id, s] of settlementLabelEntries(world?.settlements)) {
+      m.set(id, { x: s.center[0], z: s.center[1] });
+    }
+    return m;
+  }, [world?.settlements]);
+
+  // EM-121 — with 2+ settlements the reset-view home widens to frame them ALL
+  // (bounding center + fitted orbit radius); single-/no-settlement worlds get
+  // null and keep the EM-183 civic-center home byte-identical.
+  const overview = useMemo<OverviewFrame | null>(
+    () =>
+      settlementOverview(
+        [...settlementCenterById.values()].map((c) => [c.x, c.z] as const),
+        DEFAULT_VIEW_DIST,
+      ),
+    [settlementCenterById],
+  );
+
+  // The orbit HOME point: the multi-settlement overview center when 2+ cities
+  // exist (EM-121 — reset frames ALL of them, not just genesis), else the
+  // voted civic center's world position (y from the default target), else
+  // DEFAULT_TARGET when there is no place at all.
   const homeTarget = useMemo(() => {
+    if (overview) return new THREE.Vector3(overview.x, DEFAULT_TARGET.y, overview.z);
     const c = centerPlaceId ? placeCenters.get(centerPlaceId) : null;
     if (!c) return DEFAULT_TARGET;
     return new THREE.Vector3(c.x, DEFAULT_TARGET.y, c.z);
-  }, [centerPlaceId, placeCenters]);
+  }, [overview, centerPlaceId, placeCenters]);
 
-  // Bump a nonce whenever the chosen center changes (after mount) so the camera
-  // glides home to the new heart — "the city re-centers on the agents' choice".
+  // Bump a nonce whenever the orbit home changes (after mount) so the camera
+  // glides there — the EM-183 "city re-centers on the agents' choice" ease,
+  // extended to the EM-121 overview (a newly founded city widens the frame
+  // with the same glide instead of a hard cut).
+  const homeKey = overview
+    ? `ov:${overview.x},${overview.z},${overview.distance}`
+    : `cc:${centerPlaceId ?? ''}`;
   const [recenterNonce, setRecenterNonce] = useState(0);
-  const prevCenterRef = useRef<string | null>(centerPlaceId);
+  const prevHomeKeyRef = useRef<string>(homeKey);
   useEffect(() => {
-    if (prevCenterRef.current !== centerPlaceId) {
-      prevCenterRef.current = centerPlaceId;
+    if (prevHomeKeyRef.current !== homeKey) {
+      prevHomeKeyRef.current = homeKey;
       setRecenterNonce((n) => n + 1);
     }
-  }, [centerPlaceId]);
+  }, [homeKey]);
 
   // EM-174: real W7 buildings claim REAL lots — street-front lots inside
   // their place's landmark block first (stable id order → lot index), then
@@ -622,26 +714,46 @@ export function CozyWorld({
     return map;
   }, [world]);
 
+  // EM-110: live route-marker position per in-transit agent id — the follow
+  // fallback for a traveler (its animMap entry is dropped while off-board).
+  // Recomputed per snapshot, same inputs <TravelMarkers> renders from.
+  const travelPosById = useMemo<Map<string, XZ>>(() => {
+    const m = new Map<string, XZ>();
+    if (world) {
+      for (const t of travelMarkerEntries(world.agents, world.settlements, world.tick)) {
+        m.set(t.id, t.pos);
+      }
+    }
+    return m;
+  }, [world]);
+
   // EM-095: where is the focus target RIGHT NOW. Agents/animals read the live
   // animated positions (the same refs the renderer lerps), so a follow tracks
   // the walking villager, not its last place center. 'place' ids may be a
   // Place id or a W7 Building id (FocusTarget contract in types/index.ts).
+  // 'settlement' (EM-121) resolves to the city center with the whole-cluster
+  // framing distance. Agents chain live pos → route marker (focusChainPos), so
+  // a follow rides the traveler across cities and eases into the arrival.
   const resolveFocus = useCallback(
     (f: FocusTarget): FocusPoint | null => {
       if (f.type === 'agent') {
-        const p = animMap.current.get(f.id);
+        const p = focusChainPos(f.id, animMap.current, travelPosById);
         return p ? { x: p.x, y: 1.4, z: p.z } : null;
       }
       if (f.type === 'animal') {
         const p = critterMap.current.get(f.id);
         return p ? { x: p.x, y: 0.6, z: p.z } : null;
       }
+      if (f.type === 'settlement') {
+        const s = settlementCenterById.get(f.id);
+        return s ? { x: s.x, y: 1.2, z: s.z, dist: SETTLEMENT_FOCUS_DIST } : null;
+      }
       const c = placeCenters.get(f.id);
       if (c) return { x: c.x, y: 1.2, z: c.z };
       const b = buildingSpotById.get(f.id);
       return b ? { x: b.x, y: 1.2, z: b.z } : null;
     },
-    [placeCenters, buildingSpotById],
+    [placeCenters, buildingSpotById, travelPosById, settlementCenterById],
   );
 
   if (!world) {
@@ -666,9 +778,13 @@ export function CozyWorld({
         camera={{ position: [54, 46, 54], fov: 42, near: 0.1, far: 420 }}
       >
         <color attach="background" args={[GOLDEN_HOUR.background]} />
-        {/* EM-111: PCSS soft shadows on the existing shadow map — warm,
-            feathered golden-hour shadows instead of hard stencils. */}
-        <SoftShadows size={24} samples={10} focus={0.5} />
+        {/* Shadows: the Canvas default PCFSoftShadowMap — soft-edged but
+            TEMPORALLY STABLE. We dropped drei <SoftShadows> (PCSS): its
+            stochastic penumbra "boiled" frame-to-frame (the flicker on every
+            object with the camera dead still) AND splayed a wide soft ring
+            (the halo). PCFSoft's fixed built-in filter kernel IS the
+            golden-hour softness — no boil, no halo, no knobs (under
+            PCFSoftShadowMap, LightShadow.radius has no effect). */}
         <Scene
           world={world}
           bubblesByAgent={bubblesByAgent}
@@ -695,8 +811,12 @@ export function CozyWorld({
         <StreetLabels streets={cityPlan.streets} />
         {/* EM-269 (F2): floating settlement-name markers at each agent-founded
             settlement's WORLD-frame center (rendered direct, no conversion).
-            Absent/empty ⇒ nothing — pre-EM-269 backends render unchanged. */}
-        <SettlementLabels settlements={world?.settlements} />
+            Absent/empty ⇒ nothing — pre-EM-269 backends render unchanged.
+            EM-121: clicking a marker zooms the camera to that city. */}
+        <SettlementLabels
+          settlements={world?.settlements}
+          onPick={onPick ? (id) => onPick({ type: 'settlement', id }) : undefined}
+        />
         {/* EM-169: ambient moving traffic on the road grid (deterministic
             fleet, clock-driven sweep, reduced-motion-safe). Sibling of the
             scene so it shares the frame loop + world space; no handlers. */}
@@ -713,6 +833,7 @@ export function CozyWorld({
           focus={focus}
           resetNonce={resetNonce}
           homeTarget={homeTarget}
+          homeDistance={overview?.distance}
           recenterNonce={recenterNonce}
           resolveFocus={resolveFocus}
           onFocusBreak={onFocusBreak}
@@ -778,6 +899,23 @@ function Scene({
   const { places, agents } = world;
   const animals = world.animals ?? [];
 
+  // EM-110: agents in transit are OFF-BOARD — they must NOT render inside a city
+  // (they show on the route via <TravelMarkers>). Absent field ⇒ empty set, so a
+  // no-travel world's villager render is unchanged (no regression). Full `agents`
+  // still feeds StorylineTether / pet-owner resolution below. Travelers' animMap
+  // entries are dropped while off-board so the snap-on-missing seeding (targets
+  // below) re-seats each arrival AT its destination city instead of easing the
+  // mesh from the stale pre-departure spot across the map.
+  const inTransit = useMemo(() => {
+    const s = inTransitAgentIds(agents);
+    dropInTransitPositions(s, animMap.current);
+    return s;
+  }, [agents, animMap]);
+  const residentAgents = useMemo(
+    () => agents.filter((a) => !inTransit.has(a.id)),
+    [agents, inTransit],
+  );
+
   const focusedPlaceId = focus?.type === 'place' ? focus.id : null;
 
   // Wave I (EM-213, I4): the plaza banner's world spot — a stable satellite of
@@ -793,13 +931,13 @@ function Scene({
 
   const targets = useMemo(() => {
     const byPlace = new Map<string, string[]>();
-    agents.forEach((a) => {
+    residentAgents.forEach((a) => {
       const list = byPlace.get(a.location) ?? [];
       list.push(a.id);
       byPlace.set(a.location, list);
     });
     const result = new Map<string, AnimPos>();
-    agents.forEach((a) => {
+    residentAgents.forEach((a) => {
       const center = placeCenters.get(a.location);
       if (!center) {
         result.set(a.id, { x: 0, z: 0 });
@@ -814,7 +952,7 @@ function Scene({
       }
     });
     return result;
-  }, [agents, placeCenters, animMap]);
+  }, [residentAgents, placeCenters, animMap]);
 
   return (
     <>
@@ -863,9 +1001,25 @@ function Scene({
         shadow-bias={-0.0004}
         shadow-normalBias={0.04}
       />
-      <fog attach="fog" args={[GOLDEN_HOUR.fog, 80, 215]} />
+      {/* Fog band pushed out (was 80/215) for the organic/radial city, which is
+          WIDER than the old compact grid: at the 130u zoom-out limit the whole city
+          sits ~90–170u from the camera, so the old 80u fog-start washed the entire
+          town into the matching #f6d3a4 background ("white + blurry at full zoom-out").
+          105/400 keeps the city crisp at max zoom-out while still giving a gentle
+          far-edge haze at the default framing. Tunable. */}
+      <fog attach="fog" args={[GOLDEN_HOUR.fog, 105, 400]} />
 
       <Ground places={places} />
+      {/* EM-109: a distinct GROUND footprint per agent-founded settlement (paved
+          town-square core + per-settlement grass wash + accent rim at each
+          world-frame center), so multiple cities read as distinct clusters and
+          not one origin grid + scattered far buildings. Absent/empty settlements
+          ⇒ renders nothing (a single-/no-settlement world is unchanged).
+          EM-121: the paved core doubles as the zoom-to-city click surface. */}
+      <SettlementGrounds
+        settlements={world.settlements}
+        onPick={onPick ? (id) => onPick({ type: 'settlement', id }) : undefined}
+      />
       <Scenery places={places} />
       {/* EM-118: instanced treeline (LOD) + lived-in town props. */}
       <Foliage places={places} />
@@ -944,7 +1098,7 @@ function Scene({
         ) : null;
       })}
 
-      {agents.map((a) => {
+      {residentAgents.map((a) => {
         const target = targets.get(a.id) ?? { x: 0, z: 0 };
         let anim = animMap.current.get(a.id);
         if (!anim) {
@@ -964,6 +1118,11 @@ function Scene({
           />
         );
       })}
+
+      {/* EM-110: the in-transit agents — off-board (excluded from the villager
+          render above), shown gliding along the route between their home + target
+          settlements. Absent settlements / no travelers ⇒ renders nothing. */}
+      <TravelMarkers agents={agents} settlements={world.settlements} tick={world.tick} />
 
       {/* EM-312: the storyline tether — a taut red line between the selected
           thread's first two principals, tracking their live animated positions

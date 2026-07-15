@@ -1038,6 +1038,15 @@ class CityProfileParams:
     size: int = 5               # RESERVED extent hint — parsed but NOT yet honored (follow-up)
     density: str = "medium"     # low|medium|high — village sparsity
     car_policy: str = "cars"    # starting global graph car policy (S3a can change it)
+    # Organic-world reroll (feat/organic-world-regen). When True, loop.reset()
+    # re-rolls city_seed + picks a fresh template from `template_pool` so every
+    # reset yields a genuinely DIFFERENT city (roads + POI ring + building scatter)
+    # instead of the byte-identical same-seed rebuild. DEFAULT False ⇒ pre-existing
+    # deterministic reset (every golden/embedded-default fixture stays byte-identical;
+    # only the live config/world.yaml opts in). The rolled seed/template ride the
+    # tick-0 snapshot, so replay/fork of a rerolled run still reproduce it (EM-155).
+    randomize_on_reset: bool = False
+    template_pool: tuple[str, ...] = ("pentagon", "radial", "ring")
 
 
 @dataclass
@@ -2905,7 +2914,24 @@ def _parse_city_profile(raw: dict | None) -> "CityProfileParams":
         size = max(1, int(raw.get("size", d.size)))
     except (TypeError, ValueError):
         size = d.size
-    return CityProfileParams(template=template, size=size, density=density, car_policy=car_policy)
+    # Organic-world reroll knobs (feat/organic-world-regen). Absent ⇒ pre-existing
+    # deterministic reset. `template_pool` clamps to known geometric/organic kinds;
+    # an empty/garbage pool falls back to the default so a reroll can't pick "grid"
+    # by accident (the whole point is to escape the square grid).
+    randomize_on_reset = bool(raw.get("randomize_on_reset", d.randomize_on_reset))
+    _known = ("pentagon", "radial", "ring", "grid", "greenfield", "village")
+    pool_raw = raw.get("template_pool")
+    if isinstance(pool_raw, list) and pool_raw:
+        pool = tuple(
+            k for k in (str(x).strip().lower() for x in pool_raw) if k in _known
+        )
+        template_pool = pool or d.template_pool
+    else:
+        template_pool = d.template_pool
+    return CityProfileParams(
+        template=template, size=size, density=density, car_policy=car_policy,
+        randomize_on_reset=randomize_on_reset, template_pool=template_pool,
+    )
 
 
 def _parse_relationships(raw: dict | None) -> RelationshipParams:

@@ -15,6 +15,9 @@
  *     framing, exactly what a zoom gate would hide. There are at most a
  *     handful of settlements (founding is claimed-ground-gated), so the
  *     sparse-label law holds without gating.
+ *   • CLICK = ZOOM-TO-CITY (EM-121): with `onPick` wired, clicking a marker
+ *     focuses its settlement (the Building onPick pattern — stopPropagation +
+ *     hover cursor). Without it the markers stay inert set dressing.
  *   • TOLERANT: absent/null map, malformed center, or an empty name ⇒ that
  *     entry is skipped (never a hole, never a crash) — old backends and
  *     partial snapshots render nothing.
@@ -22,7 +25,8 @@
  * Mounted by CozyWorld INSIDE the <Canvas> beside StreetLabels.
  */
 
-import { Billboard, Text } from '@react-three/drei';
+import { useState } from 'react';
+import { Billboard, Text, useCursor } from '@react-three/drei';
 import type { Settlement } from '../../types';
 import { LABEL_INK, LABEL_OUTLINE } from './toon';
 
@@ -49,15 +53,40 @@ export function settlementLabelEntries(
 /** All settlement-name markers. Absent/empty map ⇒ renders nothing. */
 export function SettlementLabels({
   settlements,
+  onPick,
 }: {
   settlements?: Record<string, Settlement> | null;
+  /** EM-121: a settlement marker was clicked (zoom-to-city). */
+  onPick?: (settlementId: string) => void;
 }) {
+  const [hovered, setHovered] = useState(false);
+  useCursor(hovered && Boolean(onPick));
   const entries = settlementLabelEntries(settlements);
   if (entries.length === 0) return null;
   return (
     <group name="settlement-labels">
       {entries.map(([id, s]) => (
-        <Billboard key={id} position={[s.center[0], SETTLEMENT_LABEL_Y, s.center[1]]}>
+        <Billboard
+          key={id}
+          position={[s.center[0], SETTLEMENT_LABEL_Y, s.center[1]]}
+          onClick={
+            onPick
+              ? (e) => {
+                  e.stopPropagation();
+                  onPick(id);
+                }
+              : undefined
+          }
+          onPointerOver={
+            onPick
+              ? (e) => {
+                  e.stopPropagation();
+                  setHovered(true);
+                }
+              : undefined
+          }
+          onPointerOut={onPick ? () => setHovered(false) : undefined}
+        >
           <Text
             fontSize={1.1}
             color={LABEL_INK}

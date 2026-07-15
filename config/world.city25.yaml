@@ -129,6 +129,24 @@ world:
   # Change the value to reroll the city layout. Default 1337 when absent.
   city_seed: 1337
 
+  # Organic-world sign-off (feat/organic-world-regen) — MUST match world.yaml's
+  # city block (test_city25_roster asserts city25 changes only the cast). Genesis
+  # stays the deterministic GRID baseline; each reset re-rolls to an off-grid
+  # template + procgen POIs ⇒ a genuinely new city.
+  city:
+    template: grid
+    size: 5
+    density: medium
+    car_policy: cars
+    randomize_on_reset: true
+    template_pool: [pentagon, radial, ring]
+
+  # EM-109/EM-110 — MUST match world.yaml's settlements block (test_city25_roster
+  # asserts city25 changes only the cast). Live opt-in: genesis home city +
+  # found_settlement + travel_to + per-city perception scoping.
+  settlements:
+    enabled: true
+
   # W10 / EM-085 — persist runs by default so run history + replay survive
   # backend restarts and uvicorn hot-reloads (':memory:' wiped everything).
   # Path rule: a RELATIVE path resolves against the repo root (the parent of

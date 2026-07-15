@@ -224,6 +224,9 @@ ACTION_SCHEMA = {
                 # EM-269 (F2) — found a settlement centered at your current
                 # place (a free-placement cluster seed; reflex, free).
                 "found_settlement",
+                # EM-110 — travel to another settlement (goes off-board, arrives
+                # a few rounds later; offered only when >1 settlement exists).
+                "travel_to",
                 # PROTOTYPE (god-channel) — answer the active proclamation (the
                 # threaded return path; offered only while a decree is live).
                 "answer_proclamation",
@@ -304,6 +307,8 @@ ACTION_SCHEMA = {
                             "excommunicate", "declare_hostility",
                             # EM-269 (F2) — found a settlement here.
                             "found_settlement",
+                            # EM-110 — travel to another settlement.
+                            "travel_to",
                         ],
                     },
                     "args": {"type": "object", "default": {}},
@@ -363,6 +368,13 @@ ACTION_SCHEMA = {
         {"if": {"required": ["action"], "properties": {"action": {"const": "answer_proclamation"}}},
          "then": {"properties": {"args": {"required": ["text"], "properties": {
              "text": {"type": "string", "maxLength": 280},
+         }}}}},
+        # EM-110 — travel_to REQUIRES a settlement id-or-name (the world action
+        # resolves + gates it; a missing target is a schema failure, never a dead
+        # turn on a bad guess).
+        {"if": {"required": ["action"], "properties": {"action": {"const": "travel_to"}}},
+         "then": {"properties": {"args": {"required": ["settlement"], "properties": {
+             "settlement": {"type": "string", "maxLength": 60},
          }}}}},
         # Wave I / EM-210+211 — The Atelier: create_image REQUIRES a prompt (≤240);
         # post_image takes an OPTIONAL image_id (defaults to the agent's newest).
@@ -683,6 +695,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     # (the real gates — settlements.enabled + unclaimed ground — are computed in
     # _assemble_context and re-enforced at resolution in action_found_settlement).
     "found_settlement": {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
+    # EM-110 — travel to ANOTHER settlement; offered anywhere (the real gates —
+    # settlements.enabled + >1 settlement + a valid, non-home target — are
+    # computed in _assemble_context and re-enforced in action_travel_to). Reflex:
+    # zero extra LLM calls; the trip itself takes the agent OFF-BOARD (0 calls
+    # while traveling — the free-scale saving).
+    "travel_to":        {"tier": "reflex", "location_gate": None,            "agreement_gate": None},
     # PROTOTYPE (god-channel) — answer the active proclamation from ANYWHERE (the
     # god's voice is omnipresent); offered only when a decree is live (see
     # _assemble_context), enforced by _validate_world.
@@ -1178,7 +1196,11 @@ _NEARBY_ZONES_MAX: int = 4  # hard line cap (prompt-diet — never the whole gra
 # NOTE: this is a COMPILE-TIME const (no clock/random — pure); it gates ONLY the
 # runtime agent surface. `world.action_propose_rule` itself stays directly callable
 # (tests + any future god path) regardless of this flag.
-GRAPH_ZONES_ENABLED = False
+# ON since the organic-world sign-off (feat/organic-world-regen): with non-grid
+# templates the road graph has real planar faces, so agents get the nearby_zones
+# perception + set_zone_rule effect and can zone the emergent city. Paired with the
+# frontend GRAPH_LOTS_ENABLED.
+GRAPH_ZONES_ENABLED = True
 
 # EM-268 (F1) — agent-controlled FREE building placement. Default OFF ⇒ buildings
 # carry no position ⇒ frontend falls back to assignBuildingLots (byte-identical to
@@ -1809,6 +1831,9 @@ _ARG_STRING_CAPS: dict[str, dict[str, int]] = {
     "propose_project": {"name": 60, "kind": 30, "function": 40},
     "post_billboard": {"text": 280},
     "answer_proclamation": {"text": 280},
+    # EM-110 — a settlement ref that overshoots the schema cap graceful-truncates
+    # instead of failing the turn (names cap at 40, so 60 never clips a real one).
+    "travel_to": {"settlement": 60},
     # EM-199 follow-up — chat length: a GENEROUS safety bound on spoken text
     # (session 189 averaged ~500 chars/line, max ~1900). 800 graceful-truncates
     # only runaway monologues so one giant say can't blow the token budget and
@@ -2998,15 +3023,37 @@ def _assemble_context(
     background = tier == "background"
     visible_districts = _diet_visible_districts(world, agent) if diet else None
 
+    # EM-110 — per-settlement (per-city) perception horizon. When settlements are
+    # enabled AND there is MORE THAN ONE city, a homed agent perceives only the
+    # places of its OWN settlement (the whole map partitions by nearest center),
+    # so its prompt stays FLAT as cities grow — a 2-city world's per-agent prompt
+    # ≈ a 1-city world's (the free-scale keystone). With ≤1 settlement (or the
+    # feature OFF, or an unsettled agent) this is None ⇒ no settlement scoping,
+    # so a single-city world shows the full town and the OFF path is byte-
+    # identical to pre-EM-110.
+    settlement_horizon: str | None = None
+    if (getattr(world, "_settlements_enabled", None)
+            and world._settlements_enabled()
+            and len(getattr(world, "settlements", {}) or {}) > 1):
+        _home = getattr(agent, "home_settlement_id", None)
+        if _home in (getattr(world, "settlements", {}) or {}):
+            settlement_horizon = _home
+
     def _place_visible(place_id: str) -> bool:
-        """EM-161 — is this place inside the diet agent's district horizon?
-        Always True for protagonists / when scoping is off; un-districted
-        places are always visible."""
-        if visible_districts is None:
-            return True
-        p = world.places.get(place_id)
-        district = getattr(p, "district", None) if p is not None else None
-        return district is None or district in visible_districts
+        """EM-161 — is this place inside the agent's perception horizon? Always
+        True for protagonists / when scoping is off; un-districted places clear
+        the district diet. EM-110 layers the per-settlement horizon on top: with
+        >1 city a homed agent sees only its OWN settlement's places."""
+        if visible_districts is not None:
+            p = world.places.get(place_id)
+            district = getattr(p, "district", None) if p is not None else None
+            if not (district is None or district in visible_districts):
+                return False
+        if settlement_horizon is not None:
+            p = world.places.get(place_id)
+            if p is not None and world.settlement_of_place(p) != settlement_horizon:
+                return False
+        return True
 
     def _tier_ok(action: str) -> bool:
         """EM-163 — offer this action on the menu? Mirrors the resolution-time
@@ -3052,9 +3099,11 @@ def _assemble_context(
         if _building_field(b, "status") in ("planned", "under_construction")
     ]
     # EM-161 — diet tiers see only the projects inside their district horizon
-    # (current + core; see _diet_visible_districts). Menu narrowing only:
-    # _validate_world still accepts contributions to ANY open project.
-    if visible_districts is not None:
+    # (current + core; see _diet_visible_districts). EM-110 — with >1 city a
+    # homed agent (any tier) sees only its own settlement's projects. Menu
+    # narrowing only: _validate_world still accepts contributions to ANY open
+    # project.
+    if visible_districts is not None or settlement_horizon is not None:
         open_projects = [
             b for b in open_projects
             if _place_visible(_building_field(b, "location"))
@@ -3807,7 +3856,20 @@ def _assemble_context(
                          + ". Build near one to join it, or found your own.")
         if _stl_line:
             settlement_block = f"\n=== 🏘 SETTLEMENTS ===\n  {_stl_line}\n"
-        if _here is not None:
+        # EM-110 — an off-board traveler (never actually scheduled here — the
+        # loop excludes in-transit agents — but rendered defensively): the trip
+        # replaces the local settlement chrome, and its verbs are suppressed
+        # below (nothing to found/travel while mid-journey).
+        _transit = getattr(agent, "in_transit_to", None)
+        _traveling = bool(_transit is not None and _transit in _stls)
+        if _traveling:
+            _arr = getattr(agent, "transit_arrival_tick", None)
+            settlement_block = (
+                "\n=== 🏘 SETTLEMENTS ===\n  You are traveling to "
+                f"{_stls[_transit].get('name', _transit)}"
+                + (f", arriving around tick {_arr}" if _arr is not None else "")
+                + " — off-board until you arrive.\n")
+        if _here is not None and not _traveling:
             from ..engine.citygraph import logical_to_world as _stl_l2w
             from ..engine.placement import SETTLEMENT_R as _STL_R
             _wx, _wz = _stl_l2w(float(_here.x), float(_here.y))
@@ -3815,6 +3877,21 @@ def _assemble_context(
                 valid_actions.append(
                     "found_settlement (name?) - found a new settlement centered "
                     "here; your future builds cluster around it")
+        # EM-110 — travel_to is offered ONLY when a DIFFERENT city exists to reach
+        # (nowhere to go with one settlement ⇒ the verb is absent ⇒ the single-
+        # city prompt is unchanged). Lists the reachable other cities; the world
+        # action resolves id-or-name and re-enforces every gate (menu/resolution
+        # agreement, EM-108). A traveler mid-journey is not offered it again.
+        if len(_stls) > 1 and not _traveling:
+            _home = getattr(agent, "home_settlement_id", None) or _mine_id
+            _dests = [str(_stls[s].get("name", s))
+                      for s in sorted(_stls) if s != _home]
+            if _dests:
+                valid_actions.append(
+                    "travel_to (settlement) - journey to another town; you go "
+                    "off-board for a few rounds, then arrive and it becomes your "
+                    "new home: " + ", ".join(_dests[:6])
+                    + ("…" if len(_dests) > 6 else ""))
 
     # ── PROTOTYPE (god-channel) — answer the active proclamation (return path) ──
     # Offered to EVERY agent (no location gate) whenever a decree is live, so the
@@ -7671,6 +7748,12 @@ class AgentRuntime:
         elif action == "found_settlement":
             result = self.world.action_found_settlement(
                 agent, str(args.get("name") or ""))
+            return _emit_world_result(result, base, thought)
+
+        # ── EM-110 — travel to another settlement (goes off-board until arrival) ─
+        elif action == "travel_to":
+            result = self.world.action_travel_to(
+                agent, str(args.get("settlement") or ""))
             return _emit_world_result(result, base, thought)
 
         # ── W11b / EM-091 billboard reflex tools ───────────────────────────────

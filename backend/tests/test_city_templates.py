@@ -1,11 +1,19 @@
 from petridish.config.loader import load_config, CityProfileParams
 
 
-def test_default_config_city_profile_is_grid():
+def test_default_config_city_profile_is_grid_genesis_organic_reset():
+    # Organic-world sign-off (feat/organic-world-regen): GENESIS stays the byte-
+    # identical GRID baseline (template grid, procgen off), but the LIVE config opts
+    # into the reset REROLL — every /api/control/reset re-rolls to a fresh off-grid
+    # template from the pool + switches POIs to procgen. So the shipped defaults keep
+    # a deterministic genesis AND a genuinely-new city on reset.
     cfg = load_config()
     assert isinstance(cfg.world.city, CityProfileParams)
-    assert cfg.world.city.template == "grid"        # back-compat default
+    assert cfg.world.city.template == "grid"        # genesis baseline unchanged
+    assert cfg.world.procgen.enabled is False        # genesis places unchanged
     assert cfg.world.city.car_policy == "cars"
+    assert cfg.world.city.randomize_on_reset is True  # reset re-rolls to organic
+    assert tuple(cfg.world.city.template_pool) == ("pentagon", "radial", "ring")
 
 
 def test_city_profile_parses_fields(tmp_path):

@@ -42,6 +42,21 @@ export function toWorldZ(y: number): number {
   return (y / 1000 - 0.5) * SIZE;
 }
 
+/**
+ * Inverse of {@link toWorldX}: a WORLD-frame x (±SIZE/2) back to logical (0..1000).
+ * The 2D WorldMap draws in the logical frame (its sx/sy map 0..1000 → pixels), but
+ * settlement centers are stored WORLD-frame (±33) — so the macro map converts them
+ * back through this before plotting. Exact roundtrip: toLogicalX(toWorldX(x)) === x.
+ */
+export function toLogicalX(worldX: number): number {
+  return (worldX / SIZE + 0.5) * 1000;
+}
+
+/** Inverse of {@link toWorldZ}: a WORLD-frame z back to logical (0..1000). */
+export function toLogicalY(worldZ: number): number {
+  return (worldZ / SIZE + 0.5) * 1000;
+}
+
 /** A place's center in world space. */
 export interface WorldPoint {
   x: number;
@@ -681,6 +696,34 @@ export function hashUnit(seed: string): number {
   }
   // map to [0,1)
   return ((h >>> 0) % 100000) / 100000;
+}
+
+/**
+ * EM-109: deterministic per-settlement accent palette — a small curated set of
+ * warm, mutually distinct tones so two adjacent cities never wear the same
+ * rim/marker. WebGL colors (also read straight as 2D canvas fills), outside the
+ * CSS token system (the Ground/CityScape precedent). Lives here (not in the R3F
+ * SettlementGrounds module) so the 2D WorldMap can share the SAME tint per city
+ * without importing three/drei.
+ */
+export const SETTLEMENT_TINTS: readonly string[] = [
+  '#e6b96a', // amber
+  '#7fae8a', // sage
+  '#c98fb0', // rose
+  '#8fb0d0', // sky
+  '#d08a5a', // clay
+  '#a0c07a', // moss
+];
+
+/**
+ * The deterministic accent tint for a settlement id — a pure function of the id
+ * (hashUnit → curated palette), so the 3D ground rim and the 2D WorldMap marker
+ * read as the SAME color for a given city, stable across ticks/reloads/replays.
+ */
+export function settlementTint(id: string): string {
+  return SETTLEMENT_TINTS[
+    Math.floor(hashUnit(id) * SETTLEMENT_TINTS.length) % SETTLEMENT_TINTS.length
+  ];
 }
 
 /**

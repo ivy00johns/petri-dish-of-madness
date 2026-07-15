@@ -679,7 +679,7 @@ export const ROAD_MESH_ENABLED = true; // EM-247 visual sign-off (PR #65)
  * render component: zone lots flow through the existing blockLots/emptyLots/
  * blocks render path.
  */
-export const GRAPH_LOTS_ENABLED = false;
+export const GRAPH_LOTS_ENABLED = true; // organic-world sign-off (feat/organic-world-regen)
 
 /** A road-tile piece key (the EM-239/243 instanced road slabs). */
 function isRoadPieceKey(key: CityPieceKey): boolean {

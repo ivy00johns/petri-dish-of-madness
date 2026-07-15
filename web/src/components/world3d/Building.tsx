@@ -32,6 +32,7 @@ import { toonMaterial } from './toon';
 import { Model } from './assets/Model';
 import { ModelBoundary } from './ModelBoundary';
 import { placeModelRotationY, resolvePlaceModel } from './structureModel';
+import { nearLabelFade } from './useProximity';
 
 interface BuildingProps {
   place: Place;
@@ -107,9 +108,12 @@ function LandmarkLabel({
       camera.position.z - z,
     );
     const { scale, fade } = landmarkLabelTransform(d);
+    // Zoom-in declutter: on a deep close-up the label recedes so the geometry
+    // (buildings + villagers) shows instead of a wall of overlapping names.
+    const nf = nearLabelFade(d);
     if (scaleRef.current) scaleRef.current.scale.setScalar(scale);
-    if (plateRef.current) plateRef.current.opacity = 0.72 * fade;
-    if (textRef.current) textRef.current.fillOpacity = fade;
+    if (plateRef.current) plateRef.current.opacity = 0.72 * fade * nf;
+    if (textRef.current) textRef.current.fillOpacity = fade * nf;
   });
 
   return (

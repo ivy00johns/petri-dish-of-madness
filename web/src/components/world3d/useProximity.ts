@@ -53,6 +53,28 @@ export function useProximity(getPoint: () => ProximityPoint, dist: number): bool
 
 /** Full place/structure label readable within this camera distance. */
 export const PLACE_LABEL_DIST = 32;
+
+/**
+ * NEAR-fade (zoom-in declutter). Every floating label used to sit at FULL opacity
+ * all the way down to the camera's closest zoom (minDistance 14) — so a deep zoom
+ * onto a dense plaza stacked a dozen world-space labels into an unreadable wall of
+ * text that BURIED the buildings and villagers behind it. This law fades labels OUT
+ * as the camera closes in past `NEAR_LABEL_FADE_FULL`, reaching 0 at
+ * `NEAR_LABEL_FADE_GONE`, so zooming all the way in reveals the geometry (the whole
+ * point of zooming in). It multiplies the existing FAR laws (landmarkLabelTransform,
+ * structureLabelFade) — no effect at the default framing (~95u) or any zoom-out.
+ * Tunable; calibrated against minDistance 14 / default framing ~95.
+ */
+export const NEAR_LABEL_FADE_GONE = 18;
+export const NEAR_LABEL_FADE_FULL = 34;
+
+/** 0 at/below NEAR_LABEL_FADE_GONE (labels cleared for a clean close-up), 1 at/above
+ *  NEAR_LABEL_FADE_FULL (no near suppression), linear between. Pure + unit-testable. */
+export function nearLabelFade(d: number): number {
+  if (d >= NEAR_LABEL_FADE_FULL) return 1;
+  if (d <= NEAR_LABEL_FADE_GONE) return 0;
+  return (d - NEAR_LABEL_FADE_GONE) / (NEAR_LABEL_FADE_FULL - NEAR_LABEL_FADE_GONE);
+}
 /** Villager/critter info cards readable within this distance (default framing
  *  ~40 units keeps them visible; only a real zoom-out collapses them). */
 export const ENTITY_LABEL_DIST = 48;

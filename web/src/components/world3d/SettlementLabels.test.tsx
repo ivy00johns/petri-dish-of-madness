@@ -11,12 +11,33 @@
  */
 
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import { render, cleanup, screen, fireEvent } from '@testing-library/react';
+import type { MouseEventHandler, PointerEventHandler, ReactNode } from 'react';
 
 vi.mock('@react-three/drei', () => ({
-  Billboard: ({ children, position }: { children?: ReactNode; position?: number[] }) => (
-    <div data-testid="settlement-marker" data-position={JSON.stringify(position)}>
+  // EM-121: the labels are clickable — the mock forwards the pointer handlers
+  // so the zoom-to-city pick path is testable, and stubs the hover cursor.
+  useCursor: () => undefined,
+  Billboard: ({
+    children,
+    position,
+    onClick,
+    onPointerOver,
+    onPointerOut,
+  }: {
+    children?: ReactNode;
+    position?: number[];
+    onClick?: MouseEventHandler<HTMLDivElement>;
+    onPointerOver?: PointerEventHandler<HTMLDivElement>;
+    onPointerOut?: PointerEventHandler<HTMLDivElement>;
+  }) => (
+    <div
+      data-testid="settlement-marker"
+      data-position={JSON.stringify(position)}
+      onClick={onClick}
+      onPointerOver={onPointerOver}
+      onPointerOut={onPointerOut}
+    >
       {children}
     </div>
   ),
@@ -85,6 +106,30 @@ describe('EM-269 — fallback discipline (older backends, partial snapshots)', (
     expect(settlementLabelEntries(junk).map(([id]) => id)).toEqual(['stl_ok']);
     render(<SettlementLabels settlements={junk} />);
     expect(screen.getAllByTestId('settlement-name')).toHaveLength(1);
+    expect(screen.getByTestId('settlement-name').textContent).toBe('River Camp');
+  });
+});
+
+describe('EM-121 — clicking a settlement marker is zoom-to-city', () => {
+  it('clicking a marker picks ITS settlement id', () => {
+    const onPick = vi.fn();
+    render(
+      <SettlementLabels
+        settlements={{ stl_1: ridge, stl_2: { name: 'Larkspur', center: [0, -3.5] } }}
+        onPick={onPick}
+      />,
+    );
+    const larkspur = screen
+      .getAllByTestId('settlement-marker')
+      .find((m) => m.textContent === 'Larkspur')!;
+    fireEvent.click(larkspur);
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(onPick).toHaveBeenCalledWith('stl_2');
+  });
+
+  it('without onPick the markers stay inert (no handler, no crash)', () => {
+    render(<SettlementLabels settlements={{ stl_1: ridge }} />);
+    fireEvent.click(screen.getByTestId('settlement-marker')); // must not throw
     expect(screen.getByTestId('settlement-name').textContent).toBe('River Camp');
   });
 });
