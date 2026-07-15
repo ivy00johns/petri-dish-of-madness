@@ -328,6 +328,12 @@ ACTION_SCHEMA = {
              # absent/unresolvable id is fine (falls back to auto-placement) — never
              # a rejection, the build is always free.
              "zone_id": {"type": "string"},
+             # EM-299 (Wave Q) — OPTIONAL parametric recipe (a shape object). LOOSE
+             # on purpose: the world coerces bad fields to defaults / drops a
+             # non-object, so a malformed shape never fails the turn (the closed-enum
+             # grammar is documented in contracts/em299-building-recipes.md and
+             # enforced server-side, not by this structural gate).
+             "recipe": {"type": "object"},
          }}}}},
         {"if": {"required": ["action"], "properties": {"action": {"const": "contribute_funds"}}},
          "then": {"properties": {"args": {"required": ["building_id", "amount"], "properties": {
@@ -876,6 +882,14 @@ def _planning_enabled(params: Any) -> bool:
     Disabled ⇒ no plan block, no plan invite, plan_revision ignored: the prompt
     and snapshot are byte-identical to pre-EM-223."""
     return bool(_world_block_get(params, "planning", "enabled", False))
+
+
+def _building_recipes_enabled(params: Any) -> bool:
+    """EM-299 (Wave Q) — config gate `world.building_recipes.enabled` (default
+    False). Disabled ⇒ NO recipe clause in the build menu: the prompt is
+    byte-identical to pre-EM-299. Enabled ⇒ propose_project offers the OPTIONAL
+    shape grammar. Mirrors world._building_recipes_enabled (same config key)."""
+    return bool(_world_block_get(params, "building_recipes", "enabled", False))
 
 
 def _universalization_enabled(params: Any) -> bool:
@@ -3592,11 +3606,25 @@ def _assemble_context(
         # invention still resolves via the FE fuzzy match, never a dead turn).
         # EM-182 — the optional `place` arg lets it build in a chosen district.
         _build_menu = ", ".join(t["type"] for t in BUILD_TYPES)
+        # EM-299 (Wave Q) — when building recipes are enabled, offer the OPTIONAL
+        # shape grammar as ONE compact clause (flat prompt budget, free-scale law):
+        # a closed-enum recipe the model may author to give its building a distinct
+        # silhouette. Both fragments are EMPTY when the flag is off, so the menu line
+        # is byte-identical (no trailing period) to pre-EM-299.
+        _recipes_on = _building_recipes_enabled(world.params)
+        _recipe_arg = ", recipe?" if _recipes_on else ""
+        _recipe_hint = (
+            ". recipe? = optional shape {footprint tiny|small|medium|large|grand, "
+            "floors 1-8, roof flat|shed|gable|hip|dome|spire, material wood|"
+            "timber_frame|brick|stone|marble|plaster|mud_brick, palette warm|cool|"
+            "earthy|pastel|vivid|muted|monochrome, window_density none|sparse|"
+            "regular|dense, trim none|simple|ornate|gilded} — fit it to the building"
+            if _recipes_on else "")
         valid_actions.append(
-            "propose_project (name, kind, funds_required?, function?, place?) - "
+            f"propose_project (name, kind, funds_required?, function?, place?{_recipe_arg}) - "
             "start a new building/collective project. kind is free-text but pick "
             f"from this menu when you can: {_build_menu}. "
-            "place? = a place id to build there (else here)")
+            f"place? = a place id to build there (else here){_recipe_hint}")
     # EM-248 — only a PLANNED, still-UNDERFUNDED project can actually take funds.
     # A fully-funded planned building (committed >= required) or any
     # under_construction one needs build_step, NOT money — offering contribute_funds
@@ -7502,8 +7530,12 @@ class AgentRuntime:
             # zone. The schema + world read ONLY zone_id; an explicit zone_id wins.
             if zone_id is None:
                 zone_id = args.get("zone")
+            # EM-299 (Wave Q) — OPTIONAL parametric recipe (a shape object). The
+            # world validates/coerces + flag-gates it; a bad/absent recipe never
+            # blocks the build (passed through untouched).
+            recipe = args.get("recipe")
             result = self.world.action_propose_project(
-                agent, name, kind, funds_required, function, place, zone_id
+                agent, name, kind, funds_required, function, place, zone_id, recipe
             )
             return _emit_world_result(result, base, thought)
 

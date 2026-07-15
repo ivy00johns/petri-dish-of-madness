@@ -704,6 +704,26 @@ class UniversalizationParams:
 
 
 @dataclass
+class BuildingRecipesParams:
+    """EM-299 (Wave Q) — parametric building recipes (config `world.building_recipes`).
+
+    A build turn may carry an OPTIONAL closed-enum `recipe` authoring the
+    building's SHAPE (footprint/floors/roof/material/palette/window_density/trim).
+
+    DEFAULT OFF (`enabled=False`): byte-identical to pre-EM-299 — the recipe is
+    ignored, no recipe is stored or serialized, and the build menu carries no
+    recipe clause (prompt goldens unchanged). The engine + prompt both read via
+    the defensive `_building_recipes_enabled` accessors with the IDENTICAL default,
+    so an absent block behaves the same (config-absent = OFF). Flip `enabled: true`
+    to let models author skylines (zero extra LLM calls — the recipe rides the
+    existing build turn; the frontend derives a procedural mesh from it).
+
+      enabled — master toggle (default False = zero behavioral change).
+    """
+    enabled: bool = False
+
+
+@dataclass
 class CoherenceParams:
     """EM-224 — PIANO coherence for multi-action turns (config `world.coherence`).
 
@@ -850,6 +870,41 @@ class LaneOrderEntry:
     tags: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class DiscoveryParams:
+    """Adaptive Lane Routing — dynamic lane discovery/refresh (spec 2026-07-07
+    §4/§9 Phase P2, config `config/lanes.yaml` `adaptive_routing.discovery:`
+    sub-block). Makes the lane registry DATA-DRIVEN: poll the FreeLLMAPI proxy's
+    `/v1/models` catalog + detect direct-provider env keys so lanes appear as the
+    user provisions accounts and drop out when disabled — no restart (spec §4).
+
+    Default `enabled: false` ⇒ BYTE-IDENTICAL: the router never fetches, the
+    registry stays the P1 static build, no new routing behavior. The router
+    reads this block via a defensive accessor with IDENTICAL defaults, so an
+    ABSENT sub-block behaves exactly like these values.
+
+      enabled          — master toggle (default OFF ⇒ static P1 registry).
+      every_turns      — counter-based auto-refresh cadence: refresh after every
+                         N served turns (spec §4). Counter-gated, no clock reads
+                         on the tick path (determinism, EM-155). Clamped >= 1.
+      freellmapi_models— poll `/v1/models`: retire configured lanes the catalog
+                         reports unavailable, synth `disco:` lanes for newly
+                         available models (the lanes.yaml `*` sweep places them).
+      direct_keys      — detect direct-provider env keys (GEMINI/ANTHROPIC/
+                         OPENAI/OLLAMA): present ⇒ that source's lanes stay,
+                         absent ⇒ they retire.
+      admin_quota      — ALSO read the admin `/api/health` quotaStates (richer
+                         per-key health) when creds are configured. Default OFF —
+                         it needs the FREELLMAPI_ADMIN_* account and is only
+                         enrichment (429-cap tracking is P3), not the gate.
+    """
+    enabled: bool = False
+    every_turns: int = 40
+    freellmapi_models: bool = True
+    direct_keys: bool = True
+    admin_quota: bool = False
+
+
 @dataclass
 class AdaptiveRoutingParams:
     """Adaptive Lane Routing — the custom sorting list + bounce loop (spec
@@ -885,6 +940,9 @@ class AdaptiveRoutingParams:
                              a profile kept only for legacy references (e.g. the
                              EM-324 command-a-2 truncator) is barred from the
                              bounce walk. Default () ⇒ nothing excluded.
+      discovery            — dynamic lane discovery/refresh (P2). Default OFF ⇒
+                             the static P1 registry, byte-identical. See
+                             DiscoveryParams.
     """
     enabled: bool = False
     max_attempts: int = 3
@@ -893,6 +951,7 @@ class AdaptiveRoutingParams:
     terminal_fallback: str | None = None
     order: tuple[LaneOrderEntry, ...] = ()
     exclude: tuple[LaneOrderEntry, ...] = ()
+    discovery: DiscoveryParams = field(default_factory=DiscoveryParams)
 
 
 @dataclass
@@ -2081,6 +2140,12 @@ class WorldParams:
     # block into every turn (zero extra LLM calls — rides the existing turn).
     universalization: UniversalizationParams = field(
         default_factory=UniversalizationParams)
+    # EM-299 (Wave Q) — parametric building recipes. Additive with a DEFAULT-OFF
+    # gate: an absent `building_recipes` block is byte-identical to pre-EM-299
+    # (prompt golden + snapshot key set). Flip enabled:true to let models author
+    # building shapes (zero extra LLM calls — the recipe rides the build turn).
+    building_recipes: BuildingRecipesParams = field(
+        default_factory=BuildingRecipesParams)
     # EM-224 — PIANO coherence for multi-action turns. Additive with an
     # engine-matching default; DEFAULT OFF, so a world.yaml without the
     # `coherence` block is byte-identical to pre-EM-224 (prompt golden +
@@ -2443,6 +2508,19 @@ def _parse_universalization(raw: dict | None) -> UniversalizationParams:
     )
 
 
+def _parse_building_recipes(raw: dict | None) -> BuildingRecipesParams:
+    """Parse the optional `world.building_recipes` block (EM-299).
+    Absent/empty/malformed -> engine-matching DEFAULT-OFF defaults, so a
+    world.yaml without the block is byte-identical to pre-EM-299 (prompt golden +
+    snapshot key set)."""
+    if not isinstance(raw, dict):
+        return BuildingRecipesParams()
+    d = BuildingRecipesParams()
+    return BuildingRecipesParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+    )
+
+
 _COHERENCE_STRATEGIES = ("annotate", "drop")
 
 
@@ -2661,6 +2739,28 @@ def _parse_lane_order(raw: Any) -> tuple[LaneOrderEntry, ...]:
     return tuple(out)
 
 
+def _parse_discovery(raw: Any) -> DiscoveryParams:
+    """Parse the optional `adaptive_routing.discovery` sub-block (spec P2 §4).
+    Absent/empty/malformed ⇒ the OFF defaults (byte-identical: static P1
+    registry, no fetches). Accepts BOTH the yaml shape and the config_json
+    asdict shape (same flat scalar keys) so the fork/replay round-trip
+    normalizes cleanly. `every_turns` clamped >= 1."""
+    d = DiscoveryParams()
+    if not isinstance(raw, dict):
+        return d
+    try:
+        every = max(1, int(raw.get("every_turns", d.every_turns)))
+    except (TypeError, ValueError):
+        every = d.every_turns
+    return DiscoveryParams(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        every_turns=every,
+        freellmapi_models=bool(raw.get("freellmapi_models", d.freellmapi_models)),
+        direct_keys=bool(raw.get("direct_keys", d.direct_keys)),
+        admin_quota=bool(raw.get("admin_quota", d.admin_quota)),
+    )
+
+
 def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
     """Parse the optional `adaptive_routing` block (spec 2026-07-07 §3.3).
     Absent/empty/malformed -> router-matching defaults (routing OFF ⇒
@@ -2699,6 +2799,10 @@ def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
         # PR#106 C15 — the denylist reuses the order-entry shape/parser, so the
         # config_json asdict round-trip normalizes it for free.
         exclude=_parse_lane_order(raw.get("exclude")),
+        # P2 — dynamic discovery/refresh. Absent ⇒ OFF defaults (byte-identical
+        # static registry). asdict serializes it to a flat dict that this
+        # parser round-trips.
+        discovery=_parse_discovery(raw.get("discovery")),
     )
 
 
@@ -3596,6 +3700,7 @@ def _parse_world(
         factions=_parse_factions(w.get("factions")),
         planning=_parse_planning(w.get("planning")),
         universalization=_parse_universalization(w.get("universalization")),
+        building_recipes=_parse_building_recipes(w.get("building_recipes")),
         coherence=_parse_coherence(w.get("coherence")),
         chimera_twins=_parse_chimera_twins(w.get("chimera_twins")),
         miracles=_parse_miracles(w.get("miracles")),
