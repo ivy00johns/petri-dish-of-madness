@@ -21,10 +21,15 @@ export function LabSetupView() {
   const [cap, setCap] = useState<CapabilityResponse | null>(null);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchFlags().then((f) => { setFlags(f); setPending({ ...f.baked }); }).catch(() => {});
-    fetchCapability().then(setCap).catch(() => {});
+    fetchFlags()
+      .then((f) => { setFlags(f); setPending({ ...f.baked }); })
+      .catch((e) => { console.error('lab-setup: fetchFlags failed', e); setLoadError(String(e)); });
+    fetchCapability()
+      .then(setCap)
+      .catch((e) => { console.error('lab-setup: fetchCapability failed', e); setLoadError(String(e)); });
   }, []);
 
   // Re-estimate whenever the pending combo changes (prompt-weight flags only).
@@ -32,10 +37,13 @@ export function LabSetupView() {
     if (!flags) return;
     const overrides: Record<string, boolean> = {};
     for (const f of flags.groups.prompt_weight) overrides[f] = pending[f] ?? !!flags.baked[f];
+    let cancelled = false;
     setEstimating(true);
     postEstimate(overrides)
-      .then(setEstimate).catch((e) => setEstimate({ ok: false, error: String(e) }))
-      .finally(() => setEstimating(false));
+      .then((r) => { if (!cancelled) setEstimate(r); })
+      .catch((e) => { if (!cancelled) setEstimate({ ok: false, error: String(e) }); })
+      .finally(() => { if (!cancelled) setEstimating(false); });
+    return () => { cancelled = true; };
   }, [flags, pending]);
 
   const onToggle = useCallback((flag: string) => {
@@ -62,6 +70,15 @@ export function LabSetupView() {
     finally { setBusy(false); }
   }, [diff]);
 
+  if (loadError && !flags) {
+    return (
+      <div className="labsetup">
+        <p role="alert" className="labsetup-loaderror">
+          Couldn’t load Lab Setup — is the backend running? ({loadError})
+        </p>
+      </div>
+    );
+  }
   if (!flags) return <div className="labsetup"><p>Loading Lab Setup…</p></div>;
   return (
     <div className="labsetup">
