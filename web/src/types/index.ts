@@ -211,6 +211,38 @@ export interface Building {
    *  backend. Present only when free placement is active; absent ⇒ the frontend
    *  falls back to assignBuildingLots. Rendered directly (no logical conversion). */
   position?: [number, number];
+  /** EM-299 (Wave Q) — an OPTIONAL parametric recipe authoring the building's
+   *  SHAPE. Present ONLY when a model authored one AND the backend
+   *  `building_recipes.enabled` flag is on (the backend is the sole authority —
+   *  it serializes the recipe only then). The renderer derives a procedural mesh
+   *  from it (computeBuildingMesh); absent ⇒ today's catalog/silhouette render,
+   *  never a hole. Optional/null so pre-EM-299 backends + snapshots stay valid. */
+  recipe?: BuildingRecipe | null;
+}
+
+// ── EM-299 (Wave Q) — parametric building recipe (closed-enum grammar) ────────
+// Mirrors the backend value-dict (petridish.engine.building_recipe): 6 closed
+// enums + a bounded `floors` int. The backend validates/coerces server-side, so
+// a Building.recipe present in a snapshot is always grammar-valid; the frontend
+// derivation (buildingRecipe.computeBuildingMesh) is defensive anyway.
+
+export type Footprint = 'tiny' | 'small' | 'medium' | 'large' | 'grand';
+export type Roof = 'flat' | 'shed' | 'gable' | 'hip' | 'dome' | 'spire';
+export type BuildingMaterial =
+  | 'wood' | 'timber_frame' | 'brick' | 'stone' | 'marble' | 'plaster' | 'mud_brick';
+export type BuildingPalette =
+  | 'warm' | 'cool' | 'earthy' | 'pastel' | 'vivid' | 'muted' | 'monochrome';
+export type WindowDensity = 'none' | 'sparse' | 'regular' | 'dense';
+export type Trim = 'none' | 'simple' | 'ornate' | 'gilded';
+
+export interface BuildingRecipe {
+  footprint: Footprint;
+  floors: number;             // 1..8
+  roof: Roof;
+  material: BuildingMaterial;
+  palette: BuildingPalette;
+  window_density: WindowDensity;
+  trim: Trim;
 }
 
 // ============================================================
