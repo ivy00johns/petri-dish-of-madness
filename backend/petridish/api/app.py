@@ -781,6 +781,36 @@ async def get_lanes_registry():
     return view()
 
 
+@app.get("/api/lanes/capability")
+async def get_lanes_capability():
+    """Lab Setup capability table: per-lane free/paid + context window +
+    clean|reasoning|unknown reliability, derived from lanes.yaml order/exclude
+    and the profile legend. Fail-closed: unknown never counts as safe (the UI
+    recommender enforces that).
+
+    `_config.world.adaptive_routing.order`/`.exclude` are tuples of the frozen
+    `LaneOrderEntry` dataclass, not dicts — `build_capability_table` calls
+    `.get()` on each entry, so they're converted to plain dicts here before
+    being passed in."""
+    if _config is None or _router is None:
+        raise HTTPException(503, "Not initialized")
+    from ..providers.capability import build_capability_table
+    ar = getattr(_config.world, "adaptive_routing", None)
+    order = [{"source": e.source, "model": e.model, "free": e.free}
+             for e in (getattr(ar, "order", ()) or ())]
+    exclude = [{"source": e.source, "model": e.model}
+               for e in (getattr(ar, "exclude", ()) or ())]
+    profiles = [
+        {"name": p["name"], "adapter": p["adapter"], "model_id": p["model_id"]}
+        for p in _router.legend()
+    ]
+    cast_pins = {}
+    if _world is not None:
+        for a in _world.living_agents():
+            cast_pins[a.name] = getattr(a, "profile", None) or getattr(a, "model_profile", "")
+    return build_capability_table(order, exclude, profiles, cast_pins)
+
+
 @app.post("/api/lanes/refresh")
 async def refresh_lanes():
     """EM-300 P2 — on-demand lane discovery refresh (spec §4): poll the
