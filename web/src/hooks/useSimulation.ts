@@ -387,7 +387,14 @@ export function useSimulation(): SimulationState & SimulationControls {
 
     wsRef.current = ws;
 
+    // Stale-socket guard (EM-305): every handler below is inert unless this
+    // socket is STILL wsRef.current. A superseded socket (StrictMode's
+    // first-mount socket, a replaced reconnect) must never touch shared
+    // state, null the ref, or schedule a reconnect — one leaked close
+    // otherwise orphans the live socket and the reconnect loop breeds N
+    // parallel sockets, each reprocessing every message (the feed flicker).
     ws.onopen = () => {
+      if (wsRef.current !== ws) return;
       // A live socket is open: kill any running mock loop so the two
       // event sources can never push (and collide on seq) at once.
       stopMockLoop();
@@ -400,6 +407,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     };
 
     ws.onmessage = (e: MessageEvent) => {
+      if (wsRef.current !== ws) return;
       try {
         const msg: WSMessage = JSON.parse(e.data);
         // Defensive: the first live message guarantees the mock loop is dead.
@@ -444,6 +452,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     };
 
     ws.onclose = () => {
+      if (wsRef.current !== ws) return;
       setConnected(false);
       wsRef.current = null;
       reconnectAttemptsRef.current += 1;
@@ -477,6 +486,7 @@ export function useSimulation(): SimulationState & SimulationControls {
     };
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return;
       // Do NOT permanently flip to mock on a transient error while the
       // socket may still open. If the socket is still CONNECTING, let the
       // browser resolve it (onopen or onclose will fire). onclose handles
@@ -509,7 +519,15 @@ export function useSimulation(): SimulationState & SimulationControls {
         reconnectTimerRef.current = null;
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        // Deliberate teardown: detach the handlers BEFORE closing so this
+        // close can never re-enter the reconnect path (the stale guard covers
+        // a REPLACED socket; this covers the one being retired at unmount).
+        const ws = wsRef.current;
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
         wsRef.current = null;
       }
     };

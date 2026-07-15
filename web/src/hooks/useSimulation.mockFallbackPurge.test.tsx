@@ -86,16 +86,28 @@ function wsEvent(seq: number, text: string): { data: string } {
   };
 }
 
-/** Drive sockets[0] through 3 closes → the mock fallback starts. */
-function tripMockFallback() {
+/**
+ * Drive 3 failed close→reconnect cycles → the mock fallback starts. Each close
+ * must land on the socket the hook currently owns (a stale socket's onclose is
+ * inert under the EM-305 guard, exactly as a real socket fires onclose once),
+ * so the backoff timer is advanced between closes to spawn each replacement.
+ * Leaves sockets.length === 3 with the 8s post-3rd-close reconnect pending.
+ */
+async function tripMockFallback() {
   act(() => {
-    sockets[0].onclose?.();
+    sockets[sockets.length - 1].onclose?.();
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000); // backoff #1 → replacement socket
   });
   act(() => {
-    sockets[0].onclose?.();
+    sockets[sockets.length - 1].onclose?.();
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4000); // backoff #2 → replacement socket
   });
   act(() => {
-    sockets[0].onclose?.();
+    sockets[sockets.length - 1].onclose?.();
   });
 }
 
@@ -122,7 +134,7 @@ describe('useSimulation — mock-fallback purge on live recovery', () => {
     await act(async () => {}); // flush the (empty) initial backfill
 
     // ── Outage: 3 failed reconnects trip the mock fallback ──────────────────
-    tripMockFallback();
+    await tripMockFallback();
     expect(result.current.mockMode).toBe(true);
 
     // The generator synthesizes events with POSITIVE seqs — the collision
@@ -150,9 +162,9 @@ describe('useSimulation — mock-fallback purge on live recovery', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(8000);
     });
-    expect(sockets.length).toBe(2);
+    expect(sockets.length).toBe(4);
     act(() => {
-      sockets[1].onopen?.();
+      sockets[3].onopen?.();
     });
     expect(result.current.mockMode).toBe(false);
     expect(result.current.connected).toBe(true);
@@ -169,13 +181,13 @@ describe('useSimulation — mock-fallback purge on live recovery', () => {
     // ── Sanity: WS dedupe still correct now that seq = DB rowid ─────────────
     // A backend resend of a seq the backfill already delivered is dropped…
     act(() => {
-      sockets[1].onmessage?.(wsEvent(3, 'real-e3-resend'));
+      sockets[3].onmessage?.(wsEvent(3, 'real-e3-resend'));
     });
     expect(result.current.events.filter((e) => e.seq === 3)).toHaveLength(1);
     expect(result.current.events.find((e) => e.seq === 3)?.text).toBe('real-e3');
     // …and a fresh seq lands at the top of the feed and in the history.
     act(() => {
-      sockets[1].onmessage?.(wsEvent(4, 'real-e4'));
+      sockets[3].onmessage?.(wsEvent(4, 'real-e4'));
     });
     expect(result.current.events[0].seq).toBe(4);
     expect(result.current.history[0].seq).toBe(4);
@@ -190,7 +202,7 @@ describe('useSimulation — mock-fallback purge on live recovery', () => {
     const { result, unmount } = renderHook(() => useSimulation());
     await act(async () => {});
 
-    tripMockFallback();
+    await tripMockFallback();
     expect(result.current.mockMode).toBe(true);
     act(() => {
       result.current.injectEvent();
@@ -202,9 +214,9 @@ describe('useSimulation — mock-fallback purge on live recovery', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(8000);
     });
-    expect(sockets.length).toBe(2);
+    expect(sockets.length).toBe(4);
     act(() => {
-      sockets[1].onmessage?.(wsEvent(1, 'real-e1'));
+      sockets[3].onmessage?.(wsEvent(1, 'real-e1'));
     });
     expect(result.current.mockMode).toBe(false);
 
