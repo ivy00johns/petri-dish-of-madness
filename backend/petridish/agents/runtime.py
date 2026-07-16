@@ -1806,6 +1806,15 @@ _NONEISH_STRINGS = {"", "none", "null", "nil"}
 # produce. First non-empty value wins.
 _PLACE_ALIAS_KEYS = ("place", "place_id", "destination", "location", "to", "target")
 _TARGET_ALIAS_KEYS = ("target", "target_id", "agent", "agent_id", "who", "name")
+# EM-feed-health — a model asked to say/whisper/write frequently puts the
+# content under a synonym key (message/msg/content/body/speech/utterance/
+# saying) instead of the schema's `text`. `_fold_stray_top_level_into_args`
+# already promotes a stray TOP-LEVEL `message` into `args`, so the turn
+# VALIDATES — but nothing mapped `args["message"]` -> `args["text"]`, so the
+# handler read an empty `text` and the agent said/whispered NOTHING (the
+# `says: ""` symptom). `text` is listed first so it wins when already real.
+_TEXT_ALIAS_KEYS = ("text", "message", "msg", "content", "body", "speech",
+                     "utterance", "saying")
 _TARGETED_ACTIONS = frozenset(
     {"give", "steal", "insult", "attack", "whisper", "set_relationship",
      # EM-240 — agent-targeted crime verbs resolve a name in args["target"] to an
@@ -1854,6 +1863,17 @@ _TARGETED_ACTIONS = frozenset(
      # send_letter recipe: _resolve_agent_target already matches an ABSENT living
      # agent by name). declare_hostility takes a faith_id, not an agent (EXCLUDED).
      "excommunicate"}
+)
+
+# EM-feed-health — actions whose primary payload is content the handler reads
+# from args["text"] (spread_rumor is the one exception: its handler falls back
+# `args.get("rumor", "") or args.get("text", "")`, so aliasing into `text`
+# satisfies it without disturbing a `rumor` the model deliberately sent).
+# Kept tight to actions that actually read a text arg — do NOT add an action
+# here just because it takes SOME free-string arg (e.g. deceive's `about`,
+# propose_project's `function` are NOT spoken/written content).
+_TEXT_ACTIONS = frozenset(
+    {"say", "whisper", "post_billboard", "send_letter", "create_meme", "spread_rumor"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -2044,6 +2064,23 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
         rid = args.get("rule_id")
         if rid is not None and not isinstance(rid, str):
             args["rule_id"] = str(rid)
+
+    # EM-feed-health — text-content alias, run as an INDEPENDENT check (not
+    # another elif branch) because whisper/send_letter/spread_rumor are ALSO
+    # _TARGETED_ACTIONS members that already matched the target-resolution
+    # branch above; an elif here would never fire for them.
+    if action in _TEXT_ACTIONS:
+        # spread_rumor's handler prefers `rumor` over `text`
+        # (args.get("rumor","") or args.get("text","")) — a real `rumor`
+        # blocks the alias write exactly like a real `text` does elsewhere
+        # (first-write-wins: never clobber content the model deliberately sent).
+        already_has_content = not _noneish(args.get("text")) or (
+            action == "spread_rumor" and not _noneish(args.get("rumor"))
+        )
+        if not already_has_content:
+            text = _first_real_arg(args, _TEXT_ALIAS_KEYS)
+            if isinstance(text, str):
+                args["text"] = text
 
     caps = _ARG_STRING_CAPS.get(action)
     if caps:
