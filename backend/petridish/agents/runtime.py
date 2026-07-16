@@ -1750,6 +1750,39 @@ def _sanitize_charter_revision(
     return None
 
 
+# The declared top-level keys ACTION_SCHEMA allows. Anything else a model puts
+# at the top level (flat single-action params like target/message/zone_id) is
+# folded into `args` before validation — the EM-066 "a misplaced field never
+# fails the turn" ethos, applied at the top level (args + actions[] items are
+# already permissive; only the top level was strict). Derived from the schema
+# itself so it stays in sync automatically.
+_DECLARED_TOP_LEVEL = set(ACTION_SCHEMA["properties"].keys())
+
+
+def _fold_stray_top_level_into_args(action_dict: dict) -> None:
+    """A model that emits a single-action response sometimes puts the action's
+    parameters FLAT at the top level (`{"action": "whisper", "target": "Ada",
+    "message": "hi"}`) instead of nested under `args` (`{"action": "whisper",
+    "args": {"target": "Ada", "text": "hi"}}`). Those undeclared top-level keys
+    used to hard-fail the whole turn under ACTION_SCHEMA's top-level
+    `additionalProperties: False` (idle fallback) even though the identical
+    keys are welcome one level down. Move any undeclared top-level key into
+    `args` IN PLACE so it validates instead. Does NOT overwrite an existing
+    `args` key (first-write-wins, mirroring the alias-resolution precedence
+    elsewhere in this module); leaves declared keys (action/actions/args/
+    thought/mood/… — see _DECLARED_TOP_LEVEL) untouched. No-op on a clean
+    response. Never raises."""
+    stray = [k for k in list(action_dict) if k not in _DECLARED_TOP_LEVEL]
+    if not stray:
+        return
+    args = action_dict.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    for k in stray:
+        args.setdefault(k, action_dict.pop(k))
+    action_dict["args"] = args
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Behavioral-arg normalization (EM-140) — meet the models where they are.
 #
@@ -6591,6 +6624,12 @@ class AgentRuntime:
             else (CHARTER_MAX_AMBITIONS, CHARTER_CREED_CAP))
         charter_rev_rejected = _sanitize_charter_revision(
             action_dict, max_ambitions=_max_amb, creed_cap=_creed_cap)
+        # Fold flat top-level action params (target/message/zone_id/…) into
+        # `args` BEFORE _normalize_args, so alias resolution (name→id, place
+        # aliases) sees them where it looks — and BEFORE _validate_schema,
+        # so the top-level additionalProperties=False gate never rejects a
+        # turn over a misplaced-but-recoverable field (EM-066 ethos).
+        _fold_stray_top_level_into_args(action_dict)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
