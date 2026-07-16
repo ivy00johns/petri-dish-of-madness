@@ -1136,7 +1136,16 @@ class CommunicationParams:
                             EM-252; never random).
       max_diffusions      — per-round ceiling on passive hops.
       half_life_ticks     — ticks without a spread before virality halves.
-      decay_ticks         — ticks without a spread before a zero-carrier meme dies.
+      decay_ticks         — ticks without a spread before a zero-carrier meme dies
+                            (lowered 80→24 in the meme-coherence fix so orphaned
+                            junk drift children clear in ~1 day, not ~4).
+      max_drift_generations — meme-coherence fix: once a SOURCE meme's own
+                            generation reaches this, further diffuse_culture hops
+                            off it stop calling _distort_text — the child mints,
+                            attaches, and increments generation as usual, but its
+                            TEXT passes through verbatim so a spreading idea
+                            stays legible instead of accreting distortions/
+                            suffixes forever.
       letter_cap          — undelivered letters parked per mailbox (FIFO, EM-251).
       held_meme_cap       — memes an agent carries (FIFO, oldest dropped).
       distortion_strength — _distort_text mutation passes per transmission hop.
@@ -1159,7 +1168,8 @@ class CommunicationParams:
     diffusion_chance: float = 0.20
     max_diffusions: int = 12
     half_life_ticks: int = 30
-    decay_ticks: int = 80
+    decay_ticks: int = 24
+    max_drift_generations: int = 3
     letter_cap: int = 8
     held_meme_cap: int = 12
     distortion_strength: int = 1
@@ -3063,6 +3073,8 @@ def _parse_comm(raw: dict | None) -> CommunicationParams:
         max_diffusions=_int("max_diffusions", d.max_diffusions),
         half_life_ticks=_int("half_life_ticks", d.half_life_ticks),
         decay_ticks=_int("decay_ticks", d.decay_ticks),
+        max_drift_generations=_int(
+            "max_drift_generations", d.max_drift_generations),
         letter_cap=_int("letter_cap", d.letter_cap),
         held_meme_cap=_int("held_meme_cap", d.held_meme_cap),
         distortion_strength=_int("distortion_strength", d.distortion_strength),
