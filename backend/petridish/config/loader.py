@@ -3075,6 +3075,11 @@ def _parse_comm(raw: dict | None) -> CommunicationParams:
         decay_ticks=_int("decay_ticks", d.decay_ticks),
         max_drift_generations=_int(
             "max_drift_generations", d.max_drift_generations),
+        # Feed-health notification caps (EM aggregation) — parsed here so the
+        # world.yaml values actually override the dataclass defaults (2/3).
+        mutation_notable_cap=_int("mutation_notable_cap", d.mutation_notable_cap),
+        death_notable_virality=_int(
+            "death_notable_virality", d.death_notable_virality),
         letter_cap=_int("letter_cap", d.letter_cap),
         held_meme_cap=_int("held_meme_cap", d.held_meme_cap),
         distortion_strength=_int("distortion_strength", d.distortion_strength),
