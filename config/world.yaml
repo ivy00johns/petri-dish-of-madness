@@ -184,6 +184,12 @@ world:
     dominance_threshold: 6    # carriers needed for a meme_dominant event
     camp_min_shared: 2        # shared memes that bind a culture-camp edge
     camp_min_size: 3          # minimum members for a culture camp
+    # Feed-health fix — the passive sweep's NOTIFICATIONS are capped so a busy
+    # round reads as a few meaningful lines + one honest summary instead of
+    # dozens of near-identical "drifts to" / "fades from memory" lines. State
+    # (mints/attaches/prunes) is completely unaffected by these two knobs.
+    mutation_notable_cap: 2      # individual meme_mutated events per sweep
+    death_notable_virality: 3    # min virality for an individual meme_died
 
   # EM-256/EM-257 — organized violence (Wave O War track). DEFAULT OFF: with
   # enabled false the grievance ledger, the advance_war round boundary, and the

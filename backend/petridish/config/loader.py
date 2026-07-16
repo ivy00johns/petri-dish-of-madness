@@ -1144,6 +1144,16 @@ class CommunicationParams:
       dominance_threshold — carriers needed for a meme_dominant event.
       camp_min_shared     — shared memes that bind a culture-camp edge.
       camp_min_size       — minimum members for a culture camp.
+      mutation_notable_cap  — feed-health fix: individual meme_mutated events
+                            emitted per diffuse_culture sweep before the rest
+                            of the round's hops roll into ONE aggregate event
+                            (state — infections/mints/attaches — is unaffected;
+                            this only caps NOTIFICATIONS).
+      death_notable_virality — feed-health fix: a decay-pruned meme still gets
+                            its own "fades from memory" event when its virality
+                            is at/above this (or it was ever dominant, or it's
+                            a generation==0 original); every other pruned meme
+                            rolls into ONE aggregate meme_died event per sweep.
     """
     enabled: bool = False
     diffusion_chance: float = 0.20
@@ -1157,6 +1167,8 @@ class CommunicationParams:
     dominance_threshold: int = 6
     camp_min_shared: int = 2
     camp_min_size: int = 3
+    mutation_notable_cap: int = 2
+    death_notable_virality: int = 3
 
 
 @dataclass
