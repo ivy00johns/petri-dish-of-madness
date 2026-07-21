@@ -1,8 +1,9 @@
 # Architecture — Execution Layers
 
 > Drop-in section for `ARCHITECTURE.md`. Anchors the vocabulary referenced by the
-> multi-city work (**EM-109/110**), the proposed asynchronous **production lane**
-> (not yet filed in the ledger), and the parallel-worlds runner (v4). When a new
+> multi-city work (first slice shipped PR #112, 2026-07-15, flag OFF live — see
+> **EM-109/110** in `docs/COMPLETED-WORK.md`), the proposed asynchronous **production
+> lane** (not yet filed in the ledger), and the parallel-worlds runner (v4). When a new
 > capability is proposed, decide its layer here *before* writing code.
 
 ## Why this section exists
@@ -152,7 +153,9 @@ Walk these in order; stop at the first **yes**.
 ## Cross-references
 
 - **EM-109** — multi-city data model; **EM-110** — migration/travel between cities
-  (City layer).
+  (City layer). First slice shipped **PR #112** (2026-07-15) on the EM-269 Settlement
+  primitive rather than EM-109's literal table design — see `docs/COMPLETED-WORK.md`.
+  Flag OFF live; the City-layer conceptual model above is unaffected either way.
 - **Asynchronous production lane** (Production lane) — *proposed; not yet filed in the
   ledger.* (`EM-162` is cache-key normalization and is unrelated.)
 - **This section** (`ARCHITECTURE.md` § Execution Layers) — the execution-layer model
