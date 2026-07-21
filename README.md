@@ -9,7 +9,7 @@
 **Drop a different LLM into every villager, then watch a society cooperate, betray, hoard, legislate, fall in love, and die.** Groq-Llama runs one agent, Gemini-Flash another, a local Ollama model a third — all in one world, color-coded, hot-swappable live. Designed to run on **free model tiers**.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-2%2C008%20passing-success" alt="2,008 tests passing" />
+  <img src="https://img.shields.io/badge/tests-2%2C800%2B%20%2F%20138-success" alt="2,800+ backend tests / 138 frontend test files passing" />
   <img src="https://img.shields.io/badge/runs%20on-free%20tiers-brightgreen" alt="Runs on free tiers" />
   <a href="https://github.com/ivy00johns/petri-dish-of-madness/stargazers"><img src="https://img.shields.io/github/stars/ivy00johns/petri-dish-of-madness?style=social" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/PRs-welcome-ff69b4" alt="PRs welcome" />
@@ -84,6 +84,10 @@ If PetriDishOfMadness made you smile, you can [**buy me a coffee** ☕](https://
 - **Buildings & collective projects** — agents propose → fund → build shared structures that carry visible state (scaffolding while under construction, scorched walls after arson). Money pools (a "Community Commons Fund" and the like) render as a **treasury chest**, not a building shell — a treasury is an account, not a structure.
 - **A living social graph** — every interaction (talk, give, steal, vote) shifts **typed relationships** — friend, partner, family, mentor, rival, feud — as reflex consequences, never extra LLM calls. Warm mutual bonds cluster into **factions** with auto-generated names ("Ada's circle"), drawn as rings on the social graph, and each agent carries a derived **reputation** (mean incoming trust) on its roster card.
 - **Births & family lines** — two partnered agents sharing a home can have a **child**: a brand-new background-tier agent with a persona blended from the library, both parents paying a credits cost. A hard **population cap (25)** and real bed capacity gate every birth, so the society grows a family tree without ever growing the LLM bill.
+- **Culture, faith & war (merged, flag-off)** — agents spread rumors and mail letters, mint and
+  remix **memes** (including drifting visual memes off the free image lane) into named culture
+  camps, found invented **faiths** and congregations, and wage organized **war** — grievances,
+  declared wars, seeded combat, sieges — between factions. All flag-gated for a live sign-off.
 - **Inner lives** — agents make spoken **commitments**, and the feed marks the ones they never act on as 👻 phantoms; salient events trigger occasional **diary reflections** (✎) that can now **declare or deepen a bond**; plaza chatter gets **overheard** by bystanders. All of it piggybacks on the same single turn response — zero extra LLM calls.
 - **A persona library** — `config/personas.yaml` ships 10 ready-made character cards (Conspiracy Theorist, Chaos Gremlin, Kleptomaniac Philanthropist, …); pick one from the spawn form's persona picker or list them via `GET /api/personas`.
 - **Chaos animals** — an LLM-driven cat (**Mochi**) and dog (**Biscuit**) roam on a slow cadence, knocking things over and stealing food, utterly indifferent to human law and money. Their mischief streams to a dedicated Animal Chaos Feed.
@@ -116,7 +120,7 @@ make install               # backend into a local .venv + web deps
 
 Open **[http://localhost:5173](http://localhost:5173)** — the 3D village and live feed load right away (no keys needed to *open* the UI). To actually run the simulation, point agents at a model (the FreeLLMAPI demo) or the offline **mock profile** for fully deterministic, zero-token agents.
 
-👉 The full walkthrough — the live FreeLLMAPI demo, mock & Ollama runs, run forking, the billboard, prayers & miracles, personas, Docker, cloud deploy, and **every config knob** — lives in **[docs/GUIDE.md](docs/GUIDE.md)**.
+👉 The full walkthrough — the live FreeLLMAPI demo, mock & Ollama runs, run forking, the billboard, prayers & miracles, personas, Docker, cloud deploy, and **the main config knobs** (world physics, lane resilience & adaptive routing, culture/religion/war, the W31 feature-flag roster) — lives in **[docs/GUIDE.md](docs/GUIDE.md)**.
 
 ---
 
@@ -182,7 +186,7 @@ flowchart TB
 
 ## 🙏 Acknowledgments
 
-Built on ideas from [Emergence-World](https://github.com/EmergenceAI/Emergence-World) by EmergenceAI — our own small, cheap reinterpretation of their world. Art is hand-vendored CC0 (KayKit · Kenney · Quaternius), catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md). See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md) for the full credits.
+Built on ideas from [Emergence-World](https://github.com/EmergenceAI/Emergence-World) by EmergenceAI — our own small, cheap reinterpretation of their world. Art is hand-vendored CC0 (KayKit · Kenney · Quaternius · CreativeTrio), catalogued in [ASSET_LICENSES.md](ASSET_LICENSES.md). See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md) for the full credits.
 
 ---
 
