@@ -70,22 +70,40 @@ profiles:
   # model-vs-model experiment. All ids verified in the live proxy catalog.
   # NOTE: profiles load at backend startup — restart (./dev) to pick these up.
 
+  # 2026-07-21 (feed-truth W1): `llama-3.3-70b-versatile` is NOT in the
+  # FreeLLMAPI catalog at all — a guaranteed-fail pin (350 recent failures).
+  # Live-probed replacements: the plain catalogued `llama-3.3-70b` is listed
+  # `available: true` but failed 5/5 live strict-JSON probes this session
+  # (timeouts + "no usable key configured" routing errors — groq's own route
+  # looks down right now, not just rate-limited). Repinned instead to
+  # `llama-3.3-70b-fp8-fast` (probe-verified 2/2 clean, finish=stop, ~1s,
+  # routes via Cloudflare) — the SAME id the `llama-fast` profile already
+  # uses. Trade-off: groq-llama and llama-fast now share one upstream/ctx
+  # budget (ctx_window=24000, the smallest lane) instead of being
+  # provider-diverse; a working shared route beats a currently-dead
+  # provider-exclusive one. Revisit if groq's native `llama-3.3-70b` route
+  # recovers (probe results: coordination/probe-results-2026-07-21.md).
   - name: groq-llama
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
-    model_id: llama-3.3-70b-versatile
+    model_id: llama-3.3-70b-fp8-fast
     max_tokens: 1024
     temperature: 0.8
     color: "#4a9eda"
-    rpd: 1000                  # ~Groq free-tier daily quotas (llama-3.3-70b-versatile)
+    rpd: 1000                  # ~Groq free-tier daily quotas (legacy estimate; now routed via Cloudflare)
     tpd: 100000
 
+  # 2026-07-21 (feed-truth W1): `zai-glm-4.7` is NOT in the FreeLLMAPI catalog
+  # (418 recent failures) — the catalogued alias is `glm-4.7` for the exact
+  # same Cerebras upstream. Live-probed: first attempt hit a transient
+  # Cerebras 429 (cooldown ~87s), retry 2/2 clean (finish=stop, valid JSON,
+  # routed_via cerebras/zai-glm-4.7 — same physical model, corrected id).
   - name: cerebras-glm
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
     api_key_env: FREELLMAPI_KEY
-    model_id: zai-glm-4.7
+    model_id: glm-4.7
     max_tokens: 1024
     temperature: 0.8
     color: "#e85d75"
@@ -203,6 +221,36 @@ profiles:
     temperature: 0.85
     color: "#e8a13c"
 
+  # ── 2026-07-21 (feed-truth W4/M1) — two new probe-verified rich lanes ──
+  # Bounce-only (not pinned to any agent by default; personas.yaml assigns a
+  # couple of new spawns onto them). Both live-probed 2x strict-JSON, no
+  # response_format, production max_tokens=1024, via $FREELLMAPI_BASE_URL:
+  #   glm-5.2            -> 2/2 clean, finish=stop, ~2-6s, routed nvidia/z-ai/glm-5.2
+  #   deepseek-v4-flash   -> 3/4 clean (1 early cold-start timeout, then 2/2
+  #                          clean on retry), finish=stop, routed opencode/deepseek-v4-flash-free
+  # `qwen3.5-122b-a10b` (also asked for) was probed and REJECTED: the
+  # provider returns a definitive "reached its end of life on
+  # 2026-07-20T00:00:00Z and is no longer available" — not a transient
+  # rate limit, so it is NOT added as a lane. Full trail:
+  # coordination/probe-results-2026-07-21.md.
+  - name: glm-5
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: glm-5.2
+    max_tokens: 1024
+    temperature: 0.85
+    color: "#f06292"
+
+  - name: deepseek-flash
+    adapter: openai
+    base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
+    api_key_env: FREELLMAPI_KEY
+    model_id: deepseek-v4-flash
+    max_tokens: 1024
+    temperature: 0.8
+    color: "#2f9e8f"
+
   # ── Adaptive Lane Routing (2026-07-08) — bounce-only healthy lane ──
   # NOT pinned to any agent: it exists so the config/lanes.yaml sorting list's
   # top priority `gpt-oss-120b*` resolves to a REAL lane. The sorting list was
@@ -210,9 +258,18 @@ profiles:
   # target was a ghost and pinned-lane failures fell straight to idle fallback.
   # Verified on the live proxy 2026-07-08: HTTP 200, clean strict-JSON output
   # (finish=stop, no chain-of-thought truncation at 1024), and NOT rate-limited
-  # while the OpenRouter/Groq free lanes were all 429. Instruct-clean here, so
-  # intentionally NOT reasoning-tagged (a reasoning tag would make the bounce
-  # loop skip it on strict-JSON agent turns — the #77/#78 lesson).
+  # while the OpenRouter/Groq free lanes were all 429.
+  #
+  # 2026-07-21 (feed-truth W6) — SUPERSEDES the note above: on the ~4900-token
+  # heavy agent prompt (not the short probe), gpt-oss-120b IS a reasoning
+  # model that CoT-truncates (finish_reason=length, 118 recent failures on
+  # strict-JSON turns per data/run.sqlite). config/lanes.yaml now tags its
+  # `order` entry `reasoning`, so the router's `require_json` bounce-skip
+  # (router.py:1219) keeps it out of the strict-JSON path entirely — it only
+  # serves non-strict-JSON turns (e.g. narrator/chronicle). The #77/#78
+  # lesson about reasoning tags removing a lane from the bounce pool still
+  # holds; it's the CORRECT outcome here since this lane keeps failing on
+  # exactly the turns it would otherwise be tried on.
   - name: gpt-oss-120b
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
@@ -248,6 +305,12 @@ profiles:
   # profile literally named `embed` at startup; absent ⇒ retrieval falls back to
   # blind recency. NOT decision-cached — embeddings ADD calls (north-star).
 
+  # 2026-07-21 (feed-truth): fallback-review.md flagged `bge-m3` as "NOT in
+  # catalog" because it's absent from GET /v1/models — but that endpoint only
+  # enumerates CHAT-completion models; embeddings aren't listed there by
+  # design. Direct-probed POST /v1/embeddings {"model":"bge-m3", ...} live
+  # 2026-07-21: HTTP 200, valid embedding vector, routed via cloudflare. NOT
+  # stale — no change needed.
   - name: embed
     adapter: openai-compatible
     model_id: bge-m3            # gating resolved 2026-06-19; gemini-embedding-001 = 3072-dim alt
