@@ -82,7 +82,10 @@ profiles:
   # budget (ctx_window=24000, the smallest lane) instead of being
   # provider-diverse; a working shared route beats a currently-dead
   # provider-exclusive one. Revisit if groq's native `llama-3.3-70b` route
-  # recovers (probe results: coordination/probe-results-2026-07-21.md).
+  # recovers. Re-confirmed clean against the REAL production system prompt
+  # (contracts/2026-07-21-feed-truth.md §C): 3/3 finish=stop, valid JSON,
+  # 2.6-4.5s typical (one 16.8s cold-start outlier). Probe results:
+  # coordination/probe-results-2026-07-21.md.
   - name: groq-llama
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
@@ -99,6 +102,8 @@ profiles:
   # same Cerebras upstream. Live-probed: first attempt hit a transient
   # Cerebras 429 (cooldown ~87s), retry 2/2 clean (finish=stop, valid JSON,
   # routed_via cerebras/zai-glm-4.7 — same physical model, corrected id).
+  # Re-confirmed against the REAL production system prompt (§C): clean,
+  # finish=stop, ~0.7s.
   - name: cerebras-glm
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}
@@ -222,14 +227,28 @@ profiles:
     color: "#e8a13c"
 
   # ── 2026-07-21 (feed-truth W4/M1) — two new probe-verified rich lanes ──
-  # Bounce-only (not pinned to any agent by default; personas.yaml assigns a
-  # couple of new spawns onto them). Both live-probed 2x strict-JSON, no
-  # response_format, production max_tokens=1024, via $FREELLMAPI_BASE_URL:
-  #   glm-5.2            -> 2/2 clean, finish=stop, ~2-6s, routed nvidia/z-ai/glm-5.2
-  #   deepseek-v4-flash   -> 3/4 clean (1 early cold-start timeout, then 2/2
-  #                          clean on retry), finish=stop, routed opencode/deepseek-v4-flash-free
-  # `qwen3.5-122b-a10b` (also asked for) was probed and REJECTED: the
-  # provider returns a definitive "reached its end of life on
+  # Not pinned to any agent by default. Live-probed twice: first with a
+  # hand-rolled short prompt, THEN re-probed with the REAL production
+  # system prompt (petridish.agents.runtime._assemble_context, per contracts/
+  # 2026-07-21-feed-truth.md §C) — the short probe MISSED both issues below,
+  # the same lesson fallback-review.md W1 documents for gpt-oss-120b.
+  #   glm-5.2 — content is clean (3/3 real-prompt trials finish=stop, valid
+  #     JSON) but SLOW: 17-26s per call, every trial. config/lanes.yaml's
+  #     bounce walk caps each attempt at per_attempt_timeout_s=12s, so as a
+  #     bounce-only lane it would time out on every single attempt — it is
+  #     deliberately NOT in lanes.yaml `order`. The pinned first-call path
+  #     (router.py:583) has no such cap, so this profile is still safe to
+  #     assign an agent to directly (spawn/reassign) if the latency is
+  #     acceptable — just don't add it back to the bounce order without
+  #     raising per_attempt_timeout_s to match.
+  #   deepseek-v4-flash — under the real prompt it plans in prose before
+  #     ever emitting JSON and hits finish_reason=length 3/3 real-prompt
+  #     trials (the short-prompt probe showed 3/4 clean — a false pass).
+  #     It's a reasoning model in practice; lanes.yaml tags its `order`
+  #     entry `reasoning` and demotes it next to gpt-oss-120b, same
+  #     treatment, same reason.
+  # `qwen3.5-122b-a10b` (also asked for) was probed and REJECTED outright:
+  # the provider returns a definitive "reached its end of life on
   # 2026-07-20T00:00:00Z and is no longer available" — not a transient
   # rate limit, so it is NOT added as a lane. Full trail:
   # coordination/probe-results-2026-07-21.md.

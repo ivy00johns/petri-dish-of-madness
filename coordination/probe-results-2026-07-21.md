@@ -1,19 +1,44 @@
 # Probe results — 2026-07-21 (lanes-agent, feed-truth W1)
 
-Protocol: 2 live strict-JSON probes per model via `$FREELLMAPI_BASE_URL`
-(sourced read-only from the main repo's `.env`), asserting HTTP 200 +
-extractable JSON object + `finish_reason=="stop"`, production-like
-`max_tokens=1024`, NO `response_format` (worst-case: raw prompt-JSON
-compliance, matching what happens when a provider rejects `response_format`
-and the real adapter falls back — `backend/petridish/providers/adapters.py`).
-On a rate-limit/timeout hit, retried once after a cooldown per the contract;
-persistent failures got a third confirmation round before being rejected.
+Protocol (contracts/2026-07-21-feed-truth.md §C): live strict-JSON probes
+per model via `$FREELLMAPI_BASE_URL` (sourced read-only from the main repo's
+`.env`), asserting HTTP 200 + extractable JSON object + `finish_reason==
+"stop"`, production `max_tokens=1024`, NO `response_format` (matching what
+happens when a provider rejects it and the real adapter falls back —
+`backend/petridish/providers/adapters.py`), using **the repo's real
+action-schema system prompt shape**. 2 probes per candidate minimum,
+rate-window tolerant (one retry after cooldown on a transient hit).
 
-Probe script + raw JSON: `scratchpad/probe_models.py`,
-`scratchpad/probe_retry.py`, `scratchpad/probe_raw_results.json`,
-`scratchpad/probe_retry_results.json` (session scratchpad, not committed).
+**Two rounds, and round 2 changed the verdict on two lanes — read this
+before the tables below.** Round 1 used a hand-rolled short system prompt
+(a reasonable first pass, but NOT the real prompt shape §C actually
+requires). Round 2 re-probed every repin/addition through
+`petridish.agents.runtime._assemble_context` — the ACTUAL production
+prompt-assembly function (`backend/tests/test_json_mode.py:141-158` shows
+the fixture pattern; script: `scratchpad/probe_real_prompt.py`), rendering
+a real 2-agent/plaza/recent-events fixture (5,847 chars ≈ 1,461 tokens —
+still lighter than a busy mid-game turn, but real production code, not an
+approximation). This caught exactly the failure mode
+`research/fallback-review.md` W1 warned about for `gpt-oss-120b` (a short
+probe missing a truncation-under-load problem) — it happened AGAIN here,
+to a lane I'd already added based on round-1 results:
+- `deepseek-v4-flash` looked clean on the short prompt (3/4 pass) but hit
+  `finish_reason=length` (prose reasoning, no JSON) **3/3** under the real
+  prompt.
+- `glm-5.2` was content-clean both rounds, but round 2 surfaced a LATENCY
+  problem the short prompt's fast responses hid: 17-26s per call, 3/3
+  trials — over `lanes.yaml`'s `per_attempt_timeout_s: 12` bound for the
+  bounce walk.
+Both are corrected in the config (details below); round-1 tables are kept
+for the full trail, round 2 is the one that decided the final config.
 
-## Dead-pin fixes (S1)
+Probe scripts + raw JSON (session scratchpad, not committed):
+`scratchpad/probe_models.py`, `scratchpad/probe_retry.py`,
+`scratchpad/probe_raw_results.json`, `scratchpad/probe_retry_results.json`
+(round 1); `scratchpad/probe_real_prompt.py`,
+`scratchpad/probe_real_prompt_results.json` (round 2).
+
+## Dead-pin fixes (S1) — round 1 (short prompt)
 
 | profile | old model_id | catalog status | new model_id | probe verdict |
 |---|---|---|---|---|
@@ -53,29 +78,46 @@ model). Direct-probed `POST /v1/embeddings {"model":"bge-m3", "input": "..."}`
 live: **HTTP 200**, valid embedding vector returned, routed via
 `cloudflare`. No change made — the profile was never actually broken.
 
-## New lanes (M1) — probe-verified subset of the requested 5
+## New lanes (M1) — round 1 (short prompt), probe-verified subset of the requested 5
 
 | model | verdict | evidence |
 |---|---|---|
-| `glm-5.2` | **PASS 2/2** | finish=stop, both clean, 1.7-6s, routed `nvidia/z-ai/glm-5.2` — new profile `glm-5` added |
-| `deepseek-v4-flash` | **PASS 3/4** (clean 2/2 on retry) | first cold attempt timed out; retry-round 2/2 clean, finish=stop, routed `opencode/deepseek-v4-flash-free` — new profile `deepseek-flash` added |
+| `glm-5.2` | **PASS 2/2** | finish=stop, both clean, 1.7-6s, routed `nvidia/z-ai/glm-5.2` |
+| `deepseek-v4-flash` | **PASS 3/4** (clean 2/2 on retry) | first cold attempt timed out; retry-round 2/2 clean, finish=stop, routed `opencode/deepseek-v4-flash-free` |
 | `kimi-k2.6` | **PASS 2/2** | already a profile (`kimi`); reconfirmed live, routed `cloudflare/@cf/moonshotai/kimi-k2.6` — no new profile needed |
 | `minimax-m3` | **PASS 2/2** | already a profile (`minimax`); reconfirmed live, two different routes served (`huggingface/MiniMaxAI/MiniMax-M3` then `ollama/minimax-m3`) — no new profile needed |
-| `qwen3.5-122b-a10b` | **REJECTED** | both attempts: NVIDIA NIM 410 — *"the model 'qwen/qwen3.5-122b-a10b' has reached its end of life on 2026-07-20T00:00:00Z and is no longer available."* This is a definitive EOL, not a rate limit — the static catalog snapshot (`freellmapi-models.json`, listing it `available: true`) was already stale within 24h. **NOT added as a lane or profile.** |
+| `qwen3.5-122b-a10b` | **REJECTED** | both attempts: NVIDIA NIM 410 — *"the model 'qwen/qwen3.5-122b-a10b' has reached its end of life on 2026-07-20T00:00:00Z and is no longer available."* This is a definitive EOL, not a rate limit — the static catalog snapshot (`freellmapi-models.json`, listing it `available: true`) was already stale within 24h. **NOT added as a lane or profile**, round 1 or 2. |
+
+## Round 2 — REAL production system prompt (`_assemble_context`)
+
+Re-probed every repin/addition through the actual prompt-assembly code
+(prompt: 2 messages, 5,847 chars ≈ 1,461 tokens — see script header above).
+This is the run that decided the committed config.
+
+| model | round-2 verdict | detail |
+|---|---|---|
+| `llama-3.3-70b-fp8-fast` (groq-llama) | **PASS 3/3** | finish=stop, valid JSON every time; latency 16.8s / 4.5s / 2.6s (one cold-start outlier, then fast) — fine either way since the PINNED first-call path has no `per_attempt_timeout_s` cap (router.py:583 passes no `timeout=`; only the bounce walk does, router.py:1136/1226) |
+| `glm-4.7` (cerebras-glm) | **PASS 1/1** | finish=stop, valid JSON, ~0.7s |
+| `glm-5.2` | **CONTENT clean 3/3, but LATENCY fails the bounce cap** | finish=stop, valid JSON every trial, but 26.1s / 17.2s / 25.2s — all three over `per_attempt_timeout_s: 12`. As a bounce-only lane (never pinned) it would time out on every attempt in production. **Removed from `lanes.yaml` `order`**; kept in `profiles.yaml` (`glm-5`) as an explicit-pin-only option, since the pinned path isn't time-capped the same way. |
+| `deepseek-v4-flash` | **FAIL 3/3** | `finish_reason=length` every trial — the model plans in prose ("We are at Central Plaza. Bram is here...") and never reaches the JSON object before the 1024-token budget runs out. Round 1's 3/4 pass was a false pass from a lighter/shorter prompt. **Tagged `reasoning` in `lanes.yaml`** (same mechanism/treatment as `gpt-oss-120b`) instead of removed outright — still a valid last-resort non-strict-JSON lane. |
 
 ## Reasoning-tag (S2/W6)
 
-`config/lanes.yaml`'s `gpt-oss-120b*` order entry now carries
-`tags: ["reasoning"]`. This flips the router's existing
+`config/lanes.yaml`'s `gpt-oss-120b*` AND `deepseek-v4-flash` order entries
+now carry `tags: ["reasoning"]`. This flips the router's existing
 `require_json`-skip mechanism (`router.py:1219`,
-`if require_json and "reasoning" in lane.tags: continue`) to keep it out of
-the strict-JSON bounce path. `profiles.yaml`'s old comment ("intentionally
-NOT reasoning-tagged") is updated to document why this supersedes the prior
-decision: on the real ~4900-token agent prompt it CoT-truncates
-(`finish_reason=length`, 118 recent failures per `data/run.sqlite`), so the
-old worry (losing it from the bounce pool entirely) is the correct outcome
-here, not a regression — it was failing on exactly the turns it would have
-been tried on.
+`if require_json and "reasoning" in lane.tags: continue`) to keep both out
+of the strict-JSON bounce path.
+
+`gpt-oss-120b`: `profiles.yaml`'s old comment ("intentionally NOT
+reasoning-tagged") is updated to document why this supersedes the prior
+decision — on the real agent prompt it CoT-truncates (`finish_reason=
+length`, 118 recent failures per `data/run.sqlite`), so the old worry
+(losing it from the bounce pool entirely) is the correct outcome here, not
+a regression.
+
+`deepseek-v4-flash`: added tagged + demoted from the start, based on round
+2 above (never was in an un-tagged committed state).
 
 ## Config audit (item 2, second half)
 

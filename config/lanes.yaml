@@ -106,27 +106,40 @@ adaptive_routing:
   # stays `auto` (terminal_fallback, EM-319). A pin that later rate-limits trips
   # the EM-324 detour (chronic length/no-JSON → lane_sick) and walks THIS list.
   #
-  # 2026-07-21 (feed-truth W1/W6/M1) — two additions:
+  # 2026-07-21 (feed-truth W1/W6/M1) — corrected against the REAL production
+  # system prompt (contracts/2026-07-21-feed-truth.md §C requires probing
+  # with the repo's real action-schema prompt shape, not a hand-rolled one —
+  # the fallback-review.md W1 lesson about short probes missing truncation
+  # applies to LATENCY too, not just content):
   #   - `tags: [reasoning]` added to gpt-oss-120b*: it CoT-truncates on the
   #     heavy agent prompt (118 recent failures on strict-JSON turns), so the
   #     router's require_json bounce-skip (router.py:1219) now keeps it out
   #     of the strict-JSON path instead of trying-and-failing it. Supersedes
   #     the old profiles.yaml "intentionally NOT reasoning-tagged" note (see
   #     that file for the full rationale).
-  #   - `glm-5.2` and `deepseek-v4-flash` added as new curated clean-JSON
-  #     lanes (probe results: coordination/probe-results-2026-07-21.md),
-  #     slotted near the top alongside the other verified-clean instruct
-  #     lanes to widen headroom during rate storms (W7).
+  #   - `deepseek-v4-flash` added tags: [reasoning] and DEMOTED next to
+  #     gpt-oss-120b: under the REAL agent prompt it plans in prose before
+  #     ever reaching JSON and hits finish_reason=length 3/3 live trials
+  #     (probe results: coordination/probe-results-2026-07-21.md) — a
+  #     short hand-rolled probe missed this (3/4 clean). Same treatment as
+  #     gpt-oss-120b: kept as a last-resort non-strict-JSON lane, not a
+  #     curated clean one.
+  #   - `glm-5.2` is NOT in this order list. It IS clean-JSON (3/3 real-
+  #     prompt trials finish=stop) but consistently took 17-26s — this
+  #     bounce walk's per_attempt_timeout_s is 12s (below), so as a
+  #     bounce-only lane it would time out on EVERY attempt (the pinned
+  #     first-call path has no such cap — see router.py:583 vs :1136/:1226
+  #     — so it stays available in profiles.yaml as an explicit-pin choice,
+  #     just not in the timed bounce walk where it can only ever fail).
   order:
     - { source: freellmapi, model: "mistral-large-3-675b",   free: true }  # mistral-large — premium rich voice (when up)
-    - { source: freellmapi, model: "glm-5.2",                free: true }  # glm-5 — NEW 2026-07-21, verified direct-clean (finish=stop, 2/2)
     - { source: freellmapi, model: "mistral-small-4-119b",   free: true }  # mistral-small — verified direct-clean (finish=stop)
-    - { source: freellmapi, model: "llama-3.3-70b-fp8-fast", free: true }  # llama-fast / groq-llama — Meta/Cloudflare, verified direct-clean
-    - { source: freellmapi, model: "deepseek-v4-flash",      free: true }  # deepseek-flash — NEW 2026-07-21, verified direct-clean on retry (3/4)
+    - { source: freellmapi, model: "llama-3.3-70b-fp8-fast", free: true }  # llama-fast / groq-llama — Meta/Cloudflare, verified direct-clean (real prompt: 2.6-4.5s typical)
     - { source: freellmapi, model: "gemini-3.1-flash-lite",  free: true }  # gemini-flash-lite — Google, verified direct-clean
     - { source: freellmapi, model: "minimax-m3",             free: true }  # minimax — MiniMax, clean JSON
     - { source: freellmapi, model: "command-r-2",            free: true }  # command-r — Cohere R (clean when its native is up)
     - { source: freellmapi, model: "gpt-oss-120b*",          free: true, tags: ["reasoning"] }  # gpt-oss-120b — reasoning-tagged 2026-07-21: CoT-truncates on heavy turns, skipped on strict-JSON turns
+    - { source: freellmapi, model: "deepseek-v4-flash",      free: true, tags: ["reasoning"] }  # deepseek-flash — reasoning-tagged 2026-07-21: plans in prose, finish=length 3/3 on the real prompt, skipped on strict-JSON turns
     - { source: freellmapi, model: "*",                      free: true }  # remaining free lanes (sweep)
     - { source: freellmapi, model: "auto" }                                # blind proxy picker — low-priority resort
     - { source: anthropic,  model: "claude-sonnet-5",        free: false } # paid, opt-in, dead last
