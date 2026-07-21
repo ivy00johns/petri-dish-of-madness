@@ -176,14 +176,21 @@ world:
     diffusion_chance: 0.20    # per-carrier co-located passive-hop chance (seeded)
     max_diffusions: 12        # per-round ceiling on passive hops
     half_life_ticks: 30       # ticks without a spread before virality halves
-    decay_ticks: 80           # ticks without a spread before a zero-carrier meme dies
+    decay_ticks: 24           # meme-coherence fix: 80→24 — zero-carrier junk memes clear in ~1 day, not ~4
     letter_cap: 8             # undelivered letters parked per mailbox (FIFO)
     held_meme_cap: 12         # memes an agent carries (FIFO, oldest dropped)
     distortion_strength: 1    # text-mutation passes per transmission hop
+    max_drift_generations: 3  # meme-coherence fix: past this many generations, diffuse_culture hops stop distorting the text (still spreads/mints, stays legible)
     meme_images: true         # create_image auto-registers an image meme (EM-253)
     dominance_threshold: 6    # carriers needed for a meme_dominant event
     camp_min_shared: 2        # shared memes that bind a culture-camp edge
     camp_min_size: 3          # minimum members for a culture camp
+    # Feed-health fix — the passive sweep's NOTIFICATIONS are capped so a busy
+    # round reads as a few meaningful lines + one honest summary instead of
+    # dozens of near-identical "drifts to" / "fades from memory" lines. State
+    # (mints/attaches/prunes) is completely unaffected by these two knobs.
+    mutation_notable_cap: 2      # individual meme_mutated events per sweep
+    death_notable_virality: 3    # min virality for an individual meme_died
 
   # EM-256/EM-257 — organized violence (Wave O War track). DEFAULT OFF: with
   # enabled false the grievance ledger, the advance_war round boundary, and the
@@ -822,8 +829,8 @@ agents:                          # seed agents; profile must match a profiles[].
   # lanes, no tiny-cap lanes) so the proxy answers in 1-4s and the world never
   # stalls behind one slow turn — the budget guard is off (turn_llm_budget_seconds: 0).
   # All start in the plaza so they meet, greet, and converse from round one.
-  - { name: Ada,    personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash,  location: plaza }
-  - { name: Bram,   personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: groq-llama,    location: plaza }
-  - { name: Cleo,   personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: cerebras-glm,  location: plaza }
+  - { name: Ada,    personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash-lite,  location: plaza }
+  - { name: Bram,   personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: llama-fast,    location: plaza }
+  - { name: Cleo,   personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: command-r,  location: plaza }
   - { name: Vesper, personality: "Serial entrepreneur who has founded eleven ventures and abandoned ten; pitches a new scheme to anyone within earshot, considers bankruptcy a branding exercise, and treats the Market as her personal stage.", profile: mistral-small, location: plaza }
-  - { name: Mox,    personality: "Conspiracy theorist convinced the town's laws are drafted by an unseen cabal and reads hidden messages in billboard typos; trusts no one near Town Hall yet attends every vote 'to monitor them'.", profile: kimi,          location: plaza }
+  - { name: Mox,    personality: "Conspiracy theorist convinced the town's laws are drafted by an unseen cabal and reads hidden messages in billboard typos; trusts no one near Town Hall yet attends every vote 'to monitor them'.", profile: minimax,          location: plaza }
