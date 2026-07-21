@@ -10220,18 +10220,26 @@ class World:
         "— I heard it twice",
         "— no one denies it",
     )
+    # Meme-coherence fix — a text that has already accreted this many
+    # DISTORTION_SUFFIXES never gets another one appended (the "pile of
+    # rumor-suffixes" ramble reported over many drift generations). 1 means
+    # at most one rumor-suffix ever rides along on a given meme's text.
+    DISTORTION_SUFFIX_CAP: int = 1
 
     def _distort_text(self, text: str, *seed_parts: Any) -> str:
         """EM-250 — deterministically mutate `text` through comm.
         distortion_strength "telephone game" hops (default 1; 0 ⇒ unchanged):
         each hop substitutes ONE seeded-pick DISTORTION_TABLE word (first
         occurrence, case-insensitive) or, when nothing matches, appends a
-        seeded embellishment. Pure fn of (text, seed_parts, config) — no
-        random, no clock (EM-155); callers supply the hop identity (e.g. tick
-        + carrier ids) as seed parts. Output is capped at 200 chars so a long
-        rumor never unbounds beliefs. TEXT ONLY by design — drift never
-        auto-generates images (the free-first cost rule; a visual-meme repaint
-        needs an explicit create_image turn, EM-253)."""
+        seeded embellishment — UNLESS the text already carries
+        DISTORTION_SUFFIX_CAP (default 1) rumor-suffixes, in which case the
+        hop is a deterministic no-op (meme-coherence fix: suffixes no longer
+        pile up into ramble across many drift generations). Pure fn of (text,
+        seed_parts, config) — no random, no clock (EM-155); callers supply the
+        hop identity (e.g. tick + carrier ids) as seed parts. Output is capped
+        at 200 chars so a long rumor never unbounds beliefs. TEXT ONLY by
+        design — drift never auto-generates images (the free-first cost rule;
+        a visual-meme repaint needs an explicit create_image turn, EM-253)."""
         from ..animals.runtime import _seed_int
         out = str(text or "")
         strength = max(0, int(self._comm_param("distortion_strength", 1)))
@@ -10247,9 +10255,16 @@ class World:
                 out = re.sub(rf"\b{re.escape(src)}\b", dst, out, count=1,
                              flags=re.IGNORECASE)
             else:
-                suffix = self.DISTORTION_SUFFIXES[seed % len(self.DISTORTION_SUFFIXES)]
-                if not out.endswith(suffix):
-                    out = f"{out} {suffix}".strip()
+                # Meme-coherence fix — count suffixes ALREADY present anywhere
+                # in the text (not just a trailing endswith match) and stop
+                # accreting once the cap is hit; a capped hop is a deterministic
+                # no-op rather than piling on another embellishment.
+                suffix_count = sum(
+                    1 for s in self.DISTORTION_SUFFIXES if s in out)
+                if suffix_count < self.DISTORTION_SUFFIX_CAP:
+                    suffix = self.DISTORTION_SUFFIXES[seed % len(self.DISTORTION_SUFFIXES)]
+                    if suffix not in out:
+                        out = f"{out} {suffix}".strip()
         return out[:200]
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -10882,13 +10897,37 @@ class World:
         % 100 < int(diffusion_chance * 100)` (never random/clock — EM-155; the
         roll is fixed by the participant ids, so the outcome is INDEPENDENT of the
         walk order). A hit mints a DRIFTED CHILD meme (parent_id + generation+1 +
-        _distort_text, seeded on the target), attaches it to the target, and emits
-        a `meme_mutated` event; the sweep is capped at comm.max_diffusions total
-        infections. Then virality half-life-decays (idle >= comm.half_life_ticks
+        _distort_text, seeded on the target), attaches it to the target, and
+        counts as an infection; the sweep is capped at comm.max_diffusions total
+        infections. Meme-coherence fix — once the SOURCE meme's own generation
+        reaches comm.max_drift_generations (default 3), the child's TEXT passes
+        through verbatim (no further _distort_text hop) even though it still
+        mints, attaches, and increments generation like any other hop — the idea
+        keeps spreading, it just stops getting more garbled past a few hops. Then
+        virality half-life-decays (idle >= comm.half_life_ticks
         ⇒ halved with `//` floor, never round/float — the EM-155 drift guard) and
-        a zero-carrier meme idle >= comm.decay_ticks is pruned from self.memes
-        with a `meme_died` event ("death of an idea"); a meme that still has
-        carriers is NEVER pruned.
+        a zero-carrier meme idle >= comm.decay_ticks is pruned from self.memes;
+        a meme that still has carriers is NEVER pruned.
+
+        Feed-health fix — STATE (mint/attach/prune/virality) is unaffected by
+        any of the below; only which NOTIFICATIONS fire changes:
+          * a hop emits an individual `meme_mutated` event only for the first
+            comm.mutation_notable_cap infections THIS sweep; every further hop
+            rolls into ONE aggregate `meme_mutated` event
+            (payload.aggregated=True, payload.count=n) so a busy round reads
+            as "an idea spread to N more neighbours" instead of N identical
+            "drifts to" lines.
+          * a pruned meme emits an individual `meme_died` ("fades from
+            memory") event only when it MATTERED — it was ever dominant (in
+            self.dominant_meme_ids before this sweep's discard), OR it's a
+            coined original (generation == 0), OR its virality was still
+            >= comm.death_notable_virality at prune time. Every OTHER pruned
+            meme (the never-notable one-hop drift children — the source of
+            the "dozens of identical fade lines" flood, since a shallow
+            _distort_text hop rarely changes a meme's text[:40]) rolls into
+            ONE aggregate `meme_died` event per sweep.
+        Both aggregates are order-independent counts (deterministic — EM-155)
+        and are omitted entirely when their count is 0.
 
         Events SELF-PARK in the pending_spawn_events outbox (same drain as
         recompute_factions) and are ALSO returned. Gated on comm.enabled: disabled
@@ -10904,11 +10943,23 @@ class World:
         max_diff = max(0, int(self._comm_param("max_diffusions", 12)))
         half_life = int(self._comm_param("half_life_ticks", 30))
         decay_ticks = int(self._comm_param("decay_ticks", 80))
+        # Feed-health fix — notification caps (never gate STATE, only which
+        # events get an individual line vs. a rolled-up aggregate).
+        mutation_cap = max(0, int(self._comm_param("mutation_notable_cap", 2)))
+        death_notable_virality = max(
+            0, int(self._comm_param("death_notable_virality", 3)))
+        # Meme-coherence fix — once a SOURCE meme's own generation reaches this
+        # cap, further hops off of it stop degrading the text (still spread /
+        # still mint a child, lineage + generation still increments — only the
+        # TEXT stops drifting past the cap).
+        max_drift_gens = max(0, int(self._comm_param("max_drift_generations", 3)))
 
         # 1) Passive seeded diffusion. Snapshot the SOURCE memes (sorted by id)
         # BEFORE any mint so a child minted THIS sweep is never itself re-walked.
         sources = sorted(self.memes.values(), key=lambda m: m.id)
         infections = 0
+        notable_mutations = 0     # individual meme_mutated events emitted so far
+        aggregated_mutations = 0  # hops beyond mutation_cap, rolled into ONE event
         for meme in sources:
             if infections >= max_diff:
                 break
@@ -10930,9 +10981,16 @@ class World:
                                      carrier.id, target.id, self.tick)
                     if roll % 100 >= threshold:
                         continue
+                    # Meme-coherence fix — past the drift-generation cap the
+                    # idea still spreads and still mints a child (lineage +
+                    # generation+1 unchanged), but the TEXT passes through
+                    # verbatim instead of taking another _distort_text hop.
+                    child_text = (
+                        meme.text if meme.generation >= max_drift_gens
+                        else self._distort_text(meme.text, target.id, self.tick))
                     child = self.mint_meme(
                         meme.kind,
-                        self._distort_text(meme.text, target.id, self.tick),
+                        child_text,
                         meme.origin_agent_id,
                         parent_id=meme.id,
                         generation=meme.generation + 1,
@@ -10947,17 +11005,34 @@ class World:
                     # child opens at virality 1 (consistent with create/adopt —
                     # a meme with a carrier is never virality 0).
                     child.virality += 1
-                    events.append({
-                        "kind": "meme_mutated",
-                        "actor_id": carrier.id,
-                        "target_id": target.id,
-                        "actor_type": "system",
-                        "text": (f"{self._agent_name(carrier.id)}'s "
-                                 f"{meme.kind} drifts to "
-                                 f"{self._agent_name(target.id)}."),
-                        "payload": {"meme_id": child.id, "parent_id": meme.id,
-                                    "generation": child.generation},
-                    })
+                    # Feed-health fix — only the first `mutation_cap` hops this
+                    # sweep get their own line; the rest are counted, not
+                    # dropped (aggregate event appended after the loop below).
+                    if notable_mutations < mutation_cap:
+                        notable_mutations += 1
+                        events.append({
+                            "kind": "meme_mutated",
+                            "actor_id": carrier.id,
+                            "target_id": target.id,
+                            "actor_type": "system",
+                            "text": (f"{self._agent_name(carrier.id)}'s "
+                                     f"{meme.kind} drifts to "
+                                     f"{self._agent_name(target.id)}."),
+                            "payload": {"meme_id": child.id, "parent_id": meme.id,
+                                        "generation": child.generation},
+                        })
+                    else:
+                        aggregated_mutations += 1
+
+        if aggregated_mutations > 0:
+            events.append({
+                "kind": "meme_mutated",
+                "actor_id": None,
+                "actor_type": "system",
+                "text": (f"🧬 an idea drifted to {aggregated_mutations} more "
+                         f"neighbour{'' if aggregated_mutations == 1 else 's'}."),
+                "payload": {"aggregated": True, "count": aggregated_mutations},
+            })
 
         # 2) Half-life virality decay — a meme idle >= half_life_ticks halves its
         # virality with `//` floor (never round/float — the EM-155 drift guard).
@@ -10972,19 +11047,46 @@ class World:
         # >= decay_ticks is deleted; a meme that still has carriers is NEVER
         # pruned. Snapshot the ids first (we mutate self.memes in the loop) and
         # walk them sorted for deterministic event order.
+        #
+        # Feed-health fix — a pruned meme gets its OWN "fades from memory" line
+        # only when it mattered (ever dominant / a coined original / still
+        # viral); every other pruned meme (the never-notable one-hop drift
+        # children that dominated the flood — _distort_text rarely changes a
+        # meme's text[:40], so waves of them read as IDENTICAL lines) is
+        # counted and rolled into ONE aggregate event below.
+        faded_count = 0
         for mid in sorted(self.memes):
             meme = self.memes[mid]
             if meme.carriers:
                 continue
             if self.tick - meme.last_spread_tick >= decay_ticks:
+                was_dominant = mid in self.dominant_meme_ids
+                notable = (
+                    was_dominant
+                    or meme.generation == 0
+                    or meme.virality >= death_notable_virality
+                )
                 del self.memes[mid]
                 self.dominant_meme_ids.discard(mid)   # EM-253 — no stale latch
-                events.append(self._faction_event(
-                    "meme_died", meme.origin_agent_id,
-                    f'The {meme.kind} "{meme.text[:40]}" fades from memory.',
-                    {"meme_id": meme.id, "kind": meme.kind,
-                     "generation": meme.generation},
-                ))
+                if notable:
+                    events.append(self._faction_event(
+                        "meme_died", meme.origin_agent_id,
+                        f'The {meme.kind} "{meme.text[:40]}" fades from memory.',
+                        {"meme_id": meme.id, "kind": meme.kind,
+                         "generation": meme.generation},
+                    ))
+                else:
+                    faded_count += 1
+
+        if faded_count > 0:
+            events.append({
+                "kind": "meme_died",
+                "actor_id": None,
+                "actor_type": "system",
+                "text": (f"🥀 {faded_count} fleeting idea"
+                         f"{'' if faded_count == 1 else 's'} faded from memory."),
+                "payload": {"aggregated": True, "count": faded_count},
+            })
 
         # 4) Dominance ("🦊 dominant motif", EM-253) — a meme whose LIVE carrier
         # count reaches comm.dominance_threshold and was NOT dominant before

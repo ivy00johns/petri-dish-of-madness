@@ -1750,6 +1750,39 @@ def _sanitize_charter_revision(
     return None
 
 
+# The declared top-level keys ACTION_SCHEMA allows. Anything else a model puts
+# at the top level (flat single-action params like target/message/zone_id) is
+# folded into `args` before validation — the EM-066 "a misplaced field never
+# fails the turn" ethos, applied at the top level (args + actions[] items are
+# already permissive; only the top level was strict). Derived from the schema
+# itself so it stays in sync automatically.
+_DECLARED_TOP_LEVEL = set(ACTION_SCHEMA["properties"].keys())
+
+
+def _fold_stray_top_level_into_args(action_dict: dict) -> None:
+    """A model that emits a single-action response sometimes puts the action's
+    parameters FLAT at the top level (`{"action": "whisper", "target": "Ada",
+    "message": "hi"}`) instead of nested under `args` (`{"action": "whisper",
+    "args": {"target": "Ada", "text": "hi"}}`). Those undeclared top-level keys
+    used to hard-fail the whole turn under ACTION_SCHEMA's top-level
+    `additionalProperties: False` (idle fallback) even though the identical
+    keys are welcome one level down. Move any undeclared top-level key into
+    `args` IN PLACE so it validates instead. Does NOT overwrite an existing
+    `args` key (first-write-wins, mirroring the alias-resolution precedence
+    elsewhere in this module); leaves declared keys (action/actions/args/
+    thought/mood/… — see _DECLARED_TOP_LEVEL) untouched. No-op on a clean
+    response. Never raises."""
+    stray = [k for k in list(action_dict) if k not in _DECLARED_TOP_LEVEL]
+    if not stray:
+        return
+    args = action_dict.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    for k in stray:
+        args.setdefault(k, action_dict.pop(k))
+    action_dict["args"] = args
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Behavioral-arg normalization (EM-140) — meet the models where they are.
 #
@@ -1773,6 +1806,15 @@ _NONEISH_STRINGS = {"", "none", "null", "nil"}
 # produce. First non-empty value wins.
 _PLACE_ALIAS_KEYS = ("place", "place_id", "destination", "location", "to", "target")
 _TARGET_ALIAS_KEYS = ("target", "target_id", "agent", "agent_id", "who", "name")
+# EM-feed-health — a model asked to say/whisper/write frequently puts the
+# content under a synonym key (message/msg/content/body/speech/utterance/
+# saying) instead of the schema's `text`. `_fold_stray_top_level_into_args`
+# already promotes a stray TOP-LEVEL `message` into `args`, so the turn
+# VALIDATES — but nothing mapped `args["message"]` -> `args["text"]`, so the
+# handler read an empty `text` and the agent said/whispered NOTHING (the
+# `says: ""` symptom). `text` is listed first so it wins when already real.
+_TEXT_ALIAS_KEYS = ("text", "message", "msg", "content", "body", "speech",
+                     "utterance", "saying")
 _TARGETED_ACTIONS = frozenset(
     {"give", "steal", "insult", "attack", "whisper", "set_relationship",
      # EM-240 — agent-targeted crime verbs resolve a name in args["target"] to an
@@ -1821,6 +1863,17 @@ _TARGETED_ACTIONS = frozenset(
      # send_letter recipe: _resolve_agent_target already matches an ABSENT living
      # agent by name). declare_hostility takes a faith_id, not an agent (EXCLUDED).
      "excommunicate"}
+)
+
+# EM-feed-health — actions whose primary payload is content the handler reads
+# from args["text"] (spread_rumor is the one exception: its handler falls back
+# `args.get("rumor", "") or args.get("text", "")`, so aliasing into `text`
+# satisfies it without disturbing a `rumor` the model deliberately sent).
+# Kept tight to actions that actually read a text arg — do NOT add an action
+# here just because it takes SOME free-string arg (e.g. deceive's `about`,
+# propose_project's `function` are NOT spoken/written content).
+_TEXT_ACTIONS = frozenset(
+    {"say", "whisper", "post_billboard", "send_letter", "create_meme", "spread_rumor"}
 )
 
 # Behavioral STRING caps where truncation is harmless (display text — losing a
@@ -2011,6 +2064,23 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
         rid = args.get("rule_id")
         if rid is not None and not isinstance(rid, str):
             args["rule_id"] = str(rid)
+
+    # EM-feed-health — text-content alias, run as an INDEPENDENT check (not
+    # another elif branch) because whisper/send_letter/spread_rumor are ALSO
+    # _TARGETED_ACTIONS members that already matched the target-resolution
+    # branch above; an elif here would never fire for them.
+    if action in _TEXT_ACTIONS:
+        # spread_rumor's handler prefers `rumor` over `text`
+        # (args.get("rumor","") or args.get("text","")) — a real `rumor`
+        # blocks the alias write exactly like a real `text` does elsewhere
+        # (first-write-wins: never clobber content the model deliberately sent).
+        already_has_content = not _noneish(args.get("text")) or (
+            action == "spread_rumor" and not _noneish(args.get("rumor"))
+        )
+        if not already_has_content:
+            text = _first_real_arg(args, _TEXT_ALIAS_KEYS)
+            if isinstance(text, str):
+                args["text"] = text
 
     caps = _ARG_STRING_CAPS.get(action)
     if caps:
@@ -6591,6 +6661,12 @@ class AgentRuntime:
             else (CHARTER_MAX_AMBITIONS, CHARTER_CREED_CAP))
         charter_rev_rejected = _sanitize_charter_revision(
             action_dict, max_ambitions=_max_amb, creed_cap=_creed_cap)
+        # Fold flat top-level action params (target/message/zone_id/…) into
+        # `args` BEFORE _normalize_args, so alias resolution (name→id, place
+        # aliases) sees them where it looks — and BEFORE _validate_schema,
+        # so the top-level additionalProperties=False gate never rejects a
+        # turn over a misplaced-but-recoverable field (EM-066 ethos).
+        _fold_stray_top_level_into_args(action_dict)
         # EM-140 — collapse arg aliases (destination→place) and resolve agent
         # names to ids BEFORE validation, so a well-intentioned response isn't
         # a dead turn over key spelling the prompt never specified.
