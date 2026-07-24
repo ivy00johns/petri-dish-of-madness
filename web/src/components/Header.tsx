@@ -33,6 +33,7 @@ const NAV_TABS = [
   { to: '/chronicle', label: 'Chronicle' },
   { to: '/diary', label: 'Diary' },
   { to: '/inspector', label: 'Inspector' },
+  { to: '/lab', label: 'Lab' },
 ] as const;
 
 export function Header({ tick, day, running, connected, mockMode }: HeaderProps) {
@@ -57,7 +58,7 @@ export function Header({ tick, day, running, connected, mockMode }: HeaderProps)
           CHAOS LAB v1
         </span>
 
-        {/* Route nav — Live · Chronicle · Inspector (EM-201). */}
+        {/* Route nav — Live · Chronicle · Diary · Inspector · Lab (EM-201). */}
         <nav className="flex items-center gap-1" aria-label="Views">
           {NAV_TABS.map(({ to, label }) => {
             const active = location.pathname === to;

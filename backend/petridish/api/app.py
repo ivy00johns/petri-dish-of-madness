@@ -63,6 +63,29 @@ _config: WorldConfig | None = None
 # WebSocket connection manager
 _connections: set[WebSocket] = set()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Lab Setup flag inventory (v1). Prompt-weight flags move the estimate; routing/ops
+# flags do not change prompt size. `discovery` lives under adaptive_routing.
+# ──────────────────────────────────────────────────────────────────────────────
+_PROMPT_WEIGHT_FLAGS = [
+    "comm", "settlements", "faith", "war", "factions", "universalization",
+    "memory_retrieval", "buildings", "planning", "narrator", "miracles",
+    "children", "animals", "image_gen", "healing_house", "charters",
+    "chimera_twins", "coherence", "generations",
+]
+_ROUTING_OPS_FLAGS = [
+    "lane_failover", "overflow_lane", "cap_governor", "usage_caps", "cache",
+    "discovery",
+]
+
+
+def _flag_baked(params: Any, flag: str) -> bool:
+    from ..engine.world import _block_get
+    if flag == "discovery":
+        ar = getattr(params, "adaptive_routing", None)
+        return bool(_block_get(getattr(ar, "discovery", None), "enabled", False))
+    return bool(_block_get(getattr(params, flag, None), "enabled", False))
+
 
 def _on_ws_send_done(task: asyncio.Task, ws: WebSocket) -> None:
     """Done-callback for scheduled WS sends (audit B10): consume the task's
@@ -665,6 +688,158 @@ async def get_config():
     return {k: getattr(params, k) for k in vars(params) if not k.startswith("_")}
 
 
+@app.get("/api/config/flags")
+async def get_config_flags():
+    """Current run's BAKED flag state + group membership. Merges explicit
+    world.yaml blocks, absent-defaulted blocks (e.g. faith), and adaptive_routing
+    — so 'why now / why not before' is answerable in one place."""
+    if _config is None:
+        raise HTTPException(503, "Not initialized")
+    params = _config.world
+    baked = {f: _flag_baked(params, f) for f in _PROMPT_WEIGHT_FLAGS + _ROUTING_OPS_FLAGS}
+    return {"baked": baked,
+            "groups": {"prompt_weight": _PROMPT_WEIGHT_FLAGS,
+                       "routing_ops": _ROUTING_OPS_FLAGS}}
+
+
+class EstimateBody(BaseModel):
+    overrides: dict[str, bool] = Field(default_factory=dict)
+
+
+@app.post("/api/estimate")
+async def post_estimate(body: EstimateBody):
+    """Predict the prompt size of a flag combo. Runs the real builder against a
+    flag-overridden shallow copy of the live world. Never fabricates a number:
+    on any failure returns {ok: false, error}."""
+    if _config is None:
+        raise HTTPException(503, "Not initialized")
+    if _world is None:
+        return {"ok": False, "error": "world not initialized"}
+    from ..engine.estimator import estimate_prompt
+    agents = _world.living_agents()
+    if not agents:
+        return {"ok": False, "error": "no living agents to estimate against"}
+    agent = next((a for a in agents if getattr(a, "cadence_tier", "") == "protagonist"), agents[0])
+    try:
+        result = estimate_prompt(_world, agent, _config.world, body.overrides, _PROMPT_WEIGHT_FLAGS)
+    except Exception as exc:  # fix-don't-hide: surface, never fake a number
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, **result}
+
+
+# Flags that do NOT live under world.yaml's `world:` block. `discovery` is
+# adaptive_routing.discovery.enabled in config/lanes.yaml (see _flag_baked
+# above, which reads it from there too). Writing it into world.yaml would
+# create a dead key the loader never reads — a silent no-op bake. Apply
+# refuses to write these; they come back in the response's `unapplied` list
+# instead (fix-don't-hide — a v2 lanes.yaml writer is future work, not this).
+_LANES_YAML_FLAGS = {"discovery"}
+
+
+class ApplyBody(BaseModel):
+    overrides: dict[str, bool] = Field(default_factory=dict)
+
+
+@app.post("/api/config/apply")
+async def post_config_apply(body: ApplyBody):
+    """Write the staged flag flips to config/world.yaml (comment-preserving) and
+    tell the caller a fresh ./dev restart is required to bake them. Never silent:
+    returns the exact diff plus any flags that could NOT be written here (e.g.
+    `discovery`, which lives in config/lanes.yaml, via `unapplied`) and any
+    override keys that aren't a real flag at all (via `unknown` — never baked
+    as a dead key under `world:`). A true no-op (empty overrides, all-unapplied,
+    or values that already match what's on disk) never opens the file for
+    writing, so `restart_required` reflects whether anything actually changed.
+    Does NOT restart in-process (the --reload ban).
+
+    Known v1 residual: ruamel's round-trip loader preserves every comment and
+    value, but on an ACTUAL write it still cosmetically normalizes ~25 lines
+    of world.yaml (e.g. `null` -> blank, flow-mapping alignment padding) that
+    are semantically identical either way. Fix 1 (the no-op guard above) means
+    this only fires when something real changed, not on every apply call.
+    Tracked as a known limitation, not a bug — a future v2 could diff at the
+    ruamel-node level to suppress even that."""
+    import os
+    import tempfile
+    from ruamel.yaml import YAML
+    if _config is None:
+        raise HTTPException(503, "Not initialized")
+    path = os.environ.get("PETRIDISH_WORLD_YAML", "config/world.yaml")
+    try:
+        # ruamel round-trip loader (typ='rt', the default) — comment-preserving
+        # AND safe: it does NOT construct arbitrary Python like PyYAML's unsafe
+        # yaml.load(). Never swap this for PyYAML yaml.load()/unsafe_load().
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        # Calibrated to world.yaml's own hand-authored style (verified against
+        # both the top-level `animals:` list and the nested `charters.
+        # seed_ambitions:` list): ruamel's unset defaults would otherwise flatten
+        # every block-sequence dash to column 0 AND rewrap any flow mapping past
+        # the 80-col default width — turning a one-flag toggle into a huge,
+        # unrelated-looking diff. width=4096 stops the rewrap; the explicit
+        # indent reproduces this file's 2-space list indent.
+        yaml.width = 4096
+        yaml.indent(mapping=2, sequence=4, offset=2)
+        with open(path) as fh:
+            doc = yaml.load(fh)
+        world_block = doc.get("world", doc)
+        # Valid flag inventory — anything else is a typo/stale name. Writing it
+        # anyway would bake a dead key the loader never reads (the exact hazard
+        # `discovery`'s `unapplied` carve-out exists for); surface it honestly
+        # via `unknown` instead.
+        KNOWN = set(_PROMPT_WEIGHT_FLAGS + _ROUTING_OPS_FLAGS)
+        unknown = [f for f in body.overrides if f not in KNOWN]
+        unapplied = [f for f in body.overrides if f in _LANES_YAML_FLAGS]
+        diff = []
+        for flag, val in body.overrides.items():
+            if flag not in KNOWN:
+                continue  # reported via `unknown`, never written — dead-key guard
+            if flag in _LANES_YAML_FLAGS:
+                continue  # reported via `unapplied`, never written to world.yaml
+            block = world_block.get(flag)
+            if block is None:
+                if not bool(val):
+                    continue  # absent flag implicitly defaults False -> no-op
+                world_block[flag] = {"enabled": True}
+                diff.append({"flag": flag, "from": False, "to": True})
+                continue
+            prev = bool(block.get("enabled", False))
+            if prev != bool(val):
+                block["enabled"] = bool(val)
+                diff.append({"flag": flag, "from": prev, "to": bool(val)})
+        if diff:
+            # Atomic write: dump to a temp file in the SAME directory (so
+            # os.replace is same-filesystem-atomic), then swap it into place.
+            # A crash/permission-error/disk-full mid-dump leaves the temp file
+            # orphaned and world.yaml — the one hand-maintained, backup-less
+            # source of truth — untouched, instead of half-written/corrupt.
+            tmp_dir = os.path.dirname(path) or "."
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", dir=tmp_dir, delete=False, suffix=".tmp")
+            try:
+                yaml.dump(doc, tmp)
+                tmp.close()
+                os.replace(tmp.name, path)
+            except Exception:
+                tmp.close()
+                if os.path.exists(tmp.name):
+                    os.unlink(tmp.name)
+                raise
+    except Exception as exc:  # fix-don't-hide: surface, never corrupt silently
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if diff:
+        message = "Config written. Restart ./dev to bake the new combo into a fresh run."
+    else:
+        message = "No changes to apply."
+    if unapplied:
+        message += (f" NOT written here — {', '.join(unapplied)} lives in "
+                     "config/lanes.yaml, not world.yaml.")
+    if unknown:
+        message += f" Unknown flag(s) ignored, not written: {', '.join(unknown)}."
+    return {"ok": True, "diff": diff, "unapplied": unapplied, "unknown": unknown,
+            "restart_required": bool(diff), "message": message}
+
+
 @app.get("/api/profiles")
 async def get_profiles():
     if _router is None:
@@ -779,6 +954,36 @@ async def get_lanes_registry():
     if not callable(view):  # pragma: no cover - older router
         raise HTTPException(501, "registry view not available")
     return view()
+
+
+@app.get("/api/lanes/capability")
+async def get_lanes_capability():
+    """Lab Setup capability table: per-lane free/paid + context window +
+    clean|reasoning|unknown reliability, derived from lanes.yaml order/exclude
+    and the profile legend. Fail-closed: unknown never counts as safe (the UI
+    recommender enforces that).
+
+    `_config.world.adaptive_routing.order`/`.exclude` are tuples of the frozen
+    `LaneOrderEntry` dataclass, not dicts — `build_capability_table` calls
+    `.get()` on each entry, so they're converted to plain dicts here before
+    being passed in."""
+    if _config is None or _router is None:
+        raise HTTPException(503, "Not initialized")
+    from ..providers.capability import build_capability_table
+    ar = getattr(_config.world, "adaptive_routing", None)
+    order = [{"source": e.source, "model": e.model, "free": e.free}
+             for e in (getattr(ar, "order", ()) or ())]
+    exclude = [{"source": e.source, "model": e.model}
+               for e in (getattr(ar, "exclude", ()) or ())]
+    profiles = [
+        {"name": p["name"], "adapter": p["adapter"], "model_id": p["model_id"]}
+        for p in _router.legend()
+    ]
+    cast_pins = {}
+    if _world is not None:
+        for a in _world.living_agents():
+            cast_pins[a.name] = getattr(a, "profile", None) or getattr(a, "model_profile", "")
+    return build_capability_table(order, exclude, profiles, cast_pins)
 
 
 @app.post("/api/lanes/refresh")

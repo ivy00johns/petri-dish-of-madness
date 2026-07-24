@@ -47,6 +47,7 @@ import { BlindLineupPanel } from './components/blind/BlindLineupPanel';
 import { InspectorLayout } from './inspector/InspectorLayout';
 import { ChronicleView } from './components/chronicle/ChronicleView';
 import { DiaryView } from './components/diary/DiaryView';
+import { LabSetupView } from './components/labsetup/LabSetupView';
 
 type WorldView = 'village' | 'map';
 type Sim = SimulationState & SimulationControls;
@@ -159,6 +160,10 @@ export default function App() {
               />
             }
           />
+          {/* "/lab" — the Lab Setup admin panel: bake flag overrides for the
+              next run before it starts. Like /inspector + /chronicle + /diary
+              it does NOT mount LiveLayout/CozyWorld. */}
+          <Route path="/lab" element={<LabSetupView />} />
         </Routes>
       </div>
     </div>
