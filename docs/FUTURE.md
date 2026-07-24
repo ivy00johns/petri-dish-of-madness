@@ -51,5 +51,7 @@ Promoted to `docs/REMAINING-WORK.md` (and removed above per the convention):
 replay viewer → EM-055 (shipped, W6) · head-to-head analytics dashboard → EM-059
 (shipped, W6) · reactive overhearing chains → EM-081 (shipped, W11b) · image generation
 → EM-210 (shipped, Wave I — The Atelier) · multi-world parallel runs → EM-112 (open, W12)
-· multiple cities + transport → EM-109/EM-110 (open, W12).
+· multiple cities + transport → EM-109/EM-110 (the multi-city *intent* shipped via PR #112,
+2026-07-15, on the EM-269 Settlement primitive rather than this literal data-model design;
+flag OFF live, archived `done`/superseded in `docs/COMPLETED-WORK.md`, W12).
 

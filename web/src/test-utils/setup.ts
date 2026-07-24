@@ -6,9 +6,35 @@
  *   • HTMLCanvasElement.getContext — jsdom's throws "not implemented"; the
  *     ReplayScrubber draw() already guards a null ctx, so a quiet null stub
  *     keeps the smoke tests about the DOM, not the canvas raster.
+ *
+ * 2026-07-21 (feed-truth) — localStorage/sessionStorage vs. Node's built-in
+ * webStorage global: Node 22+ ships an experimental `globalThis.localStorage`
+ * accessor that returns an inert stub (no backing `--localstorage-file`, so
+ * `.clear`/`.setItem`/etc. are all undefined). Vitest's jsdom environment
+ * (`populateGlobal`, vitest/dist/chunks/index.*.js) only installs a jsdom
+ * window property onto the test global when that key is EITHER on its fixed
+ * allowlist OR absent from Node's own global — `localStorage` is on neither
+ * list, so on a Node build where the native accessor exists it silently
+ * wins over jsdom's real implementation (Node 20 has no such global, so it
+ * was never a problem there). Force-install jsdom's actual Storage objects
+ * (exposed by the environment as `globalThis.jsdom`, vitest's own ambient
+ * `jsdom: JSDOM` global — see `vitest/jsdom.d.ts`) over whatever Node left
+ * behind, on every Node version, so this is a no-op where jsdom already won.
  */
 import '@testing-library/jest-dom/vitest';
 import { vi } from 'vitest';
+
+const realJsdom = (globalThis as { jsdom?: { window: Window } }).jsdom;
+if (realJsdom) {
+  Object.defineProperty(globalThis, 'localStorage', {
+    get: () => realJsdom.window.localStorage,
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    get: () => realJsdom.window.sessionStorage,
+    configurable: true,
+  });
+}
 
 class ResizeObserverStub {
   observe(): void {}

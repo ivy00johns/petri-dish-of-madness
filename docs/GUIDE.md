@@ -366,7 +366,10 @@ petri-dish-of-madness/
 ├── config/
 │   ├── profiles.yaml     # Model profiles (edit to add/swap models)
 │   ├── personas.yaml     # Persona library — character cards for the spawn form
-│   └── world.yaml        # World params + seed agents
+│   ├── world.yaml        # World params + seed agents
+│   └── lanes.yaml        # Adaptive lane routing — the bounce-loop preference order
+│                         #   used when a pinned lane fails (see "Adaptive lane
+│                         #   routing" below)
 ├── docker/
 │   ├── backend.Dockerfile
 │   ├── web.Dockerfile
@@ -447,6 +450,38 @@ world:
 `GET /api/lanes` exposes live per-lane health. Set the `enabled` flags to `false` (or
 `turn_llm_budget_seconds: 0`) for byte-identical pre-D3 behavior.
 
+**Adaptive lane routing (`config/lanes.yaml`)** — supersedes/augments Wave D3's per-call
+detour above: when a pinned lane fails, an ORDERED, health-aware bounce loop walks a curated
+preference list instead of the older single-detour hop. This is a separate file from
+`world.yaml` — it is the one place lane *preference* is curated:
+
+```yaml
+adaptive_routing:
+  enabled: true                # go-live 2026-07-08. false = byte-identical pin→auto backup
+  max_attempts: 5               # curated healthy lanes tried + the RESERVED terminal slot
+  per_attempt_timeout_s: 12     # per-lane wall-clock cap (no long doomed cascades)
+  allow_paid: false             # $0-first: `free: false` lanes stay off unless true
+  terminal_fallback: auto       # the GUARANTEED final-attempt lane (any profile may hold it)
+  discovery:                    # P2 — data-driven lane pool (EM-300)
+    enabled: false              # master toggle; false = static registry (this file only)
+    every_turns: 40             # counter-based auto-refresh cadence (served turns)
+    freellmapi_models: true     # poll /v1/models: retire unavailable, synth new lanes
+    direct_keys: true           # detect GEMINI/ANTHROPIC/OPENAI/OLLAMA env keys
+    admin_quota: false          # also read admin /api/health quotaStates (needs creds)
+  order:                        # priority order, best-headroom-first; `model: "*"` sweeps
+    - { source: freellmapi, model: "mistral-large-3-675b", free: true }
+    # ... one entry per curated lane; see the file's inline comments for the full list
+  exclude:                      # matchers no entry (not even `*`) may place
+    - { source: freellmapi, model: "command-a-2" }
+```
+
+`lanes.yaml` is thoroughly self-documented inline (curation rationale, matcher-glob syntax,
+the reserved-terminal-slot mechanism) and backed by
+`docs/superpowers/specs/2026-07-07-adaptive-lane-routing.md` — read the file itself before
+editing `order`/`exclude`. `discovery.enabled: true` additionally exposes `POST
+/api/lanes/refresh` and `GET /api/lanes/registry`. Config is captured in `runs.config_json`,
+so a run's routing order is pinned for fork/replay.
+
 **The social city (Wave E)** — typed relationships, families, factions, and answered
 prayers. All under `world:` in `config/world.yaml`; defaults shown, and every block takes
 `enabled: false` for byte-identical pre-E behavior:
@@ -496,6 +531,82 @@ world:
 
 The narrator call runs off the agents' critical path; a failed or timed-out call emits
 nothing and is never retried, so the tick loop never stalls on it.
+
+**Communication, culture, religion & war (Wave O)** — belief/rumor/letters, culture-camp
+memes (including drifting visual memes), religion, and organized war. All under `world:` in
+`config/world.yaml`; defaults shown are the engine defaults if the key is absent. **Religion
+rides the same `comm.enabled` gate as culture** (`_comm_enabled()`) — there is no separate
+`religion:` block:
+
+```yaml
+world:
+  comm:                          # master gate for transmission + diffusion + religion
+    enabled: true                 # false ⇒ no rumor/letter/meme/religion verbs, no prompt
+                                   #   line, no menu entry, no event — byte-identical pre-Wave-O
+    diffusion_chance: 0.20        # per-carrier co-located passive-hop chance (seeded)
+    max_diffusions: 12            # per-round ceiling on passive hops
+    half_life_ticks: 30           # ticks without a spread before virality halves
+    decay_ticks: 24               # ticks a zero-carrier meme survives before it's pruned
+    letter_cap: 8                 # undelivered letters parked per mailbox (FIFO)
+    held_meme_cap: 12             # memes an agent carries (FIFO, oldest dropped)
+    distortion_strength: 1        # text-mutation passes per transmission hop
+    max_drift_generations: 3      # past this many generations, hops stop distorting text
+                                   #   (still spreads/mints — keeps old memes legible)
+    meme_images: true             # create_image auto-registers an image meme
+    dominance_threshold: 6        # carriers needed for a meme_dominant event
+    camp_min_shared: 2            # shared memes that bind a culture-camp edge
+    camp_min_size: 3              # minimum members for a culture camp
+    mutation_notable_cap: 2       # feed-health: individual meme_mutated events per sweep
+    death_notable_virality: 3     # feed-health: min virality for an individual meme_died line
+  war:                            # organized violence — separate gate from comm
+    enabled: false                # master gate for the whole war layer
+    casus_belli_threshold: 50     # faction grievance needed before declare_war opens
+    grievance_per_act: 6          # base grievance a cross-faction crime feeds the victim's faction
+    grievance_per_witness: 2      # extra grievance per co-located witness
+    grievance_decay: 1            # per-round cool-off
+    reparations_base: 25          # default peace_treaty reparations when unspecified
+    war_notoriety: 10             # notoriety stamped on the exiled loser leader
+```
+
+`meme_mutated`, `meme_died`, `meme_dominant`, `rumor_spread`, `letter_delivered`,
+`faith_founded`, `war_declared`, and `siege` (among others) narrate this in the feed.
+`mutation_notable_cap`/`death_notable_virality` are the **feed-health knobs** — see the
+process-guard note below.
+
+> **Process guard — every new `CommunicationParams` field MUST be wired into `_parse_comm`
+> AND covered by `backend/tests/test_comm_param_parsing.py`.** Commit `9f56f10` (2026-07-15)
+> found `mutation_notable_cap`/`death_notable_virality` had been added to the
+> `CommunicationParams` dataclass and to `world.yaml`, but never wired into
+> `backend/petridish/config/loader.py`'s `_parse_comm` — so the yaml values were silently
+> ignored and every world ran on the hardcoded dataclass defaults (harmless only because the
+> defaults happened to match). The pattern generalizes to every `world.*` block in this
+> guide: a dataclass field with no matching line in its `_parse_*` function is a silent
+> no-op, not an error. Add the field to `_parse_comm`, add/extend a case in
+> `test_comm_param_parsing.py` asserting the yaml value round-trips, and only then treat the
+> knob as configurable.
+
+**W31 default-OFF feature flags** — the Fable Tier-1 expansion panel (`docs/research/
+2026-07-11-expansion-ideas.md`). Nine features, each gated OFF by default so shipping them
+changed no live behavior until explicitly flipped. Three different gating mechanisms are in
+play — check the "Gate" column before assuming a `world.yaml` edit will do anything:
+
+| Flag | Feature | EM-### | Gate mechanism | Default |
+|------|---------|--------|-----------------|---------|
+| `blind_lineup` | The Blind Lineup — hidden model chips taste-test | EM-309 | Frontend-only build flag: `VITE_BLIND_LINEUP=1` (see `web/src/lib/blindLineup.ts`) | OFF |
+| `chimera_twins.enabled` | Chimera Twins — linked same-persona/different-model pair | EM-310 | `world.chimera_twins` block in `config/world.yaml` | OFF |
+| `charters.enabled` | Self-Authored Charters | EM-311 | `world.charters` block in `config/world.yaml` | OFF |
+| `storylines_rail` | Storylines Rail — deterministic drama-thread feed rail | EM-312 | Frontend-only build flag: `VITE_STORYLINES_RAIL=1` (see `web/src/lib/featureFlags.ts`) | OFF |
+| `fingerprint_ticker.enabled` | Fingerprint Ticker — behavioral stylometry | EM-313 | `world.fingerprint_ticker` block (absent from `world.yaml` ⇒ dataclass default) | OFF |
+| `babel_matrix.enabled` | The Babel Matrix — dyadic inter-model heatmap | EM-314 | Backend env var `PETRIDISH_BABEL_MATRIX_ENABLED=1` **and** the frontend const `BABEL_MATRIX_ENABLED` in `web/src/inspector/BabelMatrix.tsx` (hardcoded `false` — flip requires an edit + rebuild) | OFF |
+| `healing_house.enabled` | The Healing House — model hot-swap via trial/vote | EM-315 | `world.healing_house` block in `config/world.yaml` (also needs `target_profiles` populated) | OFF |
+| `drama_wire` | The Drama Wire — deterministic salience index | EM-316 | Frontend-only build flag: `VITE_DRAMA_WIRE=1` (see `web/src/lib/dramaWire.ts`) | OFF |
+| `prophecy_board.enabled` | The Prophecy Board — watcher omens | EM-317 | `world.prophecy_board` block (absent from `world.yaml` ⇒ dataclass default) | OFF |
+
+`world.building_recipes.enabled` (EM-299, parametric building-recipe grammar, absent from
+`world.yaml` ⇒ dataclass default OFF) is the Wave Q sibling of this roster, shipped the same
+week. Note: `EM-267` (agent-invented ideologies, `ideology.enabled`) appears in some planning
+docs alongside this list but is **not built** — it stays an open ledger item
+(`docs/REMAINING-WORK.md`), not a live flag.
 
 ---
 

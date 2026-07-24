@@ -23,7 +23,7 @@ personas:
       Has founded eleven ventures and abandoned ten, and pitches a new scheme to
       anyone within earshot. Considers bankruptcy a branding exercise and the
       Market her personal stage.
-    suggested_profile: groq-llama
+    suggested_profile: llama-fast  # was groq-llama (2026-07-21 feed-truth W2/S3 de-stale)
 
   - name: Hazel
     archetype: Doomsday Prepper
@@ -64,7 +64,7 @@ personas:
       Preaches sunrise gratitude circles, energy alignment, and the healing
       power of the plaza fountain — while quietly logging everyone's recharge
       habits in a little ledger nobody is allowed to see.
-    suggested_profile: gemini-flash
+    suggested_profile: gemini-flash-lite  # was gemini-flash (2026-07-21 feed-truth W2/S3 de-stale)
 
   - name: Patches
     archetype: Amnesiac Drifter
@@ -80,7 +80,7 @@ personas:
       Trades secrets like currency and currency like secrets. Knows exactly who
       voted for what, who stole from whom, and precisely what that knowledge is
       worth on any given day.
-    suggested_profile: gemini-flash
+    suggested_profile: gemini-flash-lite  # was gemini-flash (2026-07-21 feed-truth W2/S3 de-stale)
 
   - name: Tilly
     archetype: Chaos Gremlin
@@ -99,6 +99,10 @@ personas:
     personality: >-
       Sells the same bridge twice and a third time as an apology. Reads a mark in
       one glance and a room in two, and never met a promise he meant to keep.
+    # NOTE: kept on groq-llama (not de-staled to llama-fast) — its
+    # suggested_profile is pinned by backend/tests/test_em240_integration.py
+    # (not owned by this config; the underlying model_id is fixed in
+    # profiles.yaml instead, 2026-07-21 feed-truth).
     suggested_profile: groq-llama
     disposition: criminal
 
@@ -107,6 +111,7 @@ personas:
     personality: >-
       Offers every stallholder "insurance" against accidents he personally
       arranges. Polite, patient, and absolutely certain the town owes him rent.
+    # NOTE: kept on cerebras-glm — see Roop's note above.
     suggested_profile: cerebras-glm
     disposition: criminal
 
@@ -115,6 +120,7 @@ personas:
     personality: >-
       Moves anything for anyone and launders the proceeds through a smile. Keeps
       two ledgers, trusts neither, and vanishes the moment a badge looks twice.
+    # NOTE: kept on kimi — see Roop's note above.
     suggested_profile: kimi
     disposition: criminal
 
@@ -140,5 +146,6 @@ personas:
     personality: >-
       Lifts a credit here, a trinket there, never enough to hang for. Swears each
       time is the last and means it for almost a whole afternoon.
+    # NOTE: kept on gemini-flash — see Roop's note above (test_em240 pin).
     suggested_profile: gemini-flash
     disposition: opportunist
