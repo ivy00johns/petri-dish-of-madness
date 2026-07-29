@@ -47,6 +47,22 @@ Deferred from the design spec (§1 non-goals) and brainstorming:
   instead of forking when nothing changed, or ship a prune endpoint/tool. **Low priority**
   — only bites during dev hot-reload streaks; cleanup is a known, quick procedure.
 
+## FreeLLMAPI surfaces available but not worth adopting yet (review 2026-07-29)
+
+Routed here rather than into the tactical ledger at intake — real capabilities on the live
+proxy (OpenAPI **v0.4.1**), just with no current demand. Evidence:
+`coordination/freellmapi-review-2026-07-29.md` §7.
+
+- **`GET /livez` · `GET /readyz`** — Kubernetes-style liveness/readiness probes on the proxy
+  (both verified `200`). A tidier proxy healthcheck than `/api/ping`, but `/api/ping` already
+  works and `docker-compose.yml` only healthchecks our own backend at `:8000/api/health`.
+  Promote if we ever healthcheck the proxy itself.
+- **`POST /mcp`** — the proxy's Model Context Protocol surface (Streamable HTTP), tools
+  `list_models`, `provider_health`, `usage_summary`, `routing_info`, `set_routing_strategy`,
+  `cache_stats`, `compression_stats`. An agent-facing way to read quota burn mid-session.
+  Nothing in the sim wants to introspect its own quota today; `GET /v1/providers` (folded into
+  EM-300 P3) covers the provider-health need with a plain HTTP call.
+
 Promoted to `docs/REMAINING-WORK.md` (and removed above per the convention):
 replay viewer → EM-055 (shipped, W6) · head-to-head analytics dashboard → EM-059
 (shipped, W6) · reactive overhearing chains → EM-081 (shipped, W11b) · image generation
