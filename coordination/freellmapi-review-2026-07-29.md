@@ -279,3 +279,81 @@ considering against keeping it in `lanes.yaml`.
 - Admin `/api/health` `quotaStates`: already documented in `discovery.py` — but see §2, it is now
   largely superseded by the credential-free `/v1/providers`.
 - Response cache (`X-FreeLLM-Cache`): stays OFF by standing decision.
+
+---
+
+## 10. CHASE RESULT — EM-325 root-caused (2026-07-29, same session)
+
+**The "discrepancy" in §1b was not a discrepancy.** Two things were wrong with that framing, and one
+of them was my own instrument.
+
+### 10.1 My log filter hid the evidence
+
+§1b counted inbound requests with `^\[Proxy\] [0-9:]+ (start|next|fail)`. The proxy emits
+pre-dispatch rejections in a **different, untimestamped format with no verb in that position**:
+
+```
+[Proxy] routing exhausted (no upstream tried) req=b89dd5 requested=gemini-3.5-flash candidates=1:
+```
+
+So the "3 upstream failures vs ~30 lane errors" gap was largely an artifact of my own regex. The
+proxy was reporting these all along; `start` counts only requests it actually **dispatched to a
+provider**. Both numbers were right and never contradicted each other — I compared the wrong two.
+(The §1b *rate* measurement is unaffected: `start` under-counts inbound, so the true inbound rate is
+slightly **higher** than 12/min, which only widens the headroom conclusion.)
+
+### 10.2 Root cause — two failure classes, neither of which reaches a provider
+
+Live-probed every sick lane's pinned `model_id` with the adapter's exact request shape
+(`response_format: json_object`):
+
+| lane | pinned `model_id` | probe | class |
+| --- | --- | --- | --- |
+| `mistral-small` | `mistral-small-4-119b` | **404** not in catalog | **A — dead pin** |
+| `mistral-large` | `mistral-large-3-675b` | **404** not in catalog | **A — dead pin** |
+| `qwen-next` | `qwen3-next-80b` | **404** not in catalog | **A — dead pin** |
+| `kimi` | `kimi-k2.6` | **429** all models exhausted (2 routes) | **B — routing exhausted** |
+| `gemini-flash` | `gemini-3.5-flash` | **429** (1 route, on cooldown) | **B** |
+| `gemini-flash-lite` | `gemini-3.1-flash-lite` | **429** (2 routes) | **B** |
+| `llama-fast` / `groq-llama` | `llama-3.3-70b-fp8-fast` | **429** (1 route, on cooldown) | **B** |
+| `cerebras-glm` | `glm-4.7` | **429** (2 routes) | **B** |
+| `command-r` | `command-r-2` | **200**, `cohere/command-r-plus-08-2024` | healthy |
+
+Both classes return **without any upstream attempt**, which is why every one of them shows
+`last_routed_via=None` — `adapters.py:157` can only produce `None` on an exception path, never on a
+success. So the lane bookkeeping was **correct the whole time**; there is no accounting bug to fix.
+
+**Class A is a config regression, and it is permanent — those lanes can never recover.** It is
+catalog drift: the pinned ids were renamed or retired upstream. Checking for successors:
+
+- `mistral-small-4-119b` → `mistral-small-4` exists but `available=False`; only
+  **`mistral-small-3.1-24b`** is `available=True`.
+- `mistral-large-3-675b` → every `mistral-large-*` variant is `available=False`. **No working
+  replacement in the catalog.**
+- `qwen3-next-80b` → both `qwen3-next-80b-a3b-{instruct,thinking}` are `available=False`; other qwen
+  lanes are available (`qwen3.5-397b-a17b`, `qwen3.6-35b-a3b`, `qwen3-coder-480b`, …).
+
+> **EM-300 P2 already shipped the mechanism that would have caught this** — poll `/v1/models`, retire
+> lanes the catalog reports absent/unavailable, synth new ones — and it is merged but **flag-OFF**
+> (`adaptive_routing.discovery.enabled: false` in `config/lanes.yaml`). A chunk of EM-325 is a flag
+> flip that already exists in the codebase.
+
+### 10.3 This also explains EM-326's ~25 s tick
+
+With 12 of 14 lanes sick, a turn walks the bounce list, fails fast on the 404/429 lanes (~200 ms
+each), and lands on the reserved terminal `auto`. Live proxy log for the sim's own traffic:
+
+```
+start 26f364 a0 cohere - command-a-vision-07-2025 req=auto   ok lat=8656ms in=5066 out=384
+start 7cb888 a0 cohere - command-a-vision-07-2025 req=auto   ok lat=8232ms in=6787 out=354
+start 940b0b a0 reka  - reka-flash               req=auto   ok lat=5231ms in=6293 out=336
+```
+
+So the surviving path costs **5–11 s per turn**, on ~5–7 k-token prompts, and the three timeout lanes
+(`minimax`, `glm-5`, `deepseek-pro` — `timeouts=5–6`, and these *do* carry a `routed_via`) burn the
+full `per_attempt_timeout_s: 12` whenever the walk touches them. 5 agents × that ≈ the measured
+~25 s tick. **EM-326 is downstream of EM-325, not an independent problem.**
+
+⚠️ Note what `auto` is currently selecting: **`command-a-vision-07-2025`** — a sibling of the
+`command-a-plus` endpoint EM-324 removed for emitting preambles and truncating strict JSON. Worth
+watching as a re-entry of that failure mode by the back door.
