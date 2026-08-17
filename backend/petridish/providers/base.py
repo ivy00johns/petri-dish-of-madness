@@ -4,13 +4,26 @@ from typing import Protocol, runtime_checkable
 
 
 class ProviderError(Exception):
-    """Raised by adapters on transport/HTTP failure. Must NOT crash the loop."""
+    """Raised by adapters on transport/HTTP failure. Must NOT crash the loop.
 
-    def __init__(self, profile: str, status: int | None, detail: str):
+    `retry_after` — seconds until the rate-limit resets, parsed from
+    `Retry-After` / `X-RateLimit-Reset` when the upstream surfaces them
+    (per-lane rate-limit cooldown spec §3.2). None when absent/unparseable
+    (the expected common case behind an aggregating proxy) — the exponential
+    backoff then covers it."""
+
+    def __init__(
+        self,
+        profile: str,
+        status: int | None,
+        detail: str,
+        retry_after: float | None = None,
+    ):
         super().__init__(f"[{profile}] {status}: {detail}")
         self.profile = profile
         self.status = status
         self.detail = detail
+        self.retry_after = retry_after
 
 
 @runtime_checkable

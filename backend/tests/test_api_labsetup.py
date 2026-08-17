@@ -32,11 +32,20 @@ is hermetic), so the 200 path is the asserted path here, not a tolerated one.
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import ruamel.yaml
 from fastapi.testclient import TestClient
 
 from petridish.api.app import app
+
+# The tests copy the REAL config/world.yaml into a tmp dir so the write path
+# never touches the live file. The path must resolve from THIS file (the
+# tests live in backend/tests/), not the CWD: CI runs `pytest backend/tests`
+# from the repo root, but `make test` runs `cd backend && pytest` — a
+# CWD-relative "config/world.yaml" fails one of the two (was: 6 red under
+# make test, green only in CI by accident of the working directory).
+WORLD_YAML_SRC = str(Path(__file__).resolve().parents[2] / "config" / "world.yaml")
 
 PROMPT_WEIGHT_MIN = {"comm", "settlements", "faith"}
 
@@ -85,7 +94,7 @@ def test_apply_returns_diff_and_restart_required(tmp_path, monkeypatch):
     # Point the writer at a temp copy of world.yaml so the test never edits the
     # real config. `comm` ships enabled: true in world.yaml, so flipping it to
     # False is a real change (a real no-change is covered by the noop test).
-    src = "config/world.yaml"
+    src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
@@ -103,7 +112,7 @@ def test_apply_creates_absent_flag_block_and_writes_it_to_disk(tmp_path, monkeyp
     # `faith` is absent-defaulted in world.yaml — toggling it ON must CREATE
     # `faith: {enabled: true}` under `world:`, and the write must actually land
     # on disk (comment-preserving), not just in the returned diff.
-    src = "config/world.yaml"
+    src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
@@ -125,7 +134,7 @@ def test_apply_discovery_is_unapplied_not_written_to_world_yaml(tmp_path, monkey
     # NOT world.yaml. Writing a dead `discovery:` block under `world:` would be a
     # silent no-op bake — the loader would never read it. The endpoint must
     # refuse to write it and report it back as `unapplied` instead.
-    src = "config/world.yaml"
+    src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
@@ -147,7 +156,7 @@ def test_apply_noop_does_not_rewrite_file(tmp_path, monkeypatch):
     # Empty overrides -> empty diff -> the file must not be touched at all
     # (Fix 1): a no-op apply must never needlessly rewrite/reformat the
     # hand-maintained world.yaml.
-    src = "config/world.yaml"
+    src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
@@ -169,7 +178,7 @@ def test_apply_absent_flag_false_is_noop(tmp_path, monkeypatch):
     # to False). Posting False for an absent flag is therefore a no-op — it
     # must NOT create a `faith: {enabled: false}` block, must not appear in
     # `diff`, and must not write the file (Fix 2).
-    src = "config/world.yaml"
+    src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
@@ -193,7 +202,7 @@ def test_apply_unknown_flag_reported_not_written(tmp_path, monkeypatch):
     # _ROUTING_OPS_FLAGS) must never be baked as a dead key under `world:` —
     # the loader would never read it back. It must be surfaced honestly via
     # `unknown`, and must never appear in `diff` (Fix 3).
-    src = "config/world.yaml"
+    src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))

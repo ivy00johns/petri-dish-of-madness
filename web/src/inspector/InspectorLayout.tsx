@@ -75,6 +75,7 @@ import AWIDashboard from './AWIDashboard';
 import BabelMatrix, { BABEL_MATRIX_ENABLED } from './BabelMatrix';
 import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
+import LaneHealthPanel from './LaneHealthPanel';
 
 // ── Wave M (EM-204) — the tabbed IA ──────────────────────────────────────────
 // Four sections group the formerly-flat 9-panel grid. The order is the reading
@@ -634,26 +635,36 @@ export function InspectorLayout({
         className="flex-1 min-h-0 grid grid-cols-1 gap-2 p-2 overflow-y-auto lg:overflow-hidden"
       >
         {tab === 'forensics' && (
-          // Forensics — the replay map (where) beside the decision trace (why).
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
-            <PanelCell weight="">
-              <ErrorBoundary name="Replay Map">
-                <ReplayMapPanel
-                  events={mergedEvents}
-                  agents={effAgents}
-                  profiles={profiles}
-                  places={effPlaces}
-                  buildings={scrubberBuildings}
-                  animals={effAnimals}
-                  currentTick={currentTick}
-                  maxTick={maxTick}
-                  snapshots={replaySnapshots}
-                />
-              </ErrorBoundary>
-            </PanelCell>
-            <PanelCell weight="">
-              <ErrorBoundary name="Decision Trace">
-                <DecisionTrace {...panelProps} />
+          // Forensics — the replay map (where) beside the decision trace (why),
+          // with the Lane Health panel riding beneath (EM-300 P5): the router's
+          // OWN health window + cooldown state, so EM-325-style "why is this
+          // lane skipped" questions are answerable in the UI, not only in logs.
+          <div className="flex flex-col gap-2 min-h-0 min-w-0">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
+              <PanelCell weight="">
+                <ErrorBoundary name="Replay Map">
+                  <ReplayMapPanel
+                    events={mergedEvents}
+                    agents={effAgents}
+                    profiles={profiles}
+                    places={effPlaces}
+                    buildings={scrubberBuildings}
+                    animals={effAnimals}
+                    currentTick={currentTick}
+                    maxTick={maxTick}
+                    snapshots={replaySnapshots}
+                  />
+                </ErrorBoundary>
+              </PanelCell>
+              <PanelCell weight="">
+                <ErrorBoundary name="Decision Trace">
+                  <DecisionTrace {...panelProps} />
+                </ErrorBoundary>
+              </PanelCell>
+            </div>
+            <PanelCell weight="lg:flex-[3]">
+              <ErrorBoundary name="Lane Health">
+                <LaneHealthPanel profiles={profiles} />
               </ErrorBoundary>
             </PanelCell>
           </div>

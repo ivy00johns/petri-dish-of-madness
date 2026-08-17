@@ -237,6 +237,67 @@ export interface BabelMatrix {
   totals: { outcomes: number; positive: number; cells: number; receipts_capped: boolean };
 }
 
+// ── Lane Health observability (EM-300 P3/P5 — GET /api/lanes + registry) ─────
+
+/** One outcome entry in a lane's EM-135 rolling window (router verbatim). */
+export interface LaneWindowEntry {
+  parsed: boolean;
+  truncated: boolean;
+  timed_out?: boolean;
+  error?: boolean;
+}
+
+/** Per-lane cooldown state (EM-300 P3 spec §3.7 — router lane_cooldowns()). */
+export interface LaneCooldown {
+  cooling: boolean;
+  expires_in_s: number;
+  strikes: number;
+}
+
+/** One lane in GET /api/lanes — the profile-keyed lane_health() map. */
+export interface LaneHealthRow {
+  window: LaneWindowEntry[];
+  boosted: boolean;
+  timeouts: number;
+  errors: number;
+  last_routed_via: string | null;
+  sick: boolean;
+  detours_routed_here: number;
+  /** Present only while the lane is inside a 429 cooling window. */
+  cooldown?: LaneCooldown;
+}
+
+export type LaneHealthMap = Record<string, LaneHealthRow>;
+
+/** One entry in GET /api/lanes/registry (EM-300 P2 discovery view, §8). */
+export interface LaneRegistryRow {
+  id: string;
+  source: string;
+  model_id: string;
+  profile: string;
+  priority: number;
+  enabled: boolean;
+  health: 'sick' | 'ok';
+  cooldown?: LaneCooldown | null;
+  cap_state: 'sick' | 'ok';
+  discovered: boolean;
+  free: boolean;
+  out_hint: string | null;
+  last_refresh_counter: number;
+}
+
+/** GET /api/lanes/registry — ordered lanes + the discovery meta block. */
+export interface LaneRegistryView {
+  lanes: LaneRegistryRow[];
+  discovery: {
+    enabled: boolean;
+    every_turns: number | null;
+    served_turns: number;
+    last_refresh_counter: number;
+    retired: Array<{ id: string; reason: string }>;
+  };
+}
+
 // ── fetch plumbing ───────────────────────────────────────────────────────────
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -603,6 +664,88 @@ export const inspectorApi = {
       return null;
     }
     return data as unknown as BabelMatrix;
+  },
+
+  /**
+   * EM-300 P5 — GET /api/lanes. The router's EM-135 lane_health() map verbatim
+   * (profile → {window, boosted, timeouts, errors, last_routed_via, sick,
+   * detours_routed_here, cooldown?}), the same payload the Wave D3 endpoint has
+   * always served (cooldown is the additive EM-300 P3 key). `null` when the
+   * backend is unreachable, so the panel renders its labeled "no backend"
+   * state instead of an empty table.
+   */
+  async lanes(): Promise<LaneHealthMap | null> {
+    const data = await getJsonOrNull('/api/lanes');
+    if (!isObject(data) || Array.isArray(data)) return null;
+    const out: LaneHealthMap = {};
+    for (const [profile, raw] of Object.entries(data)) {
+      if (!isObject(raw)) continue;
+      const row = raw as Record<string, unknown>;
+      out[profile] = {
+        window: Array.isArray(row.window)
+          ? (row.window as LaneWindowEntry[])
+          : [],
+        boosted: row.boosted === true,
+        timeouts: typeof row.timeouts === 'number' ? row.timeouts : 0,
+        errors: typeof row.errors === 'number' ? row.errors : 0,
+        last_routed_via: typeof row.last_routed_via === 'string' ? row.last_routed_via : null,
+        sick: row.sick === true,
+        detours_routed_here: typeof row.detours_routed_here === 'number' ? row.detours_routed_here : 0,
+        ...(isObject(row.cooldown)
+          ? {
+              cooldown: {
+                cooling: row.cooldown.cooling === true,
+                expires_in_s: typeof row.cooldown.expires_in_s === 'number'
+                  ? row.cooldown.expires_in_s
+                  : 0,
+                strikes: typeof row.cooldown.strikes === 'number' ? row.cooldown.strikes : 0,
+              },
+            }
+          : {}),
+      };
+    }
+    return out;
+  },
+
+  /**
+   * EM-300 P5 — GET /api/lanes/registry. The EM-300 P2 discovery view: the
+   * lane registry in priority order + the discovery meta block. `null` when
+   * the backend is unreachable / pre-P2 (no endpoint), so the panel can label
+   * the state instead of conflating it with "zero lanes".
+   */
+  async lanesRegistry(): Promise<LaneRegistryView | null> {
+    const data = await getJsonOrNull('/api/lanes/registry');
+    if (!isObject(data) || !Array.isArray(data.lanes)) return null;
+    const lanes: LaneRegistryRow[] = [];
+    for (const raw of data.lanes) {
+      if (!isObject(raw) || typeof raw.id !== 'string') continue;
+      lanes.push({
+        id: raw.id,
+        source: typeof raw.source === 'string' ? raw.source : '',
+        model_id: typeof raw.model_id === 'string' ? raw.model_id : '',
+        profile: typeof raw.profile === 'string' ? raw.profile : '',
+        priority: typeof raw.priority === 'number' ? raw.priority : 0,
+        enabled: raw.enabled !== false,
+        health: raw.health === 'sick' ? 'sick' : 'ok',
+        cooldown: isObject(raw.cooldown) ? raw.cooldown as unknown as LaneCooldown : null,
+        cap_state: raw.cap_state === 'sick' ? 'sick' : 'ok',
+        discovered: raw.discovered === true,
+        free: raw.free !== false,
+        out_hint: typeof raw.out_hint === 'string' ? raw.out_hint : null,
+        last_refresh_counter: typeof raw.last_refresh_counter === 'number' ? raw.last_refresh_counter : 0,
+      });
+    }
+    const d = isObject(data.discovery) ? data.discovery as Record<string, unknown> : {};
+    return {
+      lanes,
+      discovery: {
+        enabled: d.enabled === true,
+        every_turns: typeof d.every_turns === 'number' ? d.every_turns : null,
+        served_turns: typeof d.served_turns === 'number' ? d.served_turns : 0,
+        last_refresh_counter: typeof d.last_refresh_counter === 'number' ? d.last_refresh_counter : 0,
+        retired: Array.isArray(d.retired) ? d.retired as Array<{ id: string; reason: string }> : [],
+      },
+    };
   },
 };
 

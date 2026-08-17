@@ -124,6 +124,10 @@ def _router(adapters: dict[str, object], *, auto: object | None = None,
 async def test_storm_still_attempts_the_backup_every_turn():
     # Genuine whole-pool storm (auto ALSO failing). We now accept the doomed 2nd
     # POST every turn rather than mute the agent — the breaker no longer skips.
+    # EM-300 P3 cooldown narrows that further on the PINNED side: the 429 on
+    # turn 1 opens a cooling window, so turns 2-3 pre-emptively route to auto
+    # (spec §3.5 — the doomed pinned POST is skipped while cooling), while the
+    # auto backup STILL fires every failing turn (the EM-226 contract).
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
     r = _router({"home": home}, auto=auto)
@@ -131,7 +135,7 @@ async def test_storm_still_attempts_the_backup_every_turn():
     for _ in range(3):
         with pytest.raises(ProviderError):
             await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-    assert home.calls == 3
+    assert home.calls == 1   # 429 on turn 1 → cooling window pre-empts turns 2-3
     assert auto.calls == 3   # auto attempted EVERY turn (was 1 under the blind-skip)
     assert r.auto_backup_health()["open"] is True   # state still tracks the storm
 
@@ -142,7 +146,9 @@ async def test_storm_still_attempts_the_backup_every_turn():
 
 async def test_no_skip_cadence_auto_is_hit_on_every_failing_turn():
     # The probe cadence that used to gate the skip is gone: a small probe_every
-    # must NOT throttle the backup. All 7 failing turns POST to auto.
+    # must NOT throttle the backup. All 7 failing turns POST to auto. (EM-300 P3
+    # cooldown still pre-empts the doomed pinned POST after the first 429 — that
+    # skip is the cooldown window, not a probe cadence; auto is hit every turn.)
     home = _FailAdapter("home", 429)
     auto = _FailAdapter("auto", 429, _EXHAUSTED)
     r = _router({"home": home}, auto=auto)
@@ -150,7 +156,7 @@ async def test_no_skip_cadence_auto_is_hit_on_every_failing_turn():
     for _ in range(7):
         with pytest.raises(ProviderError):
             await r.chat("home", _MESSAGES, max_tokens=256, temperature=0.8)
-    assert home.calls == 7
+    assert home.calls == 1   # 429 on turn 1 → cooling window pre-empts turns 2-7
     assert auto.calls == 7   # every turn (was 3 under the probe cadence)
 
 

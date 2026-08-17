@@ -3,9 +3,11 @@
  * centerpiece. Renders ONE `world.buildings[]` entry near its place, BY STATUS:
  *
  *   planned            → a surveyor's stake + a roped footprint outline.
- *   under_construction → scaffolding + a structure RISING with progress (a
- *                        clock tower / garden visibly grows from 0→100); a
- *                        floating progress ring tracks `progress`.
+ *   under_construction → scaffolding + a structure RISING FLOOR BY FLOOR
+ *                        with progress (the masonry borrow — a clock tower /
+ *                        garden visibly gains discrete courses 0→100, each
+ *                        floor popping in at its threshold); a floating
+ *                        progress ring tracks `progress`.
  *   operational        → a real GLB from the EM-148 registry where one exists
  *                        (EM-150), keyed by `operationalVariant(kind)` and
  *                        mounted in <Suspense> whose fallback is the EM-122
@@ -32,7 +34,7 @@
  * little life (gentle motion, a glowing window, a fluttering flag).
  */
 
-import { useCallback, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useCallback, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { useFrame } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import { Billboard, RoundedBox, Text, useCursor } from '@react-three/drei';
@@ -302,22 +304,107 @@ function PlannedSite({ accent }: { accent: string }) {
   );
 }
 
-// ── A rising structure body whose height scales with `grow` (0..1) ───────────
-// Shared by under_construction (grow = progress) and abandoned (frozen grow).
+// ── Masonry growth: a structure rising FLOOR BY FLOOR with `grow` (0..1) ────
+// TheMasons borrow (block-by-block visible growth): instead of one smooth
+// extruded box, the building is laid as discrete floor courses — a completed
+// floor pops in as progress crosses each threshold, and a partial course rises
+// between thresholds so the build still reads as continuous. Shared by
+// under_construction (grow = progress) and abandoned (frozen grow).
+//
+// Pure over (floors, grow) — no clock, no RNG — so replay/EM-155 stays intact:
+// the same building at the same progress renders the same courses.
+
+/**
+ * Floors laid at `grow` (0..1): `done` full floors + a `partial` (0..1) course
+ * rising above the last one. `done` hits `floors` exactly at grow=1.
+ */
+export function floorStack(
+  floors: number,
+  grow: number,
+): { done: number; partial: number } {
+  const f = Math.max(1, Math.floor(floors));
+  const g = Math.max(0, Math.min(1, grow));
+  const scaled = g * f;
+  const done = Math.min(f, Math.floor(scaled));
+  // Round away float noise (0.51*4-2 = 0.040000000000000036) so the pure
+  // function returns exactly the fractional course a human expects.
+  const partial = Math.round((Math.max(0, Math.min(1, scaled - done))) * 1e9) / 1e9;
+  return { done, partial };
+}
+
+/**
+ * Deterministic floor count for a building: the authored recipe floors (1-8)
+ * when a recipe is present (EM-299), else a hash-derived 2-4 from the id so
+ * legacy/mock buildings also stack (EM-155-safe — same id ⇒ same floors).
+ */
+export function floorCountFor(building: Building): number {
+  const recipeFloors = building.recipe?.floors;
+  if (typeof recipeFloors === 'number' && Number.isFinite(recipeFloors)) {
+    return Math.max(1, Math.min(8, Math.round(recipeFloors)));
+  }
+  return 2 + Math.floor(hashUnit(building.id) * 3); // 2..4
+}
 
 function RisingBody({
   grow,
+  floors,
   style,
   ghost,
 }: {
   grow: number;
+  floors: number;
   style: BuildingStyle;
   ghost: boolean;
 }) {
   const g = Math.max(0.06, Math.min(1, grow));
   const fullH = 3.2;
-  const h = fullH * g;
+  const floorH = fullH / Math.max(1, floors);
+  const { done, partial } = floorStack(floors, g);
   const opts = ghost ? GHOST_OPTS : {};
+  const bodyMat = toonMaterial(ghost ? '#a89274' : style.body, opts);
+  // A darker lip at each course's top so the stacked floors read as layers.
+  const bandMat = toonMaterial(ghost ? '#8d7b60' : '#6b5238', opts);
+
+  const courses: ReactNode[] = [];
+  for (let i = 0; i < done; i++) {
+    const y = 0.3 + floorH * i + floorH / 2;
+    courses.push(
+      <group key={`f${i}`}>
+        <RoundedBox
+          args={[2.0, floorH, 2.0]}
+          radius={0.12}
+          smoothness={3}
+          position={[0, y, 0]}
+          castShadow
+          receiveShadow
+          material={bodyMat}
+        />
+        {/* course lip at the floor's top edge (the masonry seam) */}
+        <mesh position={[0, y + floorH / 2 - 0.055, 0]} material={bandMat}>
+          <boxGeometry args={[2.04, 0.07, 2.04]} />
+        </mesh>
+      </group>,
+    );
+  }
+  // the partial course currently rising above the last laid floor
+  if (partial > 0 && done < floors) {
+    const h = Math.max(0.1, floorH * partial);
+    const y = 0.3 + floorH * done + h / 2;
+    courses.push(
+      <RoundedBox
+        key="partial"
+        args={[2.0, h, 2.0]}
+        radius={0.1}
+        smoothness={3}
+        position={[0, y, 0]}
+        castShadow
+        receiveShadow
+        material={bodyMat}
+      />,
+    );
+  }
+  const topH = 0.3 + fullH * Math.min(1, g);
+
   return (
     <group>
       {/* foundation slab (always present once building starts) */}
@@ -330,20 +417,11 @@ function RisingBody({
         receiveShadow
         material={toonMaterial('#b9a07e', opts)}
       />
-      {/* rising walls */}
-      <RoundedBox
-        args={[2.0, h, 2.0]}
-        radius={0.12}
-        smoothness={3}
-        position={[0, 0.3 + h / 2, 0]}
-        castShadow
-        receiveShadow
-        material={toonMaterial(ghost ? '#a89274' : style.body, opts)}
-      />
+      {courses}
       {/* a roof caps it once it's nearly topped out (and not a ghost ruin) */}
       {!ghost && g > 0.85 && (
         <mesh
-          position={[0, 0.3 + h + 0.5, 0]}
+          position={[0, topH + 0.5, 0]}
           rotation={[0, Math.PI / 4, 0]}
           castShadow
           material={toonMaterial(style.roof)}
@@ -1538,6 +1616,14 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [recipeKey, building.id],
   );
+  // Masonry construction: the floor count drives the block-by-block build —
+  // recipe floors when authored (EM-299), else a deterministic hash-derived
+  // 2-4, so EVERY construction site stacks visibly (mock + legacy included).
+  const floors = useMemo(
+    () => floorCountFor(building),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [recipeKey, building.id],
+  );
   // EM-180: funds render as a treasury object, never a building shell.
   const fund = isFundBuilding(building);
   const bobRef = useRef<THREE.Group>(null);
@@ -1605,7 +1691,7 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
 
         {building.status === 'under_construction' && (
           <>
-            <RisingBody grow={grow} style={style} ghost={false} />
+            <RisingBody grow={grow} floors={floors} style={style} ghost={false} />
             <Scaffolding grow={grow} />
             <ProgressRing
               progress={building.progress}
@@ -1642,7 +1728,7 @@ export function Structure({ building, x, z, focusedId, onPick }: StructureProps)
           <>
             {/* a half-built ruin frozen at its last progress — desaturated, no
                 scaffolding (workers left), overgrown with a weed or two. */}
-            <RisingBody grow={Math.max(0.18, grow)} style={style} ghost />
+            <RisingBody grow={Math.max(0.18, grow)} floors={floors} style={style} ghost />
             <mesh position={[1.2, 0.4, 1.0]} castShadow material={toonMaterial('#6f8f5a')}>
               <coneGeometry args={[0.2, 0.7, 5]} />
             </mesh>

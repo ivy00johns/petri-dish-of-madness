@@ -62,11 +62,18 @@ SYNTH_PREFIX = "disco:"
 class DiscoveredModel:
     """One row from the proxy's `/v1/models` catalog (the fields discovery
     reads). `available` + `unavailable_reason` are the availability truth (spec
-    §11 Q1); `context_window` seeds a lane's ctx_hint."""
+    §11 Q1); `context_window` seeds a lane's ctx_hint.
+
+    `supports_json` (EM-327, from `supported_parameters`): True when the
+    catalog advertises `response_format`, False when it provably does not,
+    None when the field is absent (older catalogs). Consumed by the router to
+    skip the speculative JSON-mode first call for models that will reject it
+    (and to keep it for ones that advertise it)."""
     id: str
     available: bool = True
     unavailable_reason: str | None = None
     context_window: int | None = None
+    supports_json: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -74,10 +81,14 @@ class SynthLaneSpec:
     """A lane to synthesize an adapter for: a discovered available FreeLLMAPI
     model with no hand-authored profile. The router builds an
     OpenAICompatibleAdapter from the freellmapi connection template (base_url +
-    api_key + color) with this `model_id`, registered under `profile`."""
+    api_key + color) with this `model_id`, registered under `profile`.
+
+    `json_capable` (EM-327) forwards the catalog's `response_format`
+    advertisement so the adapter can skip the doomed speculative first call."""
     profile: str
     model_id: str
     ctx_hint: int | None = None
+    json_capable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -126,11 +137,19 @@ def parse_models(payload: Any) -> list[DiscoveredModel]:
         # usable" rather than silently retiring the whole pool.
         avail = row.get("available", True)
         ctx = row.get("context_window") or row.get("context_length")
+        # EM-327 — the catalog's advertised request parameters. `response_format`
+        # in the list ⇒ JSON mode is safe; provably absent ⇒ don't speculatively
+        # send it (that is a wasted request per the review); field absent ⇒ None.
+        params = row.get("supported_parameters")
+        supports_json: bool | None = None
+        if isinstance(params, list):
+            supports_json = "response_format" in params
         out.append(DiscoveredModel(
             id=mid,
             available=bool(avail),
             unavailable_reason=row.get("unavailable_reason"),
             context_window=int(ctx) if isinstance(ctx, (int, float)) else None,
+            supports_json=supports_json,
         ))
     return out
 
@@ -286,7 +305,8 @@ def merge_universe(
                 continue  # a configured lane already covers it
             profile = f"{SYNTH_PREFIX}{m.id}"
             synth.append(SynthLaneSpec(
-                profile=profile, model_id=m.id, ctx_hint=m.context_window))
+                profile=profile, model_id=m.id, ctx_hint=m.context_window,
+                json_capable=m.supports_json))
             universe.append(Lane(
                 id=f"freellmapi:{profile}",
                 source="freellmapi",

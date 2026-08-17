@@ -9,6 +9,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import time
 from collections import OrderedDict, deque
 from typing import Any
 
@@ -50,6 +52,17 @@ _LANE_BOOST_FLOOR = 2048          # mirrors agents.runtime._LENGTH_RETRY_TOKEN_F
 # Defaults mirror config.loader.LaneFailoverParams (config `world.lane_failover`).
 _LANE_SICK_THRESHOLD_DEFAULT = 3  # timed_out entries in the 6-window ⇒ SICK
 _LANE_PROBE_EVERY_DEFAULT = 4     # every Nth would-be-detour probes the home lane
+
+# ── Per-lane rate-limit cooldown (spec 2026-07-07 — EM-300 P3) ───────────────
+# A pinned lane that 429s is remembered as down until its limit resets; its
+# agent routes straight to `auto` meanwhile, then the pin resumes (probe on
+# expiry is implicit). Defaults per the approved spec: a per-minute limit
+# resets in <=60s, so 45s probes right around reset; daily-quota exhaustion
+# backs off to a 10-min probe cadence rather than hammering. A Retry-After
+# header, when present, always wins.
+_COOLDOWN_BASE_S = 45.0
+_COOLDOWN_MULT = 2.0
+_COOLDOWN_CAP_S = 600.0
 
 # ── EM-205 — auto-backup routing ──────────────────────────────────────────────
 # 2026-06-15 decision (supersedes the EM-198 fan-out): a provider error (429 /
@@ -183,6 +196,7 @@ class Router:
         lane_failover: Any = None,
         overflow_lane: Any = None,
         adaptive_routing: Any = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._profiles: dict[str, ModelProfile] = {p.name: p for p in profiles}
         self._adapters: dict[str, Provider] = {
@@ -295,6 +309,18 @@ class Router:
         # ever gated on this bit — and EM-304 removed that design's vestigial
         # `_skips`/`_probe_every` state.
         self._auto_breaker_open: bool = False
+
+        # ── Per-lane rate-limit cooldown (spec 2026-07-07 — EM-300 P3) ─────────
+        # A pinned lane that 429s is remembered as down until its limit resets
+        # (profile -> clock() expiry); its agent routes straight to `auto`
+        # meanwhile, then the pin resumes on expiry (probe-on-expiry is
+        # implicit). `_strikes` grows the backoff on consecutive 429s; any
+        # success clears both. In-memory only — cleared by clear_cache() on
+        # world reset (re-probe on boot is acceptable, per the spec's
+        # non-goals). Monotonic clock, injected so tests are deterministic.
+        self._clock: Callable[[], float] = clock
+        self._lane_cooldown: dict[str, float] = {}
+        self._lane_cooldown_strikes: dict[str, int] = {}
 
         # ── EM-222 — the dedicated embedding lane ──────────────────────────────
         # The adapter for the profile literally named `embed`, resolved once.
@@ -522,7 +548,27 @@ class Router:
         # surface unchanged for this profile.
         self._pending_cached.pop(profile_name, None)
         served_by = profile_name
-        if self._adaptive_enabled() and self.lane_sick(profile_name):
+        if (self._lane_cooling(profile_name)
+                and self._auto_backup is not None
+                and profile_name != self._auto_backup):
+            # Per-lane rate-limit cooldown (spec §3.5) — the pinned lane is
+            # inside a 429 cooling window: PRE-EMPTIVELY skip the doomed pinned
+            # POST and route straight to `auto` (which serves a real action, so
+            # the agent never idles for a lane we already know is down). The
+            # 429 that opened the window already recorded the home error, so no
+            # fresh home demerit here (note_home_error=False). Probe-on-expiry
+            # is implicit: once the window passes, _lane_cooling is false and
+            # the pin is called exactly once; a success clears the cooldown,
+            # another 429 re-cools with a grown backoff.
+            text, served_by = await self._auto_backup_call(
+                profile_name,
+                ProviderError(
+                    profile_name, 429,
+                    "rate-limited — cooling window (routed to auto)"),
+                messages, max_tokens=max_tokens, temperature=temperature,
+                note_home_error=False,
+            )
+        elif self._adaptive_enabled() and self.lane_sick(profile_name):
             # Adaptive Lane Routing (spec §6 step 1) — the pinned lane is
             # health-sick: PRE-EMPTIVELY skip it (ZERO adapter calls) and walk
             # the registry in curated order. This is the sick-lane skip the #76
@@ -581,7 +627,14 @@ class Router:
         else:
             try:
                 text = await adapter.chat(messages, max_tokens=max_tokens, temperature=temperature)
+                self._clear_cooldown(profile_name)
             except ProviderError as exc:
+                if self._is_rate_limit(exc):
+                    # Per-lane rate-limit cooldown (spec §3.4/§3.5): a 429 opens
+                    # (or extends) the lane's window; the next turn pre-empts
+                    # instead of burning another doomed POST. Non-rate-limit
+                    # errors keep the existing path untouched.
+                    self._set_cooldown(profile_name, exc.retry_after)
                 if self._adaptive_enabled():
                     # Adaptive Lane Routing (spec P1) — walk the sorting-list
                     # registry in priority order (ordered / health-aware /
@@ -655,6 +708,7 @@ class Router:
         *,
         max_tokens: int,
         temperature: float,
+        note_home_error: bool = True,
     ) -> tuple[str, str]:
         """EM-205 — auto-backup: retry one failed call ONCE on the proxy `auto`.
 
@@ -675,8 +729,14 @@ class Router:
         was usually still serving violated the never-mute rule). The breaker
         state is OBSERVABILITY-ONLY: any `auto` failure marks it open, a served
         backup marks it closed — it no longer skips or gates a single call. Its
-        vestigial fast-fail fields were removed in EM-304."""
-        self.note_lane_error(home)
+        vestigial fast-fail fields were removed in EM-304.
+
+        `note_home_error=False` (per-lane cooldown pre-emptive route, spec
+        §3.5): a cooling turn makes no home POST, so it must NOT record a
+        fresh home error — the 429 that opened the window already did, and a
+        second demerit would pin the lane sick forever."""
+        if note_home_error:
+            self.note_lane_error(home)
         backup = self._auto_backup
         if backup is None or backup == home:
             raise first_exc
@@ -736,6 +796,90 @@ class Router:
         `auto` serves. Absent an `auto` lane the breaker never trips. The
         vestigial `skips`/`probe_every` keys were removed in EM-304."""
         return {"open": self._auto_breaker_open}
+
+    # ── Per-lane rate-limit cooldown (spec 2026-07-07 — EM-300 P3) ─────────────
+
+    def _is_rate_limit(self, exc: ProviderError) -> bool:
+        """Rate-limit classification (spec §3.1): HTTP 429, or a detail that
+        reads as a rate-limit/quota/exhaustion. ONLY rate-limits set a
+        cooldown — a 5xx / transport / timeout is transient and stays on the
+        existing path (cooling a lane for a one-off 500 would wrongly park it
+        on `auto`)."""
+        if exc.status == 429:
+            return True
+        detail = (exc.detail or "").lower()
+        return re.search(r"rate.?limit|exhausted|quota|too many requests", detail) is not None
+
+    def _set_cooldown(self, profile: str, retry_after: float | None) -> None:
+        """Open or extend the lane's cooling window (spec §3.4): strike +1;
+        window = retry_after when the upstream gave one, else exponential
+        backoff (`45s * 2^(strikes-1)`) capped at 600s. Logs ONLY the open
+        transition (never per skip)."""
+        if profile == self._auto_backup:
+            # The terminal whole-pool lane never cools itself (spec §4 — no
+            # self-recursion; matches the EM-205 home==auto guard).
+            return
+        strikes = self._lane_cooldown_strikes.get(profile, 0) + 1
+        self._lane_cooldown_strikes[profile] = strikes
+        if retry_after is not None and retry_after > 0:
+            # Clamp upstream's number: a bogus/absurd `Retry-After` (or a
+            # date far in the future) must never cripple a lane past the cap
+            # the exponential fallback itself respects.
+            window = min(float(retry_after), _COOLDOWN_CAP_S)
+        else:
+            window = min(
+                _COOLDOWN_BASE_S * (_COOLDOWN_MULT ** (strikes - 1)),
+                _COOLDOWN_CAP_S,
+            )
+        now = self._clock()
+        was_cooling = now < self._lane_cooldown.get(profile, -1.0)
+        self._lane_cooldown[profile] = now + window
+        if not was_cooling:
+            log.info(
+                "%s rate-limited (retry_after=%s) — cooling %.0fs, routing to auto",
+                profile, retry_after, window,
+            )
+
+    def _clear_cooldown(self, profile: str) -> None:
+        """Close the lane's cooling window on a successful call (spec §3.5):
+        strikes reset, the pin resumes at full trust. Logs ONLY the close
+        transition."""
+        if profile in self._lane_cooldown:
+            log.info("%s recovered — resuming pin", profile)
+        self._lane_cooldown.pop(profile, None)
+        self._lane_cooldown_strikes.pop(profile, None)
+
+    def _lane_cooling(self, profile: str) -> bool:
+        """True while the lane is inside its cooling window (spec §3.3).
+        Expired entries are cleared lazily on read, so probe-on-expiry is
+        implicit: once the window passes, the next call hits the pinned lane
+        exactly once (success clears it; another 429 re-cools with a grown
+        backoff — no separate probe counter needed)."""
+        expiry = self._lane_cooldown.get(profile)
+        if expiry is None:
+            return False
+        if self._clock() >= expiry:
+            self._lane_cooldown.pop(profile, None)
+            return False
+        return True
+
+    def lane_cooldowns(self) -> dict:
+        """Introspection snapshot (spec §3.7): profile -> {cooling: true,
+        expires_in_s, strikes} for every lane currently inside a window;
+        healthy lanes absent. Merged into /api/lanes by lane_health() and into
+        /api/lanes/registry by lanes_view(), so the UI can show "on auto,
+        resets in 38s" instead of inferring a storm from error cards."""
+        now = self._clock()
+        out: dict = {}
+        for profile, expiry in self._lane_cooldown.items():
+            if now >= expiry:
+                continue  # lazily-expired on read
+            out[profile] = {
+                "cooling": True,
+                "expires_in_s": round(expiry - now, 1),
+                "strikes": self._lane_cooldown_strikes.get(profile, 0),
+            }
+        return out
 
     # ── Adaptive Lane Routing (spec 2026-07-07 — P1) ───────────────────────────
 
@@ -1008,6 +1152,9 @@ class Router:
                 api_key=template.api_key,
                 model_id=spec.model_id,
                 color=template.color,
+                # EM-327 — catalog-advertised response_format support: skip the
+                # speculative JSON-mode first call for models that reject it.
+                json_capable=spec.json_capable,
             )
             self._discovery_synth.add(spec.profile)
 
@@ -1043,6 +1190,7 @@ class Router:
                 "priority": ln.priority,
                 "enabled": self._adapters.get(ln.profile) is not None,
                 "health": "sick" if sick else "ok",
+                "cooldown": self.lane_cooldowns().get(ln.profile),
                 "cap_state": "sick" if sick else "ok",
                 "discovered": ln.profile in self._discovery_synth,
                 "free": ln.free,
@@ -1190,7 +1338,7 @@ class Router:
                 continue
             if self._adapters.get(prof) is None:
                 continue  # P4: direct-provider lanes without a built adapter
-            if self.lane_sick(prof):
+            if self.lane_sick(prof) or self._lane_cooling(prof):
                 if reserved is not None and prof == reserved.profile:
                     # The reserved backstop is attempted post-loop regardless
                     # of its window — no cadence bookkeeping needed here.
@@ -1210,10 +1358,14 @@ class Router:
                 # Counters only — no clock reads; a chronically dead lane
                 # costs one bounded attempt per probe_every bounces, never
                 # the whole budget.
+                # EM-300 P3 — a lane inside a 429 COOLDOWN window is skipped
+                # on the same cadence: the every-probe_every-th probe either
+                # recovers it (a success clears the cooldown) or re-cools it
+                # with one fresh demerit — never a doomed POST every turn.
                 n = self._lane_detour_counter.get(prof, 0) + 1
                 self._lane_detour_counter[prof] = n
                 if n % self._probe_every() != 0:
-                    continue  # health-sick (EM-135 window) — the auto-blind skip
+                    continue  # sick (EM-135 window) / cooling (429 window)
             if not lane.fits(base_need):
                 continue  # #77: ceiling can't fit even the genuine floor
             if require_json and "reasoning" in lane.tags:
@@ -1294,6 +1446,9 @@ class Router:
             )
         except ProviderError as exc:
             self.note_lane_error(lane.profile)
+            if self._is_rate_limit(exc):
+                # A 429 on a bounce attempt cools THAT lane too (spec §3.4).
+                self._set_cooldown(lane.profile, exc.retry_after)
             return None, exc
         except asyncio.TimeoutError:
             # A stalled lane is a demerit in the SAME window a turn-budget
@@ -1301,6 +1456,7 @@ class Router:
             self._record_parse_outcome(
                 lane.profile, parsed=False, truncated=False, timed_out=True)
             return None, None
+        self._clear_cooldown(lane.profile)
         return text, None
 
     async def _call_lane(
@@ -1386,6 +1542,10 @@ class Router:
         self._last_refresh_counter = 0
         self._discovery_retired = []
         self._discovery_quota = None
+        # Per-lane cooldown is per-run too: a prior run's rate-limit windows
+        # must never park a fresh run's lanes (re-probe on boot is acceptable).
+        self._lane_cooldown.clear()
+        self._lane_cooldown_strikes.clear()
         self._lane_registry = LaneRegistry(
             SortingList(
                 self._ar_order(), allow_paid=self._ar_allow_paid(),
@@ -1539,7 +1699,7 @@ class Router:
         EM-177 augments each entry with `sick` (the failover predicate) and
         `detours_routed_here` (detoured calls this lane absorbed this run) —
         both additive keys."""
-        return {
+        health = {
             profile: {
                 "window": [dict(o) for o in window],
                 "boosted": self._lane_boosted(profile),
@@ -1551,6 +1711,11 @@ class Router:
             }
             for profile, window in self._lane_outcomes.items()
         }
+        # Per-lane cooldown (EM-300 P3) rides the same payload: a cooling lane
+        # gets {cooling, expires_in_s, strikes}; healthy lanes stay absent.
+        for profile, cd in self.lane_cooldowns().items():
+            health.setdefault(profile, {})["cooldown"] = cd
+        return health
 
     # ── Wave D3 / EM-177 — lane failover with recovery probes ──────────────────
 
