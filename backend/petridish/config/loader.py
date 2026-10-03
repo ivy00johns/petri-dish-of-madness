@@ -1631,6 +1631,38 @@ class SettlementParams:
 
 
 @dataclass
+class ContactParams:
+    """EM-332 — First Contact: ONE world, TWO settlements, the roster split
+    between them and each half cast from a DIFFERENT model family (the
+    speciation-then-contact experiment).
+
+    DEFAULT OFF: a world.yaml without the `contact` block is byte-identical to
+    pre-EM-332 (single genesis, no roster split, no extra places). `enabled:
+    true` (with `settlements.enabled` too — a contact world IS a two-settlement
+    world) lays out the second settlement + its starter places at genesis and
+    moves the B-half agents' homes there; the split CAST lives in
+    api/tournament.build_contact_cast_plan (both sides follow the ONE split
+    rule, engine.world.contact_roster_split). The engine reads this block via
+    the defensive `_block_get` accessor with IDENTICAL defaults."""
+
+    enabled: bool = False
+    # Informational in the config (the endpoint takes them explicitly); the
+    # run row self-describes via its config_json so EM-334's per-settlement
+    # Arena cards can read the pairing back.
+    family_a: str = ""
+    family_b: str = ""
+    # Optional display name for the second settlement; empty ⇒ the seeded
+    # _settlement_name walk (never a collision with town A).
+    name_b: str = ""
+    # Town B's layout seed = city_seed + seed_offset (a DIFFERENT town, same
+    # generator guarantees); its starter-cluster size (procgen-capped); and
+    # how far (logical units) beyond town A's extent B's anchor sits.
+    seed_offset: int = 1
+    n_places: int = 8
+    margin: int = 60
+
+
+@dataclass
 class ProphecyBoardParams:
     """EM-317 — The Prophecy Board (config `world.prophecy_board`). The watcher
     posts a prophecy from a CONSTRAINED enum-predicate menu ("X convicted within
@@ -2124,6 +2156,10 @@ class WorldParams:
     # (no menu line, no prompt line, no snapshot key, F1 city-origin anchoring).
     # `enabled: true` turns on found_settlement + settlement-anchored placement.
     settlements: SettlementParams = field(default_factory=SettlementParams)
+    # EM-332 — First Contact. Additive, DEFAULT OFF, so a world.yaml without
+    # the `contact` block is byte-identical to pre-EM-332 (single genesis, no
+    # split, no extra places). Requires settlements too (see ContactParams).
+    contact: ContactParams = field(default_factory=ContactParams)
     # EM-317 — The Prophecy Board. Additive, DEFAULT OFF, so a world.yaml without
     # the `prophecy_board` block is byte-identical to pre-EM-317 (no omen prompt
     # line, no snapshot key, no resolution sweep, no /api/prophesy verb).
@@ -3440,6 +3476,33 @@ def _parse_boost(raw: dict | None) -> BoostParams:
     )
 
 
+def _parse_contact(raw: dict | None) -> ContactParams:
+    """Parse the optional `world.contact` block (EM-332).
+    Absent/empty/malformed -> engine-matching defaults (enabled False ⇒ a
+    complete no-op, byte-identical pre-EM-332). A malformed `enabled` value
+    coerces truthily like the other block flags; numeric keys fall back
+    individually and are clamped sane — a malformed value never breaks the
+    block."""
+    if not isinstance(raw, dict):
+        return ContactParams()
+
+    def _int(key: str, default: int, lo: int) -> int:
+        try:
+            return max(lo, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return ContactParams(
+        enabled=bool(raw.get("enabled", False)),
+        family_a=str(raw.get("family_a", "") or ""),
+        family_b=str(raw.get("family_b", "") or ""),
+        name_b=str(raw.get("name_b", "") or ""),
+        seed_offset=_int("seed_offset", 1, 0),
+        n_places=_int("n_places", 8, 4),
+        margin=_int("margin", 60, 10),
+    )
+
+
 def _parse_settlements(raw: dict | None) -> SettlementParams:
     """Parse the optional `world.settlements` block (EM-269 F2).
     Absent/empty/malformed -> engine-matching defaults (enabled False ⇒ a
@@ -3750,6 +3813,7 @@ def _parse_world(
         victory_arch=_parse_victory_arch(w.get("victory_arch")),
         boost=_parse_boost(w.get("boost")),
         settlements=_parse_settlements(w.get("settlements")),
+        contact=_parse_contact(w.get("contact")),
         prophecy_board=_parse_prophecy_board(w.get("prophecy_board")),
         constitution=_parse_constitution(w.get("constitution")),
         governance=_parse_governance(w.get("governance")),

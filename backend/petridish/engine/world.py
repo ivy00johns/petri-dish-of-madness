@@ -1593,6 +1593,21 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "place"
 
 
+def contact_roster_split(roster_names: list[str]) -> tuple[list[str], list[str]]:
+    """EM-332 — the deterministic First-Contact roster split: the roster's
+    FIRST ceil(n/2) names belong to settlement A (the genesis town), the rest
+    to settlement B (the contact founding).
+
+    The roster is the config's agent-list order — the ONE identity both sides
+    of the split see: the cast plan reads AgentConfig.name, the genesis reads
+    AgentState.name in the same boot order. Keyed on NAME deliberately, NOT
+    on boot agent ids (those carry a uuid suffix — a sorted-id split would
+    randomize who lands in which town on every boot!). Same config ⇒ same
+    split, deterministically. Pure; empty-safe."""
+    k = (len(roster_names) + 1) // 2
+    return list(roster_names[:k]), list(roster_names[k:])
+
+
 def generate_procgen_places(cfg: Any, agent_names: list[str]) -> list[PlaceState]:
     """Generate a seeded town layout (EM-098) using EXISTING kinds only
     (work/home/social/governance/wild).
@@ -4434,6 +4449,18 @@ class World:
         no snapshot key — byte-identical pre-EM-269 behavior."""
         return bool(self._stl_param("enabled", False))
 
+    def _ctc_param(self, name: str, default: Any) -> Any:
+        """Defensive accessor for the `world.contact` config block (dataclass OR
+        dict OR absent — the _stl_param discipline, EM-332)."""
+        return _block_get(getattr(self.params, "contact", None), name, default)
+
+    def _contact_enabled(self) -> bool:
+        """Config gate `world.contact.enabled` (EM-332, default OFF). Requires
+        settlements too — a contact world IS a two-settlement world; a contact
+        block alone in a settlements-OFF world is a no-op (byte-identical)."""
+        return bool(self._stl_param("enabled", False)) and bool(
+            self._ctc_param("enabled", False))
+
     def _settlement_id(self, founder_id: str, ordinal: int) -> str:
         """A SEEDED, replay-stable settlement id (NEVER uuid4 — the EM-155
         keystone). Mirrors _prop_id/_image_id: sha256 of (founder, tick,
@@ -4617,6 +4644,129 @@ class World:
         for aid in sorted(self.agents):
             self.agents[aid].home_settlement_id = sid
             members.append(aid)
+        # EM-332 — First Contact: lay out the second settlement + its starter
+        # places and move the B-half of the roster there (inside the same
+        # fresh-boot-only path, so a restore never clobbers a saved contact
+        # world). No-op unless `world.contact.enabled` is on.
+        self._seed_contact_settlement(sid)
+
+    def _seed_contact_settlement(self, sid_a: str) -> None:
+        """EM-332 — the First-Contact second genesis: a second settlement cast
+        from a DIFFERENT model family (the split CAST lives in
+        api/tournament.build_contact_cast_plan; here we lay the ground it
+        stands on). Called from seed_genesis_settlement's fresh-boot path only
+        (a restore brings its settlements/homes/places back verbatim), so a
+        re-call after boot is a no-op via the idempotence guard.
+
+        Lays out, in order:
+          1. the roster split (contact_roster_split over SORTED agent ids —
+             the same rule the cast plan follows),
+          2. a deterministic starter place cluster for town B — the SAME
+             generate_procgen_places town A uses, seed-shifted off the run's
+             city_seed so the layouts differ but the generator's guarantees
+             (plaza + town hall + work/wild minimums, one home per B agent)
+             hold — with ids/names namespaced (cb_ prefix) so they cannot
+             collide with town A's, and the cluster shifted to B's anchor,
+          3. settlement B centered a `margin` (logical units) beyond town A's
+             extent — the nearest-center Voronoi partition in
+             settlement_of_place then keeps every B place on B's side, so the
+             per-city perception horizons isolate the two towns, and
+          4. the B-half agents' home_settlement_id + location moved to B
+             (removing them from town A's members list).
+
+        Byte-identity: gated on `_contact_enabled()`; a contact-OFF world never
+        enters this method (the EM-155 keystone). Deterministic: seeded place
+        ids via the settlement idiom, sorted-id splits, fixed margins."""
+        if not self._contact_enabled() or len(self.settlements) != 1:
+            return
+        if not self.places:  # no map ⇒ no far anchor to found against
+            return
+        a = self.settlements[sid_a]
+        id_by_name = {self.agents[aid].name: aid for aid in self.agents}
+        a_names, b_names = contact_roster_split(list(id_by_name))
+        if not b_names:  # a 1-agent world has no second founding
+            return
+        b_ids = [id_by_name[n] for n in b_names]
+        # 2. Town B's starter cluster — the same generator town A uses, with a
+        #    seed shifted off the run's city_seed (the _seed_int idiom) and B's
+        #    roster names (one cottage per B agent).
+        from ..animals.runtime import _seed_int
+        gen_cfg = {
+            "seed": _seed_int("contact_layout", self.city_seed, self.tick, 0),
+            "n_places": int(self._ctc_param("n_places", 8)),
+        }
+        b_name = str(self._ctc_param("name_b", "") or "").strip()
+        if not b_name:
+            b_name = self._settlement_name("", "contact")
+        # B's anchor: far enough beyond town A that the nearest-center Voronoi
+        # partition (settlement_of_place) keeps EVERY B place on B's side of
+        # the perpendicular bisector — computed from the generated cluster's
+        # ACTUAL reach toward A (the generator rings out to ~450 logical from
+        # its center), never from a hardcoded hope. Per axis, with c = A's
+        # civic-center logical coord and e = A's max place extent:
+        #   bisector:  B_center ≥ c + 2*reach   (B's near edge past the
+        #              midpoint — a place at the near edge is closer to B)
+        #   non-overlap: B_center − reach ≥ e + margin  (no tile overlap)
+        # Places live in LOGICAL coords; the settlement center stores WORLD.
+        margin = int(self._ctc_param("margin", 60))
+        gen = generate_procgen_places(gen_cfg, b_names)
+        anchor = self.places.get(self.civic_center_id())
+        ax = float(anchor.x) if anchor is not None else 500.0
+        ay = float(anchor.y) if anchor is not None else 500.0
+        max_ax = max(float(p.x) for p in self.places.values())
+        max_ay = max(float(p.y) for p in self.places.values())
+        reach_x = 500.0 - min(float(p.x) for p in gen)
+        reach_y = 500.0 - min(float(p.y) for p in gen)
+        dx = max(ax + 2 * reach_x + margin,
+                 max_ax + margin + reach_x) - 500.0
+        dy = max(ay + 2 * reach_y + margin,
+                 max_ay + margin + reach_y) - 500.0
+        bx, by = 500.0 + dx, 500.0 + dy
+        rename = {"Central Plaza": f"{b_name} Plaza", "Town Hall": f"{b_name} Hall"}
+        # Names are LLM-facing (perception lines, menus) — a second bare
+        # "Market" would read ambiguously to a traveler, so any generated name
+        # that collides with an existing place gets the town prefix
+        # ("Grimstead Market"). Ids are already namespaced (cb_ prefix).
+        taken = {p.name for p in self.places.values()}
+        b_plaza = ""
+        for p in gen:
+            p.id = f"cb_{p.id}"
+            if p.name in rename:
+                p.name = rename[p.name]
+            if p.name in taken:
+                p.name = f"{b_name} {p.name}"
+            taken.add(p.name)
+            p.x = round(p.x + dx, 4)
+            p.y = round(p.y + dy, 4)
+            self.places[p.id] = p
+            if p.id == "cb_plaza":
+                b_plaza = p.id
+        # 3. Settlement B — the exact primitive shape action_found_settlement
+        #    mints (round(4) centers — the byte-stable snapshot discipline).
+        bx_w, by_w = logical_to_world(bx, by)
+        ordinal = 0
+        sid_b = self._settlement_id("contact", ordinal)
+        while sid_b in self.settlements:  # pragma: no cover - collision bump
+            ordinal += 1
+            sid_b = self._settlement_id("contact", ordinal)
+        self.settlements[sid_b] = {
+            "name": b_name,
+            "center": (round(bx_w, 4), round(by_w, 4)),
+            "founded_tick": self.tick,
+            "founder_id": "contact",
+            "members": list(b_ids),
+        }
+        # 1 + 4. The split: town A keeps its half (membership rebuilt as the
+        # sorted A-half ids — the snapshot stays order-stable), town B's
+        # agents move home + body. Same names ⇒ same sides, every boot.
+        a_names_set = set(a_names)
+        a["members"] = [aid for aid in sorted(self.agents)
+                        if self.agents[aid].name in a_names_set]
+        for aid in b_ids:
+            agent = self.agents[aid]
+            agent.home_settlement_id = sid_b
+            if b_plaza:
+                agent.location = b_plaza
 
     def _resolve_settlement_ref(self, ref: str) -> str | None:
         """Resolve a settlement id OR a (case-insensitive) name to its id, or
