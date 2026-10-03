@@ -469,9 +469,16 @@ class TickLoop:
         if self._task and not self._task.done():
             self._task.cancel()
             try:
-                await self._task
+                # EM-112 — bounded: even if the tick task swallows the cancel
+                # (py3.11 wait_for race), reset() must return. The zombie dies
+                # on its own via _run's cancelling() guards.
+                await asyncio.wait_for(self._task, timeout=5.0)
             except asyncio.CancelledError:
                 pass
+            except asyncio.TimeoutError:
+                log.warning(
+                    "tick task outlived reset()'s cancel — abandoning it"
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("tick task raised during reset: %s", exc)
         self._task = None
@@ -709,6 +716,14 @@ class TickLoop:
     async def _run(self) -> None:
         log.info("TickLoop started")
         while True:
+            # EM-112 — a swallowed cancellation must never strand reset().
+            # Python 3.11's wait_for can surface a cancel() racing the timeout
+            # as TimeoutError (3.12 rewrote it to always re-raise), which this
+            # loop would then eat — leaving reset()'s `await self._task`
+            # blocked forever. Re-deliver any pending cancel request.
+            _me = asyncio.current_task()
+            if _me is not None and _me.cancelling():
+                raise asyncio.CancelledError()
             # Wait until either continuously running, or a step is queued.
             while self._paused and self._pending_steps <= 0:
                 self._step_event.clear()
@@ -720,6 +735,8 @@ class TickLoop:
                 # network outage, probe connectivity and auto-resume when it's
                 # back (breaks this wait by clearing self._paused).
                 await self._maybe_auto_resume()
+                if _me is not None and _me.cancelling():
+                    raise asyncio.CancelledError()
 
             # Decide whether this iteration is a one-shot step or a continuous turn.
             # A queued step always advances exactly one turn (even while running);

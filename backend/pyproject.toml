@@ -23,6 +23,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
     "httpx",
 ]
 
@@ -33,3 +34,7 @@ include = ["petridish*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# EM-112 CI hardening — a hung test must fail with a stack dump in minutes,
+# not wedge the runner for hours (the py3.11 wait_for cancel race did exactly
+# that). 300s is ~100x the slowest test in the suite.
+addopts = "--timeout=300"
