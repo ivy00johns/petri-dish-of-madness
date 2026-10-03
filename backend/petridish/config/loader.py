@@ -344,6 +344,9 @@ places:
   # EM-240 — the town jail (kind: civic). Enforcers march detained / convicted
   # lawbreakers here; a jailed agent may only talk and think until released.
   - { id: jail,            name: "The Lockup",        x: 106, y: 303, kind: civic,      district: civic,       description: "A spare stone cell where the town holds its lawbreakers." }
+  # EM-315 — the Healing House (kind: social): where a 70% heal vote's patient
+  # visibly relocates while their model is hot-swapped. Must mirror world.yaml.
+  - { id: healing_house,   name: "The Healing House", x: 500, y: 106, kind: social,     district: civic,       description: "A quiet rest-house where the town sends troubled souls to be made whole again." }
   # residential — lamplit blocks to the south-west
   - { id: home,            name: "Hearth House",      x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
   - { id: rosehip_cottage, name: "Rosehip Walk-up",   x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }

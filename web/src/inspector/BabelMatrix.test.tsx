@@ -90,8 +90,8 @@ beforeEach(() => {
 });
 
 describe('BabelMatrix (EM-314)', () => {
-  it('the frontend flag defaults OFF (deferred sign-off — mirror ROAD_MESH_ENABLED)', () => {
-    expect(BABEL_MATRIX_ENABLED).toBe(false);
+  it('the frontend flag defaults ON (EM-314 live sign-off 2026-10-03)', () => {
+    expect(BABEL_MATRIX_ENABLED).toBe(true);
   });
 
   it('renders the N×N grid with model axes and per-cell rates', async () => {

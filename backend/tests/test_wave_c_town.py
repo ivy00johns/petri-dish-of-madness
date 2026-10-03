@@ -194,7 +194,7 @@ def test_town_shape_gates_and_legacy_ids(monkeypatch):
     places = _load_town(monkeypatch)
     by_id = {p.id: p for p in places}
 
-    assert len(places) == 16   # EM-240 added the jail (a civic-kind place)
+    assert len(places) == 17   # EM-240 jail + EM-315 healing house (civic district)
     assert {p.district for p in places} == DISTRICTS
     assert {p.kind for p in places} <= KINDS
 
@@ -218,9 +218,11 @@ def test_town_shape_gates_and_legacy_ids(monkeypatch):
     assert all(p.kind == "home" for p in by_district["residential"])
     assert 3 <= len(by_district["residential"]) <= 4
     assert any(p.kind == "governance" for p in by_district["civic"])
-    # EM-240 — civic now holds townhall + archive (governance) + the jail (civic).
-    assert len(by_district["civic"]) == 3
-    assert {p.kind for p in by_district["civic"]} == {"governance", "civic"}
+    # EM-240 — civic holds townhall + archive (governance) + the jail (civic).
+    # EM-315 — plus the healing house (social, civic district): the 70% heal
+    # vote's patient visibly relocates there while their model is swapped.
+    assert len(by_district["civic"]) == 4
+    assert {p.kind for p in by_district["civic"]} == {"governance", "civic", "social"}
     assert {p.kind for p in by_district["farm"]} <= {"wild", "work"}
 
 

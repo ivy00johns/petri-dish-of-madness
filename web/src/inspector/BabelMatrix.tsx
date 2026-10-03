@@ -32,12 +32,13 @@ import './inspector-tokens.css';
 
 /**
  * Frontend half of the `babel_matrix.enabled` flag — mirrors the
- * ROAD_MESH_ENABLED / GRAPH_LOTS_ENABLED deferred-sign-off const pattern.
- * Default OFF: the panel is never mounted, and even if it were the backend
- * endpoint 404s unless PETRIDISH_BABEL_MATRIX_ENABLED is also set. Flip both
- * together for a live sign-off.
+ * ROAD_MESH_ENABLED / GRAPH_LOTS_ENABLED const pattern.
+ * Default ON since the EM-314 live sign-off (2026-10-03): the panel mounts in
+ * the Inspector and the backend endpoint is enabled at boot via
+ * PETRIDISH_BABEL_MATRIX_ENABLED (flip both together — the backend half is
+ * boot-env, the frontend half is this const).
  */
-export const BABEL_MATRIX_ENABLED = false;
+export const BABEL_MATRIX_ENABLED = true;
 
 /** n at which a cell reaches full colour intensity (below it, faded = thin). */
 const CONFIDENCE_FULL_N = 12;

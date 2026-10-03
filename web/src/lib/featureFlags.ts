@@ -7,9 +7,9 @@
  */
 
 /**
- * EM-312 — the Storylines Rail (`storylines_rail.enabled`). When OFF (default)
- * the rail is not mounted, no thread filter is offered, and no 3-D tether is
- * drawn, so the live/golden UI is byte-identical to before the feature. Flip
- * with VITE_STORYLINES_RAIL=1 for a demo/live sign-off build.
+ * EM-312 — the Storylines Rail (`storylines_rail.enabled`). Default ON since
+ * the live sign-off (2026-10-03); the rail still renders nothing until a
+ * storyline is promoted, so peacetime chrome is unchanged. Set
+ * VITE_STORYLINES_RAIL=0 to opt out of the build.
  */
-export const STORYLINES_RAIL_ENABLED = import.meta.env.VITE_STORYLINES_RAIL === '1';
+export const STORYLINES_RAIL_ENABLED = import.meta.env.VITE_STORYLINES_RAIL !== '0';

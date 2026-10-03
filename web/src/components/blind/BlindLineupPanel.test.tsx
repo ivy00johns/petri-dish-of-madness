@@ -48,8 +48,9 @@ afterEach(() => {
 });
 
 describe('BlindLineupPanel — flag gating', () => {
-  it('renders NOTHING and masks NOTHING when the flag is off (default)', () => {
-    renderWithFlag(); // no VITE_BLIND_LINEUP stub
+  it('renders NOTHING and masks NOTHING when the flag is explicitly off', () => {
+    vi.stubEnv('VITE_BLIND_LINEUP', '0');
+    renderWithFlag();
     expect(screen.queryByText(/BLIND LINEUP/i)).not.toBeInTheDocument();
     // The legend shows real model names — no masking with the flag off.
     expect(screen.getByText('groq-llama')).toBeInTheDocument();

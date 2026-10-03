@@ -22,9 +22,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe('blindLineupEnabled — the flag (default OFF)', () => {
-  it('is OFF when VITE_BLIND_LINEUP is unset', () => {
-    expect(blindLineupEnabled()).toBe(false);
+describe('blindLineupEnabled — the flag (default ON since the EM-309 live sign-off)', () => {
+  it('is ON when VITE_BLIND_LINEUP is unset', () => {
+    expect(blindLineupEnabled()).toBe(true);
   });
 
   it.each(['1', 'true', 'on', 'YES', 'On'])('is ON for %s', (v) => {

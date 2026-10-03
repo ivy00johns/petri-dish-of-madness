@@ -41,11 +41,11 @@ const W = world({
 });
 
 describe('DramaWire — flag gate', () => {
-  it('renders NOTHING when the flag is unset (default OFF)', () => {
-    const { container } = render(
+  it('renders the wire when the flag is unset (default ON — EM-316 live sign-off)', () => {
+    render(
       <DramaWire world={W} history={newestFirst([ev({ kind: 'agent_died', tick: 5 })])} />,
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByText('DRAMA WIRE')).toBeInTheDocument();
   });
 
   it('renders NOTHING when the flag is explicitly off', () => {
@@ -56,7 +56,8 @@ describe('DramaWire — flag gate', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('does NO scoring with the flag off — the full history is never scanned (C6)', () => {
+  it('does NO scoring with the flag explicitly off — the full history is never scanned (C6)', () => {
+    vi.stubEnv('VITE_DRAMA_WIRE', '0');
     const history = newestFirst([
       ev({ kind: 'agent_died', tick: 5 }),
       ev({ kind: 'war_clash', tick: 6 }),

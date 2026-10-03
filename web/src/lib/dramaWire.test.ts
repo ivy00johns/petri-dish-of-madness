@@ -194,11 +194,11 @@ describe('beatFocus — camera fly-to resolution (zero sim feedback)', () => {
   });
 });
 
-describe('isDramaWireEnabled — flag defaults OFF', () => {
+describe('isDramaWireEnabled — flag defaults ON (EM-316 live sign-off 2026-10-03)', () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it('defaults OFF when unset', () => {
-    expect(isDramaWireEnabled()).toBe(false);
+  it('defaults ON when unset', () => {
+    expect(isDramaWireEnabled()).toBe(true);
   });
 
   it('is ON for 1/true/on (case-insensitive)', () => {
@@ -208,7 +208,7 @@ describe('isDramaWireEnabled — flag defaults OFF', () => {
     }
   });
 
-  it('stays OFF for other values', () => {
+  it('stays OFF for other values (opt-out)', () => {
     vi.stubEnv('VITE_DRAMA_WIRE', '0');
     expect(isDramaWireEnabled()).toBe(false);
   });

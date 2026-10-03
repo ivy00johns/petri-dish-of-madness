@@ -47,6 +47,18 @@ from petridish.api.app import app
 # make test, green only in CI by accident of the working directory).
 WORLD_YAML_SRC = str(Path(__file__).resolve().parents[2] / "config" / "world.yaml")
 
+
+def _drop_block(dst, key: str) -> None:
+    """Delete a flag block from a copied world.yaml so tests can exercise the
+    absent-block path (every block ships present since the 2026-10-03
+    dormant-flag sign-off flipped them all ON)."""
+    yaml = ruamel.yaml.YAML()
+    with open(dst) as fh:
+        doc = yaml.load(fh)
+    doc["world"].pop(key, None)
+    with open(dst, "w") as fh:
+        yaml.dump(doc, fh)
+
 PROMPT_WEIGHT_MIN = {"comm", "settlements", "faith"}
 
 
@@ -109,24 +121,27 @@ def test_apply_returns_diff_and_restart_required(tmp_path, monkeypatch):
 
 
 def test_apply_creates_absent_flag_block_and_writes_it_to_disk(tmp_path, monkeypatch):
-    # `faith` is absent-defaulted in world.yaml — toggling it ON must CREATE
-    # `faith: {enabled: true}` under `world:`, and the write must actually land
-    # on disk (comment-preserving), not just in the returned diff.
+    # Every toggleable flag block now exists in world.yaml (the 2026-10-03
+    # sign-off flipped them all ON), so the absent-block path is exercised by
+    # DELETING `coherence` from the copy first: applying True must CREATE
+    # `coherence: {enabled: true}` under `world:`, and the write must actually
+    # land on disk (comment-preserving), not just in the returned diff.
     src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
+    _drop_block(dst, "coherence")
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
     with TestClient(app, raise_server_exceptions=True) as client:
-        r = client.post("/api/config/apply", json={"overrides": {"faith": True}})
+        r = client.post("/api/config/apply", json={"overrides": {"coherence": True}})
         assert r.status_code == 200
         body = r.json()
-        assert {"flag": "faith", "from": False, "to": True} in body["diff"]
+        assert {"flag": "coherence", "from": False, "to": True} in body["diff"]
         assert body["restart_required"] is True
 
     yaml = ruamel.yaml.YAML()
     with open(dst) as fh:
         doc = yaml.load(fh)
-    assert doc["world"]["faith"]["enabled"] is True
+    assert doc["world"]["coherence"]["enabled"] is True
 
 
 def test_apply_discovery_is_unapplied_not_written_to_world_yaml(tmp_path, monkeypatch):
@@ -174,17 +189,19 @@ def test_apply_noop_does_not_rewrite_file(tmp_path, monkeypatch):
 
 
 def test_apply_absent_flag_false_is_noop(tmp_path, monkeypatch):
-    # `faith` is absent from world.yaml (an absent block implicitly defaults
-    # to False). Posting False for an absent flag is therefore a no-op — it
-    # must NOT create a `faith: {enabled: false}` block, must not appear in
-    # `diff`, and must not write the file (Fix 2).
+    # An absent block implicitly defaults to False (every block now exists in
+    # world.yaml since the 2026-10-03 sign-off, so the absent case is made by
+    # deleting `coherence` from the copy). Posting False for it is a no-op —
+    # it must NOT create a `coherence: {enabled: false}` block, must not appear
+    # in `diff`, and must not write the file (Fix 2).
     src = WORLD_YAML_SRC
     dst = tmp_path / "world.yaml"
     shutil.copy(src, dst)
+    _drop_block(dst, "coherence")
     monkeypatch.setenv("PETRIDISH_WORLD_YAML", str(dst))
     before_bytes = dst.read_bytes()
     with TestClient(app, raise_server_exceptions=True) as client:
-        r = client.post("/api/config/apply", json={"overrides": {"faith": False}})
+        r = client.post("/api/config/apply", json={"overrides": {"coherence": False}})
         assert r.status_code == 200
         body = r.json()
         assert body["diff"] == []
@@ -194,7 +211,7 @@ def test_apply_absent_flag_false_is_noop(tmp_path, monkeypatch):
     yaml = ruamel.yaml.YAML()
     with open(dst) as fh:
         doc = yaml.load(fh)
-    assert "faith" not in doc["world"]
+    assert "coherence" not in doc["world"]
 
 
 def test_apply_unknown_flag_reported_not_written(tmp_path, monkeypatch):

@@ -268,13 +268,14 @@ export function beatFocus(
 }
 
 /**
- * VITE_DRAMA_WIRE — the feature flag. DEFAULT OFF: absent/empty ⇒ the whole
- * Drama Wire renders nothing and the feed is byte-identical to today. Set to
- * "1" / "true" / "on" (case-insensitive) to enable. Evaluated at call-time (not
- * module-init) so vi.stubEnv works in tests — mirrors Header's VITE_COFFEE_BUTTON.
+ * VITE_DRAMA_WIRE — the feature flag. DEFAULT ON since the EM-316 live
+ * sign-off (2026-10-03): absent ⇒ the wire mounts (it still renders nothing
+ * until a rate-capped red card earns its place). Set to "0" / "false" / "off"
+ * to opt out. Evaluated at call-time (not module-init) so vi.stubEnv works in
+ * tests — mirrors Header's VITE_COFFEE_BUTTON.
  */
 export function isDramaWireEnabled(): boolean {
   const v = import.meta.env.VITE_DRAMA_WIRE;
-  if (v === undefined || v === null) return false;
+  if (v === undefined || v === null) return true;
   return ['1', 'true', 'on'].includes(String(v).toLowerCase());
 }

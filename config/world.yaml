@@ -199,13 +199,21 @@ world:
   # golden). Absent ⇒ engine defaults (these same values). MUST stay in sync
   # with the WarParams mirror in backend/petridish/config/loader.py.
   war:
-    enabled: false            # master gate for the whole war layer
+    enabled: true             # EM-256/257 Wave-O War live sign-off 2026-10-03 (merged #92, dormant since)
     casus_belli_threshold: 50 # faction grievance needed before declare_war opens
     grievance_per_act: 6      # base grievance a cross-faction crime feeds the victim's faction
     grievance_per_witness: 2  # extra grievance per co-located witness (word spreads)
     grievance_decay: 1        # per-round cool-off (advance_war; 0 entries drop)
     reparations_base: 25      # default peace_treaty reparations when unspecified
     war_notoriety: 10         # notoriety stamped on the exiled loser leader
+
+  # EM-260–263 — Faith & religion (Wave O culture track). Live sign-off
+  # 2026-10-03 (merged #111, dormant since): found_faith/proselytize/worship/
+  # schism/hostility verbs enter agent menus; congregations + devotion run at
+  # the round boundary. MUST stay in sync with the FaithParams mirror in
+  # backend/petridish/config/loader.py.
+  faith:
+    enabled: true
 
   # EM-315 — The Healing House. A 70% governance vote (the `heal` propose_rule
   # effect) sentences a citizen to the Healing House, where the engine hot-swaps
@@ -220,8 +228,8 @@ world:
   # MUST stay in sync with the HealingHouseParams mirror in
   # backend/petridish/config/loader.py.
   healing_house:
-    enabled: false            # master gate for the whole Healing House layer
-    target_profiles: []       # curated free/local lanes the sentence swaps INTO (e.g. [groq-llama, cerebras-qwen, mistral])
+    enabled: true             # EM-315 live sign-off 2026-10-03 (merged #103, dormant since)
+    target_profiles: [groq-llama, gemini-flash]   # curated full-rate free lanes (verified healthy on the live registry 2026-10-03)
     whisper_ticks: 40         # ticks a treated patient carries the "came back different" prompt line (0 disables)
 
   # EM-311 — Self-Authored Charters (Tier-1 divergence amplifier). DEFAULT OFF:
@@ -234,12 +242,36 @@ world:
   # values). MUST stay in sync with the CharterParams mirror in
   # backend/petridish/config/loader.py.
   charters:
-    enabled: false            # master gate for the whole charter layer
+    enabled: true             # EM-311 live sign-off 2026-10-03 (was default OFF since W31)
     max_ambitions: 3          # HARD cap on ambition slots (self-prompt loop guard)
     creed_cap: 140            # HARD char cap on the free-text creed line
     seed_ambitions:           # uniform STARTING ambitions (must be legal kinds)
       - keep_the_peace
     seed_creed: "I am still finding my place here."   # uniform STARTING creed
+
+  # EM-313 — Fingerprint Ticker (behavioral stylometry, zero-LLM, viewer-only).
+  # Live sign-off 2026-10-03 — flipped ON after verifying /api/fingerprints
+  # serves converging per-agent guesses on the live proxy. MUST stay in sync
+  # with the FingerprintTickerParams mirror in backend/petridish/config/loader.py.
+  fingerprint_ticker:
+    enabled: true
+
+  # EM-317 — Prophecy Board (watcher omens, deterministic resolution).
+  # Live sign-off 2026-10-03 — flipped ON after posting + resolving a prophecy
+  # on the live run (post → omen line → deterministic FULFILLED/BROKEN sweep).
+  # MUST stay in sync with the ProphecyBoardParams mirror in
+  # backend/petridish/config/loader.py.
+  prophecy_board:
+    enabled: true
+
+  # EM-299 — parametric building-recipe grammar (Wave Q keystone). Live
+  # sign-off 2026-10-03 (merged #107, dormant since): build turns may author
+  # footprint/floors/roof/material/palette via the closed recipe enum (rides
+  # the existing build turn — zero extra calls; frontend derives the mesh).
+  # MUST stay in sync with the BuildingRecipesParams mirror in
+  # backend/petridish/config/loader.py.
+  building_recipes:
+    enabled: true
 
   # EM-229 — three-needs psychology (contracts/wave-m.md §3 Wave M1). Two
   # decaying drives — `knowledge` and `influence` — ride alongside `energy` on
@@ -381,7 +413,7 @@ world:
   # stay in sync with the SettlementParams mirror in
   # backend/petridish/config/loader.py.
   settlements:
-    enabled: false              # EM-109/EM-110 live opt-in: genesis home city + found_settlement + travel_to + settlement-anchored placement + per-city perception scoping. Loader/embedded defaults stay OFF (byte-identical goldens); this is the per-run live flip (baked per-run ⇒ restart to adopt).
+    enabled: true               # EM-109/EM-110 multi-city live sign-off 2026-10-03 (merged #112; live OFF via d97d8ea until now): genesis home city + found_settlement + travel_to + settlement-anchored placement + per-city perception scoping. Loader/embedded defaults stay OFF (byte-identical goldens); this is the per-run live flip (baked per-run ⇒ restart to adopt).
 
   # EM-203 — governance renewal cooldown (contracts/wave-m.md §3 Wave M4). The
   # W11b/EM-087 RENEWAL ritual lets agents re-pass a law identical to an ACTIVE
@@ -432,7 +464,7 @@ world:
   # the within-one-city A/B pair. MUST stay in sync with the ChimeraTwinsParams
   # mirror in backend/petridish/config/loader.py.
   chimera_twins:
-    enabled: false
+    enabled: true             # EM-310 live sign-off 2026-10-03 (merged #101, dormant since): god-mode twin spawn enabled
 
   # Wave E / EM-114 — lightweight children (contracts/wave-e.md B2). Once per
   # ROUND boundary the world checks every mutual-partner pair (are_partners,
@@ -809,6 +841,7 @@ places:
   # EM-240 — the town jail (kind: civic). Enforcers march detained / convicted
   # lawbreakers here; a jailed agent may only talk and think until released.
   - { id: jail,            name: The Lockup,          x: 106, y: 303, kind: civic,      district: civic,       description: "A spare stone cell where the town holds its lawbreakers." }
+  - { id: healing_house,   name: The Healing House,   x: 500, y: 106, kind: social,     district: civic,       description: "A quiet rest-house where the town sends troubled souls to be made whole again." }
   # residential — lamplit blocks to the south-west
   - { id: home,            name: Hearth House,        x: 106, y: 697, kind: home,       district: residential, description: "Rest and recharge." }
   - { id: rosehip_cottage, name: Rosehip Walk-up,     x: 106, y: 894, kind: home,       district: residential, description: "A snug walk-up over a flower shop. Rest and recharge." }
