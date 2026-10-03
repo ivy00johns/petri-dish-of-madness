@@ -1,7 +1,7 @@
 # PetriDishOfMadness — Start Here
 
 > The one place to land. If you're lost, read this first.
-> **Last updated:** 2026-10-02
+> **Last updated:** 2026-10-03
 
 A tiny, fast, cheap multi-agent world whose marquee feature is **per-agent model
 control** — drop different LLMs (Gemini-Flash, Groq-Llama, Cerebras-Qwen, Mistral,
@@ -39,19 +39,24 @@ district street network past real buildings under golden-hour light — the proc
 the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minute live demo" in
 `README.md`. Per-wave end-state reports live in `docs/build-results/`.
 
-**What's next (2026-10-02, after the re-entry Phase-3 build):**
-1. **Live flag-flip sign-off** — the growing backlog of merged-but-dormant features waiting on a
+**What's next (2026-10-03, after the re-entry Phase-4 build):**
+1. **Run a long-horizon tournament** — the EM-112/119 machinery is live (Runs tab → Model-Family
+   Arena): cast 2–3 families at 100–300 ticks each and read the Gemini-vs-Llama civilization
+   divergence off the arena standings (the v3 headline demo). Consider overnight for the full
+   Emergence-World-style bake-off; EM-128's per-family AWI deltas are the natural follow-on.
+2. **Live flag-flip sign-off** — the growing backlog of merged-but-dormant features waiting on a
    watched-live confirmation: the 9 Fable Tier-1 features (EM-309–317), Wave O culture/religion
    + war (EM-249–263), the EM-299 building-recipe grammar, and the multi-city expansion
    (EM-109/110/121) — all default-OFF or flag-OFF live; flip one at a time and watch the feed.
    (EM-300's discovery flags are off this list — flipped ON live 2026-10-02.)
-2. **EM-300 P4** — direct-provider lanes (Gemini/Anthropic/OpenAI/Ollama without the proxy), the
+3. **EM-300 P4** — direct-provider lanes (Gemini/Anthropic/OpenAI/Ollama without the proxy), the
    last open phase of adaptive lane routing (P3 cooldown/parking + P5 lane board shipped 2026-10-02).
-3. **EM-326 cadence levers** — the ~3–4 ticks/min ceiling is structural and latency-bound (5
+4. **EM-326 cadence levers** — the ~3–4 ticks/min ceiling is structural and latency-bound (5
    serialized turns × p50 6–8s ok-latency); levers: turn concurrency (unfiled architecture work),
    EM-327 `supported_parameters`, EM-331 empty-contents 400s (our own requests feed the proxy's
-   per-key cooldowns — `X-Request-ID` correlation is now unblocked).
-4. **EM-301** idle-fallback churn thread (Ollama overflow lane, EM-167, is the identified lever).
+   per-key cooldowns — `X-Request-ID` correlation is now unblocked). Also now unblocked: the
+   tournament multiplies the cadence problem per family, so turn concurrency lifts every world.
+5. **EM-301** idle-fallback churn thread (Ollama overflow lane, EM-167, is the identified lever).
 
 See the closure log in `BUILD-PLAN.md` and `docs/REMAINING-WORK.md` for the full ledger. EM-151
 (inspector blank on ~40k-event runs) shipped in Wave F.
@@ -62,6 +67,13 @@ lane discovery/refresh (#109), the EM-305 feed-flicker **WebSocket fix** (#110),
 culture + religion (EM-251–255/260–263, #111), and the **multi-city expansion** — 2 cities +
 travel + world3d rendering (EM-109/110/121, #112). Live config: comm **ON**, multi-city **OFF**
 via `d97d8ea`. PRs #113 (Lab Setup panel) and #114 (`fix/feed-health`) merged in the interim.
+
+**Recently landed (2026-10-03 re-entry Phase 4, EM-112 + EM-119):** the **parallel-worlds
+tournament runner** (sequential all-Gemini vs all-Llama worlds through the live loop, one family
+at a time — free-tier-safe) + the **Model-Family Arena** (cross-run civilization standings:
+population / laws / buildings / crimes / credits + population sparklines per family, on the Runs
+tab beside the run browser). `runs.model_family` stamps + fork inheritance; api.openapi 1.5.0.
+Live-verified: a real 2-family/4-tick tournament on the proxy (~26s), runs stamped + aggregated.
 
 **Recently landed (2026-10-02 re-entry, `build/reentry-phase1`):** the ledger reconcile + WIP
 salvage (reactive per-lane 429 cooldown + LaneHealthPanel), the **EM-325 live heal** (discovery

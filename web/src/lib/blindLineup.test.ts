@@ -50,6 +50,11 @@ describe('modelFamily', () => {
     ['claude-haiku-3-5', 'claude'],
     ['deepseek-chat', 'deepseek'],
     ['command-r-plus', 'command-r'],
+    // EM-112 mirror addition (backend families.py added it in the same commit):
+    // a real profiles.yaml lane family that otherwise read 'other' and would
+    // have been excluded from the tournament cast.
+    ['kimi-k2', 'kimi'],
+    ['moonshotai/kimi-latest', 'kimi'],
   ])('maps %s → %s (via model_id)', (model_id, fam) => {
     expect(modelFamily({ name: 'anything', model_id })).toBe(fam);
   });

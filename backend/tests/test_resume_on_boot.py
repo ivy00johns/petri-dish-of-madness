@@ -228,10 +228,12 @@ def test_resume_creates_lineage_run_row_and_run_browser_shape(boot, tmp_path):
         assert child["forked_at_tick"] == 7
         assert child["is_active"] is True
         assert runs[parent]["forked_from"] is None
-        # The run-browser seam: RunRow keys unchanged (lineage chip just works).
+        # The run-browser seam: RunRow keys (lineage chip just works). EM-112
+        # adds the nullable `model_family` stamp (api.openapi 1.5.0) — additive.
         assert set(child) == {
             "id", "started_at", "ended_at", "status", "is_active", "max_tick",
             "event_count", "forked_from", "forked_at_tick", "config_summary",
+            "model_family",
         }
 
 

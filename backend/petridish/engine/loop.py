@@ -362,8 +362,15 @@ class TickLoop:
     def is_running(self) -> bool:
         return not self._paused
 
-    async def reset(self, config: WorldConfig) -> None:
-        """Reset world from config. Pauses loop, rebuilds state, starts new DB run."""
+    async def reset(
+        self, config: WorldConfig, *, model_family: str | None = None
+    ) -> None:
+        """Reset world from config. Pauses loop, rebuilds state, starts new DB run.
+
+        EM-112 — optional `model_family` stamp for parallel-worlds tournament
+        runs: the runs row records the coarse family this world was cast from
+        so the arena can group runs after the fact. None (default) = un-stamped
+        = byte-identical to the pre-EM-112 reset."""
         self.pause()
         self._pending_steps = 0
         # Release any step_and_wait() callers so they don't block on the reset.
@@ -633,7 +640,7 @@ class TickLoop:
                 self._repo.end_run(self._run_id)
             except Exception:
                 pass
-        self._run_id = self._repo.start_run(cfg_json)
+        self._run_id = self._repo.start_run(cfg_json, model_family=model_family)
         # EM-222 — hand the runtime the repo + active run so relevance-scored
         # memory retrieval can read the persisted event log of THIS run.
         self._wire_runtime_run_context()
@@ -652,10 +659,15 @@ class TickLoop:
         # Broadcast new state
         self._broadcast_world_state()
 
-    def init_run(self, config: WorldConfig) -> None:
-        """One-time initialization (called at startup, not async)."""
+    def init_run(
+        self, config: WorldConfig, *, model_family: str | None = None
+    ) -> None:
+        """One-time initialization (called at startup, not async).
+
+        EM-112 — optional `model_family` stamp, mirroring reset(); the boot
+        path never casts (None), so behavior is unchanged."""
         cfg_json = _run_config_json(config)
-        self._run_id = self._repo.start_run(cfg_json)
+        self._run_id = self._repo.start_run(cfg_json, model_family=model_family)
         # EM-222 — hand the runtime the repo + active run so relevance-scored
         # memory retrieval can read the persisted event log of THIS run.
         self._wire_runtime_run_context()
