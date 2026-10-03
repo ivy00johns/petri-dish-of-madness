@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..config.loader import WorldConfig
+from ..engine.world import contact_roster_split
 from ..providers.families import families_in_legend
 
 # ── Casting ───────────────────────────────────────────────────────────────────
@@ -53,6 +54,22 @@ class CastPlan:
     family: str
     config: WorldConfig
     lanes: list[str]                      # the family's lanes, round-robin order
+    profile_by_agent: dict[str, str]      # agent name -> lane profile name
+
+
+@dataclass
+class ContactCastPlan:
+    """EM-332 — a First-Contact cast: the roster SPLIT into two settlements'
+    halves, each cast entirely from its own model family (one world, two
+    civilizations). `config` carries the replaced profiles AND the `contact`
+    block, so the reset World boot lays out both towns; the home-side of the
+    split is the SAME rule (engine.world.contact_roster_split over sorted
+    agent ids), so the cast and the genesis can never disagree."""
+
+    families: tuple[str, str]
+    config: WorldConfig
+    lanes_a: list[str]
+    lanes_b: list[str]
     profile_by_agent: dict[str, str]      # agent name -> lane profile name
 
 
@@ -96,6 +113,78 @@ def build_cast_plan(
         config=cast_cfg,
         lanes=list(lanes),
         profile_by_agent={a.name: a.profile for a in agents},
+    )
+
+
+def build_contact_cast_plan(
+    cfg: WorldConfig, legend: list[dict], family_a: str, family_b: str
+) -> ContactCastPlan:
+    """EM-332 — cast the roster SPLIT by settlement for First Contact: the
+    first half (sorted ids — engine.world.contact_roster_split, the ONE rule
+    the contact genesis also follows) draws family_a's lanes, the rest
+    family_b's. One world, two civilizations.
+
+    Same lane discipline as build_cast_plan: lanes come from the router legend
+    grouped by family (providers/families.py), AVAILABLE lanes first, each
+    group sorted for determinism, agents drawing round-robin so a 5-agent half
+    on 3 lanes never funnels everyone onto one key. The split keys on roster
+    NAME order (AgentConfig.name — boot agent ids carry a uuid suffix, so an
+    id-keyed split would randomize per boot; the contact genesis follows the
+    same name rule). Deterministic: same legend + roster ⇒ same plan.
+
+    Raises ValueError on an unknown/un-castable family, equal families (that
+    is not the experiment), or a roster of fewer than 2 agents — the endpoint
+    maps that to a 400."""
+    fam_a = (family_a or "").strip().lower()
+    fam_b = (family_b or "").strip().lower()
+    for fam in (fam_a, fam_b):
+        if not fam:
+            raise ValueError("both contact families are required")
+        if fam in _UNCASTABLE_FAMILIES:
+            raise ValueError(
+                f"family {fam!r} cannot be cast (auto/mock are not model families)")
+    groups = families_in_legend(legend)
+    for fam in (fam_a, fam_b):
+        if fam not in groups:
+            raise ValueError(
+                f"unknown family {fam!r} — no configured lane matches "
+                f"(available: {', '.join(sorted(groups)) or 'none'})"
+            )
+    if fam_a == fam_b:
+        raise ValueError(
+            "the two contact families must differ — same-family towns are the "
+            "tournament's job, not First Contact's")
+    entry = {p.get("name"): p for p in legend or []}
+
+    def _lanes(fam: str) -> list[str]:
+        preferred = [n for n in groups[fam] if entry.get(n, {}).get("available")]
+        lanes = preferred or groups[fam]
+        if not lanes:  # pragma: no cover - a group exists ⇒ it has lanes
+            raise ValueError(f"family {fam!r} has no lanes")
+        return list(lanes)
+
+    lanes_a, lanes_b = _lanes(fam_a), _lanes(fam_b)
+    all_names = [a.name for a in cfg.agents]
+    if len(all_names) < 2:
+        raise ValueError("a contact world needs at least 2 agents")
+    a_names, b_names = contact_roster_split(all_names)
+    by_name = {a.name: a for a in cfg.agents}
+    profile_by_agent: dict[str, str] = {}
+    for i, name in enumerate(a_names):
+        profile_by_agent[name] = lanes_a[i % len(lanes_a)]
+    for i, name in enumerate(b_names):
+        profile_by_agent[name] = lanes_b[i % len(lanes_b)]
+    agents = [
+        dataclasses.replace(a, profile=profile_by_agent[a.name])
+        for a in cfg.agents
+    ]
+    cast_cfg = dataclasses.replace(cfg, agents=agents)
+    return ContactCastPlan(
+        families=(fam_a, fam_b),
+        config=cast_cfg,
+        lanes_a=lanes_a,
+        lanes_b=lanes_b,
+        profile_by_agent=profile_by_agent,
     )
 
 

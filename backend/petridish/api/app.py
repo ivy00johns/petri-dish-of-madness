@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import anyio.to_thread
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -30,6 +31,7 @@ from .arena import arena_summary
 from .tournament import (
     TournamentRunner,
     build_cast_plan,
+    build_contact_cast_plan,
     validate_tournament_request,
 )
 
@@ -2477,6 +2479,54 @@ async def start_tournament(body: TournamentBody):
         "families": families,
         "ticks_per_family": ticks,
         "casts": {p.family: p.profile_by_agent for p in plans},
+    }
+
+
+class ContactBody(BaseModel):
+    # Coarse family names ("gemini", "llama", …) — validated against the
+    # router legend; "other" (auto/mock) is un-castable by design.
+    family_a: str
+    family_b: str
+
+
+@app.post("/api/arena/contact", status_code=202)
+async def start_contact(body: ContactBody):
+    """EM-332 — bootstrap a First-Contact run: ONE world, TWO settlements, the
+    roster split between them and each half cast entirely from its own model
+    family (build_contact_cast_plan — the same available-lanes-first,
+    deterministic round-robin discipline as the tournament). The reset World
+    lays out both towns (seed_genesis_settlement's contact branch: starter
+    places + the roster split into their homes) and the run row self-describes
+    via its config_json's `contact` block — no new runs column; EM-334's
+    per-settlement Arena cards read the pairing back from there. 409 while a
+    tournament sweep owns the loop; 400 on unknown/un-castable/equal families."""
+    if _loop is None or _config is None or _router is None:
+        raise HTTPException(503, "Not initialized")
+    _tournament_guard()
+    try:
+        plan = build_contact_cast_plan(
+            _config, _router.legend(), body.family_a, body.family_b)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    # The live world.yaml ships contact OFF (the flag is per-run, not global):
+    # arm the block on the RESET config so the fresh boot lays out both towns,
+    # and record the pairing in the run's config_json (the self-describing
+    # run row EM-334's per-settlement Arena cards read back).
+    world_params = dataclasses.replace(
+        plan.config.world,
+        contact=dataclasses.replace(
+            plan.config.world.contact,
+            enabled=True,
+            family_a=plan.families[0],
+            family_b=plan.families[1],
+        ),
+    )
+    reset_cfg = dataclasses.replace(plan.config, world=world_params)
+    await _loop.reset(reset_cfg)
+    return {
+        "status": "started",
+        "families": list(plan.families),
+        "casts": plan.profile_by_agent,
     }
 
 
