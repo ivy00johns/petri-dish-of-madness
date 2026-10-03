@@ -29,6 +29,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldState, WorldEvent, GalleryImage } from '../../types';
 import { useBlindLineup } from '../blind/BlindLineupContext';
+import { loadPanelCollapsed, savePanelCollapsed } from '../../lib/panelCollapse';
 import '../../inspector/inspector-tokens.css';
 
 interface GalleryPanelProps {
@@ -47,16 +48,15 @@ interface GalleryFeed {
   materialized: number;
 }
 
-const COLLAPSE_KEY = 'em.gallery.collapsed';
+const COLLAPSE_KEY = 'em.gallery.collapsed.v2';
 /** Mirror the engine's default max_gallery when deriving from history. */
 const DERIVE_CAP = 30;
 
+/** Default COLLAPSED (feed primacy, 2026-10-03) via the shared helper — the
+ *  one-time migration ignores the stale expanded pin the pre-fix persist-on-
+ *  mount wrote on every load. */
 function loadCollapsed(): boolean {
-  try {
-    return localStorage.getItem(COLLAPSE_KEY) === '1';
-  } catch {
-    return false;
-  }
+  return loadPanelCollapsed(COLLAPSE_KEY);
 }
 
 /**
@@ -129,7 +129,7 @@ export function GalleryPanel({ world, history }: GalleryPanelProps) {
   const [feed, setFeed] = useState<GalleryFeed | null | undefined>(undefined);
 
   useEffect(() => {
-    try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
+    savePanelCollapsed(COLLAPSE_KEY, collapsed);
   }, [collapsed]);
 
   const sig = gallerySig(world);

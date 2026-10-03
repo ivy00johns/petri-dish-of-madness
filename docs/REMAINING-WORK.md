@@ -24,6 +24,20 @@ frontend flags default ON, with the loader defaults still OFF (goldens byte-iden
 - [x] **EM-300 P2 lane discovery** — `adaptive_routing.discovery.enabled` (merged #109) — **FLIPPED ON LIVE 2026-10-02** (Phase-2 heal, commit `e5fa2e2`) together with dead-pin repins + the mistral-large retirement; live-verified (zero dead-pin hits in the proxy log, Vesper serving direct on the repinned lane). The sibling `discovery.providers_resume` flag (EM-300 P3 platform parking, Phase 3) also ships ON.
 - [x] **ROAD_MESH_ENABLED** — EM-247 procedural road meshing — **already ON by default since the EM-247 sign-off (PR #65, 2026-06-24)**; this row was stale (live-confirmed: `CityScape.ROAD_MESH_ENABLED = true`, road mesh rendering in the live view).
 
+## Follow-ups from the 2026-10-03 live-feedback fix
+
+The live run's meme wall surfaced two genuinely open threads (filed here so
+they're not lost; both unfiled-ID — grab EM-332+ when formally intake'd):
+
+- **Meme variety** — even spread-as-itself, the drift vocabulary (`_distort_text`/
+  `DISTORTION_TABLE`) is small: 6 texts covered 55 memes on the live run. A
+  richer distortion pass (or a cheap LLM rephrase lane) would make culture
+  visibly alive again.
+- **Fingerprint/Storylines-style count badges** — the feed-primacy fix added
+  one-line collapsed headers for Billboard/Gallery/Culture; TwinLens and
+  FingerprintTicker already had their own toggles but lack count badges — a
+  small polish item if the column feels opaque when everything is collapsed.
+
 ## Format & conventions
 
 - **ID** — `EM-###`. Stable, never reused. New items take the next free number.

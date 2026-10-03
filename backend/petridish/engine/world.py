@@ -10892,18 +10892,20 @@ class World:
         """EM-252 — the once-per-round passive culture-diffusion sweep. Walks
         memes (sorted by id) then their carriers (sorted by id) in deterministic
         order; for each carrier, every co-located OTHER living non-carrier is a
-        candidate whose infection is gated by the seeded roll
+        candidate whose infection is        gated by the seeded roll
         `_seed_int("diffuse", city_seed, meme.id, carrier.id, target.id, tick)
         % 100 < int(diffusion_chance * 100)` (never random/clock — EM-155; the
         roll is fixed by the participant ids, so the outcome is INDEPENDENT of the
-        walk order). A hit mints a DRIFTED CHILD meme (parent_id + generation+1 +
-        _distort_text, seeded on the target), attaches it to the target, and
-        counts as an infection; the sweep is capped at comm.max_diffusions total
-        infections. Meme-coherence fix — once the SOURCE meme's own generation
-        reaches comm.max_drift_generations (default 3), the child's TEXT passes
-        through verbatim (no further _distort_text hop) even though it still
-        mints, attaches, and increments generation like any other hop — the idea
-        keeps spreading, it just stops getting more garbled past a few hops. Then
+        walk order). A hit under the drift horizon mints a DRIFTED CHILD meme
+        (parent_id + generation+1 + _distort_text, seeded on the target) and
+        attaches it; the sweep is capped at comm.max_diffusions total infections.
+        Meme-coherence fix v2 — once the SOURCE meme's own generation reaches
+        comm.max_drift_generations (default 3), or the meme is an IMAGE meme
+        (the image is the content), the hop SPREADS THE SOURCE ITSELF: the
+        target joins the source's carriers (a genuine infection — carriers and
+        virality and dominance all see the idea's real reach) instead of minting
+        a verbatim clone child that only added identical-text rows to the
+        culture panel. Then
         virality half-life-decays (idle >= comm.half_life_ticks
         ⇒ halved with `//` floor, never round/float — the EM-155 drift guard) and
         a zero-carrier meme idle >= comm.decay_ticks is pruned from self.memes;
@@ -10981,20 +10983,26 @@ class World:
                                      carrier.id, target.id, self.tick)
                     if roll % 100 >= threshold:
                         continue
-                    # Meme-coherence fix — past the drift-generation cap the
-                    # idea still spreads and still mints a child (lineage +
-                    # generation+1 unchanged), but the TEXT passes through
-                    # verbatim instead of taking another _distort_text hop.
-                    child_text = (
-                        meme.text if meme.generation >= max_drift_gens
-                        else self._distort_text(meme.text, target.id, self.tick))
-                    child = self.mint_meme(
-                        meme.kind,
-                        child_text,
-                        meme.origin_agent_id,
-                        parent_id=meme.id,
-                        generation=meme.generation + 1,
-                    )
+                    # Meme-coherence fix v2 (2026-10-03 live feedback — "the
+                    # memes are not memes"): past the drift-generation cap an
+                    # idea no longer MINTS a verbatim clone child (a gen-6 wall
+                    # of identical-text rows read as spam, not culture) — it
+                    # SPREADS AS ITSELF: the target becomes a genuine new
+                    # carrier of the source, so carriers/virality/dominance
+                    # count the idea's actual reach. Same for IMAGE memes at
+                    # any generation: the image IS the content — caption
+                    # "drift" ("— I heard it twice") is noise. Text memes
+                    # under the cap still drift-mint through _distort_text.
+                    if meme.generation >= max_drift_gens or meme.image_id:
+                        child = meme
+                    else:
+                        child = self.mint_meme(
+                            meme.kind,
+                            self._distort_text(meme.text, target.id, self.tick),
+                            meme.origin_agent_id,
+                            parent_id=meme.id,
+                            generation=meme.generation + 1,
+                        )
                     # Only a GENUINELY new attachment counts as an infection: an
                     # idempotent re-derivation (same seeded child already held)
                     # is a no-op — no double-count, no spurious event.
@@ -11010,14 +11018,20 @@ class World:
                     # dropped (aggregate event appended after the loop below).
                     if notable_mutations < mutation_cap:
                         notable_mutations += 1
+                        if child is meme:
+                            spread_text = (f"{self._agent_name(carrier.id)}'s "
+                                           f"{meme.kind} spreads to "
+                                           f"{self._agent_name(target.id)}.")
+                        else:
+                            spread_text = (f"{self._agent_name(carrier.id)}'s "
+                                           f"{meme.kind} drifts to "
+                                           f"{self._agent_name(target.id)}.")
                         events.append({
                             "kind": "meme_mutated",
                             "actor_id": carrier.id,
                             "target_id": target.id,
                             "actor_type": "system",
-                            "text": (f"{self._agent_name(carrier.id)}'s "
-                                     f"{meme.kind} drifts to "
-                                     f"{self._agent_name(target.id)}."),
+                            "text": spread_text,
                             "payload": {"meme_id": child.id, "parent_id": meme.id,
                                         "generation": child.generation},
                         })
@@ -11028,9 +11042,8 @@ class World:
             events.append({
                 "kind": "meme_mutated",
                 "actor_id": None,
-                "actor_type": "system",
-                "text": (f"🧬 an idea drifted to {aggregated_mutations} more "
-                         f"neighbour{'' if aggregated_mutations == 1 else 's'}."),
+                "actor_type": "system",                            "text": (f"🧬 an idea spread to {aggregated_mutations} more "
+                                     f"neighbour{'' if aggregated_mutations == 1 else 's'}."),
                 "payload": {"aggregated": True, "count": aggregated_mutations},
             })
 

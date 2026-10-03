@@ -28,21 +28,21 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldState, Meme, CultureCamp, GalleryImage } from '../../types';
+import { loadPanelCollapsed, savePanelCollapsed } from '../../lib/panelCollapse';
 import '../../inspector/inspector-tokens.css';
 
 interface MemeLineagePanelProps {
   world: WorldState | null;
 }
 
-const COLLAPSE_KEY = 'em.culture.collapsed';
+const COLLAPSE_KEY = 'em.culture.collapsed.v2';
 const MAX_LINEAGE_SHOWN = 12;
 
+/** Default COLLAPSED (feed primacy, 2026-10-03): the shared helper applies the
+ *  one-time default migration — stale expanded pins (the pre-fix persist-on-
+ *  mount wrote '0' on every load) are ignored on the first post-change load. */
 function loadCollapsed(): boolean {
-  try {
-    return localStorage.getItem(COLLAPSE_KEY) === '1';
-  } catch {
-    return false;
-  }
+  return loadPanelCollapsed(COLLAPSE_KEY);
 }
 
 /** A meme placed in the flattened lineage tree: `depth` is its distance from
@@ -108,6 +108,35 @@ export function sortedCamps(camps: Record<string, CultureCamp> | undefined): Cul
   );
 }
 
+/** A lineage row collapsed for display: identical-text variants (verbatim
+ *  drift clones — worlds minted before the meme-coherence fix still carry
+ *  whole chains of them) fold onto their FIRST occurrence (the family head,
+ *  so tree order is preserved) with a variant count. */
+export interface DisplayMemeRow extends LineageRow {
+  /** How many memes in the graph share this row's exact text (≥1). */
+  variants: number;
+}
+
+/**
+ * Fold rows that share an exact text into one display row keyed on the first
+ * occurrence, counting the rest into `variants`. Pure + insertion-ordered (Map)
+ * so the tree order survives. Memes with empty text key on their id (each is
+ * then its own group). Distinct-text worlds pass through unchanged.
+ */
+export function dedupeByText(rows: LineageRow[]): DisplayMemeRow[] {
+  const byText = new Map<string, DisplayMemeRow>();
+  for (const row of rows) {
+    const key = row.meme.text || row.meme.id;
+    const hit = byText.get(key);
+    if (hit) {
+      hit.variants += 1;
+    } else {
+      byText.set(key, { ...row, variants: 1 });
+    }
+  }
+  return [...byText.values()];
+}
+
 /** Resolve an image meme's gallery thumbnail url (or null when unavailable). */
 function thumbUrl(meme: Meme, gallery: GalleryImage[] | undefined): string | null {
   if (!meme.image_id) return null;
@@ -118,10 +147,13 @@ export function MemeLineagePanel({ world }: MemeLineagePanelProps) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
 
   useEffect(() => {
-    try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
+    savePanelCollapsed(COLLAPSE_KEY, collapsed);
   }, [collapsed]);
 
-  const rows = useMemo(() => memeLineageRows(world?.memes), [world]);
+  const rows = useMemo(
+    () => dedupeByText(memeLineageRows(world?.memes)),
+    [world],
+  );
   const camps = useMemo(() => sortedCamps(world?.culture_camps), [world]);
   const dominant = useMemo(() => new Set(world?.dominant_meme_ids ?? []), [world]);
   const gallery = world?.gallery;
@@ -156,7 +188,7 @@ export function MemeLineagePanel({ world }: MemeLineagePanelProps) {
             <span
               className="font-mono text-[10px] px-1 py-px border rounded-sm normal-case tracking-normal"
               style={{ color: 'var(--faction-tint)', borderColor: 'var(--faction-tint)' }}
-              title="Distinct memes spreading through the town"
+              title="Distinct memes spreading through the town (verbatim repeats folded into one row each)"
             >
               {rows.length} meme{rows.length === 1 ? '' : 's'}
             </span>
@@ -185,11 +217,12 @@ export function MemeLineagePanel({ world }: MemeLineagePanelProps) {
 
           {shown.length > 0 && (
             <ul className="m-0 p-0 list-none">
-              {shown.map(({ meme, depth }) => (
+              {shown.map(({ meme, depth, variants }) => (
                 <MemeRow
                   key={meme.id}
                   meme={meme}
                   depth={depth}
+                  variants={variants}
                   dominant={dominant.has(meme.id)}
                   thumb={thumbUrl(meme, gallery)}
                 />
@@ -252,15 +285,19 @@ function MotifBanner({ motif, thumb }: { motif: Meme; thumb: string | null }) {
 
 /** One meme in the lineage tree — indented by depth, tagged with generation,
  *  carrier count, virality, and (for image memes) its gallery thumbnail. A
- *  dominant meme wears the ⭐ marker. */
+ *  dominant meme wears the ⭐ marker. Identical-text variants (verbatim drift
+ *  clones) carry a ×N badge — one row instead of a wall of near-identical
+ *  ones. */
 function MemeRow({
   meme,
   depth,
+  variants,
   dominant,
   thumb,
 }: {
   meme: Meme;
   depth: number;
+  variants: number;
   dominant: boolean;
   thumb: string | null;
 }) {
@@ -305,6 +342,15 @@ function MemeRow({
             <span className="tabular-nums" title="virality — spread pressure">
               vir {meme.virality}
             </span>
+            {variants > 1 && (
+              <span
+                className="px-1 py-px border rounded-sm tabular-nums"
+                style={{ color: 'var(--faction-tint)', borderColor: 'var(--faction-tint)' }}
+                title={`${variants} memes in the graph share this exact text (verbatim drift clones) — folded into one row`}
+              >
+                ×{variants}
+              </span>
+            )}
           </p>
         </div>
       </div>

@@ -293,65 +293,74 @@ function LiveLayout({ sim }: { sim: Sim }) {
           className="w-[var(--feed-w)] shrink-0 overflow-hidden flex flex-col bg-lab-surface"
           aria-label="Story digest and live event feed"
         >
-          <StorySoFar world={world} history={sim.history} />
-          {/* EM-309 (Blind Lineup): the spectator guess card. Renders NOTHING
-              unless the blind_lineup.enabled flag is on. */}
-          <BlindLineupPanel world={world} />
-          {/* W11b (EM-091c): the notice-board panel rides under the digest —
-              collapsible so the feed keeps its vertical budget. */}
-          <BillboardPanel world={world} history={sim.history} />
-          {/* Atelier (EM-210): the read-only artwork viewer — browse the art the
-              villagers paint + vote onto the plaza. Collapsible so the feed keeps
-              its vertical budget. */}
-          <GalleryPanel world={world} history={sim.history} />
-          {/* Wave O (EM-256–259): the war panel — belligerent factions + the
-              grievances driving them. Renders NOTHING in peacetime (no wars,
-              no grievances ⇒ null), so it adds zero chrome until war fires. */}
-          <WarPanel world={world} />
-          {/* Wave O (EM-251–255): the culture panel — the town's meme family
-              tree, the belief camps clustering around them, and the canonized
-              motif banner. Renders NOTHING in a culture-free world (no memes,
-              no camps ⇒ null), so it adds zero chrome until culture fires. */}
-          <MemeLineagePanel world={world} />
-          {/* Wave O (EM-260–263): the faith panel — the town's religions, their
-              congregations, devotion, and declared hostilities. Renders NOTHING
-              in a religion-free world (no faiths ⇒ null), so it adds zero chrome
-              until a faith is founded (a sibling of the war + culture panels). */}
-          <FaithPanel world={world} />
-          {/* EM-312 (Storylines Rail): the feed's drama index — recurring
-              rivalries / redemptions / power grabs, promoted from the event log
-              with zero LLM. Default ON since the live sign-off (2026-10-03);
-              renders nothing until a thread is promoted, so peacetime chrome
-              stays identical. Clicking a thread filters the feed (below) +
-              tethers its principals in 3-D. */}
-          {STORYLINES_RAIL_ENABLED && (
-            <StorylinesRail
-              storylines={storylines}
-              selectedId={selectedStoryId}
-              onSelect={(s) => setSelectedStoryId(s?.id ?? null)}
+          {/* FEED PRIMACY (2026-10-03 live feedback): the secondary panels live
+              in their own scroll region capped at 45% of the column, so they
+              can grow but NEVER crush the feed below — the chat (the heart of
+              the project) always owns at least 55% and scrolls internally.
+              Before this, eleven stacked expanded panels + overflow-hidden
+              squeezed the feed to zero height and the column couldn't scroll
+              at all. */}
+          <div className="shrink-0 min-h-0 max-h-[45%] overflow-y-auto">
+            <StorySoFar world={world} history={sim.history} />
+            {/* EM-309 (Blind Lineup): the spectator guess card. Renders NOTHING
+                unless the blind_lineup.enabled flag is on; defaults COLLAPSED —
+                it's an optional game, not a reading surface. */}
+            <BlindLineupPanel world={world} />
+            {/* W11b (EM-091c): the notice-board panel rides under the digest —
+                default-collapsed; expand to read the board. */}
+            <BillboardPanel world={world} history={sim.history} />
+            {/* Atelier (EM-210): the read-only artwork viewer — browse the art the
+                villagers paint + vote onto the plaza. Default-collapsed. */}
+            <GalleryPanel world={world} history={sim.history} />
+            {/* Wave O (EM-256–259): the war panel — belligerent factions + the
+                grievances driving them. Renders NOTHING in peacetime (no wars,
+                no grievances ⇒ null), so it adds zero chrome until war fires. */}
+            <WarPanel world={world} />
+            {/* Wave O (EM-251–255): the culture panel — the town's meme family
+                tree, the belief camps clustering around them, and the canonized
+                motif banner. Default-collapsed (it's a browse surface, and the
+                lineage tree can be tall). */}
+            <MemeLineagePanel world={world} />
+            {/* Wave O (EM-260–263): the faith panel — the town's religions, their
+                congregations, devotion, and declared hostilities. Renders NOTHING
+                in a religion-free world (no faiths ⇒ null), so it adds zero chrome
+                until a faith is founded (a sibling of the war + culture panels). */}
+            <FaithPanel world={world} />
+            {/* EM-312 (Storylines Rail): the feed's drama index — recurring
+                rivalries / redemptions / power grabs, promoted from the event log
+                with zero LLM. Default ON since the live sign-off (2026-10-03);
+                renders nothing until a thread is promoted, so peacetime chrome
+                stays identical. Clicking a thread filters the feed (below) +
+                tethers its principals in 3-D. */}
+            {STORYLINES_RAIL_ENABLED && (
+              <StorylinesRail
+                storylines={storylines}
+                selectedId={selectedStoryId}
+                onSelect={(s) => setSelectedStoryId(s?.id ?? null)}
+              />
+            )}
+            {/* EM-310 (Chimera Twins): the twin lens — a synchronized dual-strand
+                thread + an auto-pinned divergence-point card for a linked
+                same-persona/different-model pair. Renders NOTHING until such a
+                pair is spawned behind world.chimera_twins.enabled, so it adds zero
+                chrome to every ordinary run. Feed-only chrome (off replay). */}
+            <TwinLens world={world} history={sim.history} />
+            {/* EM-313: the fingerprint ticker — a converging live model guess vs
+                the X-Routed-Via ground truth. Renders NOTHING unless the backend
+                has fingerprint_ticker.enabled (default OFF), so it adds zero
+                chrome until switched on. */}
+            <FingerprintTicker
+              tick={world?.tick}
+              activeAgentId={focus?.type === 'agent' ? focus.id : null}
+              names={agentNames}
             />
-          )}
-          {/* EM-310 (Chimera Twins): the twin lens — a synchronized dual-strand
-              thread + an auto-pinned divergence-point card for a linked
-              same-persona/different-model pair. Renders NOTHING until such a
-              pair is spawned behind world.chimera_twins.enabled, so it adds zero
-              chrome to every ordinary run. Feed-only chrome (off replay). */}
-          <TwinLens world={world} history={sim.history} />
-          {/* EM-313: the fingerprint ticker — a converging live model guess vs
-              the X-Routed-Via ground truth. Renders NOTHING unless the backend
-              has fingerprint_ticker.enabled (default OFF), so it adds zero
-              chrome until switched on. */}
-          <FingerprintTicker
-            tick={world?.tick}
-            activeAgentId={focus?.type === 'agent' ? focus.id : null}
-            names={agentNames}
-          />
-          {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
-              scores typed events and breaks its own news into rate-capped red
-              cards; clicking one flies the shipped zoom-to-place camera. Default
-              ON since the live sign-off (2026-10-03); VITE_DRAMA_WIRE=0 opts
-              out ⇒ renders null, feed unchanged. */}
-          <DramaWire world={world} history={sim.history} onFocus={handleFocus} />
+            {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
+                scores typed events and breaks its own news into rate-capped red
+                cards; clicking one flies the shipped zoom-to-place camera. Default
+                ON since the live sign-off (2026-10-03); VITE_DRAMA_WIRE=0 opts
+                out ⇒ renders null, feed unchanged. */}
+            <DramaWire world={world} history={sim.history} onFocus={handleFocus} />
+          </div>
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME
                 optimistic-free billboard path the god console's VOICE uses. */}

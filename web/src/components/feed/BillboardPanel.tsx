@@ -20,6 +20,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldState, WorldEvent, BillboardPost } from '../../types';
 import { useBlindLineup } from '../blind/BlindLineupContext';
+import { loadPanelCollapsed, savePanelCollapsed } from '../../lib/panelCollapse';
 import '../../inspector/inspector-tokens.css';
 
 interface BillboardPanelProps {
@@ -28,15 +29,14 @@ interface BillboardPanelProps {
   history: WorldEvent[];
 }
 
-const COLLAPSE_KEY = 'em.billboard.collapsed';
+const COLLAPSE_KEY = 'em.billboard.collapsed.v2';
 const MAX_POSTS_SHOWN = 8;
 
+/** Default COLLAPSED (feed primacy, 2026-10-03) via the shared helper — the
+ *  one-time migration ignores the stale expanded pin the pre-fix persist-on-
+ *  mount wrote on every load. */
 function loadCollapsed(): boolean {
-  try {
-    return localStorage.getItem(COLLAPSE_KEY) === '1';
-  } catch {
-    return false;
-  }
+  return loadPanelCollapsed(COLLAPSE_KEY);
 }
 
 /**
@@ -76,7 +76,7 @@ export function BillboardPanel({ world, history }: BillboardPanelProps) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
 
   useEffect(() => {
-    try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
+    savePanelCollapsed(COLLAPSE_KEY, collapsed);
   }, [collapsed]);
 
   const posts = useMemo(() => billboardPosts(world, history), [world, history]);
