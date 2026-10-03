@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { WorldState } from '../../types';
+import { loadPanelCollapsed, savePanelCollapsed } from '../../lib/panelCollapse';
 import {
   accumulate,
   gradeRound,
@@ -31,14 +32,14 @@ interface BlindLineupPanelProps {
   world: WorldState | null;
 }
 
-const COLLAPSE_KEY = 'em.blindLineup.collapsed';
+const COLLAPSE_KEY = 'em.blindLineup.collapsed.v2';
 
+/** Default COLLAPSED (feed primacy, 2026-10-03) via the shared helper — it's
+ *  an optional spectator game, not a reading surface, and the one-time
+ *  migration ignores the stale expanded pin the pre-fix persist-on-mount
+ *  wrote on every load. */
 function loadCollapsed(): boolean {
-  try {
-    return localStorage.getItem(COLLAPSE_KEY) === '1';
-  } catch {
-    return false;
-  }
+  return loadPanelCollapsed(COLLAPSE_KEY);
 }
 
 /** A → Model A, B → Model B … a stable, model-neutral slot label by index. */
@@ -56,7 +57,7 @@ export function BlindLineupPanel({ world }: BlindLineupPanelProps) {
   const [scorecard, setScorecard] = useState<Scorecard>(() => loadScorecard());
 
   useEffect(() => {
-    try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
+    savePanelCollapsed(COLLAPSE_KEY, collapsed);
   }, [collapsed]);
 
   const profiles = useMemo(() => lineupProfiles(world), [world]);
@@ -86,11 +87,20 @@ export function BlindLineupPanel({ world }: BlindLineupPanelProps) {
       className="shrink-0 border-b border-lab-border bg-lab-surface"
       aria-label="Blind Lineup — guess which model each slot is"
     >
-      <div className="lab-header flex items-center justify-between gap-2">
-        <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">
-          🕵 BLIND LINEUP
-        </h2>
-        <div className="flex items-center gap-2">
+      <div className="lab-header flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="m-0 font-mono text-xs font-semibold tracking-widest uppercase">
+            🕵 BLIND LINEUP
+          </h2>
+          {/* The “what even is this?” explainer — always visible, even collapsed
+              (2026-10-03 live feedback: the Reveal section read as mystery
+              chrome). One line, dim; the panel body carries the detail. */}
+          <p className="m-0 font-mono text-[9px] leading-tight text-lab-dim normal-case tracking-normal">
+            optional spectator game — guess which model hides behind each
+            color, then reveal to grade yourself
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
           <span className="font-mono text-[10px] text-lab-dim normal-case tracking-normal">
             {revealed ? 'revealed' : `${score.answered}/${score.total} guessed`}
           </span>

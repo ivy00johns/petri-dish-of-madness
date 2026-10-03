@@ -78,9 +78,13 @@ def test_repeated_distortion_never_accretes_more_than_one_suffix():
     assert len(out) <= 200                          # the existing char cap holds
 
 
-# ── 3) diffuse_culture: past the generation cap, the child TEXT is verbatim ──
+# ── 3) diffuse_culture: past the generation cap, the idea SPREADS AS ITSELF ──
 
-def test_diffuse_culture_child_text_is_verbatim_past_generation_cap():
+def test_diffuse_culture_spreads_source_itself_past_generation_cap():
+    """Meme-coherence fix v2 (2026-10-03 live feedback): past the drift cap a
+    hop no longer mints a verbatim clone child (a gen-6 wall of identical-text
+    rows read as spam, not culture) — the target becomes a genuine new CARRIER
+    of the source itself, so carriers/virality/dominance count real reach."""
     ada, bram = _a("ada"), _a("bram")
     w = _world([ada, bram], _on(diffusion_chance=1.0))
     assert w._comm_param("max_drift_generations", 3) == 3
@@ -91,15 +95,30 @@ def test_diffuse_culture_child_text_is_verbatim_past_generation_cap():
 
     events = w.diffuse_culture()
 
-    assert len(bram.held_memes) == 1
-    child = w.memes[bram.held_memes[0]]
-    # Lineage/generation mechanic is UNTOUCHED — it still mints and increments.
-    assert child.parent_id == source.id
-    assert child.generation == source.generation + 1 == 4
-    # …but the TEXT stopped degrading: verbatim passthrough, no distortion.
-    assert child.text == source.text == "Ada borrowed bread"
+    # No clone was minted: bram holds the SOURCE itself.
+    assert bram.held_memes == [source.id]
+    assert len(w.memes) == 1                        # no verbatim child in the graph
+    assert source.text == "Ada borrowed bread"      # text never degraded
+    assert bram.id in source.carriers               # a genuine new carrier
     muts = [e for e in events if e["kind"] == "meme_mutated"]
     assert len(muts) == 1                            # still spreads, still notifies
+    assert "spreads to" in muts[0]["text"]           # spread wording, not drift
+
+
+def test_diffuse_culture_image_meme_spreads_itself_at_any_generation():
+    """An IMAGE meme's content is the image — a hop spreads it as itself at
+    ANY generation (caption "drift" like '— I heard it twice' is noise)."""
+    ada, bram = _a("ada"), _a("bram")
+    w = _world([ada, bram], _on(diffusion_chance=1.0))
+    source = w.mint_meme("image", "A futuristic lounge", "ada",
+                         generation=0)
+    source.image_id = "img_1"
+    w._attach_meme(ada, source)
+
+    w.diffuse_culture()
+
+    assert bram.held_memes == [source.id]            # spread, not a clone child
+    assert len(w.memes) == 1
 
 
 def test_diffuse_culture_child_text_still_drifts_below_generation_cap():

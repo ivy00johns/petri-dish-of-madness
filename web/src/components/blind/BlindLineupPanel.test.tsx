@@ -41,6 +41,11 @@ function renderWithFlag() {
 
 beforeEach(() => {
   localStorage.clear();
+  // Post-migration user who explicitly expanded (the panel defaults COLLAPSED
+  // via the em.panelDefaults.v2 one-time migration) so the round tests below
+  // reach the guess card's body.
+  localStorage.setItem('em.panelDefaults.v2', '1');
+  localStorage.setItem('em.blindLineup.collapsed.v2', '0');
 });
 
 afterEach(() => {
@@ -138,5 +143,37 @@ describe('BlindLineupPanel — the round (flag on)', () => {
       </BlindLineupProvider>,
     );
     expect(screen.getByText(/No models on stage yet/i)).toBeInTheDocument();
+  });
+});
+
+describe('BlindLineupPanel — collapse default (feed primacy, 2026-10-03)', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_BLIND_LINEUP', '1');
+  });
+
+  it('defaults COLLAPSED on a fresh browser — the game must not squat on the feed', () => {
+    localStorage.clear(); // undo the file-level seed: a fresh browser
+    renderWithFlag();
+    // Header (with its explainer) is still findable…
+    expect(screen.getByText(/BLIND LINEUP/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/optional spectator game/i),
+    ).toBeInTheDocument();
+    // …but the guess card body is not.
+    expect(screen.queryByText('Model A')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Expand the Blind Lineup panel' }),
+    ).toBeInTheDocument();
+  });
+
+  it('expands on toggle and persists the preference', async () => {
+    localStorage.clear();
+    const user = userEvent.setup();
+    renderWithFlag();
+    await user.click(
+      screen.getByRole('button', { name: 'Expand the Blind Lineup panel' }),
+    );
+    expect(screen.getByText('Model A')).toBeInTheDocument();
+    expect(localStorage.getItem('em.blindLineup.collapsed.v2')).toBe('0');
   });
 });

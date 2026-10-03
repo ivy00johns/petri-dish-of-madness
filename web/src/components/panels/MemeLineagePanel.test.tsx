@@ -9,12 +9,17 @@
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { MemeLineagePanel, memeLineageRows, sortedCamps } from './MemeLineagePanel';
+import { MemeLineagePanel, dedupeByText, memeLineageRows, sortedCamps } from './MemeLineagePanel';
 import { world } from '../../test-utils/fixtures';
 import type { Meme, GalleryImage } from '../../types';
 
 beforeEach(() => {
   localStorage.clear(); // the panel persists its collapse preference
+  // The panel defaults COLLAPSED via the one-time migration marker; seed a
+  // POST-migration user who explicitly expanded so the render tests below
+  // reach the lineage rows.
+  localStorage.setItem('em.panelDefaults.v2', '1');
+  localStorage.setItem('em.culture.collapsed.v2', '0');
 });
 
 /** A Meme with contract defaults; override only what a test asserts about. */
@@ -122,6 +127,42 @@ describe('sortedCamps — belief circles, most-populous first', () => {
   });
 });
 
+describe('dedupeByText — the clone-row fold (2026-10-03 live feedback)', () => {
+  it('folds identical-text memes onto the first occurrence with a variant count', () => {
+    // The live shape: a root, its verbatim clone, and the clone's own clones.
+    const rows = memeLineageRows({
+      m0: meme({ id: 'm0', text: 'a fox in a crown', generation: 0, virality: 9 }),
+      m1: meme({ id: 'm1', text: 'a fox in a crown', generation: 3, parent_id: 'm0' }),
+      m2: meme({ id: 'm2', text: 'a fox in a crown', generation: 4, parent_id: 'm1' }),
+      m3: meme({ id: 'm3', text: 'a fox in a paper crown', generation: 1, parent_id: 'm0' }),
+    });
+    const display = dedupeByText(rows);
+    // 4 memes ⇒ 2 display rows; the head of the family is the first in tree
+    // order (the root), the rest folded into its variant count.
+    expect(display.map((d) => d.meme.id)).toEqual(['m0', 'm3']);
+    expect(display[0].variants).toBe(3);
+    expect(display[1].variants).toBe(1);
+  });
+
+  it('keeps distinct texts, empty-text memes (keyed by id), and ordering', () => {
+    const rows = memeLineageRows({
+      a: meme({ id: 'a', text: 'one idea' }),
+      b: meme({ id: 'b', text: '' }),
+      c: meme({ id: 'c', text: 'other idea' }),
+    });
+    const display = dedupeByText(rows);
+    expect(display.map((d) => [d.meme.id, d.variants])).toEqual([
+      ['a', 1],
+      ['b', 1],
+      ['c', 1],
+    ]);
+  });
+
+  it('is empty for an empty row list', () => {
+    expect(dedupeByText([])).toEqual([]);
+  });
+});
+
 describe('MemeLineagePanel — culture renders', () => {
   const cultured = world({
     memes: {
@@ -189,5 +230,29 @@ describe('MemeLineagePanel — culture renders', () => {
     });
     render(<MemeLineagePanel world={campsOnly} />);
     expect(screen.getByText('The Quiet Order')).toBeInTheDocument();
+  });
+
+  it('folds verbatim-clone rows into one row with a ×N variant badge', () => {
+    // The live-feedback wall: three clones of the same drifted text.
+    const cloned = world({
+      memes: {
+        m0: meme({ id: 'm0', text: 'a fox in a crown', generation: 0, virality: 9 }),
+        m1: meme({ id: 'm1', text: 'a fox in a crown', generation: 3, parent_id: 'm0' }),
+        m2: meme({ id: 'm2', text: 'a fox in a crown', generation: 4, parent_id: 'm1' }),
+      },
+    });
+    render(<MemeLineagePanel world={cloned} />);
+    // One row for the text, the fold counted in a ×3 badge.
+    expect(screen.getAllByText(/a fox in a crown/).length).toBe(1);
+    expect(screen.getByText('×3')).toBeInTheDocument();
+  });
+
+  it('defaults COLLAPSED on a fresh browser and expands on toggle', () => {
+    localStorage.clear(); // undo the file-level seed: a fresh browser
+    render(<MemeLineagePanel world={cultured} />);
+    expect(screen.queryByText(/a fox in a crown/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Expand the culture panel' }),
+    ).toBeInTheDocument();
   });
 });

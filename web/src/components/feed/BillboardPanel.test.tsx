@@ -17,6 +17,10 @@ function post(partial: Partial<BillboardPost> & { text: string }): BillboardPost
 beforeEach(() => {
   resetSeq();
   localStorage.clear(); // the panel persists its collapse preference
+  // Post-migration user who explicitly expanded (the panels default COLLAPSED
+  // via the em.panelDefaults.v2 one-time migration).
+  localStorage.setItem('em.panelDefaults.v2', '1');
+  localStorage.setItem('em.billboard.collapsed.v2', '0');
 });
 
 describe('billboardPosts (pure)', () => {
