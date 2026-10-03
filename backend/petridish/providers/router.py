@@ -322,6 +322,22 @@ class Router:
         self._lane_cooldown: dict[str, float] = {}
         self._lane_cooldown_strikes: dict[str, int] = {}
 
+        # ── Platform resume parking (EM-300 P3, freellmapi review 2026-07-29 §2)
+        # `GET /v1/providers?ready=true` (plain unified key — no admin session)
+        # reports each platform's status + `resume_at`: the proxy's OWN exact
+        # wall-clock reset for a rate-limited allocation (live-verified:
+        # huggingface `rate_limited` with resume_at at the daily-allocation
+        # reset — daily-allocation exhaustion, not a short rate window). Lane →
+        # platform is LEARNED from each call's X-Routed-Via ("platform - model");
+        # a platform inside its resume window parks every lane it serves
+        # straight onto `auto` — PROACTIVE, before a single doomed POST. The
+        # reactive per-lane cooldown above covers platforms this poll hasn't
+        # seen rate-limited yet. Wall-clock (time.time()), unlike the monotonic
+        # per-lane cooldowns: resume_at IS a wall-clock timestamp. In-memory
+        # only — cleared by clear_cache() on world reset.
+        self._platform_cool: dict[str, float] = {}
+        self._lane_platform: dict[str, str] = {}
+
         # ── EM-222 — the dedicated embedding lane ──────────────────────────────
         # The adapter for the profile literally named `embed`, resolved once.
         # adapter_overrides already merged into self._adapters above, so a test
@@ -548,18 +564,21 @@ class Router:
         # surface unchanged for this profile.
         self._pending_cached.pop(profile_name, None)
         served_by = profile_name
-        if (self._lane_cooling(profile_name)
+        if ((self._lane_cooling(profile_name)
+                or self._platform_cooling(profile_name))
                 and self._auto_backup is not None
                 and profile_name != self._auto_backup):
-            # Per-lane rate-limit cooldown (spec §3.5) — the pinned lane is
-            # inside a 429 cooling window: PRE-EMPTIVELY skip the doomed pinned
-            # POST and route straight to `auto` (which serves a real action, so
-            # the agent never idles for a lane we already know is down). The
-            # 429 that opened the window already recorded the home error, so no
-            # fresh home demerit here (note_home_error=False). Probe-on-expiry
-            # is implicit: once the window passes, _lane_cooling is false and
-            # the pin is called exactly once; a success clears the cooldown,
-            # another 429 re-cools with a grown backoff.
+            # Rate-limit pre-emption (spec §3.5 + EM-300 P3) — the pinned lane
+            # is either inside its own 429 cooling window (reactive) or its
+            # PLATFORM is inside the proxy-declared resume_at window
+            # (proactive — see refresh_lanes): PRE-EMPTIVELY skip the doomed
+            # pinned POST and route straight to `auto` (which serves a real
+            # action, so the agent never idles for a lane we already know is
+            # down). The 429 that opened the window already recorded the home
+            # error, so no fresh home demerit here (note_home_error=False).
+            # Probe-on-expiry is implicit: once the window passes, the pin is
+            # called exactly once; a success clears the cooldown, another 429
+            # re-cools with a grown backoff.
             text, served_by = await self._auto_backup_call(
                 profile_name,
                 ProviderError(
@@ -848,6 +867,14 @@ class Router:
             log.info("%s recovered — resuming pin", profile)
         self._lane_cooldown.pop(profile, None)
         self._lane_cooldown_strikes.pop(profile, None)
+        # A successful call through the lane also proves its PLATFORM is
+        # serving again — drop the proactive resume_at parking (the proxy's
+        # own accounting can lag a few seconds behind reality).
+        platform = self._lane_platform.get(profile)
+        if platform is not None and platform in self._platform_cool:
+            log.info("%s platform %s serving again — dropping resume parking",
+                     profile, platform)
+            self._platform_cool.pop(platform, None)
 
     def _lane_cooling(self, profile: str) -> bool:
         """True while the lane is inside its cooling window (spec §3.3).
@@ -860,6 +887,35 @@ class Router:
             return False
         if self._clock() >= expiry:
             self._lane_cooldown.pop(profile, None)
+            return False
+        return True
+
+    def _learn_platform(self, profile_name: str) -> None:
+        """EM-300 P3 — learn the lane's platform from its X-Routed-Via header
+        ("platform - model", the proxy's reroute disclosure — e.g.
+        "cloudflare - @cf/mistralai/mistral-small-3.1-24b-instruct"). No
+        platform when the header is absent or carries no " - " separator
+        (mock lanes, direct adapters). Lower-cased to match the /v1/providers
+        platform ids. Called on every recorded outcome."""
+        via = self.last_routed_via(profile_name)
+        if not via or " - " not in via:
+            return
+        self._lane_platform[profile_name] = via.split(" - ", 1)[0].strip().lower()
+
+    def _platform_cooling(self, profile: str) -> bool:
+        """EM-300 P3 — True while the lane's learned platform is inside the
+        proxy-declared resume_at window (proactive: parks the lane BEFORE a
+        doomed POST, vs the reactive per-lane 429 cooldown). Expired entries
+        clear lazily on read. No learned platform ⇒ never parks — an unknown
+        platform can only be caught reactively."""
+        platform = self._lane_platform.get(profile)
+        if not platform:
+            return False
+        expiry = self._platform_cool.get(platform)
+        if expiry is None:
+            return False
+        if time.time() >= expiry:
+            self._platform_cool.pop(platform, None)
             return False
         return True
 
@@ -878,6 +934,23 @@ class Router:
                 "cooling": True,
                 "expires_in_s": round(expiry - now, 1),
                 "strikes": self._lane_cooldown_strikes.get(profile, 0),
+            }
+        # Platform resume parking (EM-300 P3): a lane whose PLATFORM is inside
+        # the proxy-declared window parks too — same shape as a lane cooldown
+        # (strikes is meaningless here; the platform id rides along so the UI
+        # can say "huggingface resets in 38s" instead of just "cooling").
+        now_wall = time.time()
+        for profile, platform in self._lane_platform.items():
+            if profile in out:
+                continue
+            expiry = self._platform_cool.get(platform)
+            if expiry is None or now_wall >= expiry:
+                continue
+            out[profile] = {
+                "cooling": True,
+                "expires_in_s": round(expiry - now_wall, 1),
+                "strikes": 0,
+                "platform": platform,
             }
         return out
 
@@ -1082,6 +1155,7 @@ class Router:
 
     async def refresh_lanes(
         self, *, catalog: Any = None, quota: Any = None, env: Any = None,
+        providers: Any = None,
     ) -> bool:
         """Rebuild the lane registry from live discovery (spec §4 step 3):
         poll the FreeLLMAPI catalog + detect direct-provider keys, MERGE into a
@@ -1099,13 +1173,13 @@ class Router:
             return False
         try:
             return await self._refresh_lanes_inner(
-                catalog=catalog, quota=quota, env=env)
+                catalog=catalog, quota=quota, env=env, providers=providers)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("lane discovery refresh failed: %s", exc)
             return False
 
     async def _refresh_lanes_inner(
-        self, *, catalog: Any, quota: Any, env: Any,
+        self, *, catalog: Any, quota: Any, env: Any, providers: Any = None,
     ) -> bool:
         template = self._freellmapi_template()
         fllm_models = bool(self._disco_value("freellmapi_models", True))
@@ -1127,6 +1201,23 @@ class Router:
         if quota is None and bool(self._disco_value("admin_quota", False)):
             quota = await self._fetch_admin_quota_from_env(env)
         self._discovery_quota = quota
+
+        # 2b. Platform resume parking (EM-300 P3, review §2): ONE GET to
+        #     /v1/providers?ready=true (plain unified key) returns each
+        #     platform's status + resume_at — the proxy's own exact reset
+        #     time. A platform past its allocation parks every lane it
+        #     serves straight onto `auto` until that wall-clock time,
+        #     instead of re-discovering the death by burning a turn and a
+        #     bounce cascade. Knob-defaulted OFF for hermetic tests (like
+        #     admin_quota); config/lanes.yaml ships it ON. A FAILED poll
+        #     (None) keeps the existing map; a successful one replaces it
+        #     (the poll is authoritative — recovered platforms drop out).
+        if providers is None and template is not None and bool(
+                self._disco_value("providers_resume", False)):
+            providers = await _discovery.fetch_platform_resume(
+                template.base_url, template.api_key)
+        if providers is not None:
+            self._platform_cool = dict(providers)
 
         # 3. Direct-provider key presence (spec §4 step 2).
         environ = env if env is not None else os.environ
@@ -1195,6 +1286,7 @@ class Router:
                 "discovered": ln.profile in self._discovery_synth,
                 "free": ln.free,
                 "out_hint": ln.out_hint,
+                "platform": self._lane_platform.get(ln.profile),
                 "last_refresh_counter": self._last_refresh_counter,
             })
         return {
@@ -1546,6 +1638,10 @@ class Router:
         # must never park a fresh run's lanes (re-probe on boot is acceptable).
         self._lane_cooldown.clear()
         self._lane_cooldown_strikes.clear()
+        # Platform resume parking likewise (EM-300 P3) — and the learned
+        # lane→platform map is routed_via-derived, so it resets with it.
+        self._platform_cool.clear()
+        self._lane_platform.clear()
         self._lane_registry = LaneRegistry(
             SortingList(
                 self._ar_order(), allow_paid=self._ar_allow_paid(),
@@ -1656,6 +1752,7 @@ class Router:
         window.append(entry)
         # routed_via at the time of the outcome — introspection only.
         self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
+        self._learn_platform(profile_name)
 
     def note_lane_error(self, profile_name: str) -> None:
         """EM-198 — record one adapter-level provider error (429 / 5xx /
@@ -1671,6 +1768,7 @@ class Router:
         )
         window.append({"parsed": False, "truncated": False, "error": True})
         self._lane_routed_via[profile_name] = self.last_routed_via(profile_name)
+        self._learn_platform(profile_name)
 
     def _lane_boosted(self, profile_name: str) -> bool:
         """True when this profile's outcome window shows enough truncations to
@@ -1715,6 +1813,13 @@ class Router:
         # gets {cooling, expires_in_s, strikes}; healthy lanes stay absent.
         for profile, cd in self.lane_cooldowns().items():
             health.setdefault(profile, {})["cooldown"] = cd
+        # EM-328 — the proxy's diagnostic headers from the lane's last call
+        # ({request_id, fallback_trail}); absent for mock/direct lanes.
+        for profile in health:
+            _diag = self.last_request_diag(profile)
+            if _diag:
+                health[profile]["last_request_id"] = _diag.get("request_id")
+                health[profile]["last_fallback_trail"] = _diag.get("fallback_trail")
         return health
 
     # ── Wave D3 / EM-177 — lane failover with recovery probes ──────────────────
@@ -2000,6 +2105,16 @@ class Router:
         if pending is not None:
             return pending["routed_via"]
         return getattr(self._adapters.get(profile_name), "last_routed_via", None)
+
+    def last_request_diag(self, profile_name: str) -> dict | None:
+        """EM-328 — the proxy's diagnostic headers from this lane's last call:
+        {request_id, fallback_trail}. `X-Request-ID` correlates to the proxy's
+        `GET /api/analytics/requests/:id` — the full failover ladder for one
+        call; `X-Fallback-Trail` lists what the proxy tried INTERNALLY (only
+        present on failover). None when the adapter doesn't capture them
+        (mock/direct adapters, no call yet)."""
+        diag = getattr(self._adapters.get(profile_name), "_last_diag", None)
+        return diag or None
 
     def last_usage(self, profile_name: str) -> dict | None:
         """Return the token/timing usage of the last successful chat() for this

@@ -75,8 +75,13 @@ function windowCellTitle(e: LaneWindowEntry, i: number, n: number): string {
   return parts.join(' · ');
 }
 
-function cooldownLabel(cd: { expires_in_s: number; strikes: number }): string {
-  return `cooling — auto ${Math.ceil(cd.expires_in_s)}s · ×${cd.strikes}`;
+function cooldownLabel(cd: { expires_in_s: number; strikes: number; platform?: string }): string {
+  // Platform-resume parking (EM-300 P3 finish) names the culprit platform —
+  // "huggingface · auto 38s" reads as the proxy's own reset clock, not a
+  // lane-own 429 streak (strikes is 0 there by construction).
+  const head = cd.platform ? `${cd.platform} · auto` : 'cooling — auto';
+  const tail = cd.platform ? `${Math.ceil(cd.expires_in_s)}s` : `${Math.ceil(cd.expires_in_s)}s · ×${cd.strikes}`;
+  return `${head} ${tail}`;
 }
 
 /** Model color for a lane's chip — from the live legend when present. */

@@ -87,6 +87,7 @@ async def _post_with_retry(
     headers: dict,
     payload: dict,
     profile: str,
+    diag: dict | None = None,
 ) -> tuple[dict, str | None]:
     """Single POST. Returns (parsed_json, routed_via) or raises ProviderError.
 
@@ -120,6 +121,16 @@ async def _post_with_retry(
             profile, resp.status_code, resp.text[:300],
             retry_after=_parse_retry_after(resp.headers),
         )
+
+    if diag is not None:
+        # EM-328 — the proxy's diagnostic headers, beyond X-Routed-Via:
+        # `X-Request-ID` correlates to the proxy's
+        # `GET /api/analytics/requests/:id` (the FULL failover ladder for one
+        # call) and `X-Fallback-Trail` lists what the proxy tried INTERNALLY
+        # (only present on failover). Captured so EM-331-class mysteries (our
+        # occasional empty-contents 400s) can be correlated from our side.
+        diag["request_id"] = resp.headers.get("X-Request-ID")
+        diag["fallback_trail"] = resp.headers.get("X-Fallback-Trail")
 
     routed_via = resp.headers.get("X-Routed-Via")
     if routed_via:
@@ -166,6 +177,9 @@ class OpenAICompatibleAdapter:
         # of a fresh TCP/TLS handshake per call). Per-call timeouts still ride
         # every request via _post_with_retry.
         self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+        # EM-328 — the proxy's diagnostic headers from the last call
+        # ({request_id, fallback_trail}; empty before the first call).
+        self._last_diag: dict = {}
 
     async def chat(
         self,
@@ -199,9 +213,11 @@ class OpenAICompatibleAdapter:
         # Time the whole post (incl. retry/backoff) with perf_counter (W6).
         started = time.perf_counter()
         client = self._client
+        diag: dict = {}
         try:
             data, routed_via = await _post_with_retry(
-                client, url, headers, _payload(self._json_mode), self.name
+                client, url, headers, _payload(self._json_mode), self.name,
+                diag=diag,
             )
         except ProviderError as exc:
             # Providers that don't understand `response_format` answer 4xx.
@@ -215,8 +231,10 @@ class OpenAICompatibleAdapter:
             )
             self._json_mode = False
             data, routed_via = await _post_with_retry(
-                client, url, headers, _payload(False), self.name
+                client, url, headers, _payload(False), self.name,
+                diag=diag,
             )
+        self._last_diag = diag  # EM-328 — proxy diagnostic headers (may be empty)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         # Surface the model the proxy actually routed to. Prefer the explicit
         # X-Routed-Via header, then the body's "model" field, then our request.

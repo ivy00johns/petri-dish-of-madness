@@ -100,15 +100,22 @@ def _profile(name: str, model_id: str, *, max_tokens: int = 512,
 
 
 def _router(specs, *, auto=None, clock: _Clock | None = None,
-            adaptive_enabled: bool = False) -> Router:
+            adaptive_enabled: bool = False,
+            discovery: dict | None = None,
+            order: list | None = None) -> Router:
     profiles = [_profile(n, m) for (n, m, _a) in specs]
     overrides = {n: a for (n, _m, a) in specs}
     if auto is not None:
         profiles.append(_profile("auto", "auto"))
         overrides["auto"] = auto
+    ar = {"enabled": adaptive_enabled}
+    if discovery is not None:
+        ar["discovery"] = discovery
+    if order is not None:
+        ar["order"] = order
     return Router(
         profiles, adapter_overrides=overrides, cache_enabled=False,
-        adaptive_routing={"enabled": adaptive_enabled},
+        adaptive_routing=ar,
         clock=clock if clock is not None else _Clock(),
     )
 
@@ -306,3 +313,128 @@ async def test_auto_never_self_cools():
             await r.chat("auto", _MESSAGES, max_tokens=256, temperature=0.8)
     assert r.lane_cooldowns() == {}     # the terminal lane never cools itself
     assert auto.calls == 2
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EM-300 P3 (finish) — proactive PLATFORM resume_at parking (review §2):
+# GET /v1/providers?ready=true returns each platform's status + resume_at (the
+# proxy's own exact wall-clock reset). A platform inside its window parks every
+# lane it serves onto `auto` BEFORE a doomed POST. Lane→platform is learned
+# from X-Routed-Via ("platform - model").
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ViaAdapter(_OkAdapter):
+    """Serves with a proxy-shaped routed_via ("platform - model")."""
+
+    def __init__(self, name: str, via: str):
+        super().__init__(name)
+        self.last_routed_via = via
+
+
+def test_lane_platform_learned_from_routed_via():
+    r = _router([("mox", "minimax-m3", _ViaAdapter("mox", "huggingface - MiniMaxAI/MiniMax-M3"))],
+                adaptive_enabled=True)
+    r.note_parse_outcome("mox", parsed=True, truncated=False)
+    assert r._lane_platform["mox"] == "huggingface"
+    # A routed_via without the " - " separator (mock/direct adapters) learns nothing.
+    r2 = _router([("bram", "llama-3.3-70b-fp8-fast", _OkAdapter("bram"))], adaptive_enabled=True)
+    r2.note_parse_outcome("bram", parsed=True, truncated=False)
+    assert "bram" not in r2._lane_platform
+
+
+def test_platform_resume_parks_lane_to_auto_before_any_post():
+    pin = _ViaAdapter("mox", "huggingface - MiniMaxAI/MiniMax-M3")
+    auto = _OkAdapter("auto")
+    clock = _Clock()
+    r = _router([("mox", "minimax-m3", pin)], auto=auto, clock=clock, adaptive_enabled=True)
+    r.note_parse_outcome("mox", parsed=True, truncated=False)  # learn platform
+    r._platform_cool["huggingface"] = time.time() + 120        # proxy says: parked
+    import asyncio
+    text = asyncio.run(r.chat("mox", _MESSAGES, max_tokens=512, temperature=0.8))
+    assert pin.calls == 0, "a platform-parked lane must not burn a pinned POST"
+    assert auto.calls == 1 and text == "served/auto"
+
+
+def test_platform_resume_expiry_probes_pin_once():
+    pin = _ViaAdapter("mox", "huggingface - MiniMaxAI/MiniMax-M3")
+    auto = _OkAdapter("auto")
+    r = _router([("mox", "minimax-m3", pin)], auto=auto, adaptive_enabled=True)
+    r.note_parse_outcome("mox", parsed=True, truncated=False)
+    r._platform_cool["huggingface"] = time.time() - 1  # already expired
+    import asyncio
+    asyncio.run(r.chat("mox", _MESSAGES, max_tokens=512, temperature=0.8))
+    assert pin.calls == 1 and auto.calls == 0, "expired resume_at must not park"
+
+
+def test_success_clears_platform_resume_parking():
+    pin = _ViaAdapter("mox", "huggingface - MiniMaxAI/MiniMax-M3")
+    auto = _OkAdapter("auto")
+    r = _router([("mox", "minimax-m3", pin)], auto=auto, adaptive_enabled=True)
+    r.note_parse_outcome("mox", parsed=True, truncated=False)
+    r._platform_cool["huggingface"] = time.time() + 120
+    import asyncio
+    asyncio.run(r.chat("mox", _MESSAGES, max_tokens=512, temperature=0.8))  # pre-empts
+    r._platform_cool["huggingface"] = time.time() + 120  # re-park (simulating a poll)
+    # A direct success through the lane proves the platform serves again.
+    r.note_parse_outcome("mox", parsed=True, truncated=False)
+    # Simulate the success path: _clear_cooldown is the hook the chat success uses.
+    r._clear_cooldown("mox")
+    assert "huggingface" not in r._platform_cool
+
+
+def test_platform_cooling_surfaces_in_health_and_registry():
+    pin = _ViaAdapter("mox", "huggingface - MiniMaxAI/MiniMax-M3")
+    auto = _OkAdapter("auto")
+    r = _router([("mox", "minimax-m3", pin)], auto=auto, adaptive_enabled=True,
+                discovery={"enabled": True},
+                # a `*` sweep so the sorting list places the lane
+                order=[{"source": "freellmapi", "model": "*", "free": True}])
+    r.note_parse_outcome("mox", parsed=True, truncated=False)
+    r._platform_cool["huggingface"] = time.time() + 90
+    cd = r.lane_cooldowns().get("mox")
+    assert cd and cd["cooling"] and cd["platform"] == "huggingface"
+    health = r.lane_health()["mox"]["cooldown"]
+    assert health["cooling"] and health["platform"] == "huggingface"
+    view = r.lanes_view()
+    row = next(ln for ln in view["lanes"] if ln["profile"] == "mox")
+    assert row["platform"] == "huggingface" and row["cooldown"]["cooling"]
+
+
+def test_refresh_updates_platform_cool_and_failure_keeps_it():
+    pin = _ViaAdapter("mox", "huggingface - MiniMaxAI/MiniMax-M3")
+    r = _router([("mox", "minimax-m3", pin)], adaptive_enabled=True,
+                discovery={"enabled": True})
+    r._platform_cool["huggingface"] = time.time() + 999
+    import asyncio
+    # A SUCCESSFUL poll (dict, possibly empty) is authoritative: replaces the map.
+    asyncio.run(r.refresh_lanes(catalog=[], providers={}))
+    assert r._platform_cool == {}
+    # A FAILED poll (None) keeps the existing parking.
+    r._platform_cool["huggingface"] = time.time() + 999
+    asyncio.run(r.refresh_lanes(catalog=[], providers=None))
+    assert "huggingface" in r._platform_cool
+
+
+def test_parse_platform_resume_shapes():
+    from petridish.providers.discovery import parse_platform_resume
+    now = 1_790_000_000.0  # 2026-09 — the Z-timestamp (2026-10-04) must be FUTURE
+    payload = {
+        "providers": [
+            {"platform": "HuggingFace", "status": "rate_limited",
+             "resume_at": "2026-10-04T02:18:11.729Z"},          # Z suffix, future
+            {"platform": "google", "status": "rate_limited",
+             "resume_at": "2020-01-01T00:00:00+00:00"},          # past → omitted
+            {"platform": "cerebras", "status": "healthy",
+             "resume_at": "2030-01-01T00:00:00Z"},               # healthy → omitted
+            {"platform": "cohere", "status": "rate_limited"},    # no resume_at
+            {"platform": "broken", "status": "rate_limited",
+             "resume_at": "not-a-timestamp"},                    # malformed
+            "garbage-row",                                       # not a dict
+        ],
+        "counts": {"rate_limited": 1},
+    }
+    out = parse_platform_resume(payload, now)
+    assert set(out) == {"huggingface"}
+    assert out["huggingface"] > now
+    assert parse_platform_resume("nope", now) == {}
+    assert parse_platform_resume({"providers": "nope"}, now) == {}

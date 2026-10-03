@@ -76,6 +76,12 @@ adaptive_routing:
     admin_quota: false         # also read admin /api/health quotaStates (needs
                                #  FREELLMAPI_ADMIN_* creds; enrichment only, P3
                                #  owns 429-cap tracking)
+    providers_resume: true     # EM-300 P3 (2026-10-02): also GET /v1/providers?ready=true
+                               #  (plain unified key — no admin session) on every
+                               #  refresh and PARK each rate-limited platform's lanes
+                               #  until its exact resume_at (wall-clock). The proxy's
+                               #  own reset time replaces turn-burning rediscovery.
+                               #  Code-default OFF so the test suite stays hermetic.
   #
   # Lanes come from this file matched against configured profiles (P1) UNION the
   # discovered catalog (P2, when discovery.enabled).

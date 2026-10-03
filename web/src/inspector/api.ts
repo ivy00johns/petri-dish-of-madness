@@ -247,11 +247,14 @@ export interface LaneWindowEntry {
   error?: boolean;
 }
 
-/** Per-lane cooldown state (EM-300 P3 spec §3.7 — router lane_cooldowns()). */
+/** Per-lane cooldown state (EM-300 P3 spec §3.7 — router lane_cooldowns()).
+ *  `platform` (EM-300 P3 finish): present when the parking comes from the
+ *  platform's proxy-declared resume_at window, not a lane-own 429. */
 export interface LaneCooldown {
   cooling: boolean;
   expires_in_s: number;
   strikes: number;
+  platform?: string;
 }
 
 /** One lane in GET /api/lanes — the profile-keyed lane_health() map. */
@@ -283,6 +286,8 @@ export interface LaneRegistryRow {
   discovered: boolean;
   free: boolean;
   out_hint: string | null;
+  /** Learned from X-Routed-Via ("platform - model") — EM-300 P3 finish. */
+  platform?: string | null;
   last_refresh_counter: number;
 }
 
