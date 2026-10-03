@@ -20,16 +20,16 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 | **v3 art — Wave B** | "The city comes alive" — golden-hour HDRI + toon shading, instanced foliage/props, per-place-kind buildings | ✅ Done |
 | **v3 art — Wave C** | "A town, not a diorama" — real **CC0 GLB** buildings + animated villagers & critters, a 15-place district town, a real street network | ✅ Done |
 | **Wave M** (W23) | Cooperation economy + governance texture (skills/teach/trade, harm-surface finishers, living constitution) | ✅ Done |
-| **Wave N** (W24–W25) | Agent-controlled city layout — emergent road graph (`build_road`, demolish/car-policy votes, templates, procedural meshing, master-plan morphs) | ✅ Done — visual sign-off on `ROAD_MESH_ENABLED` deferred |
-| **Wave O** (W26) | Emergent society systems — belief/culture (memes), religion, organized war | ✅ Done — keystone + War merged PR #92 (2026-07-12), culture + religion (EM-251–255/260–263) merged PR #111 (2026-07-15); live sign-off owed |
+| **Wave N** (W24–W25) | Agent-controlled city layout — emergent road graph (`build_road`, demolish/car-policy votes, templates, procedural meshing, master-plan morphs) | ✅ Done — road mesh ON by default since the EM-247 sign-off (PR #65) |
+| **Wave O** (W26) | Emergent society systems — belief/culture (memes), religion, organized war | ✅ Done — keystone + War merged PR #92 (2026-07-12), culture + religion (EM-251–255/260–263) merged PR #111 (2026-07-15); war + faith flipped ON live 2026-10-03 (dormant-flag sweep) |
 | **Wave P** (W27) | Agent-controlled building layout (graph-derived zones) | Shipped dormant, then **superseded by F1/EM-268** (free placement); code stays on `main` behind default-off flags |
 | **W29** | Offline-review remediation — 25 findings (EM-272–296) from the 2026-07-01 deep review | ✅ Done — PR #74 |
-| **Wave Q** (W30) | World-authorship first slice — divergence probe (EM-297), agent-authored facades/murals (EM-298 ✅ PR #78), parametric building-recipe grammar keystone (EM-299) | ✅ First slice complete — EM-297 done PR #87, EM-298 done PR #78, EM-299 recipes merged PR #107 (2026-07-15); only the live flag-flip sign-off owed |
-| **Multi-city expansion** | 2 cities + travel + world3d rendering (EM-109/EM-110/EM-121) | ✅ Merged PR #112 (2026-07-15); flag OFF live (`chore: enable comm, disable multi-city for live comm sign-off`, `d97d8ea`) — live sign-off owed |
+| **Wave Q** (W30) | World-authorship first slice — divergence probe (EM-297), agent-authored facades/murals (EM-298 ✅ PR #78), parametric building-recipe grammar keystone (EM-299) | ✅ First slice complete — EM-297 done PR #87, EM-298 done PR #78, EM-299 recipes merged PR #107 (2026-07-15); recipes flipped ON live 2026-10-03 (dormant-flag sweep) |
+| **Multi-city expansion** | 2 cities + travel + world3d rendering (EM-109/EM-110/EM-121) | ✅ Merged PR #112 (2026-07-15); settlements flipped ON live 2026-10-03 (dormant-flag sweep — genesis "Ashvale" + homed agents verified) |
 | **F1 free-placement** (W28) | Retire graph-lots placement; deterministic free-coordinate organic building placement, build-anywhere restored | ✅ **Merged + ratified** — PR #81/#82; derive-on-load restore behavior ratified by user 2026-07-09 |
 | **Adaptive lane routing P1** | Custom sorting list + registry-owned bounce loop, replacing blind `auto` delegation | ✅ **Shipped PR #83 (2026-07-07); go-live flip 2026-07-08.** P2 (dynamic lane discovery/refresh) shipped PR #109 (2026-07-15), **flipped ON live 2026-10-02** (EM-325 heal). **P3 (429-aware lane cooldown + platform `resume_at` parking) + P5 (LaneHealthPanel observability board) shipped 2026-10-02** on `build/reentry-phase1`. P4 (direct-provider lanes) open — EM-300 |
 | **W30** | Fable-audit remediation build — go-live flips, facades decal-clear fix, idle-fallback churn mitigation, ledger intake of the 2026-07-08 deep review | ✅ Done — PR #86 et al. |
-| **W31** | Fable Tier-1 expansion (9 features EM-309–317) + the command-a-plus routing/chat fix (EM-319–324) | ✅ **All merged 2026-07-13** (PRs #94, #96–#104, #106; #95/#105 superseded by #106). Features flag-gated **default-OFF** — flip one at a time to sign off. Live routing/chat fixed: 0 truncation feed cards, cast repinned to clean-JSON lanes |
+| **W31** | Fable Tier-1 expansion (9 features EM-309–317) + the command-a-plus routing/chat fix (EM-319–324) | ✅ **All merged 2026-07-13** (PRs #94, #96–#104, #106; #95/#105 superseded by #106). **All 9 features flipped ON live 2026-10-03** (dormant-flag sweep). Live routing/chat fixed: 0 truncation feed cards, cast repinned to clean-JSON lanes |
 
 **Where we are:** the lab is well past v1. The marquee feature is proven live — **EM-048**: a
 3-agent / 3-model world ran on FreeLLMAPI for >11 minutes (all three alive, real chat, a passed
@@ -44,11 +44,11 @@ the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minu
    Arena): cast 2–3 families at 100–300 ticks each and read the Gemini-vs-Llama civilization
    divergence off the arena standings (the v3 headline demo). Consider overnight for the full
    Emergence-World-style bake-off; EM-128's per-family AWI deltas are the natural follow-on.
-2. **Live flag-flip sign-off** — the growing backlog of merged-but-dormant features waiting on a
-   watched-live confirmation: the 9 Fable Tier-1 features (EM-309–317), Wave O culture/religion
-   + war (EM-249–263), the EM-299 building-recipe grammar, and the multi-city expansion
-   (EM-109/110/121) — all default-OFF or flag-OFF live; flip one at a time and watch the feed.
-   (EM-300's discovery flags are off this list — flipped ON live 2026-10-02.)
+2. **Turn the freshly-armed features into evidence** — the 2026-10-03 sign-off flipped EM-309–317,
+   Wave O war+faith, EM-299 recipes, and the multi-city expansion ON live; the next watched run
+   should read their emergent milestones off the feed (first war grievance→declare_war, first
+   found_faith, first recipe-authored skyline, first Healing-House sentence) and land **EM-128's
+   AWI-weighted per-family deltas** in the Arena.
 3. **EM-300 P4** — direct-provider lanes (Gemini/Anthropic/OpenAI/Ollama without the proxy), the
    last open phase of adaptive lane routing (P3 cooldown/parking + P5 lane board shipped 2026-10-02).
 4. **EM-326 cadence levers** — the ~3–4 ticks/min ceiling is structural and latency-bound (5
@@ -74,6 +74,21 @@ at a time — free-tier-safe) + the **Model-Family Arena** (cross-run civilizati
 population / laws / buildings / crimes / credits + population sparklines per family, on the Runs
 tab beside the run browser). `runs.model_family` stamps + fork inheritance; api.openapi 1.5.0.
 Live-verified: a real 2-family/4-tick tournament on the proxy (~26s), runs stamped + aggregated.
+Same session also fixed a **py3.11 `asyncio.wait_for` cancel race** that could hang
+`TickLoop.reset()` forever (the EM-112 CI wedge) — `_run` re-delivers swallowed cancellations and
+`pytest-timeout --timeout=300` guards every future run.
+
+**Recently landed (2026-10-03 dormant-flag sign-off sweep, re-entry Phase 5):** the entire
+dormant backlog flipped ON live on the FreeLLMAPI proxy and verified end to end — the **9 Fable
+Tier-1 features** (EM-309 Blind Lineup masking the whole feed `???` with the guess card live;
+EM-310 Chimera Twins spawning a real Vesper II/III pair with a divergence card at tick 5;
+EM-311 charters seeded + organic `charter_revised`; EM-313 fingerprint guesses converging vs
+`X-Routed-Via`; EM-314 Babel Matrix serving real dyadic cells; EM-317 prophecy posted →
+deterministically resolved), **Wave O war + faith**, **EM-299 building recipes**, and the
+**multi-city expansion** (genesis settlement "Ashvale" + homed agents). Frontend env flags
+(`VITE_BLIND_LINEUP`, `VITE_STORYLINES_RAIL`, `VITE_DRAMA_WIRE`, `BABEL_MATRIX_ENABLED`) now
+default ON; EM-314's backend half boots via `PETRIDISH_BABEL_MATRIX_ENABLED=1`. Loader defaults
+stay OFF (goldens byte-identical); the 8 dormant-state guard tests flipped with the sweep.
 
 **Recently landed (2026-10-02 re-entry, `build/reentry-phase1`):** the ledger reconcile + WIP
 salvage (reactive per-lane 429 cooldown + LaneHealthPanel), the **EM-325 live heal** (discovery

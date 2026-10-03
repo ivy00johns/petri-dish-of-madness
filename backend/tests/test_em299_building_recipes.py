@@ -34,6 +34,9 @@ from petridish.config.loader import load_config, BuildingRecipesParams
 
 def _world() -> World:
     cfg = load_config()
+    # The live config ships the flag ON since the 2026-10-03 sign-off; these
+    # tests exercise the flag-OFF behavior, so force it off here explicitly.
+    cfg.world.building_recipes.enabled = False
     places = [
         PlaceState(id=p.id, name=p.name, x=p.x, y=p.y,
                    kind=p.kind, description=p.description,
@@ -308,10 +311,14 @@ def test_strict_recipe_rejects_unknown_keys():
 
 # ── config: the flag parses + defaults OFF ────────────────────────────────────
 
-def test_config_flag_default_off():
+def test_recipes_dormant_in_code_live_config_sign_off_on():
+    # The dataclass (loader/embedded) default stays OFF — hermetic tests and
+    # goldens are byte-identical. The LIVE config/world.yaml flipped ON at the
+    # 2026-10-03 live sign-off (PR: dormant-flag sweep).
+    assert BuildingRecipesParams().enabled is False
     cfg = load_config()
     assert isinstance(cfg.world.building_recipes, BuildingRecipesParams)
-    assert cfg.world.building_recipes.enabled is False
+    assert cfg.world.building_recipes.enabled is True
 
 
 # ── DRIFT GUARD: the runtime grammar EQUALS the EM-297 probe grammar ──────────

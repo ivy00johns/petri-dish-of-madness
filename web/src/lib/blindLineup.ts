@@ -27,13 +27,14 @@ import type { Agent, ModelProfile, WorldState } from '../types';
 export const MASK = '???';
 
 /**
- * blind_lineup.enabled — read the Vite env VITE_BLIND_LINEUP. Default OFF.
+ * blind_lineup.enabled — read the Vite env VITE_BLIND_LINEUP. Default ON since
+ * the EM-309 live sign-off (2026-10-03); set VITE_BLIND_LINEUP=0 to opt out.
  * Truthy values: "1" | "true" | "on" | "yes" (case-insensitive). Evaluated at
  * call-time (not module-init) so vi.stubEnv works in tests.
  */
 export function blindLineupEnabled(): boolean {
   const v = import.meta.env.VITE_BLIND_LINEUP;
-  if (v === undefined || v === null) return false;
+  if (v === undefined || v === null) return true;
   return ['1', 'true', 'on', 'yes'].includes(String(v).toLowerCase());
 }
 

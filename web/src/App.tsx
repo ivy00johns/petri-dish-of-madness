@@ -320,9 +320,10 @@ function LiveLayout({ sim }: { sim: Sim }) {
           <FaithPanel world={world} />
           {/* EM-312 (Storylines Rail): the feed's drama index — recurring
               rivalries / redemptions / power grabs, promoted from the event log
-              with zero LLM. Gated OFF by default; renders nothing until a thread
-              is promoted, so peacetime chrome stays byte-identical. Clicking a
-              thread filters the feed (below) + tethers its principals in 3-D. */}
+              with zero LLM. Default ON since the live sign-off (2026-10-03);
+              renders nothing until a thread is promoted, so peacetime chrome
+              stays identical. Clicking a thread filters the feed (below) +
+              tethers its principals in 3-D. */}
           {STORYLINES_RAIL_ENABLED && (
             <StorylinesRail
               storylines={storylines}
@@ -347,8 +348,9 @@ function LiveLayout({ sim }: { sim: Sim }) {
           />
           {/* EM-316: the Drama Wire — a derived, zero-sim-feedback rail that
               scores typed events and breaks its own news into rate-capped red
-              cards; clicking one flies the shipped zoom-to-place camera. Gated
-              behind VITE_DRAMA_WIRE (default OFF ⇒ renders null, feed unchanged). */}
+              cards; clicking one flies the shipped zoom-to-place camera. Default
+              ON since the live sign-off (2026-10-03); VITE_DRAMA_WIRE=0 opts
+              out ⇒ renders null, feed unchanged. */}
           <DramaWire world={world} history={sim.history} onFocus={handleFocus} />
           <div className="flex-1 min-h-0" aria-label="Live event feed">
             {/* Wave E (EM-185): the GRANT affordance replies through the SAME

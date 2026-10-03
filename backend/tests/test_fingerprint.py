@@ -352,8 +352,10 @@ def test_malformed_block_survives_world_parse():
 
 
 def test_endpoint_gate_default_off():
-    """End-to-end: the shipped config leaves the ticker OFF, so the endpoint
-    returns {enabled: false} through the whole app stack."""
+    """End-to-end: the LOADER default leaves the ticker OFF, so an app booted
+    with it disabled returns {enabled: false} through the whole app stack.
+    (The live config/world.yaml flipped ON at the 2026-10-03 sign-off, so the
+    gate is forced off here to exercise the disabled path.)"""
     import sys
     from fastapi.testclient import TestClient
     from petridish.api.app import app
@@ -362,6 +364,7 @@ def test_endpoint_gate_default_off():
         if appmod._world is not None:
             appmod._world.params.animals.enabled = False
             appmod._world.animals.clear()
+            appmod._world.params.fingerprint_ticker.enabled = False
         r = c.get("/api/fingerprints")
         assert r.status_code == 200
         body = r.json()
