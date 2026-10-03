@@ -829,8 +829,16 @@ agents:                          # seed agents; profile must match a profiles[].
   # lanes, no tiny-cap lanes) so the proxy answers in 1-4s and the world never
   # stalls behind one slow turn — the budget guard is off (turn_llm_budget_seconds: 0).
   # All start in the plaza so they meet, greet, and converse from round one.
+  # EM-325 (2026-10-02) cast repin — same-day live probe evidence: command-r-2
+  # (cohere upstream) aborted at the proxy's 15s cap 3/3 in the AFTER window and
+  # was bimodal in direct probes (0.9s/11.9s); minimax-m3 (huggingface upstream)
+  # exceeded the router's per_attempt_timeout_s=12 on EVERY call (client
+  # disconnected mid-attempt 3/3). Cleo → deepseek-pro (probed 0.9–1.1s, clean
+  # JSON 2/2) and Mox → qwen-next (the EM-325-repinned pin, probed clean 3/3).
+  # The cast stays five DISTINCT model families: gemini / llama / deepseek /
+  # mistral / qwen.
   - { name: Ada,    personality: "Warm-hearted tinkerer who keeps the village fair and tidy; chatty and curious, greets everyone and loves swapping news in the plaza, gently calls out freeloaders but always lends a hand.", profile: gemini-flash-lite,  location: plaza }
   - { name: Bram,   personality: "Charming market trader who loves a good deal and a good gossip; quick with a joke, always chatting someone up, and might pocket a coin if nobody is watching.", profile: llama-fast,    location: plaza }
-  - { name: Cleo,   personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: command-r,  location: plaza }
+  - { name: Cleo,   personality: "Earnest town organizer who talks ideas with anyone who'll listen; loves proposals, votes, and rallying neighbours for community projects; dreams of a fairer commons.", profile: deepseek-pro,  location: plaza }
   - { name: Vesper, personality: "Serial entrepreneur who has founded eleven ventures and abandoned ten; pitches a new scheme to anyone within earshot, considers bankruptcy a branding exercise, and treats the Market as her personal stage.", profile: mistral-small, location: plaza }
-  - { name: Mox,    personality: "Conspiracy theorist convinced the town's laws are drafted by an unseen cabal and reads hidden messages in billboard typos; trusts no one near Town Hall yet attends every vote 'to monitor them'.", profile: minimax,          location: plaza }
+  - { name: Mox,    personality: "Conspiracy theorist convinced the town's laws are drafted by an unseen cabal and reads hidden messages in billboard typos; trusts no one near Town Hall yet attends every vote 'to monitor them'.", profile: qwen-next,          location: plaza }

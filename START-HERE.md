@@ -1,7 +1,7 @@
 # PetriDishOfMadness — Start Here
 
 > The one place to land. If you're lost, read this first.
-> **Last updated:** 2026-07-21
+> **Last updated:** 2026-10-02
 
 A tiny, fast, cheap multi-agent world whose marquee feature is **per-agent model
 control** — drop different LLMs (Gemini-Flash, Groq-Llama, Cerebras-Qwen, Mistral,
@@ -27,7 +27,7 @@ of [Emergence-World](file:///Users/johns/Repos/ai-tools-and-frameworks/Emergence
 | **Wave Q** (W30) | World-authorship first slice — divergence probe (EM-297), agent-authored facades/murals (EM-298 ✅ PR #78), parametric building-recipe grammar keystone (EM-299) | ✅ First slice complete — EM-297 done PR #87, EM-298 done PR #78, EM-299 recipes merged PR #107 (2026-07-15); only the live flag-flip sign-off owed |
 | **Multi-city expansion** | 2 cities + travel + world3d rendering (EM-109/EM-110/EM-121) | ✅ Merged PR #112 (2026-07-15); flag OFF live (`chore: enable comm, disable multi-city for live comm sign-off`, `d97d8ea`) — live sign-off owed |
 | **F1 free-placement** (W28) | Retire graph-lots placement; deterministic free-coordinate organic building placement, build-anywhere restored | ✅ **Merged + ratified** — PR #81/#82; derive-on-load restore behavior ratified by user 2026-07-09 |
-| **Adaptive lane routing P1** | Custom sorting list + registry-owned bounce loop, replacing blind `auto` delegation | ✅ **Shipped PR #83 (2026-07-07); go-live flip 2026-07-08.** P2 (dynamic lane discovery/refresh) shipped PR #109 (2026-07-15), flag OFF live. P3–P5 (429 cooldown, direct-provider lanes, observability) open — EM-300 |
+| **Adaptive lane routing P1** | Custom sorting list + registry-owned bounce loop, replacing blind `auto` delegation | ✅ **Shipped PR #83 (2026-07-07); go-live flip 2026-07-08.** P2 (dynamic lane discovery/refresh) shipped PR #109 (2026-07-15), **flipped ON live 2026-10-02** (EM-325 heal). **P3 (429-aware lane cooldown + platform `resume_at` parking) + P5 (LaneHealthPanel observability board) shipped 2026-10-02** on `build/reentry-phase1`. P4 (direct-provider lanes) open — EM-300 |
 | **W30** | Fable-audit remediation build — go-live flips, facades decal-clear fix, idle-fallback churn mitigation, ledger intake of the 2026-07-08 deep review | ✅ Done — PR #86 et al. |
 | **W31** | Fable Tier-1 expansion (9 features EM-309–317) + the command-a-plus routing/chat fix (EM-319–324) | ✅ **All merged 2026-07-13** (PRs #94, #96–#104, #106; #95/#105 superseded by #106). Features flag-gated **default-OFF** — flip one at a time to sign off. Live routing/chat fixed: 0 truncation feed cards, cast repinned to clean-JSON lanes |
 
@@ -39,17 +39,19 @@ district street network past real buildings under golden-hour light — the proc
 the old hub-and-spoke pinwheel are gone. To run it yourself, see "Run the 5-minute live demo" in
 `README.md`. Per-wave end-state reports live in `docs/build-results/`.
 
-**What's next (2026-07-21, after the 2026-07-15 merge sweep):**
+**What's next (2026-10-02, after the re-entry Phase-3 build):**
 1. **Live flag-flip sign-off** — the growing backlog of merged-but-dormant features waiting on a
    watched-live confirmation: the 9 Fable Tier-1 features (EM-309–317), Wave O culture/religion
    + war (EM-249–263), the EM-299 building-recipe grammar, and the multi-city expansion
    (EM-109/110/121) — all default-OFF or flag-OFF live; flip one at a time and watch the feed.
-2. **EM-300 P3–P5** — 429-aware cap/cooldown, direct-provider lanes, and a lane-board observability
-   UI, building on the P2 dynamic discovery/refresh that shipped PR #109 (2026-07-15).
-3. **EM-301** idle-fallback churn thread (Ollama overflow lane, EM-167, is the identified lever).
-4. **PR #113** (Lab Setup admin panel) and **PR #114** (`fix/feed-health` — repin clean lanes,
-   tolerant action schema, tame comm meme spam, and the 9f56f10 comm-knob parsing fix) — both
-   awaiting merge.
+   (EM-300's discovery flags are off this list — flipped ON live 2026-10-02.)
+2. **EM-300 P4** — direct-provider lanes (Gemini/Anthropic/OpenAI/Ollama without the proxy), the
+   last open phase of adaptive lane routing (P3 cooldown/parking + P5 lane board shipped 2026-10-02).
+3. **EM-326 cadence levers** — the ~3–4 ticks/min ceiling is structural and latency-bound (5
+   serialized turns × p50 6–8s ok-latency); levers: turn concurrency (unfiled architecture work),
+   EM-327 `supported_parameters`, EM-331 empty-contents 400s (our own requests feed the proxy's
+   per-key cooldowns — `X-Request-ID` correlation is now unblocked).
+4. **EM-301** idle-fallback churn thread (Ollama overflow lane, EM-167, is the identified lever).
 
 See the closure log in `BUILD-PLAN.md` and `docs/REMAINING-WORK.md` for the full ledger. EM-151
 (inspector blank on ~40k-event runs) shipped in Wave F.
@@ -59,7 +61,15 @@ See the closure log in `BUILD-PLAN.md` and `docs/REMAINING-WORK.md` for the full
 lane discovery/refresh (#109), the EM-305 feed-flicker **WebSocket fix** (#110), **Wave O**
 culture + religion (EM-251–255/260–263, #111), and the **multi-city expansion** — 2 cities +
 travel + world3d rendering (EM-109/110/121, #112). Live config: comm **ON**, multi-city **OFF**
-via `d97d8ea`. **In flight:** PR #113 (Lab Setup panel) and PR #114 (`fix/feed-health`).
+via `d97d8ea`. PRs #113 (Lab Setup panel) and #114 (`fix/feed-health`) merged in the interim.
+
+**Recently landed (2026-10-02 re-entry, `build/reentry-phase1`):** the ledger reconcile + WIP
+salvage (reactive per-lane 429 cooldown + LaneHealthPanel), the **EM-325 live heal** (discovery
+ON, dead-pin repins, mistral-large retired) with the **EM-326 cadence A/B** recorded (3–4
+ticks/min is a structural, latency-bound ceiling — "self-heals" refuted), the **EM-331** filing
+(our empty-contents 400s feed the proxy's per-key cooldowns), the bare-JSON-array crash fix, and
+**EM-300 P3 + P5 + EM-328 (partial)** — proactive platform `resume_at` parking, the
+platform-aware LaneHealthPanel, and `X-Request-ID`/`X-Fallback-Trail` capture into lane health.
 
 ## Which doc is which (ownership map)
 

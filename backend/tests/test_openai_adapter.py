@@ -479,3 +479,32 @@ async def test_openai_adapter_invalid_action_retries_then_idles(stub_server):
     assert result.get("kind") == "parse_failure", (
         f"Expected parse_failure for schema-invalid response, got: {result.get('kind')!r}"
     )
+
+
+# ── EM-328 — proxy diagnostic header capture ({request_id, fallback_trail}) ──
+
+def test_post_with_retry_captures_diag_headers():
+    import asyncio
+    import httpx
+    from petridish.providers.adapters import _post_with_retry
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": []}, headers={
+            "X-Routed-Via": "cloudflare - @cf/mistralai/mistral-small-3.1-24b-instruct",
+            "X-Request-ID": "req-abc-123",
+            "X-Fallback-Trail": "google/gemini-flash -> cloudflare/mistral",
+        })
+
+    diag: dict = {}
+    transport = httpx.MockTransport(handler)
+    data, routed_via = asyncio.run(_post_with_retry(
+        httpx.AsyncClient(transport=transport), "http://proxy.test/v1/chat/completions",
+        {}, {"model": "x"}, "test-profile", diag=diag))
+    assert routed_via.startswith("cloudflare")
+    assert diag["request_id"] == "req-abc-123"
+    assert "cloudflare/mistral" in diag["fallback_trail"]
+    # No diag sink → capture is skipped, nothing crashes.
+    data2, _ = asyncio.run(_post_with_retry(
+        httpx.AsyncClient(transport=transport), "http://proxy.test/v1/chat/completions",
+        {}, {"model": "x"}, "test-profile"))
+    assert isinstance(data2, dict)

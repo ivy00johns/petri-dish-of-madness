@@ -764,3 +764,42 @@ async def test_tier_gate_enforced_per_step_for_background_agent():
     assert len(tier_error_evts) == 1, "tier gate did not fire per-step on the actions[] propose_project"
     # The sibling say still reached the room.
     assert any(e["kind"] == "agent_speech" for e in evts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2026-10-02 live finding — a model may return a BARE JSON array: the multi-
+# action sequence WITHOUT its keyword wrapper (deepseek-v4-pro cast lane). That
+# crashed `_coerce_actions_keyword` (AttributeError on .get) → the whole loop
+# auto-paused at tick 32. The bare list must take the actions[] path.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_wrap_bare_action_list_unit():
+    from petridish.agents.runtime import _coerce_actions_keyword, _wrap_bare_action_list
+
+    # A dict passes through UNTOUCHED (the em161 golden parse path).
+    d = {"action": "say", "args": {"text": "x"}}
+    assert _wrap_bare_action_list(d) is d
+    # A bare list is wrapped into the keyword shape.
+    w = _wrap_bare_action_list([{"action": "say", "args": {"text": "hi"}}])
+    assert w == {"actions": [{"action": "say", "args": {"text": "hi"}}]}
+    # The exact live crash shape (keyword-echo inside a bare list) now coerces
+    # cleanly instead of raising AttributeError.
+    w2 = _wrap_bare_action_list([{"action": "actions", "actions": [{"action": "work", "args": {}}]}])
+    _coerce_actions_keyword(w2)
+    assert "actions" in w2
+
+
+async def test_bare_action_list_runs_as_multi_action():
+    # The mock's dict() copy mangles a list ENTRY, so emit the bare array via a
+    # callable script entry (chat() json.dumps()es the return value verbatim —
+    # exactly the wire shape deepseek-v4-pro served live).
+    bare = lambda agent_id, tick: [  # noqa: E731
+        {"action": "move_to", "args": {"place": "plaza"}},
+        {"action": "say", "args": {"text": "bare list says hi"}},
+    ]
+    runtime, world, ada, _bram = _make_world_runtime([bare], start="market")
+    result = await runtime.run_turn(ada)
+    evts = _domain_events(result)
+    kinds = [e.get("kind") for e in evts]
+    assert "agent_speech" in kinds, f"bare-list actions did not execute: {kinds}"
+    assert "parse_failure" not in kinds

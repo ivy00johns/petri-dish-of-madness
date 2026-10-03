@@ -31,7 +31,9 @@ synthesis + registry rebuild (see providers/router.py `refresh_lanes`).
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Iterable
 
 import httpx
@@ -62,11 +64,18 @@ SYNTH_PREFIX = "disco:"
 class DiscoveredModel:
     """One row from the proxy's `/v1/models` catalog (the fields discovery
     reads). `available` + `unavailable_reason` are the availability truth (spec
-    §11 Q1); `context_window` seeds a lane's ctx_hint."""
+    §11 Q1); `context_window` seeds a lane's ctx_hint.
+
+    `supports_json` (EM-327, from `supported_parameters`): True when the
+    catalog advertises `response_format`, False when it provably does not,
+    None when the field is absent (older catalogs). Consumed by the router to
+    skip the speculative JSON-mode first call for models that will reject it
+    (and to keep it for ones that advertise it)."""
     id: str
     available: bool = True
     unavailable_reason: str | None = None
     context_window: int | None = None
+    supports_json: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -74,10 +83,14 @@ class SynthLaneSpec:
     """A lane to synthesize an adapter for: a discovered available FreeLLMAPI
     model with no hand-authored profile. The router builds an
     OpenAICompatibleAdapter from the freellmapi connection template (base_url +
-    api_key + color) with this `model_id`, registered under `profile`."""
+    api_key + color) with this `model_id`, registered under `profile`.
+
+    `json_capable` (EM-327) forwards the catalog's `response_format`
+    advertisement so the adapter can skip the doomed speculative first call."""
     profile: str
     model_id: str
     ctx_hint: int | None = None
+    json_capable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -126,11 +139,19 @@ def parse_models(payload: Any) -> list[DiscoveredModel]:
         # usable" rather than silently retiring the whole pool.
         avail = row.get("available", True)
         ctx = row.get("context_window") or row.get("context_length")
+        # EM-327 — the catalog's advertised request parameters. `response_format`
+        # in the list ⇒ JSON mode is safe; provably absent ⇒ don't speculatively
+        # send it (that is a wasted request per the review); field absent ⇒ None.
+        params = row.get("supported_parameters")
+        supports_json: bool | None = None
+        if isinstance(params, list):
+            supports_json = "response_format" in params
         out.append(DiscoveredModel(
             id=mid,
             available=bool(avail),
             unavailable_reason=row.get("unavailable_reason"),
             context_window=int(ctx) if isinstance(ctx, (int, float)) else None,
+            supports_json=supports_json,
         ))
     return out
 
@@ -166,6 +187,88 @@ async def fetch_freellmapi_catalog(
     except Exception as exc:  # defensive — a down/500 proxy discovers nothing
         log.debug("freellmapi catalog fetch failed (%s): %s", url, exc)
         return []
+
+
+def parse_platform_resume(payload: Any, now: float) -> dict[str, float]:
+    """EM-300 P3 (freellmapi review 2026-07-29 §2) — pure parser for the proxy's
+    `GET /v1/providers?ready=true` payload: `{"providers": [{platform, name,
+    status, keys, requests_remaining_pct?, resume_at?}], "counts": {…}}`.
+
+    Returns {platform_id: resume_epoch_s} for every NON-healthy platform that
+    carries a parseable future `resume_at` — the exact wall-clock time the
+    proxy itself says the platform's allocation resets. Platforms already past
+    their resume_at are OMITTED (they are healthy-now as far as parking goes;
+    the reactive 429 cooldown covers any surprise). Platform-keyed by design:
+    that is the proxy's own granularity (one bad daily allocation parks every
+    lane that platform serves — parking per-model would re-discover the death
+    one lane at a time).
+
+    Defensive: non-dict payloads, missing rows, malformed timestamps → skipped
+    row, never a raise. `now` (epoch seconds) is injected so tests are
+    deterministic."""
+    out: dict[str, float] = {}
+    if not isinstance(payload, dict):
+        return out
+    rows = payload.get("providers")
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        platform = str(row.get("platform") or "").strip().lower()
+        if not platform:
+            continue
+        if str(row.get("status") or "").strip().lower() == "healthy":
+            continue
+        resume_raw = row.get("resume_at")
+        if not isinstance(resume_raw, str) or not resume_raw.strip():
+            continue
+        try:
+            # ISO-8601; the live proxy emits UTC with a 'Z' suffix
+            # (e.g. "2026-10-04T02:18:11.729Z") which fromisoformat (3.11+)
+            # accepts directly, but normalize anyway for older catalogs.
+            dt = datetime.fromisoformat(resume_raw.replace("Z", "+00:00"))
+            epoch = dt.timestamp()
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if epoch > now:
+            out[platform] = epoch
+    return out
+
+
+async def fetch_platform_resume(
+    base_url: str,
+    api_key: str,
+    *,
+    client_factory: Callable[[], httpx.AsyncClient] | None = None,
+    timeout: float = 8.0,
+) -> dict[str, float] | None:
+    """GET `{base_url}/providers?ready=true` with the runtime bearer key →
+    {platform: resume_epoch_s} via `parse_platform_resume`.
+
+    Return contract (deliberately 3-valued):
+      - dict  — the poll SUCCEEDED (possibly empty: nothing parked now); the
+                caller may replace its platform-cooldown map wholesale.
+      - None  — the poll FAILED (transport / status / parse); the caller keeps
+                its existing map (the reactive 429 cooldown covers the gap).
+    DEFENSIVE like the sibling fetchers — never raises into the caller."""
+    root = (base_url or "").rstrip("/")
+    if not root:
+        return None
+    url = f"{root}/providers?ready=true"
+    headers = {}
+    key = (api_key or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    factory = client_factory or (lambda: httpx.AsyncClient(timeout=timeout))
+    try:
+        async with factory() as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return parse_platform_resume(resp.json(), time.time())
+    except Exception as exc:  # defensive — a down proxy parks nobody
+        log.debug("platform resume fetch failed (%s): %s", url, exc)
+        return None
 
 
 async def fetch_admin_quota(
@@ -286,7 +389,8 @@ def merge_universe(
                 continue  # a configured lane already covers it
             profile = f"{SYNTH_PREFIX}{m.id}"
             synth.append(SynthLaneSpec(
-                profile=profile, model_id=m.id, ctx_hint=m.context_window))
+                profile=profile, model_id=m.id, ctx_hint=m.context_window,
+                json_capable=m.supports_json))
             universe.append(Lane(
                 id=f"freellmapi:{profile}",
                 source="freellmapi",
