@@ -1,0 +1,152 @@
+/**
+ * api.ts — the EM-112/EM-119 Arena client additions.
+ *
+ * Pure fetch-stub tests (no backend): parsing/typing of /api/arena,
+ * /api/arena/tournament GET (status), POST (start), DELETE (abort) —
+ * labeled failures for 400/409/network, never a throw.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { inspectorApi } from './api';
+
+function stubFetch(responses: Record<string, { status: number; body: unknown } | 'throw'>) {
+  const impl = (path: string, init?: RequestInit) => {
+    const key = `${(init?.method ?? 'GET').toUpperCase()} ${path.split('?')[0]}`;
+    const hit = responses[key];
+    if (hit === 'throw' || !hit) return Promise.reject(new TypeError('network down'));
+    return Promise.resolve(
+      new Response(JSON.stringify(hit.body), {
+        status: hit.status,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  };
+  vi.stubGlobal('fetch', vi.fn(impl));
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('inspectorApi.arena (EM-119)', () => {
+  it('parses families/runs/sparklines and coerces odd fields to zeros', async () => {
+    stubFetch({
+      'GET /api/arena': {
+        status: 200,
+        body: {
+          families: [
+            {
+              family: 'gemini',
+              avg_per_run: { population: 3, laws_passed: 1.5 },
+              runs: [
+                {
+                  run_id: 12,
+                  max_tick: 40,
+                  outcomes: { population: 4, laws_passed: 2, buildings: 1, crimes: 1, credits: 50 },
+                  population_sparkline: [{ tick: 0, alive: 1 }, { tick: 40, alive: 4 }],
+                },
+                { run_id: 'junk' },                       // dropped
+                { run_id: 9, outcomes: null, population_sparkline: 'junk' }, // zeroed
+              ],
+            },
+            { family: 42 },                               // dropped
+          ],
+        },
+      },
+    });
+    const out = await inspectorApi.arena();
+    expect(out).not.toBeNull();
+    expect(out!.families).toHaveLength(1);
+    const fam = out!.families[0];
+    expect(fam.family).toBe('gemini');
+    expect(fam.avg_per_run).toEqual({
+      population: 3, laws_passed: 1.5, buildings: 0, crimes: 0, credits: 0,
+    });
+    expect(fam.runs).toHaveLength(2);
+    expect(fam.runs[1].outcomes).toEqual({
+      population: 0, laws_passed: 0, buildings: 0, crimes: 0, credits: 0,
+    });
+    expect(fam.runs[1].population_sparkline).toEqual([]);
+  });
+
+  it('returns null on network failure and on a non-object body', async () => {
+    stubFetch({ 'GET /api/arena': 'throw' });
+    expect(await inspectorApi.arena()).toBeNull();
+    stubFetch({ 'GET /api/arena': { status: 200, body: [1, 2] } });
+    expect(await inspectorApi.arena()).toBeNull();
+  });
+});
+
+describe('inspectorApi.tournamentStatus (EM-112)', () => {
+  it('parses a running status with results', async () => {
+    stubFetch({
+      'GET /api/arena/tournament': {
+        status: 200,
+        body: {
+          status: 'running', families: ['gemini'], ticks_per_family: 40,
+          current_family: 'gemini', current_index: 0, current_run_id: 12,
+          ticks_done_in_current: 3, started_at: 't0', finished_at: null,
+          error: null,
+          results: [
+            { family: 'gemini', run_id: 12, ticks_run: 3, status: 'done', note: '' },
+            { family: 'x', status: 'bogus' }, // tolerated → status 'done', zeros
+          ],
+        },
+      },
+    });
+    const s = await inspectorApi.tournamentStatus();
+    expect(s.status).toBe('running');
+    expect(s.current_family).toBe('gemini');
+    expect(s.results).toHaveLength(2);
+    expect(s.results[1]).toEqual({ family: 'x', run_id: null, ticks_run: 0, status: 'done', note: '' });
+  });
+
+  it('falls back to the idle shape on failure (no throw)', async () => {
+    stubFetch({ 'GET /api/arena/tournament': 'throw' });
+    const s = await inspectorApi.tournamentStatus();
+    expect(s.status).toBe('idle');
+    expect(s.results).toEqual([]);
+  });
+});
+
+describe('inspectorApi.startTournament / abortTournament (EM-112)', () => {
+  it('POSTs the selection and reports ok on 202', async () => {
+    const fetchSpy = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify({ status: 'started' }), { status: 202 })));
+    vi.stubGlobal('fetch', fetchSpy);
+    const out = await inspectorApi.startTournament(['gemini', 'llama'], 25);
+    expect(out.ok).toBe(true);
+    const [path, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe('/api/arena/tournament');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({
+      families: ['gemini', 'llama'],
+      ticks_per_family: 25,
+    });
+  });
+
+  it('surfaces the backend 400 detail verbatim', async () => {
+    stubFetch({
+      'POST /api/arena/tournament': {
+        status: 400,
+        body: { detail: "unknown family 'bogus' — no configured lane matches" },
+      },
+    });
+    const out = await inspectorApi.startTournament(['bogus'], 40);
+    expect(out.ok).toBe(false);
+    expect(out.status).toBe(400);
+    expect(out.message).toContain('unknown family');
+  });
+
+  it('maps network failure to a labeled message (never throws)', async () => {
+    stubFetch({ 'POST /api/arena/tournament': 'throw' });
+    const out = await inspectorApi.startTournament(['gemini'], 40);
+    expect(out).toEqual({ ok: false, status: null, message: expect.stringContaining('unreachable') });
+  });
+
+  it('DELETE 409 renders the labeled no-op message', async () => {
+    stubFetch({ 'DELETE /api/arena/tournament': { status: 409, body: { detail: 'no tournament is running' } } });
+    const out = await inspectorApi.abortTournament();
+    expect(out.ok).toBe(false);
+    expect(out.message).toBe('no tournament is running');
+  });
+});

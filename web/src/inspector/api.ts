@@ -93,6 +93,9 @@ export interface RunRow {
   forked_from?: number | null;
   /** W11b (EM-101): the parent tick the fork branched from; null/absent otherwise. */
   forked_at_tick?: number | null;
+  /** EM-112: coarse model family this run was cast from; null/absent = un-stamped.
+   *  Optional so pre-EM-112 fixtures/backends stay type-valid. */
+  model_family?: string | null;
   /** Small projection of runs.config_json: {agents: [{name, profile}], seed?}. */
   config_summary: { agents?: RunConfigAgent[]; seed?: number } & Record<string, unknown>;
 }
@@ -396,6 +399,64 @@ function eventsPath(query: EventsQuery): string {
   })}`;
 }
 
+// ── EM-112 + EM-119 — the Model-Family Arena ──────────────────────────────
+
+/** One run's civilization-outcome card (zero-LLM projection of its events). */
+export interface ArenaRun {
+  run_id: number;
+  max_tick: number;
+  outcomes: {
+    population: number;
+    laws_passed: number;
+    buildings: number;
+    crimes: number;
+    credits: number;
+  };
+  /** Downsampled population series [{tick, alive}] (≤48 points, first+last kept). */
+  population_sparkline: Array<{ tick: number; alive: number }>;
+}
+
+/** One family's standings block: its runs + per-run means. */
+export interface ArenaFamily {
+  family: string;
+  avg_per_run: ArenaRun['outcomes'];
+  runs: ArenaRun[];
+}
+
+export interface ArenaSummary {
+  families: ArenaFamily[];
+}
+
+/** One settled/in-progress family result from the tournament status. */
+export interface TournamentFamilyResult {
+  family: string;
+  run_id: number | null;
+  ticks_run: number;
+  status: 'done' | 'stalled' | 'aborted';
+  note: string;
+}
+
+export interface TournamentStatus {
+  status: 'idle' | 'running' | 'done' | 'aborted' | 'error';
+  families: string[];
+  ticks_per_family: number;
+  current_family: string | null;
+  current_index: number;
+  current_run_id: number | null;
+  ticks_done_in_current: number;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  results: TournamentFamilyResult[];
+}
+
+/** Labeled outcome shared with forkRun/god actions — never a throw. */
+export interface TournamentActionResult {
+  ok: boolean;
+  status: number | null;
+  message: string;
+}
+
 export const inspectorApi = {
   /**
    * GET /api/runs — every persisted run, newest first (EM-086, the RunBrowser).
@@ -419,6 +480,7 @@ export const inspectorApi = {
         event_count: typeof raw.event_count === 'number' ? raw.event_count : 0,
         forked_from: typeof raw.forked_from === 'number' ? raw.forked_from : null,
         forked_at_tick: typeof raw.forked_at_tick === 'number' ? raw.forked_at_tick : null,
+        model_family: typeof raw.model_family === 'string' ? raw.model_family : null,
         config_summary: isObject(raw.config_summary)
           ? (raw.config_summary as RunRow['config_summary'])
           : {},
@@ -577,6 +639,158 @@ export const inspectorApi = {
       return { ok: true, runId: newRunId };
     } catch {
       return { ok: false, status: null, message: 'backend unreachable — fork not sent' };
+    }
+  },
+
+  /**
+   * GET /api/arena (EM-119) — Model-Family Arena standings: every run stamped
+   * with `runs.model_family` grouped by family (outcome cards + population
+   * sparklines + family means). Returns `null` when the backend is
+   * unreachable / pre-EM-119, so the panel can render its labeled state.
+   */
+  async arena(): Promise<ArenaSummary | null> {
+    const data = await getJsonOrNull('/api/arena');
+    if (!isObject(data) || !Array.isArray(data.families)) return null;
+    const families: ArenaFamily[] = [];
+    for (const rawFam of data.families) {
+      if (!isObject(rawFam) || typeof rawFam.family !== 'string') continue;
+      const avg = isObject(rawFam.avg_per_run) ? rawFam.avg_per_run : {};
+      const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      const runs: ArenaRun[] = [];
+      for (const rawRun of Array.isArray(rawFam.runs) ? rawFam.runs : []) {
+        if (!isObject(rawRun) || typeof rawRun.run_id !== 'number') continue;
+        const outcomes = isObject(rawRun.outcomes) ? rawRun.outcomes : {};
+        const sparkline: Array<{ tick: number; alive: number }> = [];
+        for (const p of Array.isArray(rawRun.population_sparkline) ? rawRun.population_sparkline : []) {
+          if (!isObject(p)) continue;
+          sparkline.push({ tick: num(p.tick), alive: num(p.alive) });
+        }
+        runs.push({
+          run_id: rawRun.run_id,
+          max_tick: num(rawRun.max_tick),
+          outcomes: {
+            population: num(outcomes.population),
+            laws_passed: num(outcomes.laws_passed),
+            buildings: num(outcomes.buildings),
+            crimes: num(outcomes.crimes),
+            credits: num(outcomes.credits),
+          },
+          population_sparkline: sparkline,
+        });
+      }
+      families.push({
+        family: rawFam.family,
+        avg_per_run: {
+          population: num(avg.population),
+          laws_passed: num(avg.laws_passed),
+          buildings: num(avg.buildings),
+          crimes: num(avg.crimes),
+          credits: num(avg.credits),
+        },
+        runs,
+      });
+    }
+    return { families };
+  },
+
+  /**
+   * GET /api/arena/tournament (EM-112) — current tournament state. Any
+   * failure parses to the idle shape (the panel just shows its controls).
+   */
+  async tournamentStatus(): Promise<TournamentStatus> {
+    const data = await getJsonOrNull('/api/arena/tournament');
+    if (!isObject(data) || typeof data.status !== 'string') {
+      return {
+        status: 'idle', families: [], ticks_per_family: 40,
+        current_family: null, current_index: 0, current_run_id: null,
+        ticks_done_in_current: 0, started_at: null, finished_at: null,
+        error: null, results: [],
+      };
+    }
+    const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    const results: TournamentFamilyResult[] = [];
+    for (const r of Array.isArray(data.results) ? data.results : []) {
+      if (!isObject(r) || typeof r.family !== 'string') continue;
+      const st = r.status === 'stalled' || r.status === 'aborted' ? r.status : 'done';
+      results.push({
+        family: r.family,
+        run_id: typeof r.run_id === 'number' ? r.run_id : null,
+        ticks_run: num(r.ticks_run),
+        status: st,
+        note: typeof r.note === 'string' ? r.note : '',
+      });
+    }
+    const rawStatus: unknown = data.status;
+    const status: TournamentStatus['status'] =
+      rawStatus === 'running' || rawStatus === 'done' ||
+      rawStatus === 'aborted' || rawStatus === 'error'
+        ? rawStatus
+        : 'idle';
+    return {
+      status,
+      families: (Array.isArray(data.families) ? data.families : []).filter(
+        (f): f is string => typeof f === 'string'),
+      ticks_per_family: num(data.ticks_per_family) || 40,
+      current_family: typeof data.current_family === 'string' ? data.current_family : null,
+      current_index: num(data.current_index),
+      current_run_id: typeof data.current_run_id === 'number' ? data.current_run_id : null,
+      ticks_done_in_current: num(data.ticks_done_in_current),
+      started_at: typeof data.started_at === 'string' ? data.started_at : null,
+      finished_at: typeof data.finished_at === 'string' ? data.finished_at : null,
+      error: typeof data.error === 'string' ? data.error : null,
+      results,
+    };
+  },
+
+  /**
+   * POST /api/arena/tournament (EM-112) — start a SEQUENTIAL parallel-worlds
+   * tournament (one family's world at a time through the live loop). 202 →
+   * {ok:true}; 400 (unknown/un-castable family, bad ticks) / 409 (already
+   * running) / network failure → labeled {ok:false}, never a throw.
+   */
+  async startTournament(
+    families: string[],
+    ticksPerFamily: number,
+  ): Promise<TournamentActionResult> {
+    try {
+      const res = await fetch('/api/arena/tournament', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ families, ticks_per_family: ticksPerFamily }),
+      });
+      if (!res.ok) {
+        let detail = `tournament start failed (HTTP ${res.status})`;
+        try {
+          const body = (await res.json()) as unknown;
+          if (isObject(body) && typeof body.detail === 'string') detail = body.detail;
+        } catch {
+          // non-JSON error body — keep the labeled fallback
+        }
+        return { ok: false, status: res.status, message: detail };
+      }
+      return { ok: true, status: res.status, message: 'started' };
+    } catch {
+      return { ok: false, status: null, message: 'backend unreachable — tournament not started' };
+    }
+  },
+
+  /**
+   * DELETE /api/arena/tournament (EM-112) — abort between turns. The current
+   * family's run stays (paused, partial); 409 when nothing is running.
+   */
+  async abortTournament(): Promise<TournamentActionResult> {
+    try {
+      const res = await fetch('/api/arena/tournament', { method: 'DELETE' });
+      if (!res.ok) {
+        return {
+          ok: false,
+          status: res.status,
+          message: res.status === 409 ? 'no tournament is running' : `abort failed (HTTP ${res.status})`,
+        };
+      }
+      return { ok: true, status: res.status, message: 'aborting' };
+    } catch {
+      return { ok: false, status: null, message: 'backend unreachable — abort not sent' };
     }
   },
 

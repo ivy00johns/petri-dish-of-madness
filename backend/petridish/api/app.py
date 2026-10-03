@@ -26,6 +26,12 @@ from ..animals.runtime import ANIMAL_SPECIES_CATALOG, _seed_int
 from ..persistence.repository import SQLiteRepository
 from ..providers.router import Router
 from ..fingerprint import FEATURE_VERSION, compute_run_fingerprints
+from .arena import arena_summary
+from .tournament import (
+    TournamentRunner,
+    build_cast_plan,
+    validate_tournament_request,
+)
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +64,9 @@ _router: Router | None = None
 _runtime: AgentRuntime | None = None
 _repo: SQLiteRepository | None = None
 _loop: TickLoop | None = None
+# EM-112 — the parallel-worlds tournament runner (None = never started; the
+# endpoints below own its lifecycle).
+_tournament: TournamentRunner | None = None
 _config: WorldConfig | None = None
 
 # WebSocket connection manager
@@ -362,8 +371,16 @@ def _spin_up_run_from_world(
         router=_router,
         broadcaster=_broadcast,
     )
+    parent_family: str | None = None
+    if parent_run_id:
+        # EM-112 — a fork CONTINUES its parent's society, so it inherits the
+        # model-family stamp (un-stamped parents stay un-stamped).
+        _parent_row = _repo.get_run(parent_run_id)
+        if _parent_row is not None:
+            parent_family = _parent_row.get("model_family")
     new_run_id = _repo.start_run(
-        config_json, forked_from=parent_run_id, forked_at_tick=snapshot_tick
+        config_json, forked_from=parent_run_id, forked_at_tick=snapshot_tick,
+        model_family=parent_family,
     )
     new_loop._run_id = new_run_id
     # EM-222 — hand the freshly-built runtime the repo + active run so its
@@ -1051,6 +1068,7 @@ async def control_speed(body: SpeedBody):
 async def control_reset():
     if _loop is None or _config is None:
         raise HTTPException(503, "Not initialized")
+    _tournament_guard()
     await _loop.reset(_config)
     return {"status": "ok"}
 
@@ -2282,6 +2300,7 @@ async def fork_run(body: ForkBody):
 
     if _loop is None or _repo is None or _router is None:
         raise HTTPException(503, "Not initialized")
+    _tournament_guard()
 
     # ── Validation: 404 unknown run; 400 tick out of range / bad overrides ──
     parent = _repo.get_run(body.run_id)
@@ -2379,6 +2398,106 @@ async def fork_run(body: ForkBody):
             "delta is not folded server-side"
         )
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-112 + EM-119 — the Model-Family Arena.
+#
+# WRITE half (EM-112): a SEQUENTIAL parallel-worlds tournament — cast every
+# agent from one coarse model family (providers/families.py), run that world
+# through the live TickLoop for a tick budget, then reset into the next family.
+# Never concurrent (protects the free-tier key pool — ARCHITECTURE.md §Instance);
+# each finished family lands in the run browser as a complete run stamped
+# `runs.model_family`. READ half (EM-119): /api/arena groups those stamped runs
+# into civilization-outcome cards + population sparklines.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TournamentBody(BaseModel):
+    # Coarse family names ("gemini", "llama", "qwen", …) — validated against
+    # the router legend; "other" (auto/mock) is un-castable by design.
+    families: list[str] = Field(min_length=1, max_length=8)
+    ticks_per_family: int = Field(default=40, ge=1, le=500)
+
+
+def _tournament_guard() -> None:
+    """409 while a tournament owns the live loop — a concurrent reset or fork
+    would tear down the world mid-sweep."""
+    if _tournament is not None and _tournament.running():
+        raise HTTPException(
+            409,
+            "a parallel-worlds tournament is in progress — abort it first "
+            "(DELETE /api/arena/tournament)",
+        )
+
+
+@app.get("/api/arena")
+async def get_arena():
+    """EM-119 — Model-Family Arena standings. Every run stamped with
+    `runs.model_family` (the EM-112 tournament stamps it at reset; forks
+    inherit) grouped by family: per-run outcome cards (population / laws
+    passed / buildings completed / crimes / credits) + downsampled population
+    sparklines, plus family-level per-run means. Zero-LLM, read-only, OFF the
+    replay surface. Heavy per-run analytics run on a worker thread (same
+    blocking class as /api/fingerprints)."""
+    if _repo is None:
+        return {"families": []}
+    return await anyio.to_thread.run_sync(arena_summary, _repo)
+
+
+@app.post("/api/arena/tournament", status_code=202)
+async def start_tournament(body: TournamentBody):
+    """EM-112 — start a sequential parallel-worlds tournament: for each family
+    (in order), reset the live world with EVERY agent cast from that family's
+    lanes (available lanes first, round-robin) and step it for
+    `ticks_per_family` turns. The live tick timer stays paused — the runner
+    drives every step — so the WS/API surface simply spectates whichever world
+    is on stage. 409 while another tournament runs; 400 on an unknown family.
+    Forks/reset are 409-guarded for the duration."""
+    global _tournament
+    if _loop is None or _config is None or _router is None or _repo is None:
+        raise HTTPException(503, "Not initialized")
+    _tournament_guard()
+    try:
+        families, ticks = validate_tournament_request(
+            body.families, body.ticks_per_family
+        )
+        # Validate every family up-front (400 before anything resets) — the
+        # runner re-derives the same deterministic plans at start.
+        plans = [build_cast_plan(_config, _router.legend(), f) for f in families]
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    runner = TournamentRunner(
+        loop=_loop, config=_config, router=_router,
+        families=families, ticks_per_family=ticks,
+    )
+    _tournament = runner
+    runner.start()
+    return {
+        "status": "started",
+        "families": families,
+        "ticks_per_family": ticks,
+        "casts": {p.family: p.profile_by_agent for p in plans},
+    }
+
+
+@app.get("/api/arena/tournament")
+async def tournament_status():
+    """EM-112 — current tournament state (idle | running | done | aborted |
+    error) + per-family results; polled by the Arena panel for progress."""
+    if _tournament is None:
+        return {"status": "idle", "families": [], "results": []}
+    return _tournament.state.snapshot()
+
+
+@app.delete("/api/arena/tournament")
+async def abort_tournament():
+    """EM-112 — request a stop between turns. The current family's run is left
+    paused with its partial ticks (a comparable partial run, still in the
+    browser); remaining families are skipped. 409 when nothing is running."""
+    if _tournament is None or not _tournament.running():
+        raise HTTPException(409, "no tournament is running")
+    _tournament.abort()
+    return {"status": "aborting"}
 
 
 def _enrich_profile_colors(events: list[dict]) -> list[dict]:

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.4.0
+  version: 1.5.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -17,6 +17,13 @@ info:
     leave dead runs `running` forever (EM-086 note 1). For PAST runs, place/world geometry
     comes from that run's earliest snapshot `state_json`, not the `places` table (which the
     live run re-owns via INSERT OR REPLACE — EM-086 note 2).
+    v1.5.0 (re-entry Phase 4, EM-112+EM-119) adds the Model-Family Arena: GET /api/arena
+    (cross-run civilization-outcome standings grouped by `runs.model_family`) and the
+    SEQUENTIAL parallel-worlds tournament (/api/arena/tournament POST start / GET status /
+    DELETE abort) which casts every agent from one coarse model family per run through the
+    live TickLoop — never concurrent (free-tier key-pool protection, ARCHITECTURE.md
+    §Instance). RunRow gains a nullable `model_family` stamp (null = un-stamped); a fork
+    inherits its parent's stamp.
 servers:
   - url: http://localhost:8000
 paths:
@@ -162,6 +169,49 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/RunRow' }
+  /api/arena:
+    get:
+      summary: Model-Family Arena standings (EM-119)
+      description: >
+        Every run stamped with `runs.model_family` grouped by family: per-run outcome cards
+        (population / laws_passed / buildings / crimes / credits) + downsampled population
+        sparklines, plus family-level per-run means. Zero-LLM, read-only.
+      responses:
+        "200": { description: arena summary, content: { application/json: { schema: { type: object } } } }
+  /api/arena/tournament:
+    post:
+      summary: Start a SEQUENTIAL parallel-worlds tournament (EM-112)
+      description: >
+        For each family in order: reset the live world with EVERY agent cast from that
+        family's lanes (available first, round-robin) and step it for `ticks_per_family`
+        turns through the live TickLoop. Never concurrent (free-tier key-pool protection).
+        The live timer stays paused; fork/reset are 409-guarded for the duration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [families]
+              properties:
+                families: { type: array, items: { type: string }, minItems: 1, maxItems: 8, description: "coarse family names (gemini, llama, qwen, …); 'other' (auto/mock) is un-castable" }
+                ticks_per_family: { type: integer, minimum: 1, maximum: 500, default: 40 }
+      responses:
+        "202": { description: started — families, ticks_per_family, and the per-agent cast
+          "casts" (agent name → lane profile) }
+        "400": { description: unknown/un-castable family or out-of-range ticks }
+        "409": { description: a tournament is already running }
+    get:
+      summary: Tournament status
+      responses:
+        "200": { description: "{status: idle|running|done|aborted|error, families,
+          ticks_per_family, current_family, current_run_id, ticks_done_in_current, results[]}" }
+    delete:
+      summary: Abort the running tournament between turns
+      description: The current family's run is left paused with its partial ticks.
+      responses:
+        "200": { description: aborting }
+        "409": { description: no tournament is running }
   /api/events:
     get:
       summary: Query the append-only event log
@@ -241,6 +291,7 @@ components:
         event_count: { type: integer }
         forked_from: { type: integer, nullable: true, description: "parent run id (W11b EM-101)" }
         forked_at_tick: { type: integer, nullable: true }
+        model_family: { type: string, nullable: true, description: "coarse family this run was cast from (EM-112; null = un-stamped; forks inherit)" }
         config_summary:
           type: object
           description: "small projection of config_json: {agents: [{name, profile}], seed?}"

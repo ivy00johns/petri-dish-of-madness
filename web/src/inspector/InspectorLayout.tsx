@@ -75,6 +75,7 @@ import AWIDashboard from './AWIDashboard';
 import BabelMatrix, { BABEL_MATRIX_ENABLED } from './BabelMatrix';
 import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
+import ArenaPanel from './ArenaPanel';
 import LaneHealthPanel from './LaneHealthPanel';
 
 // ── Wave M (EM-204) — the tabbed IA ──────────────────────────────────────────
@@ -728,16 +729,26 @@ export function InspectorLayout({
         )}
 
         {tab === 'runs' && (
-          // Runs — past-run browser + archive-mode entry + cross-run AWI.
-          <PanelCell weight="">
-            <ErrorBoundary name="Run Browser">
-              <RunBrowser
-                mockMode={mockMode}
-                selectedRunId={selectedRunId}
-                onSelectRun={setArchivedRun}
-              />
-            </ErrorBoundary>
-          </PanelCell>
+          // Runs — past-run browser + archive-mode entry + cross-run AWI,
+          // with the Model-Family Arena beside it (EM-112 + EM-119): family
+          // standings over every `runs.model_family`-stamped run + the
+          // SEQUENTIAL tournament controls (cast one family per world).
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 min-h-0 min-w-0">
+            <PanelCell weight="">
+              <ErrorBoundary name="Run Browser">
+                <RunBrowser
+                  mockMode={mockMode}
+                  selectedRunId={selectedRunId}
+                  onSelectRun={setArchivedRun}
+                />
+              </ErrorBoundary>
+            </PanelCell>
+            <PanelCell weight="">
+              <ErrorBoundary name="Model-Family Arena">
+                <ArenaPanel />
+              </ErrorBoundary>
+            </PanelCell>
+          </div>
         )}
       </div>
     </main>

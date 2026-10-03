@@ -57,6 +57,7 @@ const FAMILY_PATTERNS: Array<[RegExp, string]> = [
   [/grok/, 'grok'],
   [/\bglm\b|glm-?\d/, 'glm'],
   [/\byi-?\d|\byi\b/, 'yi'],
+  [/kimi|moonshot/, 'kimi'],
 ];
 
 /**

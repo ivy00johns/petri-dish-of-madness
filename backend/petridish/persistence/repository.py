@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS runs (
   config_json    TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'running',
   forked_from    INTEGER,                            -- W11b EM-101: parent run id (null = root run)
-  forked_at_tick INTEGER                             -- W11b EM-101: parent tick the fork was taken at
+  forked_at_tick INTEGER,                            -- W11b EM-101: parent tick the fork was taken at
+  model_family   TEXT                                -- EM-112: coarse family this run was cast from (null = un-stamped)
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -139,6 +140,7 @@ class SQLiteRepository:
         self._migrate_events_v1_1_0()
         self._migrate_runs_v1_3_0()
         self._migrate_runs_v1_4_0()
+        self._migrate_runs_model_family()
         self._migrate_agents_wave_e()
         self._conn.commit()
 
@@ -210,20 +212,32 @@ class SQLiteRepository:
         if "forked_at_tick" not in cols:
             self._conn.execute("ALTER TABLE runs ADD COLUMN forked_at_tick INTEGER")
 
+    def _migrate_runs_model_family(self) -> None:
+        """Idempotent runs-table upgrade for pre-EM-112 file DBs: add nullable
+        `model_family` (the coarse family the parallel-worlds tournament cast
+        the run from). Fresh DBs get it from SCHEMA's CREATE; the guard skips
+        them. Un-stamped runs keep NULL — the arena simply omits them."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)")}
+        if "model_family" not in cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN model_family TEXT")
+
     def start_run(
         self,
         config_json: str,
         *,
         forked_from: int | None = None,
         forked_at_tick: int | None = None,
+        model_family: str | None = None,
     ) -> int:
         """Insert a new run row. W11b EM-101: keyword-only lineage stamps for
-        forked runs (both None for root runs — byte-identical to pre-W11b)."""
+        forked runs (both None for root runs — byte-identical to pre-W11b).
+        EM-112: optional keyword-only `model_family` stamp for parallel-worlds
+        tournament runs (None = un-stamped = pre-EM-112 behavior)."""
         cur = self._conn.execute(
-            "INSERT INTO runs (started_at, config_json, forked_from, forked_at_tick) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO runs (started_at, config_json, forked_from, forked_at_tick, model_family) "
+            "VALUES (?, ?, ?, ?, ?)",
             (datetime.now(timezone.utc).isoformat(), config_json,
-             forked_from, forked_at_tick),
+             forked_from, forked_at_tick, model_family),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -318,6 +332,30 @@ class SQLiteRepository:
             (run_id, tick, state_json),
         )
         self._conn.commit()
+
+    def snapshot_agent_count(self, run_id: int) -> int:
+        """The latest snapshot's alive-agent count for a run (EM-119 arena —
+        the population card's floor when the run has no spawn/death events, the
+        same projection gap get_analytics covers for credits with its
+        snapshot fallback). 0 when the run has no snapshots."""
+        row = self._conn.execute(
+            "SELECT state_json FROM snapshots WHERE run_id = ? "
+            "ORDER BY tick DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            state = json.loads(row[0] or "{}")
+        except (TypeError, ValueError):
+            return 0
+        agents = state.get("agents") if isinstance(state, dict) else None
+        if not isinstance(agents, list):
+            return 0
+        return sum(
+            1 for a in agents
+            if isinstance(a, dict) and a.get("alive") is not False
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # EM-222 — relevance-scored memory retrieval (embedding cache + candidates).
@@ -487,7 +525,7 @@ class SQLiteRepository:
         'running' forever."""
         cur = self._conn.execute(
             """SELECT r.id, r.started_at, r.ended_at, r.status, r.config_json,
-                      r.forked_from, r.forked_at_tick,
+                      r.forked_from, r.forked_at_tick, r.model_family,
                       COALESCE(MAX(e.tick), 0) AS max_tick,
                       COUNT(e.seq)             AS event_count
                FROM runs r
@@ -497,7 +535,7 @@ class SQLiteRepository:
         )
         out: list[dict] = []
         for (rid, started_at, ended_at, status, config_json,
-             forked_from, forked_at_tick, max_tick, count) in cur.fetchall():
+             forked_from, forked_at_tick, model_family, max_tick, count) in cur.fetchall():
             out.append({
                 "id": rid,
                 "started_at": started_at,
@@ -510,6 +548,8 @@ class SQLiteRepository:
                 # Null for root runs; the W11a frontend tolerates the extra keys.
                 "forked_from": forked_from,
                 "forked_at_tick": forked_at_tick,
+                # EM-112 — coarse model-family stamp (null = un-stamped).
+                "model_family": model_family,
                 "config_summary": self._config_summary(config_json),
             })
         return out
@@ -517,15 +557,16 @@ class SQLiteRepository:
     def get_run(self, run_id: int) -> dict | None:
         """One run row (W11b EM-101 — the fork endpoint needs the parent's
         config_json to carry into the child): {id, started_at, ended_at, status,
-        config_json, forked_from, forked_at_tick} | None."""
+        config_json, forked_from, forked_at_tick, model_family} | None."""
         row = self._conn.execute(
             "SELECT id, started_at, ended_at, status, config_json, "
-            "forked_from, forked_at_tick FROM runs WHERE id = ?",
+            "forked_from, forked_at_tick, model_family FROM runs WHERE id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
             return None
-        rid, started_at, ended_at, status, config_json, forked_from, forked_at_tick = row
+        (rid, started_at, ended_at, status, config_json,
+         forked_from, forked_at_tick, model_family) = row
         return {
             "id": rid,
             "started_at": started_at,
@@ -534,7 +575,17 @@ class SQLiteRepository:
             "config_json": config_json,
             "forked_from": forked_from,
             "forked_at_tick": forked_at_tick,
+            "model_family": model_family,
         }
+
+    def count_events_of_kind(self, run_id: int, kind: str) -> int:
+        """COUNT(events) of one kind for a run (EM-119 arena — buildings built
+        reads `building_operational`). 0 when the run has none."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id = ? AND kind = ?",
+            (run_id, kind),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
 
     def run_max_tick(self, run_id: int) -> int:
         """MAX(events.tick) for a run, 0 when it has no events (W11b EM-101 —
