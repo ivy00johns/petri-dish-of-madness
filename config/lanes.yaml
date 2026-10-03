@@ -66,7 +66,10 @@ adaptive_routing:
   # enabled: true to adopt. Refresh also on demand via POST /api/lanes/refresh;
   # the live registry is visible at GET /api/lanes/registry.
   discovery:
-    enabled: false             # master toggle (default OFF ⇒ static registry)
+    enabled: true              # EM-325 go-live 2026-10-02: catalog polling retires dead
+                               # pins (404/unavailable) structurally — the Class A
+                               # catalog-drift deaths can no longer squat in the pool
+                               # (was default OFF since PR #109, 2026-07-15)
     every_turns: 40            # counter-based auto-refresh cadence (served turns)
     freellmapi_models: true    # poll /v1/models: retire unavailable, synth new
     direct_keys: true          # detect GEMINI/ANTHROPIC/OPENAI/OLLAMA env keys
@@ -80,14 +83,16 @@ adaptive_routing:
   # priority order, best-headroom-first. matcher = source + model glob.
   # a glob `model: "*"` sweeps every remaining lane of that source.
   # matcher globs run against each lane's ACTUAL model_id (profiles.yaml), NOT
-  # the profile name. Every specific entry below is verified to resolve:
-  #   mistral-large-3-675b   -> profile mistral-large
-  #   mistral-small-4-119b   -> profile mistral-small
+  # the profile name. Every specific entry below is verified to resolve
+  # (re-verified against the live catalog 2026-10-02, EM-325):
+  #   mistral-small-3.1-24b  -> profile mistral-small   (EM-325 repin; -4-119b is gone)
   #   llama-3.3-70b-fp8-fast -> profile llama-fast       (EM-324)
   #   gemini-3.1-flash-lite  -> profile gemini-flash-lite (EM-324)
   #   minimax-m3             -> profile minimax          (EM-324)
   #   command-r-2            -> profile command-r        (EM-324)
   #   gpt-oss-120b*          -> profile gpt-oss-120b
+  #   (mistral-large-3-675b REMOVED from order — retired per EM-325: gone from the
+  #    catalog with NO free successor; profile kept for legacy refs, lane denied below)
   #
   # EM-324 (2026-07-13) — the bounce pool is the set of PROBE-VERIFIED clean
   # lanes (each returned finish=stop + valid JSON live, mid rate-storm).
@@ -132,14 +137,15 @@ adaptive_routing:
   #     — so it stays available in profiles.yaml as an explicit-pin choice,
   #     just not in the timed bounce walk where it can only ever fail).
   order:
-    - { source: freellmapi, model: "mistral-large-3-675b",   free: true }  # mistral-large — premium rich voice (when up)
-    - { source: freellmapi, model: "mistral-small-4-119b",   free: true }  # mistral-small — verified direct-clean (finish=stop)
+    - { source: freellmapi, model: "mistral-small-3.1-24b",  free: true }  # mistral-small — verified direct-clean (finish=stop); EM-325 repin from the vanished -4-119b
     - { source: freellmapi, model: "llama-3.3-70b-fp8-fast", free: true }  # llama-fast / groq-llama — Meta/Cloudflare, verified direct-clean (real prompt: 2.6-4.5s typical)
     - { source: freellmapi, model: "gemini-3.1-flash-lite",  free: true }  # gemini-flash-lite — Google, verified direct-clean
-    - { source: freellmapi, model: "minimax-m3",             free: true }  # minimax — MiniMax, clean JSON
-    - { source: freellmapi, model: "command-r-2",            free: true }  # command-r — Cohere R (clean when its native is up)
+    - { source: freellmapi, model: "deepseek-v4-pro",        free: true }  # deepseek-pro — EM-325 2026-10-02: probed 0.9-1.1s, fin=stop, clean JSON 2/2 (now Cleo's cast lane)
+    - { source: freellmapi, model: "qwen3-next-80b-a3b-instruct", free: true }  # qwen-next — EM-325 repin 2026-10-02: probed fin=stop clean 3/3 (now Mox's cast lane)
     - { source: freellmapi, model: "gpt-oss-120b*",          free: true, tags: ["reasoning"] }  # gpt-oss-120b — reasoning-tagged 2026-07-21: CoT-truncates on heavy turns, skipped on strict-JSON turns
     - { source: freellmapi, model: "deepseek-v4-flash",      free: true, tags: ["reasoning"] }  # deepseek-flash — reasoning-tagged 2026-07-21: plans in prose, finish=length 3/3 on the real prompt, skipped on strict-JSON turns
+    - { source: freellmapi, model: "minimax-m3",             free: true }  # minimax — DEMOTED 2026-10-02 (EM-325): exceeded per_attempt_timeout_s=12 on every live call (huggingface upstream); catalog-available but chronic-slow today
+    - { source: freellmapi, model: "command-r-2",            free: true }  # command-r — DEMOTED 2026-10-02 (EM-325): cohere upstream aborted at the proxy's 15s cap 3/3 live; bimodal in probes (0.9s/11.9s)
     - { source: freellmapi, model: "*",                      free: true }  # remaining free lanes (sweep)
     - { source: freellmapi, model: "auto" }                                # blind proxy picker — low-priority resort
     - { source: anthropic,  model: "claude-sonnet-5",        free: false } # paid, opt-in, dead last
@@ -149,3 +155,4 @@ adaptive_routing:
   # for barring a legacy-only profile from the bounce walk without deleting it.
   exclude:
     - { source: freellmapi, model: "command-a-2" }  # cohere A+ — preambles + truncates strict-JSON (EM-324, run 1388)
+    - { source: freellmapi, model: "mistral-large-3-675b" }  # EM-325 retired 2026-10-02: 404 not-in-catalog, no free successor — never re-place via the `*` sweep

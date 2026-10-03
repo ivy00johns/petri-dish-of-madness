@@ -1938,6 +1938,19 @@ _HOISTABLE_COGNITION = (
 )
 
 
+def _wrap_bare_action_list(action_dict: object) -> object:
+    """2026-10-02 live finding (deepseek-v4-pro cast lane) — a model may return a
+    BARE JSON array: the multi-action `actions` sequence without its keyword
+    wrapper. That crashed `_coerce_actions_keyword`'s `.get()` with an
+    AttributeError, which auto-paused the whole loop. Wrap a list into the
+    keyword shape the multi-action path expects (schema anyOf [action|actions]
+    accepts it). Dicts pass through untouched — the em161 golden parse path is
+    byte-identical. Anything else passes through for the normal failure flow."""
+    if isinstance(action_dict, list):
+        return {"actions": action_dict}
+    return action_dict
+
+
 def _coerce_actions_keyword(action_dict: dict) -> None:
     """EM-249 — a free model told to 'return "actions" — an ordered list' (the
     EM-199 multi-action prompt) routinely echoes the keyword as the VERB, emitting
@@ -1949,6 +1962,8 @@ def _coerce_actions_keyword(action_dict: dict) -> None:
     _normalize_steps prefers actions). With no usable actions[] to fall back on we
     leave it for the normal retry. Mutates in place; never raises; a no-op for every
     well-formed response (so the em161 golden parse path is untouched)."""
+    if not isinstance(action_dict, dict):
+        return
     if action_dict.get("action") != "actions":
         return
     actions = action_dict.get("actions")
@@ -6634,6 +6649,7 @@ class AgentRuntime:
         # that put the real steps in actions[] but also named the verb "actions")
         # BEFORE anything reads the shape, so the multi-action path takes over
         # instead of dying on the schema enum.
+        action_dict = _wrap_bare_action_list(action_dict)
         _coerce_actions_keyword(action_dict)
         # EM-199 — lift turn-level cognition the model scattered into actions[0]
         # up to the top level (before sanitize/validate), so a 💭 thought / trace

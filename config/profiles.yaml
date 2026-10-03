@@ -44,7 +44,11 @@ profiles:
     # EM-323 (2026-07-13): `qwen/qwen3-next-80b-a3b-instruct:free` is not in the
     # FreeLLMAPI catalog (the OpenRouter-style id) — 404/exhausted. Corrected to
     # the plain catalogued id so the proxy can route it across any qwen provider.
-    model_id: qwen3-next-80b
+    # EM-325 (2026-10-02): `qwen3-next-80b` has since ALSO vanished from the
+    # catalog (404 not-in-catalog; both `qwen3-next-80b-a3b-*` variants were
+    # unavailable on 2026-07-29 but `-a3b-instruct` is available again live).
+    # Repinned to the exact catalogued id the original pin was reaching for.
+    model_id: qwen3-next-80b-a3b-instruct
     max_tokens: 1024
     temperature: 0.8
     color: "#f5a623"
@@ -122,8 +126,13 @@ profiles:
     # EM-321 (2026-07-13): `mistral-small-latest` is NOT in the FreeLLMAPI catalog
     # ("Model not in the catalog") — Vesper's pinned lane ALWAYS 404'd and fell to
     # the fallback, even with no rate storm. Corrected to a catalogued, has-key,
-    # currently-live id (resolves to mistralai/mistral-small-4-119b-2603).
-    model_id: mistral-small-4-119b
+    # currently-live id.
+    # EM-325 (2026-10-02): `mistral-small-4-119b` has itself vanished from the
+    # catalog (404 not-in-catalog; the -4 line is `disabled` upstream) — the
+    # catalog drifted again. Repinned to the only available mistral-small
+    # successor (`mistral-small-3.1-24b`, verified available live). Vesper rides
+    # this lane, so this repin is load-bearing for the live run.
+    model_id: mistral-small-3.1-24b
     max_tokens: 1024
     temperature: 0.8
     color: "#7bc950"
@@ -146,6 +155,14 @@ profiles:
   # (assignable to agents / reassign / A-B) AND wired into the config/lanes.yaml
   # bounce walk as high-priority fallbacks so a failed pin lands on a RICH model
   # (not the small gpt-oss:20b) during rate storms — the fix for flat storm chat.
+  # EM-325 (2026-10-02): RETIRED lane. `mistral-large-3-675b` is gone from the
+  # catalog (404 not-in-catalog) and EVERY `mistral-large-*` variant reports
+  # `disabled` — there is NO free successor in the catalog (checked live), so
+  # this profile is deliberately NOT repinned to a paid id. The profile stays
+  # only so legacy references resolve (same pattern as command-a), and its lane
+  # is denylisted from the bounce walk via config/lanes.yaml
+  # `adaptive_routing.exclude`. With discovery ON, the catalog poll would retire
+  # it from the registry anyway — the denylist covers the static path.
   - name: mistral-large
     adapter: openai
     base_url: ${FREELLMAPI_BASE_URL:-http://localhost:3001/v1}

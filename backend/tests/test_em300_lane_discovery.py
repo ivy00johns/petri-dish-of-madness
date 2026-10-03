@@ -545,8 +545,14 @@ def test_api_lanes_registry_view(client):
             "discovered", "last_refresh_counter"}
 
 
-def test_api_lanes_refresh_noop_when_disabled(client):
-    # the default config ships discovery OFF ⇒ refresh is a safe no-op
+def test_api_lanes_refresh_noop_when_disabled(client, monkeypatch):
+    # Force discovery OFF explicitly — the REPO config flipped it ON at the
+    # 2026-10-02 EM-325 go-live, so the old "default config ships discovery
+    # OFF" premise no longer holds. The behavior under test is the noop path:
+    # with the flag off, refresh must be a safe no-op regardless of config.
+    import sys as _sys
+    _appmod = _sys.modules["petridish.api.app"]
+    monkeypatch.setattr(_appmod._router, "_disco_value", lambda key, default=False: False)
     body = client.post("/api/lanes/refresh").json()
     assert body["refreshed"] is False
     assert "lanes" in body and "discovery" in body
