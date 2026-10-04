@@ -248,6 +248,40 @@ def test_arena_contact_card_tolerates_snapshotless_run(tmp_path):
                               "travel_departed": 0, "travel_arrived": 0}
 
 
+def test_get_run_configs_batches_every_run_in_one_query(tmp_path):
+    """EM-334 follow-up — the batched {run_id: config_json} read: every run's
+    raw blob in one dict (the screen input list_runs deliberately omits)."""
+    repo = SQLiteRepository(str(tmp_path / "batch.sqlite"))
+    assert repo.get_run_configs() == {}          # empty db ⇒ no rows, no error
+    rid_a = _seed_contact_run(repo)
+    rid_plain = repo.start_run(json.dumps({"world": {}}))    # a plain run
+    rid_b = _seed_contact_run(repo)              # a second contact run
+    configs = repo.get_run_configs()
+    assert set(configs) == {rid_a, rid_plain, rid_b}
+    assert json.loads(configs[rid_a])["world"]["contact"]["family_b"] == "llama"
+    assert json.loads(configs[rid_plain]) == {"world": {}}
+
+
+def test_arena_contact_screen_batched_byte_identical(tmp_path):
+    """The N+1 fix keeps the projection: exactly the ARMED runs get cards,
+    newest-first (list_runs order), with the same pairings the per-run
+    get_run() fetch produced — now screened off ONE config read."""
+    repo = SQLiteRepository(str(tmp_path / "screen.sqlite"))
+    rid_a = _seed_contact_run(repo)
+    repo.start_run(json.dumps({"world": {}}))                     # plain
+    rid_b = _seed_contact_run(repo)                               # armed
+    repo.start_run(json.dumps({"world": {"contact": {
+        "enabled": False, "family_a": "gemini",
+        "family_b": "llama"}}}))                                  # disarmed
+    out = arena_summary(repo)
+    assert [c["run_id"] for c in out["contact_runs"]] == [rid_b, rid_a]
+    assert all(c["family_a"] == "gemini" and c["family_b"] == "llama"
+               for c in out["contact_runs"])
+    # The snapshot-fed fields survive the batched screen untouched.
+    assert all(c["population_by_town"] == {"Mossmarket": 1, "Windrow": 1}
+               for c in out["contact_runs"])
+
+
 # ── 3. GET /api/contact — the live read surface ──────────────────────────────
 
 _TEST_PROFILES = [

@@ -596,6 +596,19 @@ class SQLiteRepository:
             "model_family": model_family,
         }
 
+    def get_run_configs(self) -> dict[int, str]:
+        """{run_id: config_json} for EVERY run in ONE query (EM-334 follow-up).
+
+        The Arena's contact-run screen needs the raw config blob of every run —
+        the armed contact block lives ONLY in runs.config_json, which list_runs
+        deliberately omits from its RunRow projection — and the previous path
+        paid one get_run() row fetch per run for it (an N+1 on /api/arena).
+        This single scan replaces the batch; a caller needing one full row
+        still uses get_run(). config_json is NOT NULL by schema; the `or ""`
+        is defensive parity with the other reads."""
+        cur = self._conn.execute("SELECT id, config_json FROM runs")
+        return {int(rid): (config_json or "") for rid, config_json in cur.fetchall()}
+
     def count_events_of_kind(self, run_id: int, kind: str) -> int:
         """COUNT(events) of one kind for a run (EM-119 arena — buildings built
         reads `building_operational`). 0 when the run has none."""
