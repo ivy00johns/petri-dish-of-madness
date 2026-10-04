@@ -76,6 +76,7 @@ import BabelMatrix, { BABEL_MATRIX_ENABLED } from './BabelMatrix';
 import AnimalChaosFeed, { isAnimalEvent } from './AnimalChaosFeed';
 import RunBrowser from './RunBrowser';
 import ArenaPanel from './ArenaPanel';
+import ContactPanel from './ContactPanel';
 import LaneHealthPanel from './LaneHealthPanel';
 
 // ── Wave M (EM-204) — the tabbed IA ──────────────────────────────────────────
@@ -746,6 +747,11 @@ export function InspectorLayout({
             <PanelCell weight="">
               <ErrorBoundary name="Model-Family Arena">
                 <ArenaPanel />
+              </ErrorBoundary>
+            </PanelCell>
+            <PanelCell weight="">
+              <ErrorBoundary name="First Contact">
+                <ContactPanel />
               </ErrorBoundary>
             </PanelCell>
           </div>

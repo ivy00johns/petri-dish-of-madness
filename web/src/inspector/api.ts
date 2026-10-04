@@ -425,6 +425,44 @@ export interface ArenaFamily {
 
 export interface ArenaSummary {
   families: ArenaFamily[];
+  /** EM-334 — contact runs: runs whose config_json carries an ARMED contact
+   * block, with the family pairing + per-settlement cards. Absent on a
+   * pre-EM-334 backend ⇒ parsed to []. */
+  contact_runs: ContactArenaRun[];
+}
+
+/** EM-334 — one contact run's Arena card (family pairing + per-town cards). */
+export interface ContactArenaRun {
+  run_id: number;
+  max_tick: number;
+  family_a: string;
+  family_b: string;
+  name_b: string;
+  outcomes: ArenaRun['outcomes'];
+  population_by_town: Record<string, number>;
+  contact_made: { tick: number; agent_id: string; from_settlement: string; to_settlement: string } | null;
+  ledger: { crossings: number; by_family: Record<string, { hops: number; mutated: number }> } | null;
+  events: Record<string, number>;
+}
+
+/** EM-334 — one settlement card on the /api/contact read surface. */
+export interface ContactSettlement {
+  id: string;
+  name: string;
+  founded_tick: number;
+  member_count: number;
+  families: Record<string, number>;
+}
+
+/** EM-334 — the /api/contact payload (the First Contact read surface). */
+export interface ContactSummary {
+  enabled: boolean;
+  tick: number;
+  settlements: ContactSettlement[];
+  contact_made: { tick: number; agent_id: string; from_settlement: string; to_settlement: string } | null;
+  ledger: { crossings: number; by_family: Record<string, { hops: number; mutated: number }> } | null;
+  crossings: Array<{ tick: number; kind: string; actor_id: string | null; text: string }>;
+  travels: Array<{ tick: number; kind: string; actor_id: string | null; text: string }>;
 }
 
 /** One settled/in-progress family result from the tournament status. */
@@ -651,11 +689,11 @@ export const inspectorApi = {
   async arena(): Promise<ArenaSummary | null> {
     const data = await getJsonOrNull('/api/arena');
     if (!isObject(data) || !Array.isArray(data.families)) return null;
+    const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
     const families: ArenaFamily[] = [];
     for (const rawFam of data.families) {
       if (!isObject(rawFam) || typeof rawFam.family !== 'string') continue;
       const avg = isObject(rawFam.avg_per_run) ? rawFam.avg_per_run : {};
-      const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
       const runs: ArenaRun[] = [];
       for (const rawRun of Array.isArray(rawFam.runs) ? rawFam.runs : []) {
         if (!isObject(rawRun) || typeof rawRun.run_id !== 'number') continue;
@@ -690,7 +728,126 @@ export const inspectorApi = {
         runs,
       });
     }
-    return { families };
+    // EM-334 — the additive contact-runs section (defensive: a pre-EM-334
+    // backend omits the key ⇒ []).
+    const contactRuns: ContactArenaRun[] = [];
+    for (const rawCard of Array.isArray(data.contact_runs) ? data.contact_runs : []) {
+      if (!isObject(rawCard) || typeof rawCard.run_id !== 'number') continue;
+      const outcomes = isObject(rawCard.outcomes) ? rawCard.outcomes : {};
+      const popByTown: Record<string, number> = {};
+      if (isObject(rawCard.population_by_town)) {
+        for (const [town, n] of Object.entries(rawCard.population_by_town)) {
+          popByTown[town] = num(n);
+        }
+      }
+      const ledgerRaw = isObject(rawCard.ledger) ? rawCard.ledger : null;
+      const byFamily: Record<string, { hops: number; mutated: number }> = {};
+      if (ledgerRaw && isObject(ledgerRaw.by_family)) {
+        for (const [fam, rec] of Object.entries(ledgerRaw.by_family)) {
+          if (!isObject(rec)) continue;
+          byFamily[fam] = { hops: num(rec.hops), mutated: num(rec.mutated) };
+        }
+      }
+      const madeRaw = isObject(rawCard.contact_made) ? rawCard.contact_made : null;
+      const events: Record<string, number> = {};
+      if (isObject(rawCard.events)) {
+        for (const [k, n] of Object.entries(rawCard.events)) events[k] = num(n);
+      }
+      contactRuns.push({
+        run_id: rawCard.run_id,
+        max_tick: num(rawCard.max_tick),
+        family_a: typeof rawCard.family_a === 'string' ? rawCard.family_a : '',
+        family_b: typeof rawCard.family_b === 'string' ? rawCard.family_b : '',
+        name_b: typeof rawCard.name_b === 'string' ? rawCard.name_b : '',
+        outcomes: {
+          population: num(outcomes.population),
+          laws_passed: num(outcomes.laws_passed),
+          buildings: num(outcomes.buildings),
+          crimes: num(outcomes.crimes),
+          credits: num(outcomes.credits),
+        },
+        population_by_town: popByTown,
+        contact_made: madeRaw
+          ? {
+              tick: num(madeRaw.tick),
+              agent_id: typeof madeRaw.agent_id === 'string' ? madeRaw.agent_id : '',
+              from_settlement: typeof madeRaw.from_settlement === 'string' ? madeRaw.from_settlement : '',
+              to_settlement: typeof madeRaw.to_settlement === 'string' ? madeRaw.to_settlement : '',
+            }
+          : null,
+        ledger: ledgerRaw
+          ? { crossings: num(ledgerRaw.crossings), by_family: byFamily }
+          : null,
+        events,
+      });
+    }
+    return { families, contact_runs: contactRuns };
+  },
+
+  /**
+   * GET /api/contact (EM-334) — the First Contact read surface: settlement
+   * cards, the contact marker latch, the honesty ledger, and the recent
+   * crossing/travel events. Returns `null` when the backend is unreachable;
+   * an unarmed world parses to `{ enabled: false }` so the panel renders its
+   * labeled zero state.
+   */
+  async contact(): Promise<ContactSummary | null> {
+    const data = await getJsonOrNull('/api/contact');
+    if (!isObject(data)) return null;
+    if (data.enabled !== true) return { enabled: false, tick: 0, settlements: [], contact_made: null, ledger: null, crossings: [], travels: [] };
+    const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+    const settlements: ContactSettlement[] = [];
+    for (const s of Array.isArray(data.settlements) ? data.settlements : []) {
+      if (!isObject(s) || typeof s.id !== 'string') continue;
+      const families: Record<string, number> = {};
+      if (isObject(s.families)) {
+        for (const [fam, n] of Object.entries(s.families)) families[fam] = num(n);
+      }
+      settlements.push({
+        id: s.id,
+        name: str(s.name),
+        founded_tick: num(s.founded_tick),
+        member_count: num(s.member_count),
+        families,
+      });
+    }
+    const madeRaw = isObject(data.contact_made) ? data.contact_made : null;
+    const ledgerRaw = isObject(data.ledger) ? data.ledger : null;
+    const byFamily: Record<string, { hops: number; mutated: number }> = {};
+    if (ledgerRaw && isObject(ledgerRaw.by_family)) {
+      for (const [fam, rec] of Object.entries(ledgerRaw.by_family)) {
+        if (!isObject(rec)) continue;
+        byFamily[fam] = { hops: num(rec.hops), mutated: num(rec.mutated) };
+      }
+    }
+    const readLegs = (raw: unknown): ContactSummary['crossings'] =>
+      (Array.isArray(raw) ? raw : [])
+        .filter(isObject)
+        .map((e) => ({
+          tick: num(e.tick),
+          kind: str(e.kind),
+          actor_id: typeof e.actor_id === 'string' ? e.actor_id : null,
+          text: str(e.text),
+        }));
+    return {
+      enabled: true,
+      tick: num(data.tick),
+      settlements,
+      contact_made: madeRaw
+        ? {
+            tick: num(madeRaw.tick),
+            agent_id: str(madeRaw.agent_id),
+            from_settlement: str(madeRaw.from_settlement),
+            to_settlement: str(madeRaw.to_settlement),
+          }
+        : null,
+      ledger: ledgerRaw
+        ? { crossings: num(ledgerRaw.crossings), by_family: byFamily }
+        : null,
+      crossings: readLegs(data.crossings),
+      travels: readLegs(data.travels),
+    };
   },
 
   /**

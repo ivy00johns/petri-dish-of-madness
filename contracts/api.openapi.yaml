@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.5.0
+  version: 1.6.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -176,8 +176,58 @@ paths:
         Every run stamped with `runs.model_family` grouped by family: per-run outcome cards
         (population / laws_passed / buildings / crimes / credits) + downsampled population
         sparklines, plus family-level per-run means. Zero-LLM, read-only.
+        EM-334 (v1.6.0): the response gains the additive `contact_runs` array — every run
+        whose config_json carries an ARMED `world.contact` block, each card carrying the
+        family pairing, the ordinary outcome card, per-settlement populations from the
+        run's latest snapshot, the contact marker latch, the honesty ledger, and the
+        crossing/travel event counts. No new persistence (the run self-describes).
       responses:
         "200": { description: arena summary, content: { application/json: { schema: { type: object } } } }
+  /api/contact:
+    get:
+      summary: First Contact read surface (EM-334)
+      description: >
+        The live two-town world's settlement cards (name / founded_tick / member_count /
+        cast-family counts), the one-shot contact marker latch (the first cross-town
+        departure in a contact world), the EM-333 honesty ledger (crossings + per-family
+        {hops, mutated} fidelity), and the recent crossing/travel events. Zero-LLM,
+        read-only, off the replay surface.
+      responses:
+        "200":
+          description: contact summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean, description: "false when the live world carries no ARMED contact block — the panel renders its labeled zero state" }
+                  tick: { type: integer }
+                  settlements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        founded_tick: { type: integer }
+                        member_count: { type: integer }
+                        families: { type: object, additionalProperties: { type: integer }, description: "cast family → living member count (EM-112 classifier)" }
+                  contact_made:
+                    nullable: true
+                    type: object
+                    properties:
+                      tick: { type: integer }
+                      agent_id: { type: string }
+                      from_settlement: { type: string }
+                      to_settlement: { type: string }
+                  ledger:
+                    nullable: true
+                    type: object
+                    properties:
+                      crossings: { type: integer }
+                      by_family: { type: object, additionalProperties: { type: object, properties: { hops: { type: integer }, mutated: { type: integer } } } }
+                  crossings: { type: array, items: { type: object } }
+                  travels: { type: array, items: { type: object } }
   /api/arena/tournament:
     post:
       summary: Start a SEQUENTIAL parallel-worlds tournament (EM-112)

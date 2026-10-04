@@ -1936,6 +1936,16 @@ class World:
         # world — and every pre-EM-333 snapshot — stays byte-identical
         # (EM-155).
         self.contact_ledger: dict[str, dict] = {}
+        # EM-334 — the First Contact MARKER: the moment a citizen of one
+        # contact settlement first set out for the other. One-shot latch
+        # {"tick", "agent_id", "from_settlement", "to_settlement"} stamped
+        # by action_travel_to on the FIRST cross-town departure in a contact
+        # world; the `contact_made` event it parks is the Chronicle chapter
+        # boundary (the chronicler windows events — no new LLM call here).
+        # Serialized only-when-set (the town_motif_ref pattern), so a
+        # contact-less world — and every pre-EM-334 snapshot — stays
+        # byte-identical (EM-155).
+        self.contact_made: dict | None = None
         # EM-260 — the Wave O Religion substrate: faiths {id: Faith} (minted
         # seeded via mint_faith — the founding VERBS are the only production
         # writers, landing EM-261). Serialized in to_snapshot() only when
@@ -4992,7 +5002,7 @@ class World:
         from_name = (self.settlements.get(home, {}).get("name", home)
                      if home else "the wilds")
         to_name = self.settlements[sid].get("name", sid)
-        return {
+        departed = {
             "kind": "travel_departed",
             "actor_id": agent.id,
             "text": f"{agent.name} sets out from {from_name} for {to_name} — "
@@ -5004,6 +5014,30 @@ class World:
                 "travel_ticks": ticks,
             },
         }
+        # EM-334 — the First Contact MARKER: the FIRST cross-town departure in
+        # a contact world stamps the one-shot latch and parks a `contact_made`
+        # event — the Chronicle chapter boundary (the chronicler windows
+        # events; no new LLM call here). Honesty-independent: the marker is
+        # keystone measurement (gated on contact, not on contact.honesty), so
+        # a contact-honesty-OFF world still records WHEN the worlds met.
+        # Non-contact worlds (plain multi-city) never stamp. Idempotent: the
+        # latch is write-once — later departures are ordinary travel.
+        if self._contact_enabled() and self.contact_made is None:
+            self.contact_made = {
+                "tick": int(self.tick),
+                "agent_id": agent.id,
+                "from_settlement": str(home or ""),
+                "to_settlement": sid,
+            }
+            marker = self._faction_event(
+                "contact_made", agent.id,
+                f"🌍 FIRST CONTACT — {agent.name} sets out from {from_name} "
+                f"for {to_name}. Two worlds meet for the first time.",
+                {"from_settlement": home, "to_settlement": sid,
+                 "tick": int(self.tick), "chronicle_chapter": True},
+            )
+            return {"_multi": [departed, marker]}
+        return departed
 
     def resolve_travel_arrivals(self) -> None:
         """EM-110 — migrate every traveling agent whose transit_arrival_tick has
@@ -12660,6 +12694,18 @@ class World:
                                      or {}).items()
                 },
             }
+        # EM-334 — the First Contact marker latch. Serialized only-when-set
+        # (the town_motif_ref pattern): a world where nobody has traveled
+        # keeps the exact prior key set (absent ⇒ None on restore).
+        if self.contact_made:
+            snap["contact_made"] = {
+                "tick": int(self.contact_made.get("tick", 0)),
+                "agent_id": str(self.contact_made.get("agent_id", "")),
+                "from_settlement": str(
+                    self.contact_made.get("from_settlement", "")),
+                "to_settlement": str(
+                    self.contact_made.get("to_settlement", "")),
+            }
         # EM-260 — faiths (the Wave O Religion substrate). Serialized only when
         # non-empty (the wars pattern), so a faithless world — and every
         # pre-EM-260 snapshot — keeps the exact prior key set (absent ⇒ {} on
@@ -13526,6 +13572,18 @@ class World:
                     for fam, rec in (_ledger.get("by_family") or {}).items()
                     if fam and isinstance(rec, dict)
                 },
+            }
+        # EM-334 — restore the contact marker latch (additive: pre-EM-334
+        # snapshots lack the key and restore None). Defensive: a non-dict or
+        # agent-less row is dropped (the latch only ever records a real
+        # departure).
+        _cm = state.get("contact_made")
+        if (isinstance(_cm, dict) and str(_cm.get("agent_id", "")).strip()):
+            world.contact_made = {
+                "tick": max(0, _int(_cm.get("tick"))),
+                "agent_id": str(_cm.get("agent_id", "")),
+                "from_settlement": str(_cm.get("from_settlement", "")),
+                "to_settlement": str(_cm.get("to_settlement", "")),
             }
         # EM-260 — restore faiths (additive: pre-EM-260 snapshots lack the key
         # and restore {}, so a faithless fork/replay is byte-identical).

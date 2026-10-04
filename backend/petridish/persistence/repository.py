@@ -357,6 +357,24 @@ class SQLiteRepository:
             if isinstance(a, dict) and a.get("alive") is not False
         )
 
+    def latest_snapshot_state(self, run_id: int) -> dict | None:
+        """EM-334 — the run's LATEST snapshot state, parsed (or None). The
+        per-settlement Arena cards read settlements + agent homes + the
+        contact honesty ledger straight out of the stored world state — no
+        new persistence, the snapshot IS the record."""
+        row = self._conn.execute(
+            "SELECT state_json FROM snapshots WHERE run_id = ? "
+            "ORDER BY tick DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            state = json.loads(row[0] or "{}")
+        except (TypeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
     # ──────────────────────────────────────────────────────────────────────────
     # EM-222 — relevance-scored memory retrieval (embedding cache + candidates).
     # vec packs as little-endian float32 * dim; see _pack_vec/_unpack_vec.

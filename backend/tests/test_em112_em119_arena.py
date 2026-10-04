@@ -598,7 +598,8 @@ def test_arena_summary_empty_and_zero_event_runs(tmp_path):
     from petridish.api.arena import arena_summary
 
     repo = SQLiteRepository(str(tmp_path / "empty.sqlite"))
-    assert arena_summary(repo) == {"families": []}
+    # EM-334 — the payload gains the additive `contact_runs` section.
+    assert arena_summary(repo) == {"families": [], "contact_runs": []}
     _seed_run(repo, "gemini", spawns=0)  # a stamped run with NO events
     out = arena_summary(repo)
     assert out["families"][0]["avg_per_run"] == {
@@ -690,7 +691,8 @@ def test_tournament_end_to_end_two_families(arena_client):
     client, appmod = arena_client
 
     # Fresh boot: no stamped runs ⇒ empty arena.
-    assert client.get("/api/arena").json() == {"families": []}
+    # EM-334 — the payload gains the additive `contact_runs` section.
+    assert client.get("/api/arena").json() == {"families": [], "contact_runs": []}
     assert client.get("/api/arena/tournament").json()["status"] == "idle"
 
     body = client.post(
