@@ -198,6 +198,83 @@ def test_diffusion_within_town_records_nothing():
     assert int(w.contact_ledger.get("crossings", 0)) == 0
 
 
+def test_diffusion_crossing_carries_generation_in_payload():
+    # EM-336 — the archive row must be auditable offline: the carried
+    # lineage's drift depth rides every crossing payload. The seam helper's
+    # text distorts on the border hop ('borrowed' → 'stole'), so the payload
+    # carries the minted gen-1 CHILD; the gen-0 verbatim ride is pinned by
+    # the image-meme test below, the gen-3 verbatim ride by the run-22 one.
+    w = _honesty_world()
+    author, meme = _a_carrier_meme_at_b_plaza(w)
+    events = w.diffuse_culture()
+    crossings = [e for e in events if e["kind"] == "meme_crossed_border"]
+    assert crossings
+    assert crossings[0]["payload"]["generation"] == 1
+    assert crossings[0]["payload"]["meme_id"] != meme.id
+
+
+def test_gen3_verbatim_hop_is_a_drifted_crossing():
+    # THE RUN-22 REPRODUCTION (EM-336): a lineage drifted past the
+    # meme-coherence drift cap spreads AS ITSELF (child is meme, text
+    # unchanged) — the old text-delta flag read these as intact, pinning
+    # run 22 at fidelity 1.0 while 22/23 crossing lineages were themselves
+    # mutants. Lineage is the truth: a gen-3 hop IS a drifted crossing.
+    w = _honesty_world()
+    sid_a, _ = _towns(w)
+    a_id = sorted(w.settlements[sid_a]["members"])[0]
+    author = w.agents[a_id]
+    root = w.mint_meme("idea", "The plaza bells borrowed their chime", author.id)
+    w._attach_meme(author, root)
+    drifted = w.mint_meme("idea", "The plaza bells STOLE their chime",
+                          author.id, parent_id=root.id, generation=3)
+    w._attach_meme(author, drifted)   # root evicted from the FIFO cap? no —
+    # held_meme_cap is 12 and the author holds 2; the drifted child carries.
+    assert drifted.generation == 3
+    author.location = "cb_plaza"     # the visitor vector, per the seam tests
+    events = w.diffuse_culture()
+    crossings = [e for e in events if e["kind"] == "meme_crossed_border"]
+    assert crossings, "the drifted lineage crossed"
+    ev = next(e for e in crossings if e["payload"]["meme_id"] == drifted.id)
+    assert ev["payload"]["parent_id"] == drifted.id   # verbatim: child IS parent
+    assert ev["payload"]["mutated"] is True           # LINEAGE, not text delta
+    assert ev["payload"]["generation"] == 3
+    gem = w.contact_ledger["by_family"]["gemini"]
+    assert gem["hops"] >= 1 and gem["mutated"] >= 1
+
+
+def test_gen0_original_riding_verbatim_is_faithful():
+    # The other side of the EM-336 contract: a gen-0 original (image memes
+    # ALWAYS spread this way — the image IS the content) that crosses with
+    # its text unchanged is a GENUINE fidelity-1.0 carriage, not a blind
+    # spot. The old text-delta flag happened to get this one right.
+    w = _honesty_world()
+    author, meme = _a_carrier_meme_at_b_plaza(w, text="The plaza bells chime")
+    meme.image_id = "img_test0001"    # image memes spread as themselves at ANY generation
+    events = w.diffuse_culture()
+    crossings = [e for e in events if e["kind"] == "meme_crossed_border"]
+    assert crossings
+    ev = next(e for e in crossings if e["payload"]["meme_id"] == meme.id)
+    assert ev["payload"]["mutated"] is False
+    assert ev["payload"]["generation"] == 0
+
+
+def test_gen0_text_original_distorting_at_the_border_is_mutated():
+    # A gen-0 TEXT original can still mint a distorted child on a border hop
+    # (under the drift cap, not an image) — the mutation must count.
+    w = _honesty_world()
+    author, meme = _a_carrier_meme_at_b_plaza(w)
+    assert meme.generation == 0 and meme.image_id is None
+    events = w.diffuse_culture()
+    crossings = [e for e in events if e["kind"] == "meme_crossed_border"]
+    assert crossings
+    ev = crossings[0]
+    assert ev["payload"]["meme_id"] != ev["payload"]["parent_id"]  # a mint happened
+    assert ev["payload"]["generation"] == 1
+    assert ev["payload"]["mutated"] is True
+    gem = w.contact_ledger["by_family"]["gemini"]
+    assert gem["mutated"] >= 1
+
+
 def test_honesty_off_spreads_without_telemetry():
     # Carriage is not new — diffusion always infected co-located agents.
     # Honesty OFF must keep the STATE and add NONE of the telling.
