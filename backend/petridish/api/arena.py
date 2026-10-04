@@ -201,12 +201,15 @@ def arena_summary(repo) -> dict:
     blocks: dict[str, list[dict]] = {}
     first_seen: dict[str, int] = {}
     contact_runs: list[dict] = []
+    # EM-334 follow-up — ONE batched read of every run's config_json screens
+    # for the armed contact block (list_runs deliberately omits the blob; the
+    # old path paid one get_run() fetch per run just to screen it). The card
+    # reads only id/max_tick/config_json and max_tick still comes from the
+    # list_runs row, so the cards are byte-identical to the per-run fetch.
+    configs = repo.get_run_configs()
     for run in repo.list_runs():
-        # EM-334 — the contact pairing lives in runs.config_json, which
-        # list_runs deliberately omits (the config_summary projection only).
-        # One indexed full-row fetch per run screens for the armed block —
-        # trivial next to the per-run analytics this aggregation already does.
-        full = repo.get_run(int(run.get("id") or 0)) or {}
+        rid = int(run.get("id") or 0)
+        full = dict(run, config_json=configs.get(rid, ""))
         if _contact_block(full) is not None:
             contact_runs.append(
                 contact_run_card(repo, full, max_tick=run.get("max_tick") or 0))
