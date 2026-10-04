@@ -11396,8 +11396,25 @@ class World:
                             target, "origin_settlement_id", None)
                         if (origin_town and tgt_town
                                 and origin_town != tgt_town):
-                            mutated = (child is not meme
-                                       and child.text != meme.text)
+                            # EM-336 — drift is judged on the LINEAGE, not
+                            # this hop's text delta. The meme-coherence fix
+                            # v2 (2026-10-03) makes a meme at
+                            # generation >= max_drift_generations spread AS
+                            # ITSELF (child is meme) — and image memes do so
+                            # at any generation — so `child.text == meme.text`
+                            # held for exactly the memes that dominate
+                            # late-run crossing traffic: run 22 pinned
+                            # fidelity 1.0 both families while 22/23 crossing
+                            # lineages were themSELVES mutants (a lineage
+                            # mutated at tick 425 then crossed 5x all
+                            # recording intact). A minted child always sits
+                            # at generation >= 1, and a spread-as-itself hop
+                            # inherits the carrier's generation — so
+                            # generation > 0 is exactly "this lineage has
+                            # drifted (or is now drifting) from its original";
+                            # a gen-0 original (image or text) riding verbatim
+                            # is a genuinely faithful carriage.
+                            mutated = child.generation > 0
                             self._record_carriage(carrier.id, mutated)
                             events.append({
                                 "kind": "meme_crossed_border",
@@ -11417,6 +11434,11 @@ class World:
                                     "carrier_family": self._carriage_family(
                                         carrier.id),
                                     "mutated": bool(mutated),
+                                    # EM-336 — the carried lineage's drift
+                                    # depth (0 = the original), so the
+                                    # archive row is auditable offline
+                                    # (replay recomputes fidelity from ids).
+                                    "generation": int(child.generation),
                                 },
                             })
                     # Feed-health fix — only the first `mutation_cap` hops this
