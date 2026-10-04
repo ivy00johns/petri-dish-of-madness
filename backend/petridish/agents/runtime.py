@@ -2021,6 +2021,15 @@ def _normalize_args(action_dict: dict, agent: AgentState, world: World) -> None:
     responses validate instead of dying. Never raises; never invents a value
     the model didn't supply."""
     action = action_dict.get("action")
+    # EM-338 (run-23 finding) — a malformed response can put a LIST (or any
+    # non-string) in the `action` field; the downstream `_TARGETED_ACTIONS`
+    # set-membership then raises `TypeError: unhashable type: 'list'` and the
+    # whole WORLD auto-pauses (run 23, tick 816). Normalize to a string so the
+    # enum schema gate rejects it as the ordinary unknown-action parse failure
+    # it is — feedback + clean-JSON bounce, never a crashed turn. The write-back
+    # keeps the forensics (`rejected_action`) honest about what was parsed.
+    if action is not None and not isinstance(action, str):
+        action_dict["action"] = action = str(action)
     args = action_dict.get("args")
     if not isinstance(args, dict):
         action_dict["args"] = args = {}

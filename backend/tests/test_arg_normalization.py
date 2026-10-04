@@ -222,6 +222,29 @@ def test_normalize_non_dict_args_replaced():
     assert action["args"] == {}
 
 
+def test_normalize_list_valued_action_stringified_not_crash():
+    # EM-338 (run-23 live finding, tick 816) — a malformed response put a
+    # LIST in the `action` field; `action in _TARGETED_ACTIONS` then raised
+    # `TypeError: unhashable type: 'list'` and AUTO-PAUSED the whole world.
+    # The normalizer's own contract is "never raises": stringify in place so
+    # the schema enum gate rejects it as the ordinary parse failure it is.
+    world = _bare_world()
+    actor = world.agents["agent_bram_1"]
+    action = {"action": ["move_to"], "args": {"place": "plaza"}}
+    _normalize_args(action, actor, world)   # must not raise
+    assert action["action"] == "['move_to']"
+
+
+def test_normalize_null_action_left_alone():
+    # A missing action (None) is the schema's REQUIRED-field failure — leave
+    # it for the enum gate; the normalizer must not invent a value.
+    world = _bare_world()
+    actor = world.agents["agent_bram_1"]
+    action = {"args": {}}
+    _normalize_args(action, actor, world)   # must not raise
+    assert "action" not in action
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Behavioral string caps — truncate, never dead-turn (live: Cleo lost a turn to
 # a 60-char propose_project `function`; Bram to a 300+-char billboard post)
