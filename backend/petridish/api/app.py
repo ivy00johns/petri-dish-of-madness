@@ -2519,6 +2519,7 @@ async def start_contact(body: ContactBody):
             enabled=True,
             family_a=plan.families[0],
             family_b=plan.families[1],
+            honesty=True,  # EM-333 — SB rides the same experiment
         ),
     )
     reset_cfg = dataclasses.replace(plan.config, world=world_params)

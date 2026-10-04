@@ -380,6 +380,13 @@ class WarState:
     casualties: list[str] = field(default_factory=list)       # agent ids (EM-258)
     exhaustion: dict[str, int] = field(default_factory=dict)  # group id → 0..100
     status: str = "active"       # active | settled
+    # EM-333 — the additive scope this record promised at EM-256: "" = the
+    # faction war (the only shape before EM-333); "settlement" = the
+    # belligerents are SETTLEMENT ids (a war between TOWNS — the First
+    # Contact honesty scoping). A scoped war grinds via exhaustion and
+    # settles through the shared _settle_war lane; the combat verbs stay
+    # faction-scoped this stage.
+    scope: str = ""
 
     def to_dict(self) -> dict:
         """JSON-safe record. casualties/exhaustion ride ONLY when non-empty
@@ -398,6 +405,8 @@ class WarState:
             d["casualties"] = list(self.casualties)
         if self.exhaustion:
             d["exhaustion"] = {str(k): int(v) for k, v in self.exhaustion.items()}
+        if self.scope:
+            d["scope"] = self.scope
         return d
 
 
@@ -872,6 +881,15 @@ class AgentState:
     home_settlement_id: str | None = None
     in_transit_to: str | None = None
     transit_arrival_tick: int | None = None
+    # EM-333 — the contact-honesty birth-town stamp: the FIRST settlement
+    # this agent belonged to, written once (contact genesis / first arrival /
+    # first join) and NEVER rewritten by travel — a defector keeps the town
+    # they CAME from, so cross-border carriage and war scoping are judged
+    # against origins, not the home that migration flips. Additive
+    # None-default, serialized in to_dict ONLY when set (the
+    # home_settlement_id convention); an honesty-OFF world never writes it
+    # (the EM-155 byte-identical guarantee).
+    origin_settlement_id: str | None = None
 
     def skill_level(self, skill: str) -> int:
         """EM-227 — this agent's level in `skill` (0 if unknown/unheld). The
@@ -1043,6 +1061,8 @@ class AgentState:
         # schedule.
         if self.home_settlement_id is not None:
             d["home_settlement_id"] = self.home_settlement_id
+        if self.origin_settlement_id is not None:
+            d["origin_settlement_id"] = self.origin_settlement_id
         if self.in_transit_to is not None:
             d["in_transit_to"] = self.in_transit_to
             d["transit_arrival_tick"] = int(self.transit_arrival_tick or 0)
@@ -1908,6 +1928,14 @@ class World:
         # stays byte-identical (EM-155).
         self.wars: dict[str, WarState] = {}
         self.grievances: dict[str, int] = {}
+        # EM-333 — the First Contact honesty ledger: cross-border carriage
+        # telemetry, {"crossings": int, "by_family": {family: {"hops": n,
+        # "mutated": m}}} — fidelity per carrying family = 1 − mutated/hops
+        # (who mangles whose stories). Serialized in to_snapshot() only when
+        # a crossing exists (the grievances pattern), so an honesty-OFF
+        # world — and every pre-EM-333 snapshot — stays byte-identical
+        # (EM-155).
+        self.contact_ledger: dict[str, dict] = {}
         # EM-260 — the Wave O Religion substrate: faiths {id: Faith} (minted
         # seeded via mint_faith — the founding VERBS are the only production
         # writers, landing EM-261). Serialized in to_snapshot() only when
@@ -4461,6 +4489,85 @@ class World:
         return bool(self._stl_param("enabled", False)) and bool(
             self._ctc_param("enabled", False))
 
+    def _contact_honesty_enabled(self) -> bool:
+        """Config gate `world.contact.honesty` (EM-333, default OFF). Requires
+        the contact keystone itself (settlements + contact) — honesty is the
+        SB phase of the First Contact protocol; a keystone-OFF world never
+        enters any honesty path (byte-identical)."""
+        return self._contact_enabled() and bool(
+            self._ctc_param("honesty", False))
+
+    def _stamp_settlement_origin(self, agent_id: str, sid: str) -> None:
+        """EM-333 — record the FIRST settlement `agent_id` belonged to (the
+        birth-town stamp the cross-border carriage and war scoping are judged
+        against). WRITE-ONCE: travel/defection re-homes but never re-stamps;
+        a later join stamps only an agent that never had a town. Honesty-
+        gated — an honesty-OFF world never writes the field (byte-identical).
+        Pure state, no events, no RNG/clock (EM-155)."""
+        if not self._contact_honesty_enabled():
+            return
+        agent = self.agents.get(str(agent_id))
+        if agent is not None and getattr(
+                agent, "origin_settlement_id", None) is None:
+            agent.origin_settlement_id = str(sid)
+
+    def _meme_origin_town(self, meme: "Meme") -> str | None:
+        """EM-333 — the birth-town of a meme's ORIGINAL author. Lineage keeps
+        origin_agent_id pointed at the true author through every drift hop
+        (diffuse children re-stamp the parent's author), so the whole meme
+        family tree carries one provenance. None when the author is gone or
+        never stamped (an unstamped world detects no crossings)."""
+        author = self.agents.get(str(meme.origin_agent_id or ""))
+        if author is None:
+            return None
+        return getattr(author, "origin_settlement_id", None)
+
+    def _carriage_family(self, agent_id: str) -> str:
+        """EM-333 — the coarse model family of a carriage's CARRIER (the
+        fidelity-per-family attribution: which family mangles whose stories).
+        Uses the EM-112 classifier on the agent's profile; an unclassifiable
+        profile degrades to the profile name itself — never the Arena's
+        "other" bucket, which the tournament refuses to cast from anyway."""
+        from ..providers.families import model_family
+        agent = self.agents.get(str(agent_id))
+        if agent is None:
+            return "unknown"
+        profile = str(getattr(agent, "profile", "") or "")
+        fam = model_family(None, profile)
+        return fam if fam and fam != "other" else (profile or "unknown")
+
+    def _record_carriage(self, carrier_id: str, mutated: bool) -> None:
+        """EM-333 — the ONE carriage-telemetry seam: count a cross-border hop
+        under its carrying family (`hops`) and mark whether the hop changed
+        the text (`mutated`) — the ledger fidelity read is 1 − mutated/hops
+        per family. Deterministic counters, no events, no RNG/clock (EM-155)."""
+        fam = self._carriage_family(carrier_id)
+        fam_rec = (self.contact_ledger.setdefault("by_family", {})
+                   .setdefault(fam, {"hops": 0, "mutated": 0}))
+        fam_rec["hops"] = int(fam_rec.get("hops", 0)) + 1
+        if mutated:
+            fam_rec["mutated"] = int(fam_rec.get("mutated", 0)) + 1
+        self.contact_ledger["crossings"] = int(
+            self.contact_ledger.get("crossings", 0)) + 1
+
+    def _group_display_name(self, gid: str) -> str:
+        """EM-333 — a faction OR settlement record's display name (the war
+        scoping names TOWNS when a war goes settlement-scoped)."""
+        rec = self.factions.get(str(gid)) or self.settlements.get(str(gid)) or {}
+        return str(rec.get("name", "")) or str(gid)
+
+    def _faction_origin_town(self, fid: str) -> str | None:
+        """EM-333 — the settlement a faction is BASED in: its lowest-id living
+        member's birth-town stamp (the Wave-E founding convention — a group
+        anchors on its lowest member). None when no living member carries a
+        stamp (an honesty-OFF world always reads None ⇒ never scoped)."""
+        members = (self.factions.get(str(fid)) or {}).get("members", [])
+        for mid in sorted(str(m) for m in members):
+            agent = self.agents.get(mid)
+            if agent is not None and agent.alive:
+                return getattr(agent, "origin_settlement_id", None)
+        return None
+
     def _settlement_id(self, founder_id: str, ordinal: int) -> str:
         """A SEEDED, replay-stable settlement id (NEVER uuid4 — the EM-155
         keystone). Mirrors _prop_id/_image_id: sha256 of (founder, tick,
@@ -4767,6 +4874,15 @@ class World:
             agent.home_settlement_id = sid_b
             if b_plaza:
                 agent.location = b_plaza
+        # EM-333 — honesty birth-town stamps: every agent is stamped with the
+        # town the SPLIT gave them (write-once — later travel never re-stamps,
+        # so a defector keeps the town they CAME from). Honesty-gated: an
+        # honesty-OFF contact world stamps nothing (byte-identical).
+        if self._contact_honesty_enabled():
+            b_names_set = set(b_names)
+            for aid in sorted(self.agents):
+                self.agents[aid].origin_settlement_id = (
+                    sid_b if self.agents[aid].name in b_names_set else sid_a)
 
     def _resolve_settlement_ref(self, ref: str) -> str | None:
         """Resolve a settlement id OR a (case-insensitive) name to its id, or
@@ -4920,6 +5036,10 @@ class World:
                 continue
             self._settlement_reassociate(agent.id, target)
             agent.home_settlement_id = target
+            # EM-333 — first-settlement stamp (write-once): an agent with no
+            # town yet acquires this one; a stamped defector KEEPS the town
+            # they came from — the defection is real, the origin is too.
+            self._stamp_settlement_origin(agent.id, target)
             anchor = self._settlement_anchor_place(target)
             if anchor:
                 agent.location = anchor
@@ -6010,19 +6130,38 @@ class World:
                 return
             if self.active_war_between(aggr, target) is not None:
                 return
-            war = self.open_war(aggr, target, str(spec.get("aims") or ""))
-            aggr_name = str(self.factions[aggr].get("name", "")) or aggr
-            target_name = str(self.factions[target].get("name", "")) or target
+            # EM-333 — settlement scoping: when the two factions are based in
+            # DIFFERENT contact settlements, the war is declared BETWEEN THE
+            # TOWNS (belligerents = settlement ids, scope="settlement") — a
+            # border war belongs to the towns, not just the proposing
+            # circles. Honesty-gated: an honesty-OFF world opens the exact
+            # pre-EM-333 faction war (byte-identical).
+            war_scope, aggr_side, target_side = "", aggr, target
+            if self._contact_honesty_enabled():
+                aggr_town = self._faction_origin_town(aggr)
+                target_town = self._faction_origin_town(target)
+                if aggr_town and target_town and aggr_town != target_town:
+                    war_scope = "settlement"
+                    aggr_side, target_side = sorted((aggr_town, target_town))
+            war = self.open_war(aggr_side, target_side,
+                                str(spec.get("aims") or ""), scope=war_scope)
+            aggr_name = self._group_display_name(aggr_side)
+            target_name = self._group_display_name(target_side)
             members = [str(m) for m in self.factions[aggr].get("members", [])]
             anchor = min(members) if members else ""
             aims_tail = f" — \"{_truncate(war.aims, 60)}\"" if war.aims else ""
+            war_payload: dict[str, Any] = {
+                "war_id": war.id, "aggressor": aggr, "target": target,
+                "aims": war.aims,
+                "grievance_snapshot": int(spec.get("grievance_snapshot", 0) or 0),
+                "proposal_id": rule.id,
+            }
+            if war_scope:  # additive — never rides on the faction-war path
+                war_payload["scope"] = war_scope
             self.pending_spawn_events.append(self._faction_event(
                 "war_declared", anchor,
                 f"⚔ {aggr_name} declares WAR on {target_name}{aims_tail}!",
-                {"war_id": war.id, "aggressor": aggr, "target": target,
-                 "aims": war.aims,
-                 "grievance_snapshot": int(spec.get("grievance_snapshot", 0) or 0),
-                 "proposal_id": rule.id},
+                war_payload,
             ))
             return
         # EM-257 — peace_treaty: the SUING faction's passing 70% vote settles
@@ -6865,6 +7004,7 @@ class World:
                 # home). Only inside the enabled path, so a settlements-OFF
                 # world never touches it.
                 agent.home_settlement_id = near_sid
+                self._stamp_settlement_origin(agent.id, near_sid)
                 s_name = self.settlements[near_sid].get("name", near_sid)
                 turn_events.append({
                     "kind": "settlement_joined",
@@ -9464,6 +9604,19 @@ class World:
             victim_f["id"], actor_f["id"],
             per_act + per_witness * len(witnesses), act,
         )
+        # EM-333 — settlement scope: the same hostile act ALSO heats the
+        # TOWNS when actor and victim were born in different contact
+        # settlements (a border incident is a town-level story, not just a
+        # faction feud — the casus belli a whole settlement can ratify war
+        # on). Honesty-gated; the faction heat above is untouched.
+        if self._contact_honesty_enabled():
+            v_origin = getattr(victim, "origin_settlement_id", None)
+            a_origin = getattr(actor, "origin_settlement_id", None)
+            if v_origin and a_origin and v_origin != a_origin:
+                self.add_grievance(
+                    v_origin, a_origin,
+                    per_act + per_witness * len(witnesses), f"{act} (border)",
+                )
 
     def advance_war(self) -> list[dict]:
         """EM-256/EM-259 — the round-boundary war subsystem, called from
@@ -10494,17 +10647,49 @@ class World:
             "payload": {"action": "spread_rumor", "meme_id": child.id,
                         "parent_id": source.id, "generation": child.generation},
         }
-        if child.text == source.text:
-            return spread
-        # The drift is visible — a second legible line, like a clash kill's chain.
-        return {"_multi": [spread, {
-            "kind": "meme_mutated",
-            "actor_id": agent.id,
-            "target_id": target.id,
-            "text": f"…and it mutates on the way to {target.name}.",
-            "payload": {"action": "spread_rumor", "meme_id": child.id,
-                        "parent_id": source.id, "generation": child.generation},
-        }]}
+        legs: list[dict] = [spread]
+        if child.text != source.text:
+            # The drift is visible — a second legible line, like a clash kill's chain.
+            legs.append({
+                "kind": "meme_mutated",
+                "actor_id": agent.id,
+                "target_id": target.id,
+                "text": f"…and it mutates on the way to {target.name}.",
+                "payload": {"action": "spread_rumor", "meme_id": child.id,
+                            "parent_id": source.id, "generation": child.generation},
+            })
+        # EM-333 honesty — a whisper ACROSS the border: the source rumor was
+        # authored in a different contact settlement than the listener's.
+        # The hop still distorts (the telephone game does not stop at the
+        # town line) but now it TELLS ON ITSELF: a `rumor_crossed_border`
+        # line with the carrier's family + the ledger entry the
+        # fidelity-per-family read aggregates. Honesty-OFF worlds never enter
+        # the branch (the em251 golden return shapes are untouched).
+        if self._contact_honesty_enabled():
+            origin_town = self._meme_origin_town(source)
+            tgt_town = getattr(target, "origin_settlement_id", None)
+            if origin_town and tgt_town and origin_town != tgt_town:
+                mutated = child.text != source.text
+                self._record_carriage(agent.id, mutated)
+                legs.append({
+                    "kind": "rumor_crossed_border",
+                    "actor_id": agent.id,
+                    "target_id": target.id,
+                    "text": (
+                        f"⟐ {agent.name}'s rumor crosses from "
+                        f"{self._group_display_name(origin_town)} into "
+                        f"{self._group_display_name(tgt_town)}."),
+                    "payload": {
+                        "action": "spread_rumor", "meme_id": child.id,
+                        "parent_id": source.id,
+                        "generation": child.generation,
+                        "from_settlement": origin_town,
+                        "to_settlement": tgt_town,
+                        "carrier_family": self._carriage_family(agent.id),
+                        "mutated": bool(mutated),
+                    },
+                })
+        return legs[0] if len(legs) == 1 else {"_multi": legs}
 
     def action_send_letter(self, agent: AgentState, target: AgentState,
                            text: str) -> dict:
@@ -11163,6 +11348,43 @@ class World:
                     # child opens at virality 1 (consistent with create/adopt —
                     # a meme with a carrier is never virality 0).
                     child.virality += 1
+                    # EM-333 honesty — the carriage leg: when the meme's
+                    # ORIGINAL author was born in a different contact
+                    # settlement than the freshly-infected target, this hop is
+                    # a BORDER CROSSING — town A's idea is now living in town
+                    # B (or the reverse). Counted in the honesty ledger under
+                    # the CARRIER's family (fidelity = who mangles whose
+                    # stories) and announced as a marquee feed line (the
+                    # First Contact moment EM-334's Contact panel reads).
+                    if self._contact_honesty_enabled():
+                        origin_town = self._meme_origin_town(meme)
+                        tgt_town = getattr(
+                            target, "origin_settlement_id", None)
+                        if (origin_town and tgt_town
+                                and origin_town != tgt_town):
+                            mutated = (child is not meme
+                                       and child.text != meme.text)
+                            self._record_carriage(carrier.id, mutated)
+                            events.append({
+                                "kind": "meme_crossed_border",
+                                "actor_id": carrier.id,
+                                "target_id": target.id,
+                                "actor_type": "system",
+                                "text": (
+                                    f"⟐ {self._agent_name(carrier.id)} carries "
+                                    f"the {meme.kind} from "
+                                    f"{self._group_display_name(origin_town)} "
+                                    f"into {self._group_display_name(tgt_town)}."),
+                                "payload": {
+                                    "meme_id": child.id,
+                                    "parent_id": meme.id,
+                                    "from_settlement": origin_town,
+                                    "to_settlement": tgt_town,
+                                    "carrier_family": self._carriage_family(
+                                        carrier.id),
+                                    "mutated": bool(mutated),
+                                },
+                            })
                     # Feed-health fix — only the first `mutation_cap` hops this
                     # sweep get their own line; the rest are counted, not
                     # dropped (aggregate event appended after the loop below).
@@ -11329,8 +11551,12 @@ class World:
         key = self._grievance_key(src, dst)
         total = max(0, min(100, int(self.grievances.get(key, 0)) + amount))
         self.grievances[key] = total
-        src_rec = self.factions.get(src) or {}
-        dst_rec = self.factions.get(dst) or {}
+        # EM-333 — settlement grievances ride the SAME ledger: when src/dst
+        # are settlement ids (a town-level war heat), the records resolve
+        # from self.settlements — both shapes carry name + members, so the
+        # naming + anchor below work verbatim for towns.
+        src_rec = self.factions.get(src) or self.settlements.get(src) or {}
+        dst_rec = self.factions.get(dst) or self.settlements.get(dst) or {}
         src_name = str(src_rec.get("name", "")) or src
         dst_name = str(dst_rec.get("name", "")) or dst
         # EM-141 convention: actor_id is an AGENT id — anchor on the aggrieved
@@ -11346,17 +11572,23 @@ class World:
         ))
         return total
 
-    def open_war(self, aggressor_id: str, target_id: str, aims: str) -> WarState:
+    def open_war(self, aggressor_id: str, target_id: str, aims: str,
+                 scope: str = "") -> WarState:
         """EM-256 — mint + register a WarState with a SEEDED id (sha1 of the
         sorted belligerent pair + tick — never the salted builtin hash, never
         uuid/clock): war_<8hex>, so replay/fork mints the byte-identical id
         (EM-155; the mint_meme recipe). IDEMPOTENT: re-opening the same key
         returns the already-registered war. Belligerents store SORTED (exactly
-        two — group ids today, city-scoped later via an additive key); the
-        aggressor rides separately. The EM-257 declare_war effect is the only
-        production caller this stage."""
+        two — group ids; EM-333 adds the promised additive `scope`:
+        '' (default) keeps the pair as faction ids, 'settlement' makes them
+        SETTLEMENT ids — a war between TOWNS — and folds the scope into the
+        id seed so a town war and a faction war can never share an id; the
+        default path's key format is byte-identical to pre-EM-333). The
+        EM-257 declare_war effect is the only production caller this stage."""
         lo, hi = sorted((str(aggressor_id), str(target_id)))
-        key = f"{lo}:{hi}:{self.tick}".encode()
+        scope = str(scope or "").strip()
+        key = (f"{lo}:{hi}:{scope}:{self.tick}" if scope
+               else f"{lo}:{hi}:{self.tick}").encode()
         wid = f"war_{hashlib.sha1(key).hexdigest()[:8]}"
         existing = self.wars.get(wid)
         if existing is not None:
@@ -11367,6 +11599,7 @@ class World:
             aggressor_id=str(aggressor_id),
             start_tick=self.tick,
             aims=str(aims or "").strip()[:200],
+            scope=scope,
         )
         self.wars[wid] = war
         return war
@@ -11824,7 +12057,12 @@ class World:
         lo, hi = war.belligerents[0], war.belligerents[1]
 
         def _dissolved(fid: str) -> bool:
+            # EM-333 — settlement belligerents resolve from self.settlements
+            # (same members/alive read); an unknown id of EITHER kind is a
+            # dissolved side.
             rec = self.factions.get(fid)
+            if rec is None:
+                rec = self.settlements.get(fid)
             if rec is None:
                 return True
             return not any(
@@ -11883,8 +12121,14 @@ class World:
         winner = next(b for b in war.belligerents if b != loser)
         war.status = "settled"
         amount = max(0, int(amount))
-        loser_rec = self.factions.get(loser) or {}
-        winner_rec = self.factions.get(winner) or {}
+        # EM-333 — settlement belligerents resolve from self.settlements (the
+        # same name/members shape — reparations + the grievance clear work
+        # verbatim for towns; the exile reads the loser's FACTION leader and
+        # simply skips when the loser is a town).
+        loser_rec = (self.factions.get(loser)
+                     or self.settlements.get(loser) or {})
+        winner_rec = (self.factions.get(winner)
+                      or self.settlements.get(winner) or {})
         loser_name = str(loser_rec.get("name", "")) or loser
         winner_name = str(winner_rec.get("name", "")) or winner
         # Collect: loser's living members pay in sorted-id order until the
@@ -12400,6 +12644,22 @@ class World:
             snap["grievances"] = {
                 str(k): int(v) for k, v in self.grievances.items()
             }
+        # EM-333 — the First Contact honesty ledger (cross-border carriage
+        # telemetry). Serialized only when a crossing exists (the grievances
+        # pattern), so an honesty-OFF world — and every pre-EM-333 snapshot —
+        # keeps the exact prior key set (absent ⇒ {} on restore).
+        if int(self.contact_ledger.get("crossings", 0) or 0) > 0:
+            snap["contact_ledger"] = {
+                "crossings": int(self.contact_ledger.get("crossings", 0)),
+                "by_family": {
+                    str(fam): {
+                        "hops": int(rec.get("hops", 0)),
+                        "mutated": int(rec.get("mutated", 0)),
+                    }
+                    for fam, rec in (self.contact_ledger.get("by_family")
+                                     or {}).items()
+                },
+            }
         # EM-260 — faiths (the Wave O Religion substrate). Serialized only when
         # non-empty (the wars pattern), so a faithless world — and every
         # pre-EM-260 snapshot — keeps the exact prior key set (absent ⇒ {} on
@@ -12902,6 +13162,12 @@ class World:
                     and str(d.get("home_settlement_id")).strip()
                     else None
                 ),
+                origin_settlement_id=(
+                    str(d["origin_settlement_id"])
+                    if isinstance(d.get("origin_settlement_id"), str)
+                    and str(d.get("origin_settlement_id")).strip()
+                    else None
+                ),
                 in_transit_to=(
                     str(d["in_transit_to"])
                     if isinstance(d.get("in_transit_to"), str)
@@ -13232,6 +13498,7 @@ class World:
                     for g, v in (wrec.get("exhaustion") or {}).items() if g
                 },
                 status=status if status in ("active", "settled") else "active",
+                scope=str(wrec.get("scope", "") or ""),
             )
         world.wars = restored_wars
         world.grievances = {}
@@ -13239,6 +13506,27 @@ class World:
             heat = _int(gval)
             if gkey and "->" in str(gkey) and heat > 0:
                 world.grievances[str(gkey)] = min(100, heat)
+        # EM-333 — restore the honesty ledger (additive: pre-EM-333 snapshots
+        # lack the key and restore {}, so a pre-honesty fork/replay is
+        # byte-identical). Defensive: non-dict/non-positive rows are dropped;
+        # per-family scalars coerce fail-safe (the ledger never carries junk).
+        world.contact_ledger = {}
+        _ledger = state.get("contact_ledger")
+        if (isinstance(_ledger, dict)
+                and _int(_ledger.get("crossings")) > 0):
+            world.contact_ledger = {
+                "crossings": min(10 ** 9, _int(_ledger.get("crossings"))),
+                "by_family": {
+                    str(fam): {
+                        "hops": min(10 ** 9, _int(
+                            rec.get("hops", 0))) if isinstance(rec, dict) else 0,
+                        "mutated": min(10 ** 9, _int(
+                            rec.get("mutated", 0))) if isinstance(rec, dict) else 0,
+                    }
+                    for fam, rec in (_ledger.get("by_family") or {}).items()
+                    if fam and isinstance(rec, dict)
+                },
+            }
         # EM-260 — restore faiths (additive: pre-EM-260 snapshots lack the key
         # and restore {}, so a faithless fork/replay is byte-identical).
         # Defensive: a faith row that is not a dict or has a blank id is dropped;
