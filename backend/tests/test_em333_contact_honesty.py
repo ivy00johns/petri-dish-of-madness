@@ -221,8 +221,11 @@ def test_visitor_carries_meme_home():
     sid_a, sid_b = _towns(w)
     visitor = w.agents[_half_ids(w, "b")[0]]
     ev = w.action_travel_to(visitor, sid_a)
-    assert ev["kind"] == "travel_departed"
-    w.tick = ev["payload"]["arrival_tick"]
+    # EM-334 — the first cross-town departure now rides a contact_made leg;
+    # this test is about the carriage, so unwrap the chain.
+    departed = ev["_multi"][0] if "_multi" in ev else ev
+    assert departed["kind"] == "travel_departed"
+    w.tick = departed["payload"]["arrival_tick"]
     w.resolve_travel_arrivals()
     assert visitor.home_settlement_id == sid_a      # the defection is real
     assert visitor.origin_settlement_id == sid_b    # the origin is too

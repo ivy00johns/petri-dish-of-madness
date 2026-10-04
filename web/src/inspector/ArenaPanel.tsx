@@ -136,6 +136,7 @@ export default function ArenaPanel() {
 
   const running = tStatus?.status === 'running';
   const families = arena?.families ?? [];
+  const contactRuns = arena?.contact_runs ?? [];
 
   return (
     <section
@@ -302,6 +303,50 @@ export default function ArenaPanel() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ── Contact runs (EM-334) — the First Contact comparison ────── */}
+      {contactRuns.length > 0 && (
+        <div className="mt-2" data-testid="arena-contact-runs">
+          <div className="text-[10px] uppercase tracking-wide opacity-70 mb-1">
+            First Contact runs
+          </div>
+          <div className="flex flex-col gap-1">
+            {contactRuns.map((c) => (
+              <div
+                key={c.run_id}
+                data-testid={`arena-contact-run-${c.run_id}`}
+                className="rounded border border-current/10 px-1.5 py-1 min-w-0"
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-[10px] opacity-80">
+                    run #{c.run_id} · tick {c.max_tick} ·{' '}
+                    <span className="font-mono">
+                      {c.family_a || '?'} vs {c.family_b || '?'}
+                    </span>
+                    {c.name_b ? <span className="opacity-60"> (town B: {c.name_b})</span> : null}
+                  </span>
+                  <span className="font-mono text-[10px] opacity-60">
+                    {OUTCOME_KEYS.map(
+                      (k) => `${OUTCOME_LABELS[k]} ${compact(c.outcomes[k] ?? 0)}`,
+                    ).join('  ')}
+                  </span>
+                </div>
+                <div className="font-mono text-[10px] opacity-70">
+                  {Object.entries(c.population_by_town)
+                    .map(([town, n]) => `${town} ${n}`)
+                    .join(' · ') || 'no towns yet'}
+                  {c.contact_made
+                    ? ` · 🌍 first contact t${c.contact_made.tick}`
+                    : ' · no crossing yet'}
+                  {c.ledger
+                    ? ` · ${c.ledger.crossings} crossings`
+                    : ''}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </section>

@@ -2221,6 +2221,74 @@ async def list_runs():
     return _repo.list_runs(active_run_id=_active_run_id())
 
 
+@app.get("/api/contact")
+async def get_contact(limit: int = 20):
+    """EM-334 — the First Contact read surface (SC): the live two-town
+    world's settlement cards (name / founding tick / members / cast-family
+    counts via the EM-112 classifier), the contact marker latch (EM-334's
+    one-shot first-departure stamp), the EM-333 honesty ledger, and the
+    recent crossing + travel events. Zero-LLM, read-only, off the replay
+    surface. `{enabled: false}` when the live world carries no ARMED contact
+    block (the panel renders nothing — same labeled-state contract as the
+    fingerprints endpoint)."""
+    if _loop is None or _world is None:
+        raise HTTPException(503, "Not initialized")
+    if not _world._contact_enabled():
+        return {"enabled": False}
+    settlements = []
+    for sid in sorted(_world.settlements):
+        st = _world.settlements[sid]
+        fams: dict[str, int] = {}
+        for aid in (st.get("members") or []):
+            agent = _world.agents.get(str(aid))
+            if agent is None or not agent.alive:
+                continue
+            fam = _world._carriage_family(agent.id)
+            fams[fam] = fams.get(fam, 0) + 1
+        settlements.append({
+            "id": sid,
+            "name": str(st.get("name", "")) or sid,
+            "founded_tick": int(st.get("founded_tick", 0) or 0),
+            "member_count": len(st.get("members") or []),
+            "families": fams,
+        })
+    out: dict = {
+        "enabled": True,
+        "tick": int(_world.tick),
+        "settlements": settlements,
+        "contact_made": dict(_world.contact_made) if _world.contact_made else None,
+        "ledger": (json.loads(json.dumps(_world.contact_ledger))
+                   if _world.contact_ledger else None),
+        "crossings": [],
+        "travels": [],
+    }
+    if _repo is not None:
+        run_id = _resolve_run_id(None)
+        if run_id is not None:
+            try:
+                capped = max(1, min(int(limit or 20), 100))
+            except (TypeError, ValueError):
+                capped = 20
+            rows = _repo.get_events(
+                run_id,
+                kinds=["meme_crossed_border", "rumor_crossed_border",
+                       "travel_departed", "travel_arrived"],
+                order="desc", limit=capped)
+            for e in rows or []:
+                rec = {
+                    "tick": e.get("tick"), "kind": e.get("kind"),
+                    "actor_id": e.get("actor_id"),
+                    "text": (e.get("text") or "")[:160],
+                    "payload": e.get("payload") or {},
+                }
+                bucket = (out["travels"]
+                          if e.get("kind") in ("travel_departed",
+                                                "travel_arrived")
+                          else out["crossings"])
+                bucket.append(rec)
+    return out
+
+
 @app.get("/api/fingerprints")
 async def get_fingerprints(run_id: int | None = None):
     """EM-313 — Fingerprint Ticker. A zero-LLM, READ-ONLY behavioral-stylometry

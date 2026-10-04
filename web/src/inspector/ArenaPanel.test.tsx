@@ -32,6 +32,7 @@ const startMock = vi.mocked(inspectorApi.startTournament);
 const abortMock = vi.mocked(inspectorApi.abortTournament);
 
 const ARENA: ArenaSummary = {
+  contact_runs: [],
   families: [
     {
       family: 'gemini',
@@ -127,7 +128,7 @@ describe('ArenaPanel — standings (EM-119)', () => {
     await waitFor(() =>
       expect(screen.getByText(/no backend — the arena reads persisted runs/)).toBeInTheDocument());
 
-    arenaMock.mockResolvedValue({ families: [] });
+    arenaMock.mockResolvedValue({ families: [], contact_runs: [] });
     render(<ArenaPanel />);
     await waitFor(() =>
       expect(screen.getAllByText(/no family-stamped runs yet/).length).toBeGreaterThan(0));
