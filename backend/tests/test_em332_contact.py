@@ -389,6 +389,7 @@ def test_contact_endpoint_boots_two_towns(contact_client):
     assert cfg_json["world"]["contact"]["enabled"] is True
     assert cfg_json["world"]["contact"]["family_a"] == "gemini"
     assert cfg_json["world"]["contact"]["family_b"] == "llama"
+    assert cfg_json["world"]["contact"]["honesty"] is True  # EM-333 arms SB
 
 
 def test_contact_endpoint_400_on_bad_families(contact_client):

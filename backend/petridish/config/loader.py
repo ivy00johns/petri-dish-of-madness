@@ -1660,6 +1660,13 @@ class ContactParams:
     seed_offset: int = 1
     n_places: int = 8
     margin: int = 60
+    # EM-333 — contact-honesty wiring (SB), default OFF and byte-identical
+    # when off: cross-border meme/rumor carriage telemetry (fidelity per
+    # carrying model family) + settlement-scoped war grievances (a border
+    # incident heats the TOWNS, and a cross-town faction war is declared
+    # BETWEEN THE TOWNS). Requires `enabled` (a keystone-OFF world never
+    # enters any honesty path).
+    honesty: bool = False
 
 
 @dataclass
@@ -3500,6 +3507,7 @@ def _parse_contact(raw: dict | None) -> ContactParams:
         seed_offset=_int("seed_offset", 1, 0),
         n_places=_int("n_places", 8, 4),
         margin=_int("margin", 60, 10),
+        honesty=bool(raw.get("honesty", False)),
     )
 
 
