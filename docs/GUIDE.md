@@ -462,6 +462,7 @@ adaptive_routing:
   per_attempt_timeout_s: 12     # per-lane wall-clock cap (no long doomed cascades)
   allow_paid: false             # $0-first: `free: false` lanes stay off unless true
   terminal_fallback: auto       # the GUARANTEED final-attempt lane (any profile may hold it)
+  family_pin: false             # EM-341: serve a classified home from its own family only
   discovery:                    # P2 — data-driven lane pool (EM-300)
     enabled: false              # master toggle; false = static registry (this file only)
     every_turns: 40             # counter-based auto-refresh cadence (served turns)
@@ -478,7 +479,10 @@ adaptive_routing:
 `lanes.yaml` is thoroughly self-documented inline (curation rationale, matcher-glob syntax,
 the reserved-terminal-slot mechanism) and backed by
 `docs/superpowers/specs/2026-07-07-adaptive-lane-routing.md` — read the file itself before
-editing `order`/`exclude`. `discovery.enabled: true` additionally exposes `POST
+editing `order`/`exclude`. `family_pin: true` (EM-341) scopes substitute traffic to the
+home lane's model family (never the pin itself; an unclassifiable home stands the gate
+down, a cross-family `auto` forfeits instead of serving blind) — flip it ON for EM-335
+cast-split experiments so the "family" behavioral split rides real model weights. `discovery.enabled: true` additionally exposes `POST
 /api/lanes/refresh` and `GET /api/lanes/registry`. Config is captured in `runs.config_json`,
 so a run's routing order is pinned for fork/replay.
 

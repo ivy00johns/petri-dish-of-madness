@@ -51,6 +51,23 @@ adaptive_routing:
   # when one does surface it is real signal, not noise to mask.
   terminal_fallback: auto
 
+  # EM-341 (2026-10-05) — FAMILY-SCOPED ROUTING. Default false ⇒ byte-identical
+  # (bounces / the reserved `auto` terminal / overflow may land on ANY family's
+  # lane). true: a call whose HOME lane classifies to a known model family
+  # (EM-112 table — llama/gemini/qwen/…) may only be SERVED by same-family
+  # lanes, so a split-cast run's "family" behavioral split rides real model
+  # weights. Motivation: runs 22/23 — adaptive routing + discovery collapsed
+  # BOTH casts onto the same kilo/* disco lanes (~60-70% of resolved turns),
+  # so the EM-335 cast-vs-town read-off was confounded and the run-23 llama
+  # cast went stationary on lane-specific failures (see EM-341/EM-340).
+  # Rules: the caller's OWN pin is never gated (a sick pin still probes home);
+  # an UNCLASSIFIABLE candidate (family "other" — kilo/ling-*, the blind `auto`
+  # terminal, mock) is barred for a classified home (strict); an UNCLASSIFIABLE
+  # home stands the gate down; a cross-family `auto` forfeits instead of
+  # serving blind (all-same-family-fail still re-raises to the idle fallback —
+  # never mute). Flip ON for EM-335 contact flips; leave OFF for ordinary runs.
+  family_pin: false
+
   # ── Dynamic discovery/refresh (spec P2, EM-300) ────────────────────────────
   # Makes the lane pool DATA-DRIVEN: poll the FreeLLMAPI proxy's /v1/models
   # catalog + detect direct-provider env keys so lanes appear as you provision
