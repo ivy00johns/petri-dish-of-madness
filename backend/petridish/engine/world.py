@@ -1936,6 +1936,16 @@ class World:
         # world — and every pre-EM-333 snapshot — stays byte-identical
         # (EM-155).
         self.contact_ledger: dict[str, dict] = {}
+        # EM-339 — WHICH run the honesty ledger's numbers belong to. A fresh
+        # world carries None; init_run/reset stamp the active run row id, and
+        # from_snapshot restores whatever the snapshot's ledger recorded. The
+        # pre-339 reset rebuilt the world in-place but left the ledger intact,
+        # so run 23 shipped run 22's 131-crossing ledger on every /api surface
+        # and inside its own snapshots — with the stamp, stale persistence is
+        # self-evident instead of masquerading as fresh data. Serialized inside
+        # the contact_ledger snapshot block only-when-set (byte-identical for
+        # every pre-339 world).
+        self.contact_run_id: int | None = None
         # EM-334 — the First Contact MARKER: the moment a citizen of one
         # contact settlement first set out for the other. One-shot latch
         # {"tick", "agent_id", "from_settlement", "to_settlement"} stamped
@@ -4559,6 +4569,26 @@ class World:
             fam_rec["mutated"] = int(fam_rec.get("mutated", 0)) + 1
         self.contact_ledger["crossings"] = int(
             self.contact_ledger.get("crossings", 0)) + 1
+
+    def reset_contact_state(self) -> None:
+        """EM-339 — the ONE fresh-run seam for the First Contact state: clear
+        the EM-333 honesty ledger and the EM-334 marker latch, and drop the
+        ledger's owning-run stamp (re-stamped by the boot path once the new
+        run row exists). Loop.reset previously rebuilt the world in-place but
+        left all three intact, so a fresh run inherited the prior run's
+        crossings, its contact_made latch (whose one-shot guard then blocked
+        the fresh world's own first-contact stamp), and un-stamped numbers
+        nobody could tell apart from fresh data."""
+        self.contact_ledger = {}
+        self.contact_run_id = None
+        self.contact_made = None
+
+    def stamp_contact_ledger_run(self, run_id: int | None) -> None:
+        """EM-339 — name the run the honesty ledger belongs to: init_run and
+        reset stamp the fresh row id; a fork/resume deliberately keeps the
+        PARENT stamp (the restored crossings were recorded under the parent
+        run's rows — the stamp marks the data's origin, not the live row)."""
+        self.contact_run_id = int(run_id) if run_id is not None else None
 
     def _group_display_name(self, gid: str) -> str:
         """EM-333 — a faction OR settlement record's display name (the war
@@ -12705,7 +12735,7 @@ class World:
         # pattern), so an honesty-OFF world — and every pre-EM-333 snapshot —
         # keeps the exact prior key set (absent ⇒ {} on restore).
         if int(self.contact_ledger.get("crossings", 0) or 0) > 0:
-            snap["contact_ledger"] = {
+            _ledger_snap = {
                 "crossings": int(self.contact_ledger.get("crossings", 0)),
                 "by_family": {
                     str(fam): {
@@ -12716,6 +12746,11 @@ class World:
                                      or {}).items()
                 },
             }
+            # EM-339 — the owning-run stamp rides only-when-set: pre-339 worlds
+            # (and stampless archives) keep the exact prior ledger dict.
+            if self.contact_run_id is not None:
+                _ledger_snap["run_id"] = int(self.contact_run_id)
+            snap["contact_ledger"] = _ledger_snap
         # EM-334 — the First Contact marker latch. Serialized only-when-set
         # (the town_motif_ref pattern): a world where nobody has traveled
         # keeps the exact prior key set (absent ⇒ None on restore).
@@ -13580,6 +13615,10 @@ class World:
         # per-family scalars coerce fail-safe (the ledger never carries junk).
         world.contact_ledger = {}
         _ledger = state.get("contact_ledger")
+        # EM-339 — restore the owning-run stamp (additive: pre-339 snapshots
+        # lack the key and restore None, byte-identical).
+        _rid = _ledger.get("run_id") if isinstance(_ledger, dict) else None
+        world.contact_run_id = _int(_rid) if _rid not in (None, "") else None
         if (isinstance(_ledger, dict)
                 and _int(_ledger.get("crossings")) > 0):
             world.contact_ledger = {
