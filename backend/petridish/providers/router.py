@@ -19,6 +19,7 @@ from typing import Callable
 from ..config.loader import ModelProfile
 from .adapters import OpenAICompatibleAdapter, AnthropicAdapter, GeminiAdapter
 from . import discovery as _discovery
+from . import families as _families
 from .base import Provider, ProviderError
 from .lanes import Lane, LaneRegistry, SortingList
 from .mock import MockProvider
@@ -567,7 +568,13 @@ class Router:
         if ((self._lane_cooling(profile_name)
                 or self._platform_cooling(profile_name))
                 and self._auto_backup is not None
-                and profile_name != self._auto_backup):
+                and profile_name != self._auto_backup
+                # EM-341 — a cross-family `auto` cannot pre-empt a
+                # family-scoped call (the whole-pool router would serve
+                # another family's model); fall through to the ordinary paths.
+                and self._family_allows(
+                    self._family_gate_active(profile_name),
+                    profile_name, self._auto_backup)):
             # Rate-limit pre-emption (spec §3.5 + EM-300 P3) — the pinned lane
             # is either inside its own 429 cooling window (reactive) or its
             # PLATFORM is inside the proxy-declared resume_at window
@@ -586,6 +593,7 @@ class Router:
                     "rate-limited — cooling window (routed to auto)"),
                 messages, max_tokens=max_tokens, temperature=temperature,
                 note_home_error=False,
+                family_pin=self._family_gate_active(profile_name),
             )
         elif self._adaptive_enabled() and self.lane_sick(profile_name):
             # Adaptive Lane Routing (spec §6 step 1) — the pinned lane is
@@ -606,6 +614,9 @@ class Router:
             # the per-attempt timeout. A clean probe serves the turn from home
             # (the runtime's parse outcome then ages the demerits out); a
             # failed probe records ONE fresh demerit and bounces as usual.
+            # EM-341 — the gate rides the HOME lane's classification for this
+            # whole call (both the probe-bounce and the pre-skip below).
+            family_gate = self._family_gate_active(profile_name)
             probe_text: str | None = None
             probe_exc: ProviderError | None = None
             n = self._lane_detour_counter.get(profile_name, 0) + 1
@@ -632,6 +643,7 @@ class Router:
                     profile_name, probe_exc,
                     messages, max_tokens=max_tokens, temperature=temperature,
                     require_json=require_json, boosted=boosted,
+                    family_gate=family_gate,
                 )
             else:
                 text, served_by = await self._bounce_call(
@@ -642,6 +654,7 @@ class Router:
                         else "pinned lane pre-skipped (health-sick)"),
                     messages, max_tokens=max_tokens, temperature=temperature,
                     require_json=require_json, pre_skip=True, boosted=boosted,
+                    family_gate=family_gate,
                 )
         else:
             try:
@@ -654,6 +667,9 @@ class Router:
                     # instead of burning another doomed POST. Non-rate-limit
                     # errors keep the existing path untouched.
                     self._set_cooldown(profile_name, exc.retry_after)
+                # EM-341 — one classification of the HOME lane per call; the
+                # verdict scopes every substitute this call may reach.
+                family_gate = self._family_gate_active(profile_name)
                 if self._adaptive_enabled():
                     # Adaptive Lane Routing (spec P1) — walk the sorting-list
                     # registry in priority order (ordered / health-aware /
@@ -665,6 +681,7 @@ class Router:
                         profile_name, exc, messages,
                         max_tokens=max_tokens, temperature=temperature,
                         require_json=require_json, boosted=boosted,
+                        family_gate=family_gate,
                     )
                 else:
                     # EM-205 — retry the SAME call ONCE on the proxy's `auto`
@@ -675,6 +692,7 @@ class Router:
                     text, served_by = await self._auto_backup_call(
                         profile_name, exc, messages,
                         max_tokens=max_tokens, temperature=temperature,
+                        family_pin=family_gate,
                     )
 
         # W11b / EM-083 — one REAL provider call completed: feed the day-window
@@ -728,6 +746,7 @@ class Router:
         max_tokens: int,
         temperature: float,
         note_home_error: bool = True,
+        family_pin: bool = False,
     ) -> tuple[str, str]:
         """EM-205 — auto-backup: retry one failed call ONCE on the proxy `auto`.
 
@@ -753,11 +772,21 @@ class Router:
         `note_home_error=False` (per-lane cooldown pre-emptive route, spec
         §3.5): a cooling turn makes no home POST, so it must NOT record a
         fresh home error — the 429 that opened the window already did, and a
-        second demerit would pin the lane sick forever."""
+        second demerit would pin the lane sick forever.
+
+        `family_pin=True` (EM-341): the caller classified the HOME lane as
+        family-scoped for THIS call — a cross-family `auto` backup forfeits
+        (the home error re-raises) instead of serving blind. Never-mute is
+        untouched: the runtime's EM-173 idle fallback stays the last resort."""
         if note_home_error:
             self.note_lane_error(home)
         backup = self._auto_backup
         if backup is None or backup == home:
+            raise first_exc
+        # EM-341 — a cross-family backup FORFEITS for a family-scoped call:
+        # the whole-pool `auto` router must not smuggle another family's
+        # model into the serving path. Re-raise the home error.
+        if family_pin and not self._family_allows(family_pin, home, backup):
             raise first_exc
         adapter = self._adapters.get(backup)
         if adapter is None:  # pragma: no cover - defensive
@@ -1019,6 +1048,42 @@ class Router:
         if isinstance(exclude, (list, tuple)):
             return tuple(exclude)
         return ()
+
+    def _ar_family_pin(self) -> bool:
+        """EM-341 — `adaptive_routing.family_pin` (default OFF ⇒ byte-identical
+        pre-341 routing). ON: a call whose home lane classifies to a known
+        model family may only be SERVED by same-family lanes (see
+        _family_gate_active / _family_allows)."""
+        return bool(self._ar_value("family_pin", False))
+
+    def _lane_family(self, profile_name: str) -> str:
+        """The coarse EM-112 family of a profile's lane ("llama"/"gemini"/...
+        or "other" for an unclassifiable lane — kilo/ling-* disco lanes, the
+        blind `auto` terminal, mock). Never throws."""
+        profile = self._profiles.get(profile_name)
+        if profile is None:
+            return "other"
+        return _families.model_family(
+            getattr(profile, "model_id", None), profile_name)
+
+    def _family_gate_active(self, home: str) -> bool:
+        """True when EM-341 family-scoped routing APPLIES to this call: the
+        flag is ON and the HOME lane classifies to a known family (not
+        "other"). An unclassifiable home (`auto`, mock, an unrecognized
+        model) STANDS THE GATE DOWN — a lane the table cannot name keeps
+        pre-341 behavior (there is no family to pin to)."""
+        return self._ar_family_pin() and self._lane_family(home) != "other"
+
+    def _family_allows(self, gate: bool, home: str, candidate: str) -> bool:
+        """EM-341 — may `candidate` SERVE `home`'s call? Same-family ⇒ yes.
+        Strict rule: an UNCLASSIFIABLE candidate (family "other" — the exact
+        kilo/ling-* collapse that motivated the flag) is barred for a
+        classified home; every KNOWN family must match the home's. Only read
+        when the gate is active; the pin itself is never gated (the caller
+        keeps identity — only substitutes are scoped)."""
+        if not gate or candidate == home:
+            return True
+        return self._lane_family(candidate) == self._lane_family(home)
 
     @staticmethod
     def _lane_source(profile: ModelProfile) -> str | None:
@@ -1315,6 +1380,7 @@ class Router:
         require_json: bool = False,
         pre_skip: bool = False,
         boosted: bool = False,
+        family_gate: bool = False,
     ) -> tuple[str, str]:
         """Adaptive Lane Routing bounce loop (spec §6). Reached two ways:
         (a) the pinned `home` lane just FAILED (`pre_skip=False`) — its error is
@@ -1368,6 +1434,13 @@ class Router:
         W30 bounced_to redirect in note_parse_outcome, aging the demerits
         out automatically; a failure costs one bounded attempt that only
         fires after every curated candidate already failed."""
+        # EM-341 — family-scoped bounce: `family_gate` is threaded from chat()
+        # (the HOME lane's verdict, one classification per call — never
+        # re-derived mid-walk). True ⇒ every SUBSTITUTE lane below (the curated
+        # walk AND the reserved terminal) must be same-family; an
+        # unclassifiable candidate (family "other" — the exact kilo/ling-*
+        # lane collapse that motivated the flag) is barred. See _family_allows.
+        gate = family_gate and self._ar_family_pin()
         if not pre_skip:
             self.note_lane_error(home)
         tried: set[str] = {home}
@@ -1420,6 +1493,15 @@ class Router:
                 and self._adapters.get(backstop) is not None):
             reserved = next(
                 (ln for ln in ordered if ln.profile == backstop), None)
+            # EM-341 — a cross-family reserved terminal FORFEITS its slot for
+            # this bounce (the curated budget stays full): a blind whole-pool
+            # `auto` pick must not smuggle another family's model into a
+            # family-scoped call. Never-mute is untouched — when every
+            # same-family lane fails, the bounce still re-raises to the idle
+            # fallback exactly as before.
+            if (reserved is not None
+                    and not self._family_allows(gate, home, reserved.profile)):
+                reserved = None
         curated_budget = max_attempts - 1 if reserved is not None else max_attempts
 
         for lane in ordered:
@@ -1462,6 +1544,8 @@ class Router:
                 continue  # #77: ceiling can't fit even the genuine floor
             if require_json and "reasoning" in lane.tags:
                 continue  # reasoning lane deprioritized on a strict-JSON turn
+            if not self._family_allows(gate, home, prof):
+                continue  # EM-341: a cross-family lane cannot serve this call
 
             tried.add(prof)
             attempts += 1
@@ -1904,6 +1988,12 @@ class Router:
         target = self._overflow_profile()
         if not target or target == home:
             return None
+        # EM-341 — family-scoped overflow: a spill lane outside the home's
+        # model family (e.g. a gemini agent spilling onto the local
+        # ollama/gemma llama-family lane — run 26's top lane at 25%)
+        # self-suppresses, so the turn keeps its home routing.
+        if not self._family_allows(self._family_gate_active(home), home, target):
+            return None
         profile = self._profiles.get(target)
         if profile is None or profile.adapter == "mock":
             return None
@@ -1977,6 +2067,12 @@ class Router:
             except Exception:  # pragma: no cover - defensive
                 continue
             if self.lane_sick(name):
+                continue
+            # EM-341 — family-scoped failover: a cross-family substitute is
+            # not a candidate for a classified home (same gate as the bounce
+            # walk; the #76 pre-adaptive detour path).
+            if not self._family_allows(
+                    self._family_gate_active(home), home, name):
                 continue
             window = self._lane_outcomes.get(name) or ()
             demerits = sum(

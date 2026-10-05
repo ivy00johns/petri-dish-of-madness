@@ -946,6 +946,29 @@ class AdaptiveRoutingParams:
       discovery            — dynamic lane discovery/refresh (P2). Default OFF ⇒
                              the static P1 registry, byte-identical. See
                              DiscoveryParams.
+
+      family_pin           — EM-341 (2026-10-05) FAMILY-SCOPED ROUTING. Default
+                             OFF ⇒ byte-identical: bounces, the reserved
+                             `auto` terminal, and the overflow/detour spill may
+                             land on ANY family's lane. ON: a call whose HOME
+                             lane classifies to a known model family (the EM-112
+                             table — llama/gemini/qwen/...) may only be SERVED
+                             by same-family lanes, so a split-cast run's
+                             "family" behavioral split rides real model weights
+                             (the EM-341 finding: kilo/* disco lanes collapsed
+                             BOTH runs' casts onto one lane, making the
+                             cast-vs-town read-off confounded). Never gates the
+                             caller's OWN pin (identity is never muted — a sick
+                             pin still probes home); only SUBSTITUTE lanes are
+                             scoped. Strict: an UNCLASSIFIABLE candidate lane
+                             (family "other", e.g. a kilo/ling-* disco lane) is
+                             barred for a classified home; an UNCLASSIFIABLE
+                             HOME stands the gate down (a home the table cannot
+                             name — `auto`/mock — keeps pre-341 behavior). The
+                             `auto` terminal/backup forfeits its slot when
+                             cross-family instead of serving blind (a fresh
+                             failure still re-raises to the idle fallback, so
+                             muting is impossible).
     """
     enabled: bool = False
     max_attempts: int = 3
@@ -954,6 +977,7 @@ class AdaptiveRoutingParams:
     terminal_fallback: str | None = None
     order: tuple[LaneOrderEntry, ...] = ()
     exclude: tuple[LaneOrderEntry, ...] = ()
+    family_pin: bool = False
     discovery: DiscoveryParams = field(default_factory=DiscoveryParams)
 
 
@@ -2876,6 +2900,8 @@ def _parse_adaptive_routing(raw: dict | None) -> AdaptiveRoutingParams:
         # PR#106 C15 — the denylist reuses the order-entry shape/parser, so the
         # config_json asdict round-trip normalizes it for free.
         exclude=_parse_lane_order(raw.get("exclude")),
+        # EM-341 — family-scoped routing. Default OFF ⇒ byte-identical.
+        family_pin=bool(raw.get("family_pin", d.family_pin)),
         # P2 — dynamic discovery/refresh. Absent ⇒ OFF defaults (byte-identical
         # static registry). asdict serializes it to a flat dict that this
         # parser round-trips.
