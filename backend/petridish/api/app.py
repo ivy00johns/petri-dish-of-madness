@@ -2259,6 +2259,10 @@ async def get_contact(limit: int = 20):
         "contact_made": dict(_world.contact_made) if _world.contact_made else None,
         "ledger": (json.loads(json.dumps(_world.contact_ledger))
                    if _world.contact_ledger else None),
+        # EM-339 — the run row the ledger's numbers belong to (None on a fresh
+        # world or a pre-stamp archive): a stale-survivor ledger is now
+        # self-evident instead of masquerading as this run's data.
+        "ledger_run_id": getattr(_world, "contact_run_id", None),
         "crossings": [],
         "travels": [],
     }

@@ -542,6 +542,14 @@ class TickLoop:
         # a stale entry's until_tick would keep its buff alive deep into the
         # fresh run (and its expiry would emit a spurious miracle_expired).
         self._world.active_miracles = []
+        # EM-339 — clear the First Contact state: the pre-339 reset left the
+        # honesty ledger and the contact_made latch intact across the in-place
+        # rebuild, so the fresh run inherited the prior run's crossings (run 23
+        # shipped run 22's 131-crossing ledger) and its one-shot latch blocked
+        # the fresh world's own first-contact stamp.
+        _reset_contact = getattr(self._world, "reset_contact_state", None)
+        if callable(_reset_contact):
+            _reset_contact()
         self._world.tick = 0
         self._world.day = 0
         self._world.round = 0
@@ -648,6 +656,11 @@ class TickLoop:
             except Exception:
                 pass
         self._run_id = self._repo.start_run(cfg_json, model_family=model_family)
+        # EM-339 — stamp the honesty ledger with the row it belongs to (None
+        # stamp when the repo path is unavailable — defensive, never fatal).
+        _stamp = getattr(self._world, "stamp_contact_ledger_run", None)
+        if callable(_stamp):
+            _stamp(self._run_id)
         # EM-222 — hand the runtime the repo + active run so relevance-scored
         # memory retrieval can read the persisted event log of THIS run.
         self._wire_runtime_run_context()
@@ -675,6 +688,11 @@ class TickLoop:
         path never casts (None), so behavior is unchanged."""
         cfg_json = _run_config_json(config)
         self._run_id = self._repo.start_run(cfg_json, model_family=model_family)
+        # EM-339 — stamp the honesty ledger with the row it belongs to (None
+        # stamp when the repo path is unavailable — defensive, never fatal).
+        _stamp = getattr(self._world, "stamp_contact_ledger_run", None)
+        if callable(_stamp):
+            _stamp(self._run_id)
         # EM-222 — hand the runtime the repo + active run so relevance-scored
         # memory retrieval can read the persisted event log of THIS run.
         self._wire_runtime_run_context()

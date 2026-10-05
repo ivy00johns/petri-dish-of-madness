@@ -356,3 +356,26 @@ def test_contact_endpoint_surfaces_towns_marker_and_events(contact_client):
     assert out2["contact_made"]["to_settlement"] == sid_b
     assert out2["travels"][0]["kind"] == "travel_departed"
     assert out2["travels"][0]["actor_id"] == traveler.id
+
+
+def test_contact_endpoint_stamps_the_ledger_run(contact_client):
+    """EM-339 — the surface names the run the ledger belongs to: after a
+    contact reset the fresh world reports the ACTIVE run row (no stale
+    survivor), and a foreign stamp injected onto the live world shows up
+    verbatim so stale persistence is self-evident."""
+    client, appmod = contact_client
+    assert client.post("/api/arena/contact",
+                       json={"family_a": "gemini",
+                             "family_b": "llama"}).status_code == 202
+    world = appmod._loop._world
+    out = client.get("/api/contact").json()
+    assert out["enabled"] is True
+    assert out["ledger_run_id"] == appmod._loop._run_id
+    assert out["ledger"] is None  # fresh run: no crossings yet
+
+    world.contact_ledger = {"crossings": 5,
+                            "by_family": {"gemini": {"hops": 5, "mutated": 1}}}
+    world.contact_run_id = 999  # a stale-survivor stamp
+    out2 = client.get("/api/contact").json()
+    assert out2["ledger"]["crossings"] == 5
+    assert out2["ledger_run_id"] == 999
