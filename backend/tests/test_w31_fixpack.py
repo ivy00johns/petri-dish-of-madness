@@ -344,5 +344,5 @@ def test_disabled_war_siege_still_leaves_no_trace():
     w.params.war = {"enabled": False}
     before = json.dumps(w.to_snapshot(), sort_keys=True)
     evt = w.action_siege(w.agents["ada"], "bld_keep")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert json.dumps(w.to_snapshot(), sort_keys=True) == before

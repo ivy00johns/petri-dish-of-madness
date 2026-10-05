@@ -290,7 +290,7 @@ async def test_background_turn_really_calls_the_ollama_adapter():
     # always takes a full LLM turn.
     agent.cadence_tier = "supporting"
     event = await runtime.run_turn(agent)
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
 
     # The overflow lane REALLY served the call, at OLLAMA's budget.
     assert ollama.calls == [(999, 0.1)]
@@ -314,7 +314,7 @@ async def test_protagonist_turn_is_byte_identical_no_overflow():
     runtime = AgentRuntime(world, router)
 
     event = await runtime.run_turn(agent)
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
 
     assert home.calls == [(512, 0.8)]
     assert ollama.calls == []
@@ -355,7 +355,7 @@ async def test_unreachable_ollama_falls_back_via_auto_backup():
     # served the EM-205 retry — exactly the animal background-task fallback.
     assert ollama.calls == 1
     assert auto.calls == [(999, 0.1)]
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
 
 
 @pytest.mark.asyncio

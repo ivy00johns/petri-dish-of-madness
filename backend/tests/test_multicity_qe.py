@@ -233,13 +233,13 @@ def test_reject_same_double_and_unknown_are_all_feed_safe():
 
     # unknown target — no such settlement (must not raise, must not set transit)
     r = w.action_travel_to(b, "Atlantis")
-    assert r["kind"] == "parse_failure"
+    assert r["kind"] == "action_rejected"
     assert isinstance(r.get("text"), str) and r["text"]
     assert b.in_transit_to is None
 
     # same city — b's own home is rejected
     r = w.action_travel_to(b, b.home_settlement_id)
-    assert r["kind"] == "parse_failure"
+    assert r["kind"] == "action_rejected"
     assert b.in_transit_to is None
 
     # depart, then a SECOND departure while traveling is rejected (state unchanged)
@@ -247,7 +247,7 @@ def test_reject_same_double_and_unknown_are_all_feed_safe():
     assert ok["kind"] == "travel_departed"
     keep = (b.in_transit_to, b.transit_arrival_tick)
     r = w.action_travel_to(b, sid)
-    assert r["kind"] == "parse_failure"
+    assert r["kind"] == "action_rejected"
     assert (b.in_transit_to, b.transit_arrival_tick) == keep
 
 
@@ -387,4 +387,5 @@ def test_travel_arrived_event_is_feed_safe_and_actor_stamped():
     assert e["actor_id"] == "b"
     assert e["payload"]["settlement"] == sid
     assert isinstance(e.get("text"), str) and e["text"]
-    assert e["kind"] != "parse_failure"               # NOT an error card
+    assert e["kind"] not in ("parse_failure", "action_rejected",
+                            "provider_error")  # NOT an error card

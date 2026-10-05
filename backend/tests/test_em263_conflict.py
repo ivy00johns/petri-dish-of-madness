@@ -103,7 +103,7 @@ def test_excommunicate_non_founder_fails():
     w.action_proselytize(w.agents["ada"], w.agents["cyn"])
     # bram is a member, not the founder → he cannot excommunicate cyn.
     evt = w.action_excommunicate(w.agents["bram"], w.agents["cyn"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "not founder"
     assert w.agents["cyn"].faith_id == fid               # unchanged
 
@@ -112,7 +112,7 @@ def test_excommunicate_self_is_rejected():
     w = _world(["ada"])
     _found(w, "ada")
     evt = w.action_excommunicate(w.agents["ada"], w.agents["ada"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "founder"          # founder-is-self guard
 
 
@@ -120,7 +120,7 @@ def test_excommunicate_non_member_fails():
     w = _world(["ada", "bram"])
     _found(w, "ada")                                     # bram never joined
     evt = w.action_excommunicate(w.agents["ada"], w.agents["bram"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "not a member"
 
 
@@ -128,7 +128,7 @@ def test_excommunicate_faith_off_is_inert_fail():
     w = _world(["ada", "bram"], faith=False)
     before = _dumps(w.to_snapshot())
     evt = w.action_excommunicate(w.agents["ada"], w.agents["bram"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "faith disabled"
     assert _dumps(w.to_snapshot()) == before             # zero state change
 
@@ -161,7 +161,7 @@ def test_declare_hostility_non_founder_fails():
     b_fid = _found(w, "cyn")
     w.action_proselytize(w.agents["ada"], w.agents["bram"])  # bram is a MEMBER of A
     evt = w.action_declare_hostility(w.agents["bram"], b_fid)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "not founder"
     assert w.faiths[a_fid].hostile_to == []
 
@@ -170,7 +170,7 @@ def test_declare_hostility_self_faith_fails():
     w = _world(["ada"])
     a_fid = _found(w, "ada")
     evt = w.action_declare_hostility(w.agents["ada"], a_fid)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "self faith"
 
 
@@ -178,7 +178,7 @@ def test_declare_hostility_unknown_faith_fails():
     w = _world(["ada"])
     _found(w, "ada")
     evt = w.action_declare_hostility(w.agents["ada"], "fth_ghost")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "unknown faith"
 
 
@@ -186,7 +186,7 @@ def test_declare_hostility_faith_off_is_inert_fail():
     w = _world(["ada", "bram"], faith=False)
     before = _dumps(w.to_snapshot())
     evt = w.action_declare_hostility(w.agents["ada"], "fth_whatever")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "faith disabled"
     assert _dumps(w.to_snapshot()) == before
 

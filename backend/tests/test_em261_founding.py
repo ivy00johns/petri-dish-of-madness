@@ -121,14 +121,14 @@ def test_second_found_faith_by_same_agent_is_rejected():
     w = _world(["ada"])
     _found(w, "ada")
     evt = w.action_found_faith(w.agents["ada"])          # already faithful
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "already" in evt["payload"]["error"]
 
 
 def test_found_faith_rejected_when_faith_disabled():
     w = _world(["ada"], faith=False)
     evt = w.action_found_faith(w.agents["ada"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "disabled" in evt["payload"]["error"]
     assert not w.faiths                                  # nothing minted
     assert w.agents["ada"].faith_id is None

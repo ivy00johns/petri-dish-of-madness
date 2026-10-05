@@ -110,7 +110,7 @@ def test_paint_surface_unknown_building_is_rejected():
     a = _agent()
     w = _world([a])
     evt = w.action_paint_surface(a, "nope", "graffiti")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert w.surface_decals == {}
     assert w.gallery == []            # no mint on rejection
     assert w.pending_image_fetches == []
@@ -121,7 +121,7 @@ def test_paint_surface_empty_prompt_is_rejected():
     w = _world([a])
     _add_building(w, "b1")
     evt = w.action_paint_surface(a, "b1", "   ")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert w.surface_decals == {}
     assert w.gallery == []
 
@@ -132,7 +132,7 @@ def test_paint_surface_image_gen_disabled_is_rejected():
     w = _world([a], params=_params(image_gen=ImageGenParams(enabled=False)))
     _add_building(w, "b1")
     evt = w.action_paint_surface(a, "b1", "a mural")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert w.surface_decals == {}
     assert w.gallery == []
     assert w.pending_image_fetches == []

@@ -288,7 +288,7 @@ def test_partner_bond_below_trust_threshold_rejected_turn_succeeds():
     assert world.agents["agent_ada"].relationships["agent_bram"].type == "friend"
     events = _events_of(result)
     kinds = [e["kind"] for e in events]
-    assert "parse_failure" not in kinds, "a rejected bond never fails the turn"
+    assert all(k not in ("parse_failure", "action_rejected", "provider_error") for k in kinds), "a rejected bond never fails the turn"
     assert "relationship_changed" not in kinds
     refl = next(e for e in events if e["kind"] == "reflection")
     assert "bond_applied" not in refl["payload"]
@@ -315,7 +315,7 @@ def test_family_bond_rejected_with_trace_reason_turn_succeeds():
     )
     assert "family" in result["_trace"]["bond_rejected"]
     assert "agent_bram" not in world.agents["agent_ada"].relationships
-    assert all(e["kind"] != "parse_failure" for e in _events_of(result))
+    assert all(e["kind"] not in ("parse_failure", "action_rejected", "provider_error") for e in _events_of(result))
 
 
 def test_unknown_target_bond_silently_dropped():
@@ -324,7 +324,7 @@ def test_unknown_target_bond_silently_dropped():
     )
     assert "unknown target" in result["_trace"]["bond_rejected"]
     assert world.agents["agent_ada"].relationships == {}
-    assert all(e["kind"] != "parse_failure" for e in _events_of(result))
+    assert all(e["kind"] not in ("parse_failure", "action_rejected", "provider_error") for e in _events_of(result))
 
 
 def test_self_bond_rejected():
@@ -362,7 +362,7 @@ def test_malformed_bond_objects_are_ignored_turn_succeeds(bad_bond):
     world, result = _run_one_turn(
         {"ada": [_reflection_turn(bond=bad_bond)]},
     )
-    assert all(e["kind"] != "parse_failure" for e in _events_of(result)), \
+    assert all(e["kind"] not in ("parse_failure", "action_rejected", "provider_error") for e in _events_of(result)), \
         f"malformed bond {bad_bond!r} must never fail the turn"
     assert world.agents["agent_ada"].relationships == {}
     # The reflection itself still lands.

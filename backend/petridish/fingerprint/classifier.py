@@ -148,7 +148,11 @@ class _TurnAccumulator:
                 if rm and acc.resp_model is None:
                     acc.resp_model = rm
                 continue
-            if kind == "parse_failure":
+            if kind in ("parse_failure", "action_rejected", "provider_error"):
+                # EM-340 — the failure kind is now split, but the fingerprint's
+                # `parse_failed` feature deliberately keeps the pre-EM-340 union:
+                # it is a "this turn produced no usable model action" count, and
+                # changing it would silently re-scale every historic fingerprint.
                 acc.parse_failed = True
                 rv = payload.get("routed_via")
                 if rv and acc.routed_via is None:
@@ -203,8 +207,10 @@ def turns_from_events(
 
     Only `human_agent` actors are fingerprinted. A group is kept as a model turn
     when the model was genuinely consulted — it has an ``llm_call``, a real
-    action verb, or a ``parse_failure`` — and is dropped when it is a pure
-    reflex/instinct turn (engine-authored, not model-authored)."""
+    action verb, or any EM-340 failure kind (``parse_failure`` /
+    ``action_rejected`` / ``provider_error``, all counted as ``parse_failed``) —
+    and is dropped when it is a pure reflex/instinct turn (engine-authored, not
+    model-authored)."""
     acc = _TurnAccumulator(run_id)
     acc.feed(events)
     return acc.turns_by_agent()

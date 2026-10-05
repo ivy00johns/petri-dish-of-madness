@@ -27,7 +27,7 @@ from petridish.providers.router import Router
 
 DOMAIN_KINDS = {
     "agent_action", "agent_speech", "agent_moved", "economy",
-    "conflict", "relationship", "parse_failure",
+    "conflict", "relationship", "parse_failure", "action_rejected",
 }
 
 
@@ -227,7 +227,8 @@ async def test_vote_resolves_from_non_governance_location():
     assert world.rules["test_rule"].votes.get(ada.id) is True, "vote not recorded off-governance"
     # ... and not bounced by the governance location gate.
     assert not any(
-        e.get("kind") == "parse_failure" and "governance" in (e.get("text") or "").lower()
+        e.get("kind") in ("parse_failure", "action_rejected")
+        and "governance" in (e.get("text") or "").lower()
         for e in all_evts
     ), "vote was blocked by the governance gate"
 
@@ -306,7 +307,7 @@ async def test_multi_action_persisted_events_share_one_turn_id():
 
 
 async def test_failed_step_does_not_abort_siblings():
-    """A gated/invalid step emits its parse_failure but the rest still run —
+    """A gated/invalid step emits its action_rejected but the rest still run —
     the `say` happens even though the move target is unknown."""
     runtime, world, ada, _bram = _make_world_runtime(
         [{"actions": [
@@ -318,7 +319,7 @@ async def test_failed_step_does_not_abort_siblings():
     result = await runtime.run_turn(ada)
     evts = _domain_events(result)
     kinds = [e["kind"] for e in evts]
-    assert "parse_failure" in kinds            # the bad move surfaced
+    assert "action_rejected" in kinds          # the bad move surfaced
     assert "agent_speech" in kinds             # the say still resolved
     assert ada.location == "market"            # never moved
     speech = next(e for e in evts if e["kind"] == "agent_speech")
@@ -420,7 +421,7 @@ async def test_actions_capped_at_max_actions_per_turn():
 
 async def test_give_no_target_in_multi_step_caught_not_aborted():
     """give with no 'target' key is rejected per-step by _validate_world
-    ("give requires target") and surfaces as parse_failure — never reaching the
+    ("give requires target") and surfaces as action_rejected — never reaching the
     args['target'] KeyError in _apply_action_inner. The SUBSEQUENT say step
     still resolves (continue-on-failure)."""
     runtime, world, ada, _bram = _make_world_runtime(
@@ -433,9 +434,9 @@ async def test_give_no_target_in_multi_step_caught_not_aborted():
     result = await runtime.run_turn(ada)
     evts = _domain_events(result)
     kinds = [e["kind"] for e in evts]
-    # The broken give must surface as parse_failure, NOT propagate as an
+    # The broken give must surface as action_rejected, NOT propagate as an
     # unhandled exception that kills the turn.
-    assert "parse_failure" in kinds, "missing give KeyError emitted as parse_failure"
+    assert "action_rejected" in kinds, "missing give KeyError emitted as action_rejected"
     # The sibling say must still resolve.
     assert "agent_speech" in kinds, "sibling say was aborted by the give KeyError"
     speech = next(e for e in evts if e["kind"] == "agent_speech")
@@ -444,7 +445,7 @@ async def test_give_no_target_in_multi_step_caught_not_aborted():
 
 async def test_steal_no_target_in_multi_step_caught_not_aborted():
     """steal with no 'target' key — rejected per-step by _validate_world
-    ("steal requires target") as parse_failure; the sibling work still runs."""
+    ("steal requires target") as action_rejected; the sibling work still runs."""
     runtime, world, ada, _bram = _make_world_runtime(
         [{"actions": [
             {"action": "steal", "args": {}},  # no target → KeyError
@@ -455,7 +456,7 @@ async def test_steal_no_target_in_multi_step_caught_not_aborted():
     result = await runtime.run_turn(ada)
     evts = _domain_events(result)
     kinds = [e["kind"] for e in evts]
-    assert "parse_failure" in kinds, "steal KeyError not caught as parse_failure"
+    assert "action_rejected" in kinds, "steal KeyError not caught as action_rejected"
     assert "economy" in kinds, "sibling work was aborted by the steal KeyError"
 
 
@@ -571,7 +572,7 @@ async def test_no_relationship_leak_on_failed_step():
         start="market",
     )
     result = await runtime.run_turn(ada)
-    # The chain should contain the parse_failure (from give) + agent_speech
+    # The chain should contain the action_rejected (from give) + agent_speech
     # (from say) only — no orphaned relationship_changed events.
     evts = _domain_events(result)
     relationship_evts = [e for e in evts if e.get("kind") == "relationship_changed"]
@@ -694,13 +695,13 @@ async def test_trace_outcome_failed_when_all_steps_fail():
     )
 
 
-async def test_thought_not_duplicated_when_first_event_is_parse_failure():
-    """If the FIRST step fails (parse_failure is the first chain event), the
+async def test_thought_not_duplicated_when_first_event_is_action_rejected():
+    """If the FIRST step fails (action_rejected is the first chain event), the
     thought must ride that failure event exactly once — not duplicate onto the
     second successful event."""
     runtime, world, ada, _bram = _make_world_runtime(
         [{"thought": "test-thought", "actions": [
-            {"action": "move_to", "args": {"place": "atlantis"}},  # → parse_failure first
+            {"action": "move_to", "args": {"place": "atlantis"}},  # → action_rejected first
             {"action": "say", "args": {"text": "hi"}},
         ]}],
         start="market",
@@ -712,7 +713,7 @@ async def test_thought_not_duplicated_when_first_event_is_parse_failure():
         f"thought appeared on {len(thought_bearing)} events (expected 1): "
         f"{[e.get('text') for e in thought_bearing]}"
     )
-    # It should be on the FIRST event (the parse_failure), not the second.
+    # It should be on the FIRST event (the action_rejected), not the second.
     assert thought_bearing[0] is all_evts[0], (
         "thought was not on the first chain event"
     )
@@ -759,7 +760,7 @@ async def test_tier_gate_enforced_per_step_for_background_agent():
     evts = _domain_events(result)
     tier_error_evts = [
         e for e in evts
-        if e.get("kind") == "parse_failure" and "tier rule" in (e.get("text") or "")
+        if e.get("kind") == "action_rejected" and "tier rule" in (e.get("text") or "")
     ]
     assert len(tier_error_evts) == 1, "tier gate did not fire per-step on the actions[] propose_project"
     # The sibling say still reached the room.
@@ -802,4 +803,4 @@ async def test_bare_action_list_runs_as_multi_action():
     evts = _domain_events(result)
     kinds = [e.get("kind") for e in evts]
     assert "agent_speech" in kinds, f"bare-list actions did not execute: {kinds}"
-    assert "parse_failure" not in kinds
+    assert "parse_failure" not in kinds and "action_rejected" not in kinds

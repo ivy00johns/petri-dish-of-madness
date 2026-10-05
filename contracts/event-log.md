@@ -1,8 +1,43 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.3.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.4.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.4.0 (EM-340, 2026-10-05 — the failure-kind split):**
+> `parse_failure` was overloaded: run 23's 322 of them contained ZERO malformed
+> JSON. It is SPLIT into three kinds (the KIND is the discriminator; payloads are
+> unchanged). Decompositions measured from the persisted `run.sqlite`:
+>
+> 1. **`action_rejected`** — the model answered with a schema-valid action and the
+>    WORLD refused it at APPLY time: the per-step `_validate_world` gate in
+>    `_apply_steps`, the `_apply_action_inner` dispatch table, or `World._fail_event`
+>    (the single factory behind every `world.action_*` refusal). Payload unchanged
+>    (`{action, error, rejected?}` — the per-step gate still stamps `rejected: true`).
+>    Run 23: **133** events; run 26: **108**.
+> 2. **`provider_error`** — the provider never served a usable response: a
+>    transport/HTTP `ProviderError`, all lanes exhausted/rate-limited, or the EM-170
+>    wall-clock turn budget (`llm_timeout`). Payload unchanged (`{reason, routed_via?,
+>    raw_response?}`). The `reason` prefixes are unchanged, so the EM-226 auto-pause
+>    (which keys on `reason.startswith("provider_error")`) is unaffected — a
+>    turn-budget timeout still earns the EM-173 reflex, never the outage streak.
+>    Run 23: **30**; run 26: **288** (69% of the run's "parse failures" — the
+>    tick-1147 outage, previously indistinguishable from bad model JSON).
+> 3. **`parse_failure`** — genuinely "the model's response could not be turned into
+>    an applicable action": no JSON object, a `schema error:`, or a `world error:`
+>    from the PRE-dispatch validator. That last one stays `parse_failure` ON PURPOSE:
+>    it is the RETRIED path ("your previous response failed validation") and carries
+>    the EM-140 `rejected_action` forensic; only APPLY-time refusals become
+>    `action_rejected`. Run 23: **159** (115 no-JSON + 30 schema + 14 world); run 26:
+>    **21** — i.e. run 26's headline "412 parse failures (25% of turns)" is really 21
+>    real parse failures (1.3%), 288 provider errors, and 108 rejections.
+> 4. **Consumers.** The frontend's benign-rejection filter matches `action_rejected`
+>    (plus legacy `parse_failure` + `payload.rejected: true`), so no rejection changes
+>    its feed visibility; `action_rejected`/`provider_error` join the ⚠ Errors channel.
+>    The fingerprint `parse_failed` feature deliberately KEEPS the pre-EM-340 union
+>    (counts all three) so historic fingerprints stay comparable. Events are
+>    append-only and never re-kinded: pre-EM-340 rows keep their old
+>    overloaded `parse_failure` kind, which every consumer must still tolerate.
 
 > **v1.1.0 (W9, 2026-06-09 — audit §B1/B6/B8/C4, EM-070/071/073):**
 > 1. **`llm_call` emission is per-attempt, exactly once per attempt.** EM-067's

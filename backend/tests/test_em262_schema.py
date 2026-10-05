@@ -176,4 +176,4 @@ def test_dispatch_routes_proselytize_and_worship():
     # worship → a fail event when no seat (routing still reached the world action).
     evt2 = rt._apply_action_inner(
         w.agents["ada"], {"action": "worship", "args": {}}, "P", "#fff")
-    assert evt2["kind"] == "parse_failure" and "no seat" in evt2["payload"]["error"]
+    assert evt2["kind"] == "action_rejected" and "no seat" in evt2["payload"]["error"]

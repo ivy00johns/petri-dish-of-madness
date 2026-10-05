@@ -480,7 +480,7 @@ async def test_detoured_turn_calls_the_substitute_adapter_with_its_budget():
     _sicken(router, "alpha", 3)
 
     event = await runtime.run_turn(agent)
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
 
     # The substitute adapter REALLY served the call (green gate ≠ flag flip),
     # at the EFFECTIVE profile's max_tokens/temperature.

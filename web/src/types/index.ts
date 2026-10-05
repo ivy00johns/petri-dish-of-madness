@@ -653,6 +653,14 @@ export type EventKind =
   | 'rule_rejected'
   | 'memory'
   | 'parse_failure'
+  // EM-340 — the failure-kind split of the one overloaded `parse_failure`:
+  // `action_rejected` = a schema-valid action the WORLD refused at apply time
+  // (payload keeps {action, error, rejected?}); `provider_error` = the provider
+  // never served a usable response (payload.reason starts `provider_error:` /
+  // `llm_timeout:` / `unexpected_error:`). Events are append-only, so pre-EM-340
+  // rows still wear `parse_failure` — all three stay registered.
+  | 'action_rejected'
+  | 'provider_error'
   | 'model_reassigned'
   // EM-315 — The Healing House: a 70% governance vote sentences a citizen to
   // the Healing House, where the engine hot-swaps their model. `sentenced_healing`

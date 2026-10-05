@@ -2463,15 +2463,24 @@ class TickLoop:
     def _provider_error_reason(raw_result: Any) -> str | None:
         """Return the provider-error reason if THIS turn idled on a provider/network
         failure (EM-226), else None. A provider failure is the runtime's idle
-        fallback (`kind == "parse_failure"`) whose `payload.reason` starts with
-        `provider_error` — i.e. the call never reached a model (connection down or
-        all lanes exhausted/rate-limited), distinct from a content parse failure
-        where a model DID answer with malformed JSON."""
+        fallback whose `payload.reason` starts with `provider_error` — i.e. the
+        call never reached a model (connection down or all lanes
+        exhausted/rate-limited), distinct from a content parse failure where a
+        model DID answer with malformed JSON.
+
+        EM-340 — that idle fallback now carries `kind == "provider_error"`; the
+        legacy overloaded `parse_failure` kind is still accepted so persisted
+        pre-EM-340 rows and duck-typed test worlds classify alike. The
+        `reason.startswith("provider_error")` gate is unchanged ON PURPOSE: a
+        turn-budget `llm_timeout` idle (EM-170/173) must NOT count toward the
+        provider auto-pause."""
         if not isinstance(raw_result, dict):
             return None
         events = raw_result.get("_multi", [raw_result])
         for evt in events:
-            if not isinstance(evt, dict) or evt.get("kind") != "parse_failure":
+            if not isinstance(evt, dict) or evt.get("kind") not in (
+                "provider_error", "parse_failure",
+            ):
                 continue
             reason = (evt.get("payload") or {}).get("reason")
             if isinstance(reason, str) and reason.startswith("provider_error"):

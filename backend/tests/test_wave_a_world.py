@@ -159,14 +159,14 @@ def test_build_step_other_invalid_statuses_keep_failing():
                      location="plaza", status=status, health=50)
         world.buildings[b.id] = b
         res = world.action_build_step(ada, b.id)
-        assert res["kind"] == "parse_failure", status
+        assert res["kind"] == "action_rejected", status
         assert res["payload"]["error"] == f"cannot build a {status} structure"
     # offline keeps its current (not-under-construction) failure too.
     b = Building(id="bld_offline", name="X", kind="workshop",
                  location="plaza", status="offline", health=100)
     world.buildings[b.id] = b
     res = world.action_build_step(ada, b.id)
-    assert res["kind"] == "parse_failure"
+    assert res["kind"] == "action_rejected"
     assert res["payload"]["error"] == "project is not under construction"
 
 
@@ -212,7 +212,7 @@ def test_contribute_zero_gap_soft_fails_costing_nothing():
     world.action_contribute_funds(ada, bid, 5)
     before = ada.credits
     res = world.action_contribute_funds(ada, bid, 3)
-    assert res["kind"] == "parse_failure"
+    assert res["kind"] == "action_rejected"
     assert res["payload"]["error"] == "already fully funded"
     assert "build_step" in res["text"], "soft failure must carry guidance"
     assert ada.credits == before, "a zero-gap contribution costs nothing"
@@ -237,7 +237,7 @@ def test_contribute_insufficient_for_clamped_amount_still_rejected():
     ada.credits = 2
     bid = _propose(world, ada, "Mill", "workshop", 10)
     res = world.action_contribute_funds(ada, bid, 8)  # clamp 8, holds 2
-    assert res["kind"] == "parse_failure"
+    assert res["kind"] == "action_rejected"
     assert ada.credits == 2
     assert world.buildings[bid].funds_committed == 0
 

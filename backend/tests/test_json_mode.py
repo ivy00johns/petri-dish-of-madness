@@ -260,7 +260,7 @@ async def test_run_turn_retries_length_truncation_with_boosted_budget():
     event = await runtime.run_turn(agent)
 
     assert router.calls == [1024, 4096]
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -386,7 +386,7 @@ async def test_run_turn_boosts_budget_on_stop_truncation_and_forgets_cache():
 
     # The 'stop' lie must not suppress the boost — structure says truncated.
     assert router.calls == [1024, 4096]
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
     # The unparseable attempt-1 response was evicted from the decision cache.
     assert router.forgotten == ["test"]
 

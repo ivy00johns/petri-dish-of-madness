@@ -57,10 +57,10 @@ def _dumps(snap: dict) -> str:
 def test_disabled_war_verbs_fail_closed_with_zero_state_change():
     w = _world(war=False)
     before = _dumps(w.to_snapshot())
-    assert w.action_muster(w.agents["ada"])["kind"] == "parse_failure"
+    assert w.action_muster(w.agents["ada"])["kind"] == "action_rejected"
     assert w.action_clash(w.agents["ada"],
-                          w.agents["dot"])["kind"] == "parse_failure"
-    assert w.action_siege(w.agents["ada"], "bld_x")["kind"] == "parse_failure"
+                          w.agents["dot"])["kind"] == "action_rejected"
+    assert w.action_siege(w.agents["ada"], "bld_x")["kind"] == "action_rejected"
     w.advance_war()
     assert _dumps(w.to_snapshot()) == before
     assert w.pending_spawn_events == []

@@ -122,11 +122,11 @@ def test_vandalize_blacks_out_building_and_records_crime():
     assert vandal.rap_sheet[-1]["crime"] == "vandalize"
 
 
-def test_vandalize_unknown_building_is_parse_failure():
+def test_vandalize_unknown_building_is_action_rejected():
     vandal = _a("vandal", "plaza")
     world = _world([vandal])
     evt = world.action_vandalize(vandal, "nope")
-    assert isinstance(evt, dict) and evt["kind"] == "parse_failure"
+    assert isinstance(evt, dict) and evt["kind"] == "action_rejected"
     assert vandal.rap_sheet == []           # no crime recorded for a phantom target
 
 

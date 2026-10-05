@@ -349,7 +349,7 @@ async def test_timeout_reflex_validation_failure_falls_through_to_idle():
 
     # The EXISTING idle-fallback surface, reason llm_timeout — never a crash,
     # and no reflex markers on a turn that did not actually resolve one.
-    assert event["kind"] == "parse_failure"
+    assert event["kind"] == "provider_error"
     assert "failed to produce a valid action (idle fallback)" in event["text"]
     assert event["payload"]["reason"].startswith("llm_timeout")
     assert "reflex" not in event["payload"]
@@ -368,7 +368,7 @@ async def test_provider_error_still_resolves_idle_not_reflex():
 
     event = await runtime.run_turn(agent)
 
-    assert event["kind"] == "parse_failure"
+    assert event["kind"] == "provider_error"
     assert event["payload"]["reason"].startswith("provider_error")
     assert "reflex" not in event["payload"]
     assert "cadence_reason" not in event["payload"]

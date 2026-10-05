@@ -188,7 +188,7 @@ def test_promoted_image_becomes_public_and_postable_by_others_end_to_end():
 
     # Before promotion, Bram cannot post Ada's image.
     bram.location = "plaza"
-    assert world.action_post_image(bram, img_id)["kind"] == "parse_failure"
+    assert world.action_post_image(bram, img_id)["kind"] == "action_rejected"
 
     # Promote it by vote.
     ada.location = "townhall"

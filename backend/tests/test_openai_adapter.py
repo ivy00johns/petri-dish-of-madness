@@ -335,7 +335,7 @@ async def test_openai_adapter_500_runtime_falls_back_to_idle_no_crash(stub_serve
     """
     Full failure path:
       stub returns 500 → adapter raises ProviderError → AgentRuntime catches it
-      → runtime falls back to idle (parse_failure event) → loop does NOT crash.
+      → runtime falls back to idle (provider_error event) → loop does NOT crash.
     """
     base_url, server = stub_server
 
@@ -360,11 +360,11 @@ async def test_openai_adapter_500_runtime_falls_back_to_idle_no_crash(stub_serve
     router.reassign(agent.id, "test-openai")
     runtime = AgentRuntime(world, router)
 
-    # This must NOT raise — ProviderError is caught, emits parse_failure
+    # This must NOT raise — ProviderError is caught, emits provider_error
     result = await runtime.run_turn(agent)
 
-    assert result.get("kind") == "parse_failure", (
-        f"Expected parse_failure on 500 error, got kind={result.get('kind')!r}"
+    assert result.get("kind") == "provider_error", (
+        f"Expected provider_error on 500 error, got kind={result.get('kind')!r}"
     )
     payload = result.get("payload", {})
     assert "provider_error" in str(payload.get("reason", "")), (

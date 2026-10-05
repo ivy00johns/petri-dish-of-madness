@@ -123,7 +123,7 @@ def test_proselytize_not_co_located_fails():
     _found(w, "ada")
     w.agents["bram"].location = "temple_sq"             # elsewhere
     evt = w.action_proselytize(w.agents["ada"], w.agents["bram"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "co-located" in evt["payload"]["error"]
     assert w.agents["bram"].faith_id is None
 
@@ -132,7 +132,7 @@ def test_proselytize_by_faithless_actor_fails():
     w = _world(["ada", "bram"], faith_cfg={"conversion_chance": 1.0})
     # ada never founded a faith — she has nothing to preach.
     evt = w.action_proselytize(w.agents["ada"], w.agents["bram"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "faithless" in evt["payload"]["error"] or "no faith" in evt["text"]
 
 
@@ -166,7 +166,7 @@ def test_proselytize_rejected_when_faith_disabled():
     w.faiths["fth_manual"] = w.mint_faith("ada")        # a faith exists anyway
     w.agents["ada"].faith_id = "fth_manual"
     evt = w.action_proselytize(w.agents["ada"], w.agents["bram"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "disabled" in evt["payload"]["error"]
 
 
@@ -217,7 +217,7 @@ def test_worship_without_seat_fails():
     w, temple, fid = _seated_world()
     w.agents["ada"].location = "townhall"              # member, but no temple here
     evt = w.action_worship(w.agents["ada"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "no seat" in evt["payload"]["error"]
 
 
@@ -226,14 +226,14 @@ def test_worship_at_wrong_faiths_temple_fails():
     # cyn is faithless — no seat for her even standing on the temple.
     w.agents["cyn"].location = "temple_sq"
     evt = w.action_worship(w.agents["cyn"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "no seat" in evt["payload"]["error"]
 
 
 def test_worship_rejected_when_faith_disabled():
     w = _world(["ada"], faith=False)
     evt = w.action_worship(w.agents["ada"])
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "disabled" in evt["payload"]["error"]
 
 

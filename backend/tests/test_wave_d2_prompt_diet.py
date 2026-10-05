@@ -618,7 +618,7 @@ def test_background_propose_project_rejects_cleanly_in_full_loop():
     asyncio.run(loop._execute_turn(bg))  # first turn = salient (no baseline)
 
     assert world.buildings == {}, "the gated proposal must not create a building"
-    rows = repo.get_events(loop._run_id or 1, kinds=["parse_failure"], order="asc")
+    rows = repo.get_events(loop._run_id or 1, kinds=list(("parse_failure", "action_rejected", "provider_error")), order="asc")
     assert rows, "expected the clean rejection event"
     payload = rows[-1]["payload"]
     assert "tier rule" in payload["reason"]

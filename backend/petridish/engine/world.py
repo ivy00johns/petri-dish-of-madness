@@ -4240,7 +4240,7 @@ class World:
     # the kind/type/skin rides the agent's existing turn, zero extra invoke-LLM
     # calls (caps, not muting, hold cost). Each returns a ready-to-emit event dict
     # / {"_multi":[...]} (mirroring the W7 building actions consumed by
-    # _emit_world_result), or a parse_failure on an illegal id so the loop keeps
+    # _emit_world_result), or an action_rejected on an illegal id so the loop keeps
     # turning. Heavy gating front-loads in runtime._validate_world; these stay
     # safe if called directly.
     # ──────────────────────────────────────────────────────────────────────────
@@ -4290,7 +4290,7 @@ class World:
         """Wave K / EM-218 — place a decoration prop at `place` (defaults to the
         agent's location). The engine assigns a deterministic in-place offset from
         the count of props already at the place, and a seeded id. Over the cap ⇒
-        a parse_failure with guidance (never a dead turn). Emits prop_placed."""
+        an action_rejected with guidance (never a dead turn). Emits prop_placed."""
         kind = str(kind or "").strip()[:30]
         if not kind:
             return self._fail_event(
@@ -5183,7 +5183,7 @@ class World:
         population cap (cap_reached is observable by the caller as a short list).
         Raises ValueError on a bad kind/place so the API can 4xx like the existing
         endpoints (the god path validates UP FRONT rather than emitting a
-        per-prop parse_failure the way the agent turn does)."""
+        per-prop action_rejected the way the agent turn does)."""
         kind = str(kind or "").strip()[:30]
         if not kind:
             raise ValueError("kind required")
@@ -6771,7 +6771,7 @@ class World:
     # or {"_multi": [evt, ...]} when one action causes several events (e.g. a
     # contribution that flips planned -> under_construction). The runtime layer
     # spreads its own base (profile/profile_color/tick) onto whatever is returned.
-    # They never raise on bad ids; instead they return a parse_failure event so
+    # They never raise on bad ids; instead they return an action_rejected event so
     # the loop keeps turning. Heavy validation is runtime-api-agent's _validate_world.
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -6792,8 +6792,13 @@ class World:
 
     @staticmethod
     def _fail_event(actor_id: str | None, action: str, reason: str, text: str) -> dict:
+        """The single world-side action-refusal factory: a well-formed action the
+        world would not allow on the current state (illegal id, absent target,
+        unmet precondition). EM-340 — this is `action_rejected`, NOT a
+        `parse_failure`: the model's output parsed and validated fine; the world
+        said no. Every world action's failure path funnels through here."""
         return {
-            "kind": "parse_failure",
+            "kind": "action_rejected",
             "actor_id": actor_id,
             "text": text,
             "payload": {"action": action, "error": reason},
@@ -7956,7 +7961,7 @@ class World:
         and emitted as `proclamation_answered`, so the feed groups the exchange and
         world_state carries the thread. NO location gate — the god's voice is
         everywhere, so the answer can come from anywhere. Returns a ready-to-emit
-        event dict (or a parse_failure via _fail_event)."""
+        event dict (or an action_rejected via _fail_event)."""
         text = str(text or "").strip()[: self.BILLBOARD_TEXT_CAP]
         if not text:
             return self._fail_event(
