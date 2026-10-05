@@ -67,7 +67,7 @@ def _flatten(evt: dict) -> list[dict]:
 def test_spread_rumor_fails_closed_when_comm_disabled():
     w = _world(comm=False)
     evt = w.action_spread_rumor(w.agents["ada"], w.agents["bram"], "hi")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "comm disabled"
     assert w.memes == {}                                # nothing minted
 

@@ -8,8 +8,10 @@ Per-turn flow:
   3. Extract first JSON object from text.
   4. Validate against action-protocol schema + world rules.
   5. On failure: ONE retry with error appended.
-  6. On second failure: emit parse_failure, idle.
-  7. ProviderError → treated as failed turn → idle.
+  6. On second failure: emit the honest failure kind (EM-340: `parse_failure`
+     for no-JSON/schema-invalid output, `provider_error` when the provider never
+     answered), idle.
+  7. ProviderError → treated as failed turn → idle (`provider_error`).
 """
 from __future__ import annotations
 
@@ -2136,6 +2138,58 @@ def _building_field(building: Any, field: str, default: Any = None) -> Any:
     return getattr(building, field, default)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# EM-340 — the failure-kind taxonomy.
+#
+# `parse_failure` used to carry THREE unrelated phenomena, so any per-run
+# "parse failure rate" mixed them (run 23: 322 events, ZERO malformed JSON):
+#   • `action_rejected` — the model answered with a well-formed, schema-valid
+#     action the WORLD refused (unknown/absent target, gate rule, funds, tier,
+#     skill, blackout, …). The model was fine; the world said no.
+#   • `provider_error`  — the provider never delivered a usable response
+#     (transport error, all lanes exhausted/rate-limited, or the call blew the
+#     wall-clock turn budget). The model was never consulted.
+#   • `parse_failure`   — the model DID answer but produced no parseable action
+#     (no JSON object, JSON that failed the action schema) or the engine hit its
+#     defensive fallback. This is the only kind genuinely about parsing.
+#
+# The KIND is the discriminator — payloads are unchanged (an `action_rejected`
+# still carries `{action, error, rejected?}`, a `provider_error` still carries
+# `reason`). Events are append-only and never re-parsed through this layer, so
+# pre-EM-340 rows keep their overloaded `parse_failure` kind; `_is_failure_kind`
+# is what lets the internal "did this turn fail?" checks read both eras alike.
+_FAILURE_KINDS = frozenset({"parse_failure", "action_rejected", "provider_error"})
+
+# Transport-level reasons that mean "the provider never served us a response" —
+# the idle-fallback reason prefixes that earn `provider_error`. Anything else
+# (no-JSON, schema error, …) stays `parse_failure`. Deliberately a whitelist: an
+# unrecognized reason keeps the conservative parse_failure meaning (byte-stable
+# for any reason string added later that isn't clearly provider-side).
+_PROVIDER_ERROR_PREFIXES = (
+    "provider_error:", "llm_timeout:", "unexpected_error:",
+)
+
+
+def _is_failure_kind(kind: Any) -> bool:
+    """True for any EM-340 failure kind — including the legacy overloaded
+    `parse_failure` — so an internal "did this turn fail?" check (reflex
+    resolution, skill xp, step outcome, coherence marker) reads identically
+    before and after the split."""
+    return kind in _FAILURE_KINDS
+
+
+def _failure_kind_for(reason: str | None) -> str:
+    """EM-340 — pick the honest kind for an idle-fallback turn from the runtime's
+    own failure reason: `provider_error` when the provider never answered
+    (transport error / stuck lane / wall-clock turn budget), `parse_failure`
+    otherwise (no JSON, schema-invalid action, engine fallback)."""
+    return (
+        "provider_error"
+        if (reason or "").strip().lower().startswith(_PROVIDER_ERROR_PREFIXES)
+        else "parse_failure"
+    )
+
+
 def _emit_world_result(
     result: Any, base: dict, thought: str = "",
     stamp_for: Callable[[str], dict | None] | None = None,
@@ -2146,7 +2200,7 @@ def _emit_world_result(
     The W7 building actions return a fully-formed, ready-to-emit event dict
     (kind/actor_id/target_id?/text/payload), or {"_multi": [evt, ...]} for
     multi-event outcomes (propose_project also rides a "_building_id"). They never
-    raise; an illegal id comes back as a `parse_failure` event. This consumes them
+    raise; an illegal id comes back as an `action_rejected` event. This consumes them
     exactly like the `vote` branch consumes its own `_multi`: it does NOT unpack a
     tuple and does NOT re-derive transitions — it reads the kinds/payloads the world
     already produced and overlays the base fields the loop needs.
@@ -2184,7 +2238,8 @@ def _emit_world_result(
         return {"_multi": [_decorate(evt) for evt in result["_multi"]]}
     if isinstance(result, dict):
         return _decorate(result)
-    # Defensive: a malformed world return collapses to a parse_failure so the loop
+    # Defensive: a malformed world return collapses to a parse_failure — the
+    # engine's own fallback, no model output involved (EM-340) — so the loop
     # keeps turning rather than crashing the round.
     return {**base, "kind": "parse_failure",
             "text": "world action returned an unexpected value.",
@@ -5697,7 +5752,7 @@ class AgentRuntime:
             agent, action_dict, profile_name, profile_color
         )
         events = result_event["_multi"] if "_multi" in result_event else [result_event]
-        if require_resolution and events[0].get("kind") == "parse_failure":
+        if require_resolution and _is_failure_kind(events[0].get("kind")):
             # EM-173 — the reflex itself could not resolve: undo and signal
             # the caller to take the existing idle fallback (never crash).
             # A gated action made no world-state change, so discarding the
@@ -5711,7 +5766,7 @@ class AgentRuntime:
             payload["reflex_streak"] = agent.reflex_streak
             if cadence_reason is not None:
                 payload["cadence_reason"] = cadence_reason
-        outcome = "failed" if events[0].get("kind") == "parse_failure" else "ok"
+        outcome = "failed" if _is_failure_kind(events[0].get("kind")) else "ok"
 
         # EM-079 — commitments still advance on reflex turns: a successful
         # non-talk reflex action resets the staleness clock exactly as if the
@@ -6075,7 +6130,7 @@ class AgentRuntime:
                 "resolved": {"outcome": "failed", "state_deltas": {}},
             }
             fail_evt = {
-                "kind": "parse_failure",
+                "kind": _failure_kind_for(parse_error),
                 "actor_id": agent.id,
                 "profile": profile_name,
                 "profile_color": profile_color,
@@ -6648,7 +6703,7 @@ class AgentRuntime:
         if action_dict is None:
             # Structural truncation verdict for the retry-budget boost (the
             # reported finish_reason can be a lying 'stop'), plus the full raw
-            # text for the final parse_failure event's forensics.
+            # text for the final failure event's forensics.
             meta["truncated_json"] = truncated
             meta["raw_text"] = text
             self._forget_response(profile_name, messages)
@@ -6826,7 +6881,7 @@ class AgentRuntime:
         Gating is per-step at APPLY time, so a step is checked against the state
         the PRIOR steps just produced — `work` after a `move_to` is validated at
         the destination, not the origin. Continue-on-failed-step: a gated /
-        arg-missing / raising step emits its own parse_failure (carrying the
+        arg-missing / raising step emits its own action_rejected (carrying the
         world's reason) and NEVER aborts its siblings — the `say` still happens
         even if the `contribute_funds` was rejected. The turn `thought` (💭)
         rides ONLY the first event of the chain (and only the first step's
@@ -6845,7 +6900,7 @@ class AgentRuntime:
             args = step.get("args") or {}
             # EM-199 defense-in-depth — the gate itself runs under a guard so a
             # raising gate (e.g. an object/array id reaching a dict lookup as an
-            # unhashable key) becomes a parse_failure step, never a loop-killing
+            # unhashable key) becomes an action_rejected step, never a loop-killing
             # raise. _apply_action_inner below is guarded the same way.
             try:
                 gate_error = _validate_world(step, agent, self.world)
@@ -6855,7 +6910,7 @@ class AgentRuntime:
                     "profile": profile_name,
                     "profile_color": profile_color,
                     "tick": self.world.tick,
-                    "kind": "parse_failure",
+                    "kind": "action_rejected",
                     "text": f"{agent.name}'s {action} was rejected: {exc}",
                     "payload": {"action": action, "error": str(exc),
                                 "rejected": True},
@@ -6870,7 +6925,7 @@ class AgentRuntime:
                     "profile": profile_name,
                     "profile_color": profile_color,
                     "tick": self.world.tick,
-                    "kind": "parse_failure",
+                    "kind": "action_rejected",
                     "text": f"{agent.name}'s {action} was rejected: {gate_error}",
                     "payload": {"action": action, "error": gate_error,
                                 "rejected": True},
@@ -6894,7 +6949,7 @@ class AgentRuntime:
                     "profile": profile_name,
                     "profile_color": profile_color,
                     "tick": self.world.tick,
-                    "kind": "parse_failure",
+                    "kind": "action_rejected",
                     "text": f"{agent.name}'s {action} could not resolve: {exc}",
                     "payload": {"action": action, "error": str(exc)},
                 }]
@@ -6905,19 +6960,19 @@ class AgentRuntime:
                 shifts = self.world.drain_relationship_events()
             # EM-224 — surface a coherence annotation onto the primary event so
             # a 'say-then-harm' contradiction is legible (the act still ran). The
-            # marker rides ONLY a real resolution (not a parse_failure); the
+            # marker rides ONLY a real resolution (not a failure kind); the
             # world already mutated. Stamps text + payload.coherence.
             marker = step.get("_coherence")
             if marker and step_events:
                 primary = step_events[0]
-                if primary.get("kind") != "parse_failure":
+                if not _is_failure_kind(primary.get("kind")):
                     self._surface_coherence(primary, marker)
             chain.extend(step_events)
             if shifts and not raised:
                 tick = self.world.tick
                 chain.extend({"tick": tick, **s} for s in shifts)
             primary = step_events[0] if step_events else None
-            ok = bool(primary) and primary.get("kind") != "parse_failure"
+            ok = bool(primary) and not _is_failure_kind(primary.get("kind"))
             step_results.append({"action": action, "args": args, "ok": ok})
         # EM-199 — the turn's thought rides the FIRST event of the chain only.
         if chain:
@@ -6975,7 +7030,7 @@ class AgentRuntime:
         # EM-227 — learn-by-doing: a SUCCESSFUL gated action grants the gating
         # skill xp (a level-up replenishes the EM-229 knowledge need). The gate
         # already guaranteed the agent HAD the skill, so this deepens a profession
-        # the more it is practiced. Skipped on a failed/parse_failure result and
+        # the more it is practiced. Skipped on a failed result and
         # when no library gates the action (config-absent = no-op, golden-safe).
         self._grant_use_xp(agent, action_dict, result)
         # Surface the agent's inner thought onto the feed line so the world's
@@ -6994,7 +7049,7 @@ class AgentRuntime:
 
     def _grant_use_xp(self, agent: AgentState, action_dict: dict, result: dict) -> None:
         """EM-227 — grant the gating skill xp for a SUCCESSFUL gated action. The
-        action's result must be a real outcome (not a parse_failure) — a rejected
+        action's result must be a real outcome (not a failure kind) — a rejected
         verb earns nothing. No library gates the action ⇒ no-op (config-absent =
         no-op). Pure threshold arithmetic in world.grant_skill_xp (no random/clock).
         Robust to the _multi chain shape (the primary event is _multi[0])."""
@@ -7008,7 +7063,7 @@ class AgentRuntime:
         if gate is None:
             return
         primary = result["_multi"][0] if isinstance(result, dict) and "_multi" in result else result
-        if not isinstance(primary, dict) or primary.get("kind") == "parse_failure":
+        if not isinstance(primary, dict) or _is_failure_kind(primary.get("kind")):
             return
         skill, _min = gate
         try:
@@ -7091,7 +7146,7 @@ class AgentRuntime:
                         "text": f"{agent.name} works and earns {reward} credits.",
                         "payload": {"action": "work", "credits_delta": reward, "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to work but: {reason}",
                         "payload": {"action": "work", "error": reason}}
 
@@ -7108,14 +7163,14 @@ class AgentRuntime:
                         "text": f"{agent.name} recharges (+{gained:.1f} energy).",
                         "payload": {"action": "recharge", "energy_delta": gained, "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to recharge but: {reason}",
                         "payload": {"action": "recharge", "error": reason}}
 
         elif action == "give":
             target = self.world.agents.get(args["target"])
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to give but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason = self.world.action_give(agent, target, args["amount"])
@@ -7124,14 +7179,14 @@ class AgentRuntime:
                         "text": f"{agent.name} gives {args['amount']} credits to {target.name}.",
                         "payload": {"action": "give", "amount": args["amount"], "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to give but: {reason}",
                         "payload": {"error": reason}}
 
         elif action == "steal":
             target = self.world.agents.get(args["target"])
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to steal but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason, amount = self.world.action_steal(agent, target)
@@ -7140,7 +7195,7 @@ class AgentRuntime:
                         "text": f"{agent.name} steals {amount} credits from {target.name}.",
                         "payload": {"action": "steal", "amount": amount, "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to steal but: {reason}",
                         "payload": {"error": reason}}
 
@@ -7150,7 +7205,7 @@ class AgentRuntime:
         elif action == "heist":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to heist but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason, amount = self.world.action_heist(agent, target)
@@ -7158,14 +7213,14 @@ class AgentRuntime:
                 return {**base, "kind": "crime_committed", "target_id": target.id,
                         "text": f"{agent.name} pulls off a heist on {target.name} ({amount} credits)!",
                         "payload": {"action": "heist", "amount": amount, "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to heist but: {reason}",
                     "payload": {"error": reason}}
 
         elif action == "extort":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to extort but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason, amount = self.world.action_extort(agent, target)
@@ -7173,7 +7228,7 @@ class AgentRuntime:
                 return {**base, "kind": "crime_committed", "target_id": target.id,
                         "text": f"{agent.name} shakes down {target.name} for {amount} credits!",
                         "payload": {"action": "extort", "amount": amount, "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to extort but: {reason}",
                     "payload": {"error": reason}}
 
@@ -7183,7 +7238,7 @@ class AgentRuntime:
         elif action == "intimidate":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to intimidate but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason, amount = self.world.action_intimidate(agent, target)
@@ -7192,14 +7247,14 @@ class AgentRuntime:
                         "text": f"{agent.name} menaces {target.name} into handing over {amount} credits!",
                         "payload": {"action": "intimidate", "amount": amount,
                                     "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to intimidate but: {reason}",
                     "payload": {"error": reason}}
 
         elif action == "deceive":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to deceive but target not found",
                         "payload": {"error": "target_not_found"}}
             about = str(args.get("about", "")).strip()
@@ -7209,7 +7264,7 @@ class AgentRuntime:
                         "text": f"{agent.name} feeds {target.name} a lie.",
                         "payload": {"action": "deceive", "about": about,
                                     "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to deceive but: {reason}",
                     "payload": {"error": reason}}
 
@@ -7219,7 +7274,7 @@ class AgentRuntime:
 
         # EM-258/EM-259 — the war verbs. All three world actions return ready
         # event dicts (war_band_joined / war_clash / war_siege on success, a
-        # clear parse_failure fail event otherwise) or a {"_multi": [...]}
+        # clear action_rejected fail event otherwise) or a {"_multi": [...]}
         # chain (a clash kill appends agent_died + inheritance; a siege
         # appends the building state transition) — _emit_world_result consumes
         # both shapes, exactly like vandalize/recruit.
@@ -7230,7 +7285,7 @@ class AgentRuntime:
         elif action == "clash":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to clash but target not found",
                         "payload": {"error": "target_not_found"}}
             # A kill's _multi chain carries the slain TARGET's agent_died and
@@ -7248,12 +7303,12 @@ class AgentRuntime:
         # EM-251 — culture transmission verbs (Wave O Culture stage), both
         # reflex. Each world action returns a ready event dict (rumor_spread /
         # letter_sent) — or a {"_multi": [...]} chain (spread_rumor appends
-        # meme_mutated when the hop drifted the text) — or a clear parse_failure;
+        # meme_mutated when the hop drifted the text) — or a clear action_rejected;
         # _emit_world_result consumes both shapes, exactly like recruit/clash.
         elif action == "spread_rumor":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to spread a rumor but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7268,7 +7323,7 @@ class AgentRuntime:
             # a name was already resolved to an id by _normalize_args.
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to send a letter but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7299,14 +7354,14 @@ class AgentRuntime:
                 return {**base, "kind": "economy",
                         "text": f"{agent.name} launders credits to cool their heat ({fee} cut).",
                         "payload": {"action": "launder", "fee": fee, "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to launder but: {reason}",
                     "payload": {"error": reason}}
 
         elif action == "bribe":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to bribe but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason, paid = self.world.action_bribe(agent, target, args.get("amount", 0))
@@ -7314,7 +7369,7 @@ class AgentRuntime:
                 return {**base, "kind": "bribe", "target_id": target.id,
                         "text": f"{agent.name} slips {target.name} {paid} credits to drop the heat.",
                         "payload": {"action": "bribe", "amount": paid, "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to bribe but: {reason}",
                     "payload": {"error": reason}}
 
@@ -7324,7 +7379,7 @@ class AgentRuntime:
         elif action == "recruit":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to recruit but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7336,7 +7391,7 @@ class AgentRuntime:
                 return {**base, "kind": "recruited",
                         "text": f"{agent.name} seals the pact — a ring is born.",
                         "payload": {"action": "accept_contract", "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to accept a contract but: {reason}",
                     "payload": {"error": reason}}
 
@@ -7347,7 +7402,7 @@ class AgentRuntime:
         elif action == "teach_skill":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to teach but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7357,7 +7412,7 @@ class AgentRuntime:
         elif action == "request_skill":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to ask but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7372,7 +7427,7 @@ class AgentRuntime:
         elif action == "offer_trade":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to offer a trade but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7397,7 +7452,7 @@ class AgentRuntime:
         elif action == "offer_cooperation":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to offer a partnership but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7419,7 +7474,7 @@ class AgentRuntime:
         elif action == "investigate":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to investigate but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason, n = self.world.action_investigate(agent, target)
@@ -7429,14 +7484,14 @@ class AgentRuntime:
                                 f"({n} crime{'s' if n != 1 else ''} confirmed).",
                         "payload": {"action": "investigate", "confirmed": n,
                                     "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to investigate but: {reason}",
                     "payload": {"error": reason}}
 
         elif action == "accuse":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to accuse but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7445,14 +7500,14 @@ class AgentRuntime:
         elif action == "detain":
             target = self.world.agents.get(args.get("target"))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to detain but target not found",
                         "payload": {"error": "target_not_found"}}
             result = self.world.action_detain(agent, target)
             # action_detain returns a dict on success OR a (False, reason, None) tuple.
             if isinstance(result, dict):
                 return _emit_world_result(result, base, thought)
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to detain but: {result[1]}",
                     "payload": {"error": result[1]}}
 
@@ -7466,7 +7521,7 @@ class AgentRuntime:
         elif action == "whisper":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to whisper but target not found",
                         "payload": {"error": "target_not_found"}}
             whisper_text = args.get("text", "")
@@ -7482,7 +7537,7 @@ class AgentRuntime:
         elif action == "insult":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to insult but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason = self.world.action_insult(agent, target)
@@ -7503,14 +7558,14 @@ class AgentRuntime:
                         "payload": {"action": "insult",
                                     "insult_text": barb, "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to insult but: {reason}",
                         "payload": {"error": reason}}
 
         elif action == "attack":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to attack but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason = self.world.action_attack(agent, target)
@@ -7521,14 +7576,14 @@ class AgentRuntime:
                                     "energy_cost": self.world.params.attack_energy_cost,
                                     "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to attack but: {reason}",
                         "payload": {"error": reason}}
 
         elif action == "set_relationship":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to set_relationship but target not found",
                         "payload": {"error": "target_not_found"}}
             ok, reason = self.world.action_set_relationship(agent, target, args.get("type", "neutral"))
@@ -7538,7 +7593,7 @@ class AgentRuntime:
                         "payload": {"action": "set_relationship",
                                     "rel_type": args.get("type"), "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to set_relationship but: {reason}",
                         "payload": {"error": reason}}
 
@@ -7579,7 +7634,7 @@ class AgentRuntime:
                         "payload": {"action": "move_to", "place": place_id,
                                     "from": old_place, "thought": thought}}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to move to unknown place '{place_id}'.",
                         "payload": {"error": f"unknown place: {place_id}"}}
 
@@ -7638,7 +7693,7 @@ class AgentRuntime:
                         "text": feed + ".",
                         "payload": payload}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to propose rule but: {reason}",
                         "payload": {"error": reason}}
 
@@ -7683,7 +7738,7 @@ class AgentRuntime:
                 # Return as a list marker so loop can emit multiple events
                 return {"_multi": events}
             else:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to vote but: {reason}",
                         "payload": {"error": reason}}
 
@@ -7691,7 +7746,7 @@ class AgentRuntime:
         # Each world action_* returns a ready-to-emit event dict / {"_multi":[...]}
         # (NOT an (ok, reason, value) tuple) and takes the building_id STRING, not a
         # Building object. _emit_world_result spreads base metadata onto each, just
-        # like the `vote` branch above. Illegal ids come back as parse_failure events
+        # like the `vote` branch above. Illegal ids come back as action_rejected events
         # from the world itself, so the loop keeps turning.
         elif action == "propose_project":
             name = args.get("name", "")
@@ -7755,7 +7810,7 @@ class AgentRuntime:
                         "text": f"{agent.name} adopts {pet_name}!",
                         "payload": {"action": "adopt", "animal_id": animal_id,
                                     "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to adopt but: {reason}",
                     "payload": {"action": "adopt", "error": reason}}
 
@@ -7769,7 +7824,7 @@ class AgentRuntime:
                         "text": f"{agent.name} feeds {pet_name}.",
                         "payload": {"action": "feed_pet", "animal_id": animal_id,
                                     "thought": thought}}
-            return {**base, "kind": "parse_failure",
+            return {**base, "kind": "action_rejected",
                     "text": f"{agent.name} tried to feed {pet_name} but: {reason}",
                     "payload": {"action": "feed_pet", "error": reason}}
 
@@ -7815,7 +7870,7 @@ class AgentRuntime:
         elif action == "proselytize":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to proselytize but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(
@@ -7833,7 +7888,7 @@ class AgentRuntime:
         elif action == "excommunicate":
             target = self.world.agents.get(args.get("target", ""))
             if target is None:
-                return {**base, "kind": "parse_failure",
+                return {**base, "kind": "action_rejected",
                         "text": f"{agent.name} tried to excommunicate but target not found",
                         "payload": {"error": "target_not_found"}}
             return _emit_world_result(

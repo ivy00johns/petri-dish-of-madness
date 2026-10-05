@@ -5,8 +5,9 @@
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { EventFeed } from './EventFeed';
+import { EventFeed, KIND_ICON, KIND_FALLBACK_COLOR, CATEGORIES } from './EventFeed';
 import { ev, resetSeq } from '../../test-utils/fixtures';
+import type { EventKind } from '../../types';
 
 beforeEach(() => {
   resetSeq();
@@ -163,5 +164,68 @@ describe('EventFeed — EM-318 removal: provider_error idle-fallbacks follow the
     ]} />);
     expect(screen.getByText(/connection down/)).toBeInTheDocument();
     expect(screen.getByText(/no valid JSON/)).toBeInTheDocument();
+  });
+});
+
+describe('EventFeed — EM-340 failure-kind split', () => {
+  const EM340_KINDS: EventKind[] = ['action_rejected', 'provider_error'];
+
+  it.each(EM340_KINDS)('%s registers in all three feed registries (errors channel)', (kind) => {
+    expect(KIND_ICON[kind]).toBeTruthy();
+    expect(KIND_FALLBACK_COLOR[kind]).toBeTruthy();
+    const holders = CATEGORIES.filter((c) => c.kinds.includes(kind));
+    expect(holders).toHaveLength(1);
+    expect(holders[0].key).toBe('errors');
+  });
+
+  it('hides an action_rejected stamped rejected:true (a benign world refusal)', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'agent_speech', actor_id: 'a1', text: 'Ada says: "still here"' }),
+      ev({
+        kind: 'action_rejected', actor_id: 'a1',
+        text: "Ada's whisper was rejected: target 'Mox' is not at your location",
+        payload: {
+          action: 'whisper',
+          error: "target 'Mox' is not at your location",
+          rejected: true,
+        },
+      }),
+    ]} />);
+    expect(screen.queryByText(/was rejected/)).not.toBeInTheDocument();
+    expect(screen.getByText(/still here/)).toBeInTheDocument();
+  });
+
+  it('shows an action_rejected WITHOUT the flag (a dispatch refusal keeps its card)', () => {
+    render(<EventFeed events={[
+      ev({
+        kind: 'action_rejected', actor_id: 'a1',
+        text: 'Ada tried to work but: no work place here',
+        payload: { action: 'work', error: 'no_work_place' },
+      }),
+    ]} />);
+    expect(screen.getByText(/tried to work but/)).toBeInTheDocument();
+  });
+
+  it('still hides a legacy parse_failure + rejected:true (pre-EM-340 rows)', () => {
+    render(<EventFeed events={[
+      ev({ kind: 'agent_speech', actor_id: 'a1', text: 'legacy chatter' }),
+      ev({
+        kind: 'parse_failure', actor_id: 'a1',
+        text: "Ada's contribute_funds was rejected: abandoned",
+        payload: { action: 'contribute_funds', error: 'abandoned', rejected: true },
+      }),
+    ]} />);
+    expect(screen.queryByText(/was rejected/)).not.toBeInTheDocument();
+  });
+
+  it('shows a provider_error card in the default view (no feed-silence, EM-318)', () => {
+    render(<EventFeed events={[
+      ev({
+        kind: 'provider_error', actor_id: 'a2',
+        text: 'Bram failed to produce a valid action (idle fallback): provider_error: timed out after 30s',
+        payload: { reason: 'provider_error: timed out after 30s' },
+      }),
+    ]} />);
+    expect(screen.getByText(/timed out after 30s/)).toBeInTheDocument();
   });
 });

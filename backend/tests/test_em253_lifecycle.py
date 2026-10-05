@@ -88,7 +88,7 @@ def test_create_meme_empty_text_fails_and_mints_nothing():
     w = _world([ada], _on())
     for bad in ("", "   "):
         evt = w.action_create_meme(ada, bad)
-        assert evt["kind"] == "parse_failure"
+        assert evt["kind"] == "action_rejected"
         assert evt["payload"]["action"] == "create_meme"
     assert w.memes == {}
     assert ada.held_memes == []
@@ -98,7 +98,7 @@ def test_create_meme_disabled_when_comm_off():
     ada = _a("ada")
     w = _world([ada])                                    # no comm block ⇒ OFF
     evt = w.action_create_meme(ada, "an idea")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert w.memes == {}
 
 
@@ -134,7 +134,7 @@ def test_adopt_unknown_meme_fails():
     ada = _a("ada")
     w = _world([ada], _on())
     evt = w.action_adopt_meme(ada, "mem_doesnotexist")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["action"] == "adopt_meme"
 
 
@@ -147,7 +147,7 @@ def test_re_adopt_is_a_no_op_fail():
 
     evt = w.action_adopt_meme(ada, m.id)                 # already a carrier
 
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert m.virality == 1                               # NOT bumped
     assert ada.held_memes == [m.id]                      # unchanged
 
@@ -158,7 +158,7 @@ def test_adopt_disabled_when_comm_off():
     m = w.mint_meme("idea", "x", "ada")
     w._attach_meme(ada, m)
     evt = w.action_adopt_meme(bram, m.id)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert bram.held_memes == []
 
 

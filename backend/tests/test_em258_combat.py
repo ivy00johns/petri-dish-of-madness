@@ -78,7 +78,7 @@ def _at_war(w: World, band_a: list[str] | None = None,
 def test_muster_requires_war_enabled_faction_and_active_war():
     w = _world(war=False)
     evt = w.action_muster(w.agents["ada"])
-    assert evt["kind"] == "parse_failure" and evt["payload"]["error"] == "war disabled"
+    assert evt["kind"] == "action_rejected" and evt["payload"]["error"] == "war disabled"
     w = _world()
     evt = w.action_muster(w.agents["fay"])                  # factionless
     assert evt["payload"]["error"] == "no faction"

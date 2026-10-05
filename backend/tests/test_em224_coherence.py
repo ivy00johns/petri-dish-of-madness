@@ -26,7 +26,8 @@ from petridish.providers.router import Router
 
 DOMAIN_KINDS = {
     "agent_action", "agent_speech", "agent_moved", "economy",
-    "conflict", "relationship", "parse_failure", "coherence_note",
+    "conflict", "relationship", "parse_failure", "action_rejected",
+    "coherence_note",
 }
 
 

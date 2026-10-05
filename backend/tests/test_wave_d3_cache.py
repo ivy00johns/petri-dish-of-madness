@@ -297,7 +297,7 @@ def _drive_turns(world, runtime, agent, n: int) -> None:
         agent.energy = 78.0 if i % 2 == 0 else 77.4  # drifts within ~70 bucket
         evt = asyncio.run(runtime.run_turn(agent))
         primary = evt["_multi"][0] if "_multi" in evt else evt
-        assert primary.get("kind") != "parse_failure", primary
+        assert primary.get("kind") not in ("parse_failure", "action_rejected", "provider_error"), primary
         # Mimic the loop: the turn's own event lands in the agent's memory
         # (this is exactly the raw-tick churn EM-171 normalizes away).
         runtime.push_event({"kind": "agent_action", "actor_id": agent.id,

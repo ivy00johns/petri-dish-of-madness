@@ -160,7 +160,7 @@ def test_create_image_empty_prompt_is_soft_noop_not_dead_turn():
     world = _world()
     ada = world.agents["agent_a"]
     evt = world.action_create_image(ada, "   ")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert world.gallery == []
     assert world.pending_image_fetches == []
 
@@ -291,7 +291,7 @@ def test_post_image_off_billboard_is_soft_fail():
     world.action_create_image(ada, "a mural")
     ada.location = "forge"  # no billboard here
     evt = world.action_post_image(ada, None)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
 
 
 def test_post_image_rejects_unowned_unpromoted_image():
@@ -301,7 +301,7 @@ def test_post_image_rejects_unowned_unpromoted_image():
     bram.location = "plaza"
     # Bram cannot post Ada's image while it is unpromoted.
     evt = world.action_post_image(bram, img_id)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
 
 
 def test_validate_post_image_gate_and_existence():
@@ -426,7 +426,7 @@ async def test_FULL_AGENT_TURN_promote_image_passes_the_runtime_gate_and_activat
     evts = result["_multi"] if "_multi" in result else [result]
     kinds = [e.get("kind") for e in evts]
     # The proposal was ACCEPTED through the gate (NOT a parse_failure / dead turn).
-    assert "parse_failure" not in kinds, f"runtime gate rejected promote_image: {evts}"
+    assert all(k not in ("parse_failure", "action_rejected", "provider_error") for k in kinds), f"runtime gate rejected promote_image: {evts}"
     # A real promote_image rule now exists in the world (proof the world method ran).
     rule = next((r for r in world.rules.values()
                  if r.effect == "promote_image"
@@ -625,7 +625,7 @@ def test_image_gen_disabled_rejects_create_image_and_parks_no_fetch():
     world = _world_image_disabled()
     ada = world.agents["agent_a"]
     evt = world.action_create_image(ada, "a sunset over the plaza")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["payload"]["error"] == "image_gen_disabled"
     assert world.gallery == []                 # nothing recorded
     assert world.pending_image_fetches == []   # NO image-API fetch parked

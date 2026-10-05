@@ -120,7 +120,7 @@ def test_answer_threads_under_the_active_proclamation():
 def test_answer_with_no_active_proclamation_is_a_parse_failure():
     world = _world()
     evt = world.answer_proclamation(world.agents["ada"], "Hello?")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert evt["kind"] != "proclamation_answered"
 
 

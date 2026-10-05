@@ -404,7 +404,7 @@ async def test_demoted_agent_on_a_sick_lane_still_detours():
                                   timed_out=True)
 
     event = await runtime.run_turn(agent)
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
 
     # The demoted agent's due turn DETOURED — the substitute adapter served it.
     assert beta.calls and alpha.calls == []

@@ -612,7 +612,7 @@ def test_runtime_gate_rejects_set_zone_rule_when_flag_off(monkeypatch):
 def test_dispatch_rejects_set_zone_rule_when_flag_off(monkeypatch):
     # OFF path (pinned; ships ON by default now): the GATED dispatch (_apply_steps runs
     # _validate_world → dispatch) refuses set_zone_rule with zones OFF — it emits a
-    # parse_failure, never rule_proposed, and no zone rule is applied, byte-identical /
+    # action_rejected, never rule_proposed, and no zone rule is applied, byte-identical /
     # dormant. (The world method action_propose_rule stays directly callable — only the
     # agent surface is gated.)
     monkeypatch.setattr("petridish.agents.runtime.GRAPH_ZONES_ENABLED", False)
@@ -631,7 +631,7 @@ def test_dispatch_rejects_set_zone_rule_when_flag_off(monkeypatch):
                    "zone_id": zid, "hint": "civic", "density_cap": 3}}],
         "P", "#fff", "")
     assert not any(e["kind"] == "rule_proposed" for e in chain), chain
-    assert any(e["kind"] == "parse_failure" for e in chain)
+    assert any(e["kind"] == "action_rejected" for e in chain)
     assert not w.city_graph.zone_rules  # nothing applied while dormant
 
 

@@ -245,7 +245,7 @@ async def test_agent_turns_record_repaired_truncations_and_bump_next_budget():
     # parse_failure surfaces, but BOTH outcomes must report truncated=True.
     for _ in range(2):
         event = await runtime.run_turn(agent)
-        assert event["kind"] != "parse_failure"
+        assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
     # Base is now 1024 (the no-profile fallback). Trigger 2→1: turn 1 collects the
     # first truncation, so turn 2 ALREADY starts boosted (max(1024*4, 2048)=4096).
     assert router.calls == [1024, 4096]
@@ -333,7 +333,7 @@ async def test_agent_turn_works_against_router_without_lane_surface():
     runtime = AgentRuntime(world, router)
 
     event = await runtime.run_turn(agent)
-    assert event["kind"] != "parse_failure"
+    assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
     assert router.calls == [1024]  # base budget, no EM-135 methods consulted
 
 

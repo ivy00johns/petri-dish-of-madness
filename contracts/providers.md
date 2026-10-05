@@ -14,8 +14,10 @@ class Provider(Protocol):
 ```
 
 `ProviderError` carries `.profile`, `.status`, `.detail`. The agent runtime treats a
-ProviderError as a failed turn (logged as `parse_failure` kind with reason="provider_error",
-agent falls back to idle) — it must NOT crash the loop.
+ProviderError as a failed turn (EM-340: emitted as kind **`provider_error`** with
+`payload.reason` starting `provider_error: …`; pre-EM-340 rows wore the overloaded
+`parse_failure` kind and consumers still tolerate both), the agent falls back to idle —
+it must NOT crash the loop.
 
 ## Router
 

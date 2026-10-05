@@ -624,7 +624,7 @@ async def test_recharge_at_full_turn_rejected_with_reason_no_charge():
     await loop._execute_turn(agent)
 
     assert agent.credits == before, "rejected recharge still charged credits"
-    failures = repo.get_events(run_id, kinds=["parse_failure"])
+    failures = repo.get_events(run_id, kinds=list(("parse_failure", "action_rejected", "provider_error")))
     assert failures, "recharge-at-full should surface as a rejected action"
     assert "already full" in failures[-1]["payload"]["reason"], failures[-1]["payload"]
     resolved = repo.get_events(run_id, kinds=["action_resolved"])[-1]
@@ -868,7 +868,7 @@ async def test_ban_arson_proposable_passes_and_blocks_arson():
 
     # Turn 3: arson is now rejected by the validator; building untouched.
     await _run_ticks(loop, world, 1)
-    failures = repo.get_events(run_id, kinds=["parse_failure"])
+    failures = repo.get_events(run_id, kinds=list(("parse_failure", "action_rejected", "provider_error")))
     assert failures and "ban_arson" in failures[-1]["payload"]["reason"], (
         f"arson not gated by the active ban_arson rule: {failures}"
     )
@@ -914,7 +914,7 @@ async def test_build_step_accepts_funded_planned_building():
     assert built and built[0]["payload"]["building_id"] == "bld_fund"
     flips = repo.get_events(run_id, kinds=["structure_state_changed"])
     assert any(e["payload"]["to"] == "under_construction" for e in flips)
-    assert repo.get_events(run_id, kinds=["parse_failure"]) == []
+    assert repo.get_events(run_id, kinds=list(("parse_failure", "action_rejected", "provider_error"))) == []
 
 
 @pytest.mark.asyncio
@@ -933,7 +933,7 @@ async def test_build_step_rejects_unfunded_planned_building():
 
     b = world.buildings["bld_poor"]
     assert b.status == "planned" and b.progress == 0
-    failures = repo.get_events(run_id, kinds=["parse_failure"])
+    failures = repo.get_events(run_id, kinds=list(("parse_failure", "action_rejected", "provider_error")))
     assert failures, "unfunded planned build_step must be rejected"
     reason = failures[-1]["payload"]["reason"]
     assert "funded" in reason or "contribute_funds" in reason, reason

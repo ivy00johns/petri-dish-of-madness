@@ -148,7 +148,8 @@ reflex; say/propose_rule = llm). `propose_rule` MAY gain a `ban_arson` effect (o
 `world.action_*` methods take `(agent, building_id: str[, amount])` and RETURN a ready-to-emit
 **event dict**, or `{"_multi": [event, ...]}` for multi-event outcomes (NOT the `(ok, reason,
 value)` tuple some older `action_*` used) — `propose_project` also returns `"_building_id"`. On a
-bad/illegal id they return a `parse_failure` event dict, never raise. The runtime's `_apply_action`
+bad/illegal id they return an `action_rejected` event dict (EM-340 — the model's action parsed and
+validated fine; the WORLD refused it), never raise. The runtime's `_apply_action`
 consumes these exactly like the existing `vote → {_multi:[...]}` branch (spread base
 `{profile, profile_color, tick}` onto each and emit); it does NOT unpack a tuple and passes the
 **id string**, not a Building object. `_validate_world` gates BEFORE dispatch (build_step:

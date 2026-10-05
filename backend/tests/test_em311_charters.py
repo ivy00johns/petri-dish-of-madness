@@ -284,7 +284,7 @@ def test_malformed_revision_never_fails_the_turn():
     # the charter stays on the seed (the bad rewrite was popped) ...
     assert world.agents["agent_ada"].charter["ambitions"] == ["keep_the_peace"]
     assert repo.get_events(loop._run_id, kinds=["charter_revised"]) == []
-    assert repo.get_events(loop._run_id, kinds=["parse_failure"]) == []
+    assert repo.get_events(loop._run_id, kinds=list(("parse_failure", "action_rejected", "provider_error"))) == []
     # ... and the work still resolved — the malformed charter never cost the turn.
     assert repo.get_events(loop._run_id, kinds=["economy"]), "work resolved"
 

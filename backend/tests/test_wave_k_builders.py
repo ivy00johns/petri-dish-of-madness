@@ -181,7 +181,7 @@ def test_place_prop_defaults_place_to_agent_location():
 def test_place_prop_unknown_place_is_rejected_with_guidance_not_crash():
     world = _world()
     evt = world.action_place_prop(world.agents["agent_a"], "bench", "atlantis")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "unknown place" in evt["payload"]["error"]
 
 
@@ -191,7 +191,7 @@ def test_place_prop_cap_rejected_with_guidance():
     assert world.action_place_prop(ada, "bench", "plaza")["kind"] == "prop_placed"
     assert world.action_place_prop(ada, "lamp", "plaza")["kind"] == "prop_placed"
     over = world.action_place_prop(ada, "tree", "plaza")
-    assert over["kind"] == "parse_failure"
+    assert over["kind"] == "action_rejected"
     assert "cap" in over["payload"]["error"]
     assert len(world.props) == 2  # the over-cap prop was NOT created
 
@@ -222,7 +222,7 @@ def test_remove_prop_rejects_non_owner_of_owned_prop():
     ada, bram = world.agents["agent_a"], world.agents["agent_b"]
     pid = world.action_place_prop(ada, "bench", "plaza")["payload"]["prop_id"]
     evt = world.action_remove_prop(bram, pid)  # Bram is co-located but not owner
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert pid in world.props  # untouched
 
 
@@ -241,14 +241,14 @@ def test_remove_prop_rejects_remote_unowned_prop():
     world.props["prop_seed"] = Prop(id="prop_seed", kind="fountain", place="forge", owner_id=None)
     ada = world.agents["agent_a"]  # at plaza, NOT forge
     evt = world.action_remove_prop(ada, "prop_seed")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "prop_seed" in world.props
 
 
 def test_remove_prop_unknown_id_is_soft_fail():
     world = _world()
     evt = world.action_remove_prop(world.agents["agent_a"], "prop_nope")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -268,16 +268,16 @@ def test_non_owner_demolish_rejected_with_governance_guidance():
     world = _world()
     b = _owned_building(world, owner="agent_a")
     evt = world.action_demolish(world.agents["agent_b"], b.id)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "vote" in evt["text"] or "governance" in evt["text"].lower()
     assert world.buildings[b.id].status == "operational"  # untouched
 
 
 def test_demolish_unknown_and_already_rubble_are_soft_fails():
     world = _world()
-    assert world.action_demolish(world.agents["agent_a"], "bld_nope")["kind"] == "parse_failure"
+    assert world.action_demolish(world.agents["agent_a"], "bld_nope")["kind"] == "action_rejected"
     b = _owned_building(world, status="destroyed")
-    assert world.action_demolish(world.agents["agent_a"], b.id)["kind"] == "parse_failure"
+    assert world.action_demolish(world.agents["agent_a"], b.id)["kind"] == "action_rejected"
 
 
 def test_public_demolish_through_governance_pipeline():
@@ -326,7 +326,7 @@ def test_set_building_skin_owner_only_and_sets_field():
     assert evt["payload"]["skin"] == "rose"
     # Non-owner rejected; skin untouched.
     rej = world.action_set_building_skin(world.agents["agent_b"], b.id, "sky")
-    assert rej["kind"] == "parse_failure"
+    assert rej["kind"] == "action_rejected"
     assert world.buildings[b.id].skin == "rose"
 
 
@@ -639,10 +639,10 @@ def test_ordinary_rule_keeps_simple_majority_bar():
 # carries an OBJECT/ARRAY-valued building_id must NOT crash the TickLoop with an
 # unhashable-type TypeError. Defense-in-depth: the gate coerces ids to str before
 # the dict lookup AND the per-step gate runs under the same try/except as the
-# inner dispatch, so the bad step becomes a parse_failure and the turn continues.
+# inner dispatch, so the bad step becomes an action_rejected and the turn continues.
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_multi_action_object_building_id_is_parse_failure_not_raise():
+async def test_multi_action_object_building_id_is_action_rejected_not_raise():
     from petridish.engine.loop import TickLoop
     from petridish.config.loader import ModelProfile, WorldConfig
     from petridish.persistence.repository import SQLiteRepository
@@ -670,7 +670,7 @@ async def test_multi_action_object_building_id_is_parse_failure_not_raise():
     result = await runtime.run_turn(ada)
     evts = result["_multi"] if "_multi" in result else [result]
     kinds = [e.get("kind") for e in evts]
-    assert "parse_failure" in kinds, "the object-id step rejects cleanly"
+    assert "action_rejected" in kinds, "the object-id step rejects cleanly"
     assert "agent_speech" in kinds, "the sibling `say` still resolved — turn continued"
     assert world.buildings["bld_test1"].status == "operational"  # never demolished
 
@@ -704,7 +704,7 @@ def test_set_building_skin_rejects_destroyed_building_at_resolution():
     b = _owned_building(world, owner="agent_a", place="plaza", status="destroyed")
     ada = world.agents["agent_a"]
     evt = world.action_set_building_skin(ada, b.id, "rose")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "rubble" in evt["text"].lower()
     assert world.buildings[b.id].skin is None  # untouched
 

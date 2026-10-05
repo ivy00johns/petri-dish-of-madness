@@ -298,7 +298,7 @@ def test_malformed_plan_revision_never_fails_the_turn():
     asyncio.run(_drive(loop, world, 1))
     assert world.agents["agent_ada"].plan is None       # popped — no plan
     assert repo.get_events(loop._run_id, kinds=["plan_revised"]) == []
-    assert repo.get_events(loop._run_id, kinds=["parse_failure"]) == []
+    assert repo.get_events(loop._run_id, kinds=list(("parse_failure", "action_rejected", "provider_error"))) == []
     # the forage still resolved (emits `economy`) — the malformed plan never
     # cost the turn.
     assert repo.get_events(loop._run_id, kinds=["economy"]), "forage resolved"

@@ -420,7 +420,7 @@ async def test_FULL_AGENT_TURN_relocate_center_passes_the_gate_and_activates():
     evts = result["_multi"] if "_multi" in result else [result]
     kinds = [e.get("kind") for e in evts]
     # ACCEPTED through the gate (NOT a parse_failure / dead turn).
-    assert "parse_failure" not in kinds, f"gate rejected relocate_center: {evts}"
+    assert all(k not in ("parse_failure", "action_rejected", "provider_error") for k in kinds), f"gate rejected relocate_center: {evts}"
     rule = next((r for r in w.rules.values()
                  if r.effect == "relocate_center"
                  and (r.payload or {}).get("target") == "market"), None)

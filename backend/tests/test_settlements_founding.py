@@ -94,7 +94,7 @@ def test_second_settlement_on_claimed_ground_is_rejected():
     w.action_found_settlement(w.agents["a"], "First")
     w.agents["b"].location = "ridge"                 # same ground as First
     evt = w.action_found_settlement(w.agents["b"], "Second")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "First" in evt["text"]                    # guidance names the claimant
     assert len(w.settlements) == 1
 
@@ -121,7 +121,7 @@ def test_refounding_reassociates_the_founder():
 def test_disabled_flag_rejects_cleanly():
     w = _world(enabled=False)
     evt = w.action_found_settlement(w.agents["a"], "Nope")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert w.settlements == {}
 
 
@@ -129,5 +129,5 @@ def test_nowhere_agent_rejects_cleanly():
     w = _world()
     w.agents["a"].location = "the-void"
     evt = w.action_found_settlement(w.agents["a"], "Nope")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert w.settlements == {}

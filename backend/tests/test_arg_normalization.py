@@ -260,7 +260,7 @@ async def test_overlong_project_function_truncated_turn_resolves():
         }}]
     )
     assert by_kind["action_resolved"]["payload"]["outcome"] == "ok"
-    assert "parse_failure" not in by_kind
+    assert all(k not in ("parse_failure", "action_rejected", "provider_error") for k in by_kind)
 
 
 def test_normalize_caps_billboard_text():

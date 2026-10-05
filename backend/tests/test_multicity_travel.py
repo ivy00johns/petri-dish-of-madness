@@ -197,15 +197,15 @@ def test_travel_to_rejections():
 
     # unknown target
     r = w.action_travel_to(b, "Nowhere")
-    assert r["kind"] == "parse_failure" and b.in_transit_to is None
+    assert r["kind"] == "action_rejected" and b.in_transit_to is None
     # already home
     r = w.action_travel_to(b, b.home_settlement_id)
-    assert r["kind"] == "parse_failure" and b.in_transit_to is None
+    assert r["kind"] == "action_rejected" and b.in_transit_to is None
     # depart, then reject a second departure while traveling
     ok = w.action_travel_to(b, sid)
     assert ok["kind"] == "travel_departed"
     r = w.action_travel_to(b, sid)
-    assert r["kind"] == "parse_failure"
+    assert r["kind"] == "action_rejected"
     assert b.in_transit_to == sid                    # unchanged by the reject
 
 
@@ -219,7 +219,7 @@ def test_travel_to_resolves_name_case_insensitively():
 def test_travel_to_disabled_is_feed_safe_noop():
     w = _world(enabled=False, seed_genesis=True)
     r = w.action_travel_to(w.agents["a"], "anything")
-    assert r["kind"] == "parse_failure"
+    assert r["kind"] == "action_rejected"
     assert w.agents["a"].in_transit_to is None
 
 

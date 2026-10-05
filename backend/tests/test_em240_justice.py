@@ -90,7 +90,7 @@ def test_accuse_needs_co_location():
     crook = _a("crook", "jail")
     world = _world([cop, crook])
     evt = world.action_accuse(cop, crook)
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
 
 
 # ── _jail_place_id ────────────────────────────────────────────────────────────

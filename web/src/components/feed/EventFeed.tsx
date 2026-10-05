@@ -68,6 +68,11 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   rule_rejected:    '✘',
   memory:           '◈',
   parse_failure:    '⚠',
+  // EM-340 — the split of the overloaded `parse_failure`: a world-refused action
+  // and a provider outage read with the SAME ⚠ error glyph as a content parse
+  // failure (the errors channel treats all three alike, EM-318).
+  action_rejected:  '⚠',
+  provider_error:   '⚠',
   model_reassigned: '⇄',
   // EM-315 — the Healing House verdict card (the town votes to remake a mind).
   sentenced_healing: '⚕',
@@ -189,6 +194,10 @@ export const KIND_FALLBACK_COLOR: Partial<Record<EventKind, string>> = {
   random_event:     '#ff9900',
   model_reassigned: '#c8ff00',
   parse_failure:    '#ff9900',
+  // EM-340 — same ⚠ orange as parse_failure (no new color minted; the three
+  // failure kinds share one errors register).
+  action_rejected:  '#ff9900',
+  provider_error:   '#ff9900',
   control:          '#5a5a72',
   // Wave E — bonds read in the partner register, births in the family warmth,
   // the faction lifecycle in the shared faction tint, miracles in god-gold.
@@ -285,9 +294,16 @@ const ANIMAL_MAGENTA = 'var(--marker-animal)';
  * the live feed drops them as non-actionable clutter. They still persist in
  * history/DB for forensics; genuine parse_failures (no `rejected` flag) keep
  * their place in the errors channel.
+ *
+ * EM-340 — the backend now emits these as kind `action_rejected`; the legacy
+ * `parse_failure` + `rejected:true` shape (pre-EM-340 persisted rows) still
+ * matches, so no historic rejection changes its feed visibility.
  */
 function isBenignRejection(e: WorldEvent): boolean {
-  return e.kind === 'parse_failure' && e.payload?.rejected === true;
+  return (
+    (e.kind === 'action_rejected' || e.kind === 'parse_failure') &&
+    e.payload?.rejected === true
+  );
 }
 
 // FEED-SILENCE (EM-318) is REMOVED: routing-exhaustion idle-fallbacks
@@ -526,7 +542,7 @@ export const CATEGORIES: FeedCategory[] = [
   // W8 — the cat & dog chaos channel (magenta). Its OWN category, NOT folded
   // into Trace, so the default-muted trace chain never hides the critters.
   { key: 'animals', label: 'Animals', icon: '🐾', kinds: ['animal_spawned', 'animal_action', 'animal_died'] },
-  { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure', 'usage_alert'] },
+  { key: 'errors',  label: 'Errors',  icon: '⚠', kinds: ['parse_failure', 'action_rejected', 'provider_error', 'usage_alert'] },
   // Decision-trace chain (event-log.md §3). DEFAULT-MUTED: these are the
   // inspector's substrate, not live-feed reading material. Dissect them in the
   // /inspector annex; here they're collapsed so the feed isn't flooded.

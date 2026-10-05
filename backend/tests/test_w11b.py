@@ -594,7 +594,7 @@ def test_second_commemorative_monument_is_rejected():
     assert "_multi" in first
     second = world.action_propose_project(ada, "Hall of Basic Income",
                                           "hall", 10)
-    assert second["kind"] == "parse_failure", "one monument per law"
+    assert second["kind"] == "action_rejected", "one monument per law"
     assert second["payload"]["error"] == "commemorative_duplicate"
     assert "already stands" in second["text"]
     monuments = [b for b in world.buildings.values()
@@ -652,7 +652,7 @@ def test_post_billboard_gated_then_succeeds_at_plaza():
     asyncio.run(_drive(loop, world, 1))
     assert repo.get_events(loop._run_id, kinds=["billboard_posted"]) == [], \
         "posting away from plaza/townhall must be rejected"
-    fails = repo.get_events(loop._run_id, kinds=["parse_failure"])
+    fails = repo.get_events(loop._run_id, kinds=list(("parse_failure", "action_rejected", "provider_error")))
     assert fails and any("billboard" in (f["payload"].get("reason") or "")
                          for f in fails)
     assert world.billboard == []

@@ -103,7 +103,7 @@ def test_build_road_uses_corrected_anchor_not_corner():
     a = _agent_at(w, "plaza")
     e0 = len(w.city_graph.edges)
     evt = w.action_build_road(a, {"direction": "east"})
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "already a road" in evt["text"].lower()
     assert len(w.city_graph.edges) == e0  # no mutation
 
@@ -136,7 +136,7 @@ def test_action_build_road_too_tired_refuses_no_graph_change():
     a.energy = 1.0
     e0 = len(w.city_graph.edges)
     evt = w.action_build_road(a, {"direction": "east"})
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "tired" in evt["text"].lower()
     assert len(w.city_graph.edges) == e0   # no mutation when refused
 
@@ -152,7 +152,7 @@ def test_action_build_road_blocked_direction_reports_reason():
         pytest.skip("no blocked direction at this node")
     e0 = len(w.city_graph.edges)
     evt = w.action_build_road(a, {"direction": blocked})
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert len(w.city_graph.edges) == e0
 
 

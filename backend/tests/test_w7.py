@@ -379,7 +379,7 @@ def test_contribute_over_balance_is_rejected_and_mutates_nothing():
     bid = _propose(world, a, "Clock", "clocktower", 100)
     bld = world.buildings[bid]
     res = world.action_contribute_funds(a, bid, 6)  # more than the 5 it holds
-    assert res["kind"] == "parse_failure"
+    assert res["kind"] == "action_rejected"
     assert a.credits == 5, "rejected contribution must not debit the agent"
     assert bld.funds_committed == 0, "rejected contribution must not credit the building"
     assert a.id not in bld.contributors
@@ -535,7 +535,7 @@ def test_arson_on_destroyed_is_a_noop_failure():
     assert world.buildings[bid].status == "destroyed"
     health_before = world.buildings[bid].health
     res = world.action_arson(bram, bid)
-    assert res["kind"] == "parse_failure"
+    assert res["kind"] == "action_rejected"
     assert world.buildings[bid].health == health_before
 
 
@@ -966,7 +966,7 @@ def test_runtime_propose_project_end_to_end_through_loop():
     kinds = _emitted_kinds(emitted)
     assert "project_proposed" in kinds, "the domain event must be emitted by the loop"
     assert "structure_state_changed" in kinds
-    assert "parse_failure" not in kinds, "a correctly-wired propose must not fail/idle"
+    assert all(k not in ("parse_failure", "action_rejected", "provider_error") for k in kinds), "a correctly-wired propose must not fail/idle"
     # The decision-trace chain still brackets the domain event(s).
     assert "turn_start" in kinds and "action_chosen" in kinds
     assert kinds.index("turn_start") < kinds.index("project_proposed")
@@ -1010,7 +1010,7 @@ def test_runtime_full_construction_chain_to_operational_through_loop():
     assert bld.funds_committed == 10
 
     kinds = _emitted_kinds(emitted)
-    assert "parse_failure" not in kinds, "no turn in the chain may fail/idle"
+    assert all(k not in ("parse_failure", "action_rejected", "provider_error") for k in kinds), "no turn in the chain may fail/idle"
     assert "project_funded" in kinds
     assert "project_built" in kinds
     assert "building_operational" in kinds, "the loop must emit building_operational at 100%"

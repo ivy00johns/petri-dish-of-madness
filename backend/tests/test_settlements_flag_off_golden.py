@@ -60,7 +60,7 @@ def test_flag_off_snapshot_is_byte_identical():
     w = _world()
     baseline = json.dumps(w.to_snapshot({}), sort_keys=True, default=str)
     evt = w.action_found_settlement(w.agents["a"], "Nope")
-    assert evt["kind"] == "parse_failure"            # rejected with guidance
+    assert evt["kind"] == "action_rejected"            # rejected with guidance
     after = json.dumps(w.to_snapshot({}), sort_keys=True, default=str)
     assert baseline == after
     assert "settlements" not in w.to_snapshot({})

@@ -141,7 +141,7 @@ async def test_incident_shape_all_agents_converge_on_the_only_healthy_lane():
     for _turn in range(8):
         for agent in agents:
             event = await runtime.run_turn(agent)
-            assert event["kind"] != "parse_failure"
+            assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
             spans[agent.id].append(event["_trace"]["llm_attempts"][0])
 
     # Convergence: the healthy adapter REALLY served 6 of each agent's 8
@@ -196,7 +196,7 @@ async def test_incident_shape_probe_outcomes_age_a_home_lane_back_home():
 
     for _turn in range(40):
         event = await runtime.run_turn(agent)
-        assert event["kind"] != "parse_failure"
+        assert event["kind"] not in ("parse_failure", "action_rejected", "provider_error")
         span = event["_trace"]["llm_attempts"][0]
         if not (span.get("detoured") or span.get("probe")):
             break                          # recovered: a plain home call

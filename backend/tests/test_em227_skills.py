@@ -651,5 +651,5 @@ def test_failed_gated_action_grants_no_xp():
     res = rt._apply_action(a, {"action": "create_image", "args": {"prompt": ""}},
                            "mock", "#2ecc71")
     primary = res["_multi"][0] if "_multi" in res else res
-    assert primary.get("kind") == "parse_failure"
+    assert primary.get("kind") == "action_rejected"
     assert a.skill_level("art") == 1  # unchanged — no xp on failure

@@ -212,7 +212,7 @@ def test_active_ban_gossip_blocks_spread_rumor_in_the_world():
     w.action_vote(w.agents["bram"], rule.id, True)
     assert w.has_active_rule("ban_gossip")
     evt = w.action_spread_rumor(w.agents["ada"], w.agents["bram"], "psst")
-    assert evt["kind"] == "parse_failure"
+    assert evt["kind"] == "action_rejected"
     assert "ban_gossip" in evt["payload"]["error"]
 
 
