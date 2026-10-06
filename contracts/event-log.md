@@ -1,8 +1,30 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.4.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.5.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.5.0 (EM-342, 2026-10-05 — the world-refusal seal):**
+> The v1.4.0 split left ONE world-refusal seam: a `world error:` from the
+> PRE-dispatch `_validate_world` gate in `_call_and_parse` still emitted
+> `parse_failure`. It is the RETRIED path ("your previous response failed
+> validation"), but it is a WORLD refusal all the same — the model's action was
+> well-formed and schema-valid, and the world said no. It now emits
+> **`action_rejected`**, so EVERY world-side refusal (pre-dispatch OR apply-time)
+> wears one kind and a run's failure taxonomy has no residual ambiguity. Nothing
+> else moves: the single retry, the idle-fallback feed text, the payload shape
+> and the EM-140 `rejected_action` forensic are byte-unchanged (only
+> `_failure_kind_for`'s reason→kind mapping changed). A `schema error:`
+> deliberately STAYS `parse_failure` — that is the response's SHAPE failing the
+> action schema, a genuine parse-side failure, not a world refusal.
+> Re-measured off the persisted `run.sqlite` (the raw `world error:` bucket moves
+> 14→0 in run 23 and 1→0 in run 26; run 23/26 pre-date EM-340, so the buckets are
+> read from the overloaded rows' payloads): run 23 = **147 / 30 / 145**
+> (`action_rejected` / `provider_error` / `parse_failure`); run 26 =
+> **109 / 288 / 20** — i.e. run 26's real parse-failure share is 20/1,652 = 1.2%.
+> The EM-226 auto-pause classifier, the fingerprint `parse_failed` union, and the
+> frontend benign-rejection filter all read the three kinds together already, so
+> none is affected.
 
 > **v1.4.0 (EM-340, 2026-10-05 — the failure-kind split):**
 > `parse_failure` was overloaded: run 23's 322 of them contained ZERO malformed
@@ -25,12 +47,14 @@ Lock it before building any instrumentation UI.
 >    tick-1147 outage, previously indistinguishable from bad model JSON).
 > 3. **`parse_failure`** — genuinely "the model's response could not be turned into
 >    an applicable action": no JSON object, a `schema error:`, or a `world error:`
->    from the PRE-dispatch validator. That last one stays `parse_failure` ON PURPOSE:
->    it is the RETRIED path ("your previous response failed validation") and carries
->    the EM-140 `rejected_action` forensic; only APPLY-time refusals become
->    `action_rejected`. Run 23: **159** (115 no-JSON + 30 schema + 14 world); run 26:
->    **21** — i.e. run 26's headline "412 parse failures (25% of turns)" is really 21
->    real parse failures (1.3%), 288 provider errors, and 108 rejections.
+>    from the PRE-dispatch validator. (v1.4.0 kept that last one `parse_failure` ON
+>    PURPOSE — the retried path — but **v1.5.0/EM-342 SUPERSEDES this: the
+>    pre-dispatch `world error:` path now emits `action_rejected` too**, so every
+>    world-side refusal wears one kind; see the v1.5.0 note above. A `schema error:`
+>    remains `parse_failure`.) Run 23: **159** (115 no-JSON + 30 schema + 14 world);
+>    run 26: **21** (20 schema + 1 world) — i.e. run 26's headline "412 parse failures
+>    (25% of turns)" was really 20 real parse failures (1.2%), 288 provider errors,
+>    and 109 rejections once both EM-340 and EM-342 are applied.
 > 4. **Consumers.** The frontend's benign-rejection filter matches `action_rejected`
 >    (plus legacy `parse_failure` + `payload.rejected: true`), so no rejection changes
 >    its feed visibility; `action_rejected`/`provider_error` join the ⚠ Errors channel.
@@ -191,7 +215,8 @@ Plus: any **domain events** the action produces (`economy`, `conflict`, `relatio
 `turn_id`. So the inspector can show "this `give` (action_resolved) caused this `economy`
 transfer and this `relationship` trust bump", all under one turn.
 
-**Failure turns keep the same shape.** A `parse_failure` / `idle` turn emits the SAME ordered
+**Failure turns keep the same shape.** A failed turn (`parse_failure` / `action_rejected` /
+`provider_error`, all falling back to `idle`) emits the SAME ordered
 chain, not a truncated one: `perceived` and `memory_retrieved` are still real (context was
 assembled before the call), `llm_call` carries the error/finish, `reasoning` and `action_chosen`
 carry empty/fallback content (the action falls back to `idle`), and `action_resolved.outcome =

@@ -1,4 +1,4 @@
-"""EM-340 — the failure-kind split.
+"""EM-340 — the failure-kind split (EXTENDED by EM-342).
 
 `parse_failure` used to carry THREE unrelated phenomena, so any per-run
 "parse failure rate" mixed them. Run 23 (322 events, ZERO malformed JSON)
@@ -8,7 +8,7 @@ decomposed — measured from the persisted DB — into:
      30  reason='provider_error' → provider_error
     115  reason='no valid JSON'  → parse_failure
      30  reason='schema error'   → parse_failure
-     14  reason='world error'    → parse_failure (the RETRIED validation path)
+     14  reason='world error'    → action_rejected   (EM-342: was parse_failure)
       9  dispatch refusals w/o the flag → action_rejected
 
 Run 26 was worse: 288 of its 417 were provider errors (the tick-1147 outage)
@@ -17,17 +17,19 @@ and only ~31 were real parse failures.
 The seam this file pins, and why it is where it is:
 
   * `action_rejected` — the model answered with a schema-valid action and the
-    WORLD refused it at APPLY time (per-step `_validate_world` gate, the
-    `_apply_action_inner` dispatch table, or `World._fail_event`). Payload
-    keeps `{action, error, rejected?}` — unchanged, only the kind moves.
+    WORLD refused it — at APPLY time (per-step `_validate_world` gate, the
+    `_apply_action_inner` dispatch table, or `World._fail_event`) OR at the
+    PRE-dispatch validator (the retried `world error:` path, EM-342). Payload
+    keeps `{action, error, rejected?}` / `{reason, rejected_action?}` —
+    unchanged, only the kind moves.
   * `provider_error` — the provider never served a usable response (transport
     error, exhausted/rate-limited lanes, or the wall-clock turn budget).
-  * `parse_failure` — the response could not be turned into an applicable
-    action: no JSON, a `schema error:`, or a `world error:` from the
-    PRE-dispatch validator (which is retried as "your response failed
-    validation"). That retried path stays `parse_failure` ON PURPOSE — it is
-    the model's response that failed, and it is the path the retry loop and
-    the EM-140 `rejected_action` forensic belong to.
+  * `parse_failure` — the response itself could not be turned into an
+    applicable action: no JSON, a `schema error:` (the response's SHAPE failing
+    the action schema), or the engine's defensive fallback. EM-342 removed the
+    last world-refusal ambiguity by re-kinding the retried pre-dispatch
+    `world error:` path as `action_rejected` — its ONE retry and its EM-140
+    `rejected_action` forensic are unchanged, only the emitted kind moved.
 
 House idiom: petridish.engine.world is imported BEFORE petridish.agents.runtime
 (the circular-import guard).
@@ -67,17 +69,25 @@ def test_content_failures_keep_parse_failure():
     assert _failure_kind_for(
         "no valid JSON object (finish_reason='length') in response: 'hi'"
     ) == "parse_failure"
+    # A `schema error:` is the response's SHAPE failing the action schema —
+    # parse-side, NOT a world refusal, so it deliberately stays parse_failure.
     assert _failure_kind_for(
         "schema error: 'action' is a required property"
     ) == "parse_failure"
 
 
-def test_retried_world_error_stays_parse_failure_by_design():
-    """The pre-dispatch validator's refusal is RETRIED ("your previous response
-    failed validation") — the response could not be turned into an applicable
-    action, so it stays parse_failure. The APPLY-time refusals are the ones that
-    become action_rejected (the 124 `rejected:true` in run 23)."""
-    assert _failure_kind_for("world error: unknown target 'Zorp'") == "parse_failure"
+def test_world_error_reason_is_action_rejected():
+    """EM-342 — a `world error:` from the pre-dispatch validator is a WORLD
+    refusal, not a parse problem: it emits `action_rejected`, the same kind the
+    APPLY-time refusals already carry, so the taxonomy has no residual
+    world-refusal ambiguity. (The retry + `rejected_action` forensic are
+    unchanged — see the end-to-end pin below.)"""
+    assert _failure_kind_for("world error: unknown target 'Zorp'") == "action_rejected"
+    assert _failure_kind_for(
+        "world error: move_to requires args.place"
+    ) == "action_rejected"
+    # Prefix matching is case/whitespace tolerant here too.
+    assert _failure_kind_for("  World Error: nope") == "action_rejected"
 
 
 def test_missing_reason_defaults_to_parse_failure():
@@ -272,6 +282,28 @@ async def test_schema_invalid_idles_as_parse_failure_with_forensics():
     assert event["payload"]["reason"].startswith("schema error")
     # EM-140 forensics survive the split.
     assert event["payload"]["rejected_action"]["action"] is None
+
+
+@pytest.mark.asyncio
+async def test_retried_world_error_idles_as_action_rejected_with_forensics():
+    """EM-342 — the pre-dispatch validator refusal, end to end: a schema-valid
+    `move_to` to a place the world does not have. The turn is still RETRIED once
+    (2 router calls) and still carries the EM-140 `rejected_action` forensic —
+    only the emitted KIND moves to `action_rejected`."""
+    world, agent = _one_agent_world()
+    router = _Router('{"action": "move_to", "args": {"place": "nowhere-land"}}')
+    runtime = AgentRuntime(world, router)
+
+    event = await runtime.run_turn(agent)
+
+    assert router.calls == 2, "the single retry is unchanged"
+    assert event["kind"] == "action_rejected"
+    assert event["payload"]["reason"].startswith("world error")
+    assert event["payload"]["rejected_action"]["action"] == "move_to"
+    # The feed copy is unchanged — only the kind moved.
+    assert "failed to produce a valid action (idle fallback)" in event["text"]
+    # The agent idled (the refused move did not resolve).
+    assert agent.location == "plaza"
 
 
 # ── (E) The auto-pause classifier (EM-226) reads the new kind ────────────────

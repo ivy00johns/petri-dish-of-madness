@@ -625,7 +625,8 @@ def test_gate_take_offline_owner_only():
 
 def test_runtime_idles_on_gated_build_step_without_mutating():
     """A scripted build_step on a planned building must be gated at validation
-    (the runtime falls back to a parse_failure/idle turn) and leave it untouched.
+    (the runtime falls back to an action_rejected/idle turn, EM-342) and leave it
+    untouched.
 
     This exercises AgentRuntime._call_and_parse -> _validate_world, which is the
     real engine gate; it does NOT reach the broken _apply_action dispatch because
@@ -635,8 +636,8 @@ def test_runtime_idles_on_gated_build_step_without_mutating():
     a.location = "plaza"
     bid = _propose(world, a, "Clock", "clocktower", 10)  # planned
     res = _drive_runtime_turn(world, a, [{"action": "build_step", "args": {"building_id": bid}}])
-    # Gated -> the turn resolves to a parse_failure (idle fallback), not a build.
-    assert res["kind"] == "parse_failure"
+    # Gated -> the world refused the action (idle fallback), not a build.
+    assert res["kind"] == "action_rejected"
     assert world.buildings[bid].progress == 0
     assert world.buildings[bid].status == "planned"
 
