@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.6.0
+  version: 1.7.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -24,6 +24,12 @@ info:
     live TickLoop — never concurrent (free-tier key-pool protection, ARCHITECTURE.md
     §Instance). RunRow gains a nullable `model_family` stamp (null = un-stamped); a fork
     inherits its parent's stamp.
+    v1.7.0 (EM-343) adds the failure-taxonomy read side to GET /api/arena: every run card
+    (family standings AND contact runs) gains an additive `failures` block reporting the
+    TRUE action_rejected / provider_error / parse_failure counts + shares and the
+    failures-per-`llm_call` rate, read off the append-only event log. Pre-EM-340 runs are
+    reported honestly: their overloaded `parse_failure` rows are re-derived from their
+    payloads by the same classifier the emit path uses (event-log.md v1.6.0).
 servers:
   - url: http://localhost:8000
 paths:
@@ -181,6 +187,10 @@ paths:
         family pairing, the ordinary outcome card, per-settlement populations from the
         run's latest snapshot, the contact marker latch, the honesty ledger, and the
         crossing/travel event counts. No new persistence (the run self-describes).
+        EM-343 (v1.7.0): every run card (family standings AND contact runs) gains the
+        additive `failures` block — the true failure taxonomy read off the event log:
+        `{counts, shares, total, turns, failure_rate, legacy_rows_reclassified}`
+        (`legacy_rows_reclassified` = pre-EM-340 overloaded rows re-derived from payload).
       responses:
         "200": { description: arena summary, content: { application/json: { schema: { type: object } } } }
   /api/contact:

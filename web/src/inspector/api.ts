@@ -311,6 +311,10 @@ export interface LaneRegistryView {
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null;
 
+/** Finite number or 0 (the arena's defensive coercion). */
+const toNum = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) ? v : 0;
+
 /**
  * GET `path` and parse JSON; `null` on ANY failure (network, !ok, parse).
  * The failure-aware base — callers that can't distinguish "no backend" from
@@ -401,6 +405,50 @@ function eventsPath(query: EventsQuery): string {
 
 // ── EM-112 + EM-119 — the Model-Family Arena ──────────────────────────────
 
+/** EM-343 — the three failure kinds (the EM-340 split of `parse_failure`). */
+export type FailureKind = 'action_rejected' | 'provider_error' | 'parse_failure';
+
+/**
+ * EM-343 — ONE run's failure taxonomy read off its event log. `counts` are the
+ * TRUE per-kind counts (a pre-EM-340 run's overloaded `parse_failure` rows are
+ * re-derived from their payloads server-side), so `shares` describe what the
+ * runtime MEANT rather than the raw kind tally; `failure_rate` is failures per
+ * `llm_call`. `legacy_rows_reclassified` says how many rows needed
+ * re-derivation (0 on a run emitted after EM-340/EM-342).
+ */
+export interface FailureTaxonomy {
+  counts: Record<FailureKind, number>;
+  /** share of the failure total (0..1); all 0 when the run has no failures */
+  shares: Record<FailureKind, number>;
+  total: number;
+  turns: number;
+  failure_rate: number;
+  legacy_rows_reclassified: number;
+}
+
+const FAILURE_KINDS: FailureKind[] = ['action_rejected', 'provider_error', 'parse_failure'];
+
+/** Defensive parse of the additive `failures` block (absent ⇒ all zeros). */
+function parseFailures(raw: unknown): FailureTaxonomy {
+  const src = isObject(raw) ? raw : {};
+  const counts = isObject(src.counts) ? src.counts : {};
+  const shares = isObject(src.shares) ? src.shares : {};
+  const countsOut = {} as Record<FailureKind, number>;
+  const sharesOut = {} as Record<FailureKind, number>;
+  for (const k of FAILURE_KINDS) {
+    countsOut[k] = toNum(counts[k]);
+    sharesOut[k] = toNum(shares[k]);
+  }
+  return {
+    counts: countsOut,
+    shares: sharesOut,
+    total: toNum(src.total),
+    turns: toNum(src.turns),
+    failure_rate: toNum(src.failure_rate),
+    legacy_rows_reclassified: toNum(src.legacy_rows_reclassified),
+  };
+}
+
 /** One run's civilization-outcome card (zero-LLM projection of its events). */
 export interface ArenaRun {
   run_id: number;
@@ -414,6 +462,8 @@ export interface ArenaRun {
   };
   /** Downsampled population series [{tick, alive}] (≤48 points, first+last kept). */
   population_sparkline: Array<{ tick: number; alive: number }>;
+  /** EM-343 — the true per-run failure taxonomy (absent ⇒ zeros). */
+  failures: FailureTaxonomy;
 }
 
 /** One family's standings block: its runs + per-run means. */
@@ -439,6 +489,8 @@ export interface ContactArenaRun {
   family_b: string;
   name_b: string;
   outcomes: ArenaRun['outcomes'];
+  /** EM-343 — the true per-run failure taxonomy (absent ⇒ zeros). */
+  failures: FailureTaxonomy;
   population_by_town: Record<string, number>;
   contact_made: { tick: number; agent_id: string; from_settlement: string; to_settlement: string } | null;
   ledger: { crossings: number; by_family: Record<string, { hops: number; mutated: number }> } | null;
@@ -714,6 +766,7 @@ export const inspectorApi = {
             credits: num(outcomes.credits),
           },
           population_sparkline: sparkline,
+          failures: parseFailures(rawRun.failures),
         });
       }
       families.push({
@@ -756,6 +809,7 @@ export const inspectorApi = {
       contactRuns.push({
         run_id: rawCard.run_id,
         max_tick: num(rawCard.max_tick),
+        failures: parseFailures(rawCard.failures),
         family_a: typeof rawCard.family_a === 'string' ? rawCard.family_a : '',
         family_b: typeof rawCard.family_b === 'string' ? rawCard.family_b : '',
         name_b: typeof rawCard.name_b === 'string' ? rawCard.name_b : '',

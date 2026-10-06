@@ -43,6 +43,11 @@ describe('inspectorApi.arena (EM-119)', () => {
                   max_tick: 40,
                   outcomes: { population: 4, laws_passed: 2, buildings: 1, crimes: 1, credits: 50 },
                   population_sparkline: [{ tick: 0, alive: 1 }, { tick: 40, alive: 4 }],
+                  failures: {
+                    counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
+                    shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
+                    total: 322, turns: 1103, failure_rate: 0.292, legacy_rows_reclassified: 322,
+                  },
                 },
                 { run_id: 'junk' },                       // dropped
                 { run_id: 9, outcomes: null, population_sparkline: 'junk' }, // zeroed
@@ -66,6 +71,50 @@ describe('inspectorApi.arena (EM-119)', () => {
       population: 0, laws_passed: 0, buildings: 0, crimes: 0, credits: 0,
     });
     expect(fam.runs[1].population_sparkline).toEqual([]);
+  });
+
+  it('EM-343 — parses the failures taxonomy, absent block ⇒ zeros', async () => {
+    stubFetch({
+      'GET /api/arena': {
+        status: 200,
+        body: {
+          families: [
+            {
+              family: 'gemini',
+              avg_per_run: {},
+              runs: [
+                {
+                  run_id: 23,
+                  max_tick: 1101,
+                  outcomes: {},
+                  failures: {
+                    counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
+                    shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
+                    total: 322, turns: 1103, failure_rate: 0.292, legacy_rows_reclassified: 322,
+                  },
+                },
+                { run_id: 9, outcomes: {} }, // pre-EM-343 run: no failures block
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const out = await inspectorApi.arena();
+    const runs = out!.families[0].runs;
+    expect(runs[0].failures.counts).toEqual({
+      action_rejected: 147, provider_error: 30, parse_failure: 145,
+    });
+    expect(runs[0].failures.total).toBe(322);
+    expect(runs[0].failures.turns).toBe(1103);
+    expect(runs[0].failures.failure_rate).toBeCloseTo(0.292, 3);
+    expect(runs[0].failures.legacy_rows_reclassified).toBe(322);
+    // Defensive: an absent block coerces to the all-zero taxonomy, never null.
+    expect(runs[1].failures).toEqual({
+      counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
+      shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
+      total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
+    });
   });
 
   it('returns null on network failure and on a non-object body', async () => {
