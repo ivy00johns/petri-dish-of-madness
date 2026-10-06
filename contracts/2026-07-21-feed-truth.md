@@ -1,5 +1,10 @@
 # Feed Truth (W1+W2, overnight 2026-07-21) · Contract v1.0
 
+> **SUPERSEDED in part (2026-10-05, EM-340/EM-342):** §B1's `parse_failure`
+> `cause` discriminator field was never adopted; the taxonomy was instead split
+> into distinct EVENT KINDS (`action_rejected` / `provider_error` /
+> `parse_failure` — see `event-log.md` v1.5.0). §B2–B4 remain the historic plan.
+
 > **Plan:** `docs/plans/2026-07-21-overnight-everything-plan.md` §W1/§W2
 > **Evidence:** scratchpad `research/fallback-review.md` (failure taxonomy: ~44%
 > `rejected:True` world-side, ~30% lane-side) + `research/pain-points.md` (#1, #2, #3)

@@ -8,9 +8,11 @@ Per-turn flow:
   3. Extract first JSON object from text.
   4. Validate against action-protocol schema + world rules.
   5. On failure: ONE retry with error appended.
-  6. On second failure: emit the honest failure kind (EM-340: `parse_failure`
-     for no-JSON/schema-invalid output, `provider_error` when the provider never
-     answered), idle.
+  6. On second failure: emit the honest failure kind (EM-340 split, EM-342
+     completed: `parse_failure` for no-JSON/schema-invalid output,
+     `action_rejected` when the WORLD refused the action — whether at the
+     pre-dispatch validator or at apply time — `provider_error` when the
+     provider never answered), idle.
   7. ProviderError → treated as failed turn → idle (`provider_error`).
 """
 from __future__ import annotations
@@ -2153,11 +2155,15 @@ def _building_field(building: Any, field: str, default: Any = None) -> Any:
 #     (no JSON object, JSON that failed the action schema) or the engine hit its
 #     defensive fallback. This is the only kind genuinely about parsing.
 #
-# The KIND is the discriminator — payloads are unchanged (an `action_rejected`
-# still carries `{action, error, rejected?}`, a `provider_error` still carries
-# `reason`). Events are append-only and never re-parsed through this layer, so
-# pre-EM-340 rows keep their overloaded `parse_failure` kind; `_is_failure_kind`
-# is what lets the internal "did this turn fail?" checks read both eras alike.
+# EM-342 — the split is now EXHAUSTIVE for world-side refusals: the
+# pre-dispatch `_validate_world` refusal (reason `world error:`) is a WORLD
+# rejection too, so it emits `action_rejected` instead of `parse_failure`. The
+# KIND is the discriminator — payloads are unchanged (an `action_rejected`
+# still carries `{action, error, rejected?}` or `{reason, rejected_action?}`, a
+# `provider_error` still carries `reason`). Events are append-only and never
+# re-parsed through this layer, so pre-EM-340 rows keep their overloaded
+# `parse_failure` kind; `_is_failure_kind` is what lets the internal "did this
+# turn fail?" checks read every era alike.
 _FAILURE_KINDS = frozenset({"parse_failure", "action_rejected", "provider_error"})
 
 # Transport-level reasons that mean "the provider never served us a response" —
@@ -2169,6 +2175,17 @@ _PROVIDER_ERROR_PREFIXES = (
     "provider_error:", "llm_timeout:", "unexpected_error:",
 )
 
+# EM-342 — the WORLD-side refusal prefix: `_validate_world` (the pre-dispatch
+# gate in `_call_and_parse`) returns `world error: <reason>` when the model's
+# action is well-formed and schema-valid but the world's rules refuse it
+# (unknown/absent target, gate rule, funds, tier, skill, blackout, …). That is
+# a REJECTION, not a parse problem — it emits `action_rejected`, the same kind
+# the APPLY-time refusals (per-step gate / dispatch table / `World._fail_event`)
+# already carry, so the taxonomy has no residual world-refusal ambiguity.
+# `schema error:` deliberately stays `parse_failure`: that is the response's
+# SHAPE failing the action schema, i.e. a genuine parse-side failure.
+_REJECTION_PREFIXES = ("world error:",)
+
 
 def _is_failure_kind(kind: Any) -> bool:
     """True for any EM-340 failure kind — including the legacy overloaded
@@ -2179,15 +2196,20 @@ def _is_failure_kind(kind: Any) -> bool:
 
 
 def _failure_kind_for(reason: str | None) -> str:
-    """EM-340 — pick the honest kind for an idle-fallback turn from the runtime's
-    own failure reason: `provider_error` when the provider never answered
-    (transport error / stuck lane / wall-clock turn budget), `parse_failure`
-    otherwise (no JSON, schema-invalid action, engine fallback)."""
-    return (
-        "provider_error"
-        if (reason or "").strip().lower().startswith(_PROVIDER_ERROR_PREFIXES)
-        else "parse_failure"
-    )
+    """EM-340/EM-342 — pick the honest kind for an idle-fallback turn from the
+    runtime's own failure reason:
+      • `provider_error`  — the provider never answered (transport error, stuck
+        lane, or the wall-clock turn budget);
+      • `action_rejected` — the WORLD refused the action (`world error:` from the
+        pre-dispatch validator — the retried path — or an apply-time refusal);
+      • `parse_failure`   — the response itself could not be turned into an
+        applicable action (no JSON, a `schema error:`, engine fallback)."""
+    normalized = (reason or "").strip().lower()
+    if normalized.startswith(_PROVIDER_ERROR_PREFIXES):
+        return "provider_error"
+    if normalized.startswith(_REJECTION_PREFIXES):
+        return "action_rejected"
+    return "parse_failure"
 
 
 def _emit_world_result(

@@ -112,12 +112,13 @@ async def test_move_to_case_insensitive_place():
 
 async def test_move_to_null_place_fails_with_clear_feedback_and_forensics():
     """A genuinely missing place still fails the turn — but the feedback now
-    says what's missing (not "unknown place 'None'"), and the parse_failure
-    payload carries the rejected action for forensics."""
+    says what's missing (not "unknown place 'None'"). EM-342: the world's
+    refusal wears `action_rejected` (this is the pre-dispatch validator path),
+    and its payload still carries the rejected action for forensics."""
     by_kind, world, agent = await _run_first_turn(
         [{"action": "move_to", "args": {"place": None}}]
     )
-    fail = by_kind["parse_failure"]
+    fail = by_kind["action_rejected"]
     assert "requires args.place" in fail["text"]
     assert "'None'" not in fail["text"]
     rejected = fail["payload"]["rejected_action"]
@@ -165,7 +166,7 @@ async def test_dead_target_gets_a_dead_message_not_unknown():
     agent = world.next_agent()
     await loop._execute_turn(agent)
     events = repo.get_events(loop._run_id, order="asc")
-    fail = next(e for e in events if e["kind"] == "parse_failure")
+    fail = next(e for e in events if e["kind"] == "action_rejected")
     assert "is dead" in fail["text"]
 
 
@@ -175,7 +176,7 @@ async def test_unknown_target_feedback_lists_agents_here():
     by_kind, world, agent = await _run_first_turn(
         [{"action": "give", "args": {"target": "Zorp", "amount": 1}}]
     )
-    fail = by_kind["parse_failure"]
+    fail = by_kind["action_rejected"]
     assert "Agents at your location" in fail["text"]
     assert by_kind["action_resolved"]["payload"]["outcome"] == "failed"
 

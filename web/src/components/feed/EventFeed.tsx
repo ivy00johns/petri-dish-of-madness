@@ -68,9 +68,10 @@ export const KIND_ICON: Partial<Record<EventKind, string>> = {
   rule_rejected:    '✘',
   memory:           '◈',
   parse_failure:    '⚠',
-  // EM-340 — the split of the overloaded `parse_failure`: a world-refused action
-  // and a provider outage read with the SAME ⚠ error glyph as a content parse
-  // failure (the errors channel treats all three alike, EM-318).
+  // EM-340/EM-342 — the split of the overloaded `parse_failure`: a world-refused
+  // action (pre-dispatch or apply-time) and a provider outage read with the SAME
+  // ⚠ error glyph as a content parse failure (the errors channel treats all three
+  // alike, EM-318).
   action_rejected:  '⚠',
   provider_error:   '⚠',
   model_reassigned: '⇄',

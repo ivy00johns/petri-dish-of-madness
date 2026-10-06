@@ -454,8 +454,9 @@ async def test_FULL_AGENT_TURN_promote_image_passes_the_runtime_gate_and_activat
 
 async def test_FULL_AGENT_TURN_promote_image_unknown_id_is_rejected_at_the_gate():
     """The runtime gate mirrors demolish's target-existence check: a promote of an
-    id that is NOT a real gallery image is a clean parse_failure (never reaches the
-    world method, never a dead turn)."""
+    id that is NOT a real gallery image is a clean world refusal — EM-342: the
+    pre-dispatch validator emits `action_rejected` (never reaches the world method,
+    never a dead turn)."""
     world = _world()
     ada = world.agents["agent_a"]
     world.action_create_image(ada, "real art")  # gallery is non-empty
@@ -466,7 +467,7 @@ async def test_FULL_AGENT_TURN_promote_image_unknown_id_is_rejected_at_the_gate(
     runtime = _runtime_with_script(world, ada.id, script)
     result = await runtime.run_turn(ada)
     evts = result["_multi"] if "_multi" in result else [result]
-    assert "parse_failure" in [e.get("kind") for e in evts]
+    assert "action_rejected" in [e.get("kind") for e in evts]
     # No promote_image rule was created.
     assert not any(r.effect == "promote_image" for r in world.rules.values())
 
