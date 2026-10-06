@@ -1,7 +1,7 @@
 /**
- * ArenaPanel (EM-112 + EM-119) — the Model-Family Arena on the Runs tab.
+ * ArenaPanel (EM-112 + EM-119 + EM-343) — the Model-Family Arena on the Runs tab.
  *
- * Two halves, one panel:
+ * Two halves, one panel (plus the EM-343 failure taxonomy on every run card):
  *  • STANDINGS (EM-119): every run stamped with `runs.model_family` grouped
  *    by family — civilization-outcome cards (population / laws passed /
  *    buildings completed / crimes / credits) + population sparklines, with
@@ -11,6 +11,11 @@
  *    budget, reset into the next family; never concurrent (free-tier
  *    key-pool protection). Progress polls GET /api/arena/tournament while
  *    running; abort is a labeled action, never a throw.
+ *  • FAILURE TAXONOMY (EM-343): every run card also shows its TRUE
+ *    action_rejected / provider_error / parse_failure counts + shares and its
+ *    failures-per-turn rate, read off the event log server-side (pre-EM-340
+ *    runs have their overloaded rows re-derived from the payload) — where run
+ *    23/26's single "parse failure" number finally reads as three.
  *
  * In MOCK MODE the backend calls fail (no backend) and the panel renders its
  * labeled zero states — the arena data is inherently cross-run/persisted, so
@@ -26,6 +31,7 @@ import {
   inspectorApi,
   type ArenaRun,
   type ArenaSummary,
+  type FailureTaxonomy,
   type TournamentStatus,
 } from './api';
 
@@ -73,6 +79,51 @@ function Sparkline({ points }: { points: Array<{ tick: number; alive: number }> 
 }
 
 const OUTCOME_KEYS = Object.keys(OUTCOME_LABELS) as OutcomeKey[];
+
+const FAILURE_LABELS: Array<[keyof FailureTaxonomy['counts'], string]> = [
+  ['action_rejected', 'rej'],
+  ['provider_error', 'prov'],
+  ['parse_failure', 'parse'],
+];
+
+function pct(share: number): string {
+  return `${Math.round(share * 100)}%`;
+}
+
+/**
+ * EM-343 — the per-run failure taxonomy (the TRUE shares, not the raw kind
+ * tally: a pre-EM-340 run's overloaded rows are re-derived server-side). Shows
+ * the per-kind count + share of the failure total, and the failures-per-turn
+ * rate; the tooltip carries the denominators and how much came from history.
+ */
+function FailureTaxonomyLine({ f, testid }: { f: FailureTaxonomy; testid: string }) {
+  if (f.total === 0) {
+    return (
+      <div className="font-mono text-[10px] opacity-50" data-testid={testid}>
+        fails {f.turns > 0 ? `0/${f.turns} turns` : 'none'}
+      </div>
+    );
+  }
+  const title =
+    `true failure taxonomy off the event log — ${f.total} of ${f.turns} llm calls ` +
+    `(${(f.failure_rate * 100).toFixed(1)}%/turn): ` +
+    FAILURE_LABELS.map(([k]) => `${k} ${f.counts[k]} (${pct(f.shares[k])})`).join(', ') +
+    (f.legacy_rows_reclassified > 0
+      ? `; ${f.legacy_rows_reclassified} pre-EM-340 row(s) re-derived from payload`
+      : '');
+  return (
+    <div
+      className="font-mono text-[10px] opacity-70 truncate"
+      data-testid={testid}
+      title={title}
+    >
+      fails{' '}
+      {FAILURE_LABELS.map(([k, l]) => `${l} ${f.counts[k]} (${pct(f.shares[k])})`).join(' · ')}
+      {' · '}
+      {(f.failure_rate * 100).toFixed(1)}%/turn
+    </div>
+  );
+}
 export default function ArenaPanel() {
   const [arena, setArena] = useState<ArenaSummary | null>(null);
   const [arenaLoaded, setArenaLoaded] = useState(false);
@@ -298,6 +349,7 @@ export default function ArenaPanel() {
                       </span>
                     </div>
                     <Sparkline points={r.population_sparkline} />
+                    <FailureTaxonomyLine f={r.failures} testid={`arena-run-failures-${r.run_id}`} />
                   </div>
                 ))}
               </div>
@@ -344,6 +396,10 @@ export default function ArenaPanel() {
                     ? ` · ${c.ledger.crossings} crossings`
                     : ''}
                 </div>
+                <FailureTaxonomyLine
+                  f={c.failures}
+                  testid={`arena-contact-failures-${c.run_id}`}
+                />
               </div>
             ))}
           </div>

@@ -13,6 +13,10 @@ Sources, all already persisted (no new instrumentation):
   buildings    — `building_operational` events (a completed collective project)
   crimes       — analytics.crime.by_kind total (steal/attack/insult/arson/…)
   credits      — analytics.economy.by_agent total (event-fed, snapshot fallback)
+  failures     — the event log's failure rows (EM-343): the TRUE
+                 action_rejected / provider_error / parse_failure counts +
+                 shares and the failures-per-`llm_call` rate, re-derived from
+                 the payload on pre-EM-340 runs (see `failure_taxonomy`)
 
 Heavy (full event fetch per run) — callers run it on a worker thread
 (same blocking class as /api/fingerprints). Family-level numbers are MEANS
@@ -22,10 +26,59 @@ with three stay comparable. Runs with no events still appear (zeros).
 
 from __future__ import annotations
 
+from ..agents.runtime import true_failure_kind
+
 # Population sparklines are downsampled to this many points (first+last kept).
 _MAX_SPARK_POINTS = 48
 
 _BUILDINGS_KIND = "building_operational"
+
+# EM-343 — the failure-taxonomy read side. The three EM-340 kinds (the reader
+# tolerates the legacy overloaded `parse_failure` via `true_failure_kind`) and
+# the turn denominator (one `llm_call` row per attempt — the same unit the
+# feed's failure rate is quoted in).
+_FAILURE_KINDS = ("action_rejected", "provider_error", "parse_failure")
+_TURNS_KIND = "llm_call"
+
+
+def failure_taxonomy(repo, run_id: int) -> dict:
+    """EM-343 — ONE run's failure taxonomy, read off its persisted event log.
+
+    The TRUE shares, not the raw kind counts: every failure row is routed
+    through `true_failure_kind`, which re-derives the taxonomy from the payload
+    on pre-EM-340 runs (whose rows all wear the single overloaded
+    `parse_failure` kind) — so the panel reports what the runtime MEANT, and
+    the ambiguity EM-340/EM-342 removed does not reappear on historic runs.
+    `legacy_rows_reclassified` counts the rows that needed re-derivation, so a
+    reader can see how much of the number came from history.
+
+    `shares` are of the failure total (the taxonomy mix); `failure_rate` is
+    failures per `llm_call` (the turn-ish denominator, absent ⇒ 0). Defensive
+    throughout: an absent payload degrades to `parse_failure`.
+    """
+    counts = {k: 0 for k in _FAILURE_KINDS}
+    legacy_rows = 0
+    for event in repo.get_events(run_id, kinds=list(_FAILURE_KINDS), order="asc"):
+        kind = event.get("kind")
+        true_kind = true_failure_kind(kind, event.get("payload"))
+        if true_kind is None:
+            continue
+        counts[true_kind] += 1
+        if true_kind != kind:
+            legacy_rows += 1
+    total = sum(counts.values())
+    turns = int(repo.count_events_of_kind(run_id, _TURNS_KIND) or 0)
+    return {
+        "counts": counts,
+        "total": total,
+        "shares": {
+            k: (round(counts[k] / total, 4) if total else 0.0)
+            for k in _FAILURE_KINDS
+        },
+        "turns": turns,
+        "failure_rate": (round(total / turns, 4) if turns else 0.0),
+        "legacy_rows_reclassified": legacy_rows,
+    }
 
 
 def _mean(values: list[float]) -> float:
@@ -95,6 +148,8 @@ def run_outcomes(repo, run_id: int, max_tick: int) -> dict:
             "credits": sum(_as_num(v) for v in by_agent.values()),
         },
         "population_sparkline": _downsample(spark),
+        # EM-343 — the per-run failure taxonomy (the Arena panel's read-off).
+        "failures": failure_taxonomy(repo, run_id),
     }
 
 
@@ -123,6 +178,10 @@ def contact_run_card(repo, run: dict, *, max_tick: int | None = None) -> dict:
     event counts. Zero-LLM, read-only, defensive throughout."""
     run_id = int(run.get("id") or 0)
     block = _contact_block(run) or {}
+    # ONE run_outcomes read feeds both the outcome chips and the EM-343
+    # failure taxonomy (it is the heavy full-event pass — never pay it twice).
+    oc = run_outcomes(repo, run_id, max_tick if max_tick is not None
+                      else (run.get("max_tick") or 0))
     card: dict = {
         "run_id": run_id,
         "max_tick": int(max_tick if max_tick is not None
@@ -130,8 +189,8 @@ def contact_run_card(repo, run: dict, *, max_tick: int | None = None) -> dict:
         "family_a": str(block.get("family_a", "") or ""),
         "family_b": str(block.get("family_b", "") or ""),
         "name_b": str(block.get("name_b", "") or ""),
-        "outcomes": run_outcomes(repo, run_id, max_tick if max_tick is not None
-                                 else (run.get("max_tick") or 0))["outcomes"],
+        "outcomes": oc["outcomes"],
+        "failures": oc["failures"],
         "population_by_town": {},
         "contact_made": None,
         "ledger": None,

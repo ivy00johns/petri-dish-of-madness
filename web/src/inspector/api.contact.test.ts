@@ -218,10 +218,16 @@ describe('inspectorApi.arena (EM-334) — the contact_runs section', () => {
     });
     expect(card.ledger).toEqual({ crossings: 3, by_family: { gemini: { hops: 2, mutated: 1 } } });
     expect(card.events).toEqual({ contact_made: 1, travel_crossed: 3 });
-    // The normalized tolerances row.
+    // The normalized tolerances row (EM-343 — an absent `failures` block
+    // coerces to the all-zero taxonomy).
     expect(out!.contact_runs[1]).toEqual({
       run_id: 9,
       max_tick: 0,
+      failures: {
+        counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
+        shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
+        total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
+      },
       family_a: '',
       family_b: '',
       name_b: '',

@@ -1,8 +1,30 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.5.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.6.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.6.0 (EM-343, 2026-10-05 — the failure-taxonomy read side):**
+> The Arena now reports each run's TRUE failure shares — `action_rejected` /
+> `provider_error` / `parse_failure` counts + shares of the failure total, plus
+> the failures-per-`llm_call` rate (`/api/arena` grows an additive per-run
+> `failures` block; see `api.openapi.yaml` v1.7.0). Because events are
+> append-only, a pre-EM-340 run's rows all wear the overloaded `parse_failure`
+> kind and the true taxonomy survives only in the payload, so the reader
+> re-derives it — `true_failure_kind` in `agents/runtime.py`, which routes a
+> legacy `parse_failure` row through the SAME `_failure_kind_for` mapping the
+> emit path uses:
+>   - `payload.rejected: true`, or a dispatch payload (`action`/`error` and no
+>     `reason`), or a `world error:` reason ⇒ `action_rejected`;
+>   - a `provider_error:` / `llm_timeout:` / `unexpected_error:` reason ⇒
+>     `provider_error`;
+>   - the `bad_world_result` engine fallback (no model action to reject) and any
+>     no-reason parse payload ⇒ `parse_failure`.
+> A post-split row reads as its own kind. So one classifier serves both the
+> emit and the read side and a reported share can never diverge from what the
+> runtime meant; `legacy_rows_reclassified` exposes how much came from history.
+> Read off the live `run.sqlite`: run 23 = **147 / 30 / 145** (177 rows
+> re-derived), run 26 = **109 / 288 / 20** (397 rows).
 
 > **v1.5.0 (EM-342, 2026-10-05 — the world-refusal seal):**
 > The v1.4.0 split left ONE world-refusal seam: a `world error:` from the

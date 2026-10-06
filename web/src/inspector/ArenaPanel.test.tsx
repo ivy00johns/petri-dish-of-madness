@@ -31,8 +31,32 @@ const statusMock = vi.mocked(inspectorApi.tournamentStatus);
 const startMock = vi.mocked(inspectorApi.startTournament);
 const abortMock = vi.mocked(inspectorApi.abortTournament);
 
+const ZERO_FAIL = {
+  counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
+  shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
+  total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
+};
+
 const ARENA: ArenaSummary = {
-  contact_runs: [],
+  contact_runs: [
+    {
+      run_id: 26,
+      max_tick: 1692,
+      family_a: 'gemini',
+      family_b: 'llama',
+      name_b: 'Kettlebrook',
+      outcomes: { population: 5, laws_passed: 0, buildings: 0, crimes: 0, credits: 0 },
+      failures: {
+        counts: { action_rejected: 109, provider_error: 288, parse_failure: 20 },
+        shares: { action_rejected: 0.2614, provider_error: 0.6906, parse_failure: 0.048 },
+        total: 417, turns: 1652, failure_rate: 0.2524, legacy_rows_reclassified: 417,
+      },
+      population_by_town: { Ashvale: 3, Kettlebrook: 2 },
+      contact_made: { tick: 81, agent_id: 'a1', from_settlement: 's1', to_settlement: 's2' },
+      ledger: { crossings: 442, by_family: { gemini: { hops: 139, mutated: 100 } } },
+      events: { contact_made: 1, meme_crossed_border: 442 },
+    },
+  ],
   families: [
     {
       family: 'gemini',
@@ -47,12 +71,18 @@ const ARENA: ArenaSummary = {
             { tick: 10, alive: 2 },
             { tick: 40, alive: 4 },
           ],
+          failures: {
+            counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
+            shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
+            total: 322, turns: 1103, failure_rate: 0.292, legacy_rows_reclassified: 322,
+          },
         },
         {
           run_id: 9,
           max_tick: 40,
           outcomes: { population: 2, laws_passed: 1, buildings: 1, crimes: 3, credits: 30 },
           population_sparkline: [],
+          failures: { ...ZERO_FAIL, turns: 40 },
         },
       ],
     },
@@ -65,6 +95,7 @@ const ARENA: ArenaSummary = {
           max_tick: 40,
           outcomes: { population: 2, laws_passed: 0, buildings: 0, crimes: 5, credits: 10 },
           population_sparkline: [{ tick: 0, alive: 2 }],
+          failures: ZERO_FAIL,
         },
       ],
     },
@@ -178,5 +209,35 @@ describe('ArenaPanel — tournament controls (EM-112)', () => {
     expect(summary.textContent).toContain('last sweep: done');
     expect(summary.textContent).toContain('gemini done (40t)');
     expect(summary.textContent).toContain('llama done (40t)');
+  });
+});
+
+describe('ArenaPanel — failure taxonomy (EM-343)', () => {
+  it('renders the true per-run shares + per-turn rate off the arena card', async () => {
+    render(<ArenaPanel />);
+    const line = await screen.findByTestId('arena-run-failures-12');
+    // the TRUE taxonomy, not the raw overloaded kind tally
+    expect(line.textContent).toContain('rej 147 (46%)');
+    expect(line.textContent).toContain('prov 30 (9%)');
+    expect(line.textContent).toContain('parse 145 (45%)');
+    expect(line.textContent).toContain('29.2%/turn');
+    // the tooltip carries the denominators + how much came from history
+    const title = line.getAttribute('title') ?? '';
+    expect(title).toContain('322 of 1103 llm calls');
+    expect(title).toContain('pre-EM-340 row(s) re-derived from payload');
+  });
+
+  it('labels a failure-free run without inventing shares', async () => {
+    render(<ArenaPanel />);
+    const line = await screen.findByTestId('arena-run-failures-9');
+    expect(line.textContent).toContain('0/40 turns');
+    expect(line.textContent).not.toContain('%');
+  });
+
+  it('renders the taxonomy on a contact run card too', async () => {
+    render(<ArenaPanel />);
+    const line = await screen.findByTestId('arena-contact-failures-26');
+    expect(line.textContent).toContain('prov 288 (69%)');
+    expect(line.textContent).toContain('25.2%/turn');
   });
 });

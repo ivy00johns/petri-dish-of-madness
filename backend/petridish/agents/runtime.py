@@ -2212,6 +2212,54 @@ def _failure_kind_for(reason: str | None) -> str:
     return "parse_failure"
 
 
+# EM-343 — the engine's OWN defensive fallback (a malformed `action_*` return,
+# no model action involved) wears `parse_failure` by design; its payload is
+# `{"error": "bad_world_result"}`. The read-side classifier below must NOT
+# mistake that payload's `error` for a dispatch refusal.
+_BAD_WORLD_RESULT = "bad_world_result"
+
+
+def true_failure_kind(kind: Any, payload: Any) -> str | None:
+    """EM-343 — the READ-side taxonomy: recover the TRUE failure kind from one
+    persisted event row, or None for a non-failure event.
+
+    This is the ONE classifier both the emit path (`_failure_kind_for` above)
+    and the read surfaces (the Arena failure-taxonomy panel, EM-343) route
+    through, so a reported taxonomy share can never diverge from what the
+    runtime meant. It exists because events are APPEND-ONLY: rows emitted
+    before EM-340 wear the single overloaded `parse_failure` kind, and the true
+    taxonomy survives only in the payload — so a raw kind count on a historic
+    run would reproduce exactly the ambiguity EM-340/EM-342 removed.
+
+      • a post-split `action_rejected` / `provider_error` row → its own kind;
+      • a `parse_failure` row is re-derived from its payload:
+          - `rejected: true` (the per-step/apply-time gate's stamp) → rejected;
+          - a `reason` → `_failure_kind_for(reason)` (so a legacy
+            `world error:` reason reads as `action_rejected` per EM-342, a
+            provider prefix as `provider_error`, no-JSON/schema as parse);
+          - no reason but an `action`/`error` payload → a dispatch refusal that
+            never stamped the flag → `action_rejected`;
+          - the `bad_world_result` engine fallback → `parse_failure` (there was
+            no model action to reject).
+    """
+    if kind in ("action_rejected", "provider_error"):
+        return kind
+    if kind != "parse_failure":
+        return None
+    if not isinstance(payload, dict):
+        return "parse_failure"
+    if payload.get("rejected") is True:
+        return "action_rejected"
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return _failure_kind_for(reason)
+    if payload.get("error") == _BAD_WORLD_RESULT:
+        return "parse_failure"
+    if payload.get("action") is not None or payload.get("error") is not None:
+        return "action_rejected"
+    return "parse_failure"
+
+
 def _emit_world_result(
     result: Any, base: dict, thought: str = "",
     stamp_for: Callable[[str], dict | None] | None = None,
