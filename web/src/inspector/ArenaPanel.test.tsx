@@ -37,7 +37,14 @@ const ZERO_CORE = {
   total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
 };
 
-const ZERO_FAIL = { ...ZERO_CORE, curve: [], by_agent: {} };
+const ZERO_FAIL = {
+  ...ZERO_CORE,
+  curve: [],
+  by_agent: {},
+  by_route: {},
+  failures_attributed: 0,
+  attempts_attributed: 0,
+};
 
 const ARENA: ArenaSummary = {
   contact_runs: [
@@ -51,12 +58,18 @@ const ARENA: ArenaSummary = {
       failures: {
         counts: { action_rejected: 109, provider_error: 288, parse_failure: 20 },
         shares: { action_rejected: 0.2614, provider_error: 0.6906, parse_failure: 0.048 },
-        total: 417, turns: 1652, failure_rate: 0.2524, legacy_rows_reclassified: 417,
-        curve: [
+        total: 417, turns: 1652, failure_rate: 0.2524, legacy_rows_reclassified: 417,        curve: [
           { tick: 0, action_rejected: 0, provider_error: 0, parse_failure: 0 },
           { tick: 800, action_rejected: 0, provider_error: 60, parse_failure: 0 },
           { tick: 1600, action_rejected: 2, provider_error: 19, parse_failure: 0 },
-        ],          by_agent: {
+        ],
+        by_route: {
+          'gemini/gemini-3.1-flash-lite': { failures: 63, attempts: 217, failure_rate: 0.2903 },
+          'groq/llama-3.3-70b-instruct-fp8-fast': { failures: 66, attempts: 446, failure_rate: 0.148 },
+        },
+        failures_attributed: 417,
+        attempts_attributed: 1652,
+        by_agent: {
             // run 26 is the UNIFORM provider-outage shape (~17-18% per agent)
             agent_bram: {
               counts: { action_rejected: 21, provider_error: 62, parse_failure: 4 },
@@ -108,6 +121,12 @@ const ARENA: ArenaSummary = {
               { tick: 500, action_rejected: 2, provider_error: 0, parse_failure: 0 },
               { tick: 1000, action_rejected: 0, provider_error: 30, parse_failure: 0 },
             ],
+            by_route: {
+              'kilo/inclusionai/ling-3.0-flash-sante:free': { failures: 81, attempts: 300, failure_rate: 0.27 },
+              'google/gemini-3.8-flash': { failures: 19, attempts: 149, failure_rate: 0.1275 },
+            },
+            failures_attributed: 300,
+            attempts_attributed: 1103,
             by_agent: {
               // run 23 is the CONCENTRATED shape: ONE bad lane drives the mass
               agent_ada: {
@@ -317,11 +336,26 @@ describe('ArenaPanel — failure taxonomy (EM-343)', () => {
     expect(adaRoute.textContent).toContain('inclusionai/ling-3.0-flash-sante:free');
     expect(adaRoute.textContent).toContain('104/110 attributed');
     expect(adaRoute.getAttribute('title')).toContain('kilo/inclusionai/ling-3.0-flash-sante:free');
+    // EM-349 — the lane's OWN rate travels with the attribution
+    expect(adaRoute.textContent).toContain('lane 27% (81/300)');
     // the contact card carries the cut too
     expect(screen.getByTestId('arena-contact-agent-26-agent_bram')).toBeInTheDocument();
     expect(
       screen.getByTestId('arena-contact-agent-26-agent_bram-route').textContent,
     ).toContain('gemini-3.1-flash-lite');
+  });
+
+  it('EM-349 — the by-lane board rates each lane against its own attempts', async () => {
+    render(<ArenaPanel />);
+    const lane = await screen.findByTestId(
+      'arena-run-routes-12-kilo/inclusionai/ling-3.0-flash-sante:free',
+    );
+    expect(lane.textContent).toContain('81/300 · 27%');
+    expect(lane.getAttribute('title')).toBe('kilo/inclusionai/ling-3.0-flash-sante:free');
+    expect(screen.getByTestId('arena-run-routes-12-google/gemini-3.8-flash').textContent)
+      .toContain('19/149 · 13%');
+    // the contact card carries the board too
+    expect(screen.getByTestId('arena-contact-routes-26')).toBeInTheDocument();
   });
 
   it('EM-347 — the family block shows its pooled failure rollup', async () => {

@@ -630,6 +630,24 @@ class SQLiteRepository:
         )
         return {str(actor or ""): int(n or 0) for actor, n in cur.fetchall()}
 
+    def count_llm_attempts_by_model(self, run_id: int) -> dict[str, int]:
+        """{gen_ai.response.model: COUNT} of `llm_call` attempts for a run —
+        EM-349's per-lane denominator (the lane a turn was actually served by).
+
+        The lane lives in the flat payload key `gen_ai.response.model`, so the
+        grouped COUNT uses SQLite's JSON1 `json_extract` with a QUOTED path:
+        the key itself contains dots, so a bare `$.gen_ai.response.model` would
+        be read as three nested keys and match nothing. The empty-string key
+        collects rows with no model; the caller drops it. One query, no full
+        event pass (measured ~30 ms on a 2,900-turn run)."""
+        path = '$."gen_ai.response.model"'
+        cur = self._conn.execute(
+            f"SELECT COALESCE(json_extract(payload_json, '{path}'), '') AS m, "
+            "COUNT(*) FROM events WHERE run_id = ? AND kind = ? GROUP BY m",
+            (run_id, "llm_call"),
+        )
+        return {str(m or ""): int(n or 0) for m, n in cur.fetchall()}
+
     def run_max_tick(self, run_id: int) -> int:
         """MAX(events.tick) for a run, 0 when it has no events (W11b EM-101 —
         the fork endpoint's tick-range validation, same definition as RunRow

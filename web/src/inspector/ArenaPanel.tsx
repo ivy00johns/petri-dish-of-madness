@@ -26,11 +26,13 @@
  *    spread means the provider (or the world) failed everyone equally (run 26:
  *    ~16-18% each). This is WHY the taxonomy is exposed per agent: the run
  *    total alone can't tell those two failures apart.
- *  • ROUTE ATTRIBUTION (EM-348): each per-agent line is followed by the LANE
- *    behind that agent's failure mass (`routed_via`), so the cut NAMES the
- *    broken route instead of leaving an opaque actor id — run 23's failures are
- *    dominated by ONE lane across the cast (ling-3.0-flash-sante:free = 74% of
- *    ada's), run 26's by each agent's own lane.
+ *  • ROUTE ATTRIBUTION (EM-348/349): each per-agent line is followed by the
+ *    LANE behind that agent's failure mass (`routed_via`), so the cut NAMES the
+ *    broken route instead of leaving an opaque actor id — and a collapsed "by
+ *    lane" board gives every lane its OWN failure rate against how often it was
+ *    actually USED (`llm_call` attempts), so a lane that merely carries the
+ *    most traffic is not mistaken for a bad one (run 23's busiest lane had the
+ *    most failures but only a 15% rate, in line with its peers).
  *  • FAMILY ROLLUP (EM-347): each family block also shows its
  *    failures POOLED across its runs, so the panel answers "which family fails
  *    differently" (shares + failures-per-turn, comparable across families).
@@ -255,6 +257,7 @@ function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix:
       <div className="flex flex-col gap-0.5 mt-0.5">
         {actors.map((a) => {
           const e = f.by_agent[a];
+          const lane = e.top_route ? f.by_route[e.top_route] : undefined;
           return (
             <div key={a} className="flex flex-col">
               <FailureTaxonomyLine f={e} testid={`${testidPrefix}-${a}`} prefix={a} />
@@ -265,7 +268,10 @@ function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix:
                   title={e.top_route || "no routed_via on this actor's failure rows"}
                 >
                   {e.top_route
-                    ? `↳ via ${routeLabel(e.top_route)} — ${e.routes_attributed}/${e.total} attributed`
+                    ? `↳ via ${routeLabel(e.top_route)} — ${e.routes_attributed}/${e.total} attributed` +
+                      (lane
+                        ? ` · lane ${pct(lane.failure_rate)} (${lane.failures}/${lane.attempts})`
+                        : '')
                     : 'route unattributed'}
                 </div>
               )}
@@ -276,6 +282,42 @@ function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix:
     </details>
   );
 }
+/**
+ * EM-349 — the per-lane failure board, collapsed by default: every lane with
+ * its failure RATE against its own usage (`llm_call` attempts), worst rate
+ * first (server order). Shows `failures/attempts` so a low-volume lane's noisy
+ * percentage is visibly low-volume.
+ */
+function FailureRouteBoard({ routes, testid }: {
+  routes: FailureTaxonomy['by_route'];
+  testid: string;
+}) {
+  const lanes = Object.entries(routes);
+  if (lanes.length === 0) return null;
+  return (
+    <details className="mt-0.5" data-testid={testid}>
+      <summary className="font-mono text-[10px] opacity-60 cursor-pointer">
+        by lane ({lanes.length})
+      </summary>
+      <div className="flex flex-col gap-0.5 mt-0.5">
+        {lanes.map(([lane, s]) => (
+          <div
+            key={lane}
+            className="font-mono text-[10px] opacity-70 truncate"
+            data-testid={`${testid}-${lane}`}
+            title={lane}
+          >
+            <span className="opacity-80">{routeLabel(lane)}</span>{' '}
+            {s.attempts > 0
+              ? `${s.failures}/${s.attempts} · ${pct(s.failure_rate)}`
+              : `${s.failures} · no attempts logged`}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 export default function ArenaPanel() {
   const [arena, setArena] = useState<ArenaSummary | null>(null);
   const [arenaLoaded, setArenaLoaded] = useState(false);
@@ -511,6 +553,10 @@ export default function ArenaPanel() {
                     <FailureCurve points={r.failures.curve} testid={`arena-run-curve-${r.run_id}`} />
                     <FailureTaxonomyLine f={r.failures} testid={`arena-run-failures-${r.run_id}`} />
                     <FailureByAgent f={r.failures} testidPrefix={`arena-agent-failures-${r.run_id}`} />
+                    <FailureRouteBoard
+                      routes={r.failures.by_route}
+                      testid={`arena-run-routes-${r.run_id}`}
+                    />
                   </div>
                 ))}
               </div>
@@ -563,6 +609,10 @@ export default function ArenaPanel() {
                   testid={`arena-contact-failures-${c.run_id}`}
                 />
                 <FailureByAgent f={c.failures} testidPrefix={`arena-contact-agent-${c.run_id}`} />
+                <FailureRouteBoard
+                  routes={c.failures.by_route}
+                  testid={`arena-contact-routes-${c.run_id}`}
+                />
               </div>
             ))}
           </div>

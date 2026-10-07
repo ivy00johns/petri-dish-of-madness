@@ -454,9 +454,25 @@ export interface FailureByAgentEntry extends FailureTaxonomyCore {
   routes_attributed: number;
 }
 
+/**
+ * EM-349 — one lane's failure rate against its own usage: `failures` of
+ * `attempts` `llm_call`s served by that lane, plus the resulting `failure_rate`.
+ */
+export interface FailureRouteStat {
+  failures: number;
+  attempts: number;
+  failure_rate: number;
+}
+
 export interface FailureTaxonomy extends FailureTaxonomyCore {
   curve: FailureCurvePoint[];
   by_agent: Record<string, FailureByAgentEntry>;
+  /** EM-349 — per-lane failure rate (worst rate first), keyed by lane id. */
+  by_route: Record<string, FailureRouteStat>;
+  /** EM-349 — failure rows that named a lane (coverage of `by_route`). */
+  failures_attributed: number;
+  /** EM-349 — `llm_call` attempts that named a served lane. */
+  attempts_attributed: number;
 }
 
 const FAILURE_KINDS: FailureKind[] = ['action_rejected', 'provider_error', 'parse_failure'];
@@ -509,7 +525,25 @@ function parseFailures(raw: unknown): FailureTaxonomy {
       };
     }
   }
-  return { ...parseFailureCore(src), curve, by_agent: byAgent };
+  const byRoute: Record<string, FailureRouteStat> = {};
+  if (isObject(src.by_route)) {
+    for (const [lane, s] of Object.entries(src.by_route)) {
+      const stat = isObject(s) ? s : {};
+      byRoute[lane] = {
+        failures: toNum(stat.failures),
+        attempts: toNum(stat.attempts),
+        failure_rate: toNum(stat.failure_rate),
+      };
+    }
+  }
+  return {
+    ...parseFailureCore(src),
+    curve,
+    by_agent: byAgent,
+    by_route: byRoute,
+    failures_attributed: toNum(src.failures_attributed),
+    attempts_attributed: toNum(src.attempts_attributed),
+  };
 }
 
 /** One run's civilization-outcome card (zero-LLM projection of its events). */

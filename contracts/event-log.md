@@ -1,8 +1,26 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.8.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.9.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.9.0 (EM-349, 2026-10-07 — the per-lane failure RATE):**
+> The additive `/api/arena` `failures` block gains `by_route`:
+> `{lane: {failures, attempts, failure_rate}}` for every lane seen, ordered
+> worst-rate first — the denominator being that lane's own `llm_call` attempts
+> (`gen_ai.response.model`, the lane a turn was actually SERVED by), so a lane
+> that merely carries the most traffic is not mistaken for a bad one. Plus
+> `failures_attributed` / `attempts_attributed` (coverage; unnamed rows stay
+> unattributed, never invented). The attempt count is a grouped COUNT using
+> SQLite JSON1 `json_extract` on the flat key `gen_ai.response.model` (the
+> QUOTED path `$."gen_ai.response.model"` — a bare path would read three nested
+> keys). Measured off the live `run.sqlite`: run 23's busiest lane
+> `kilo/inclusionai/ling-3.0-flash-sante:free` carried the MOST failures (218)
+> but only a 15.0% rate, in line with its peers (step-3.7-flash 16.4%,
+> gemini-3.8 12.8%) — i.e. that run was a broadly degraded routing period, NOT
+> one uniquely broken lane; run 26's lanes were uniformly worse (27–29%). A
+> rate on a low-attempt lane is noisy, so `attempts` travels with it. See
+> `api.openapi.yaml` v1.10.0.
 
 > **v1.8.0 (EM-348, 2026-10-07 — per-agent failure route attribution):**
 > Each `by_agent` entry in the additive `/api/arena` `failures` block also
