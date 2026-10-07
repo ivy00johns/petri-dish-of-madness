@@ -618,6 +618,18 @@ class SQLiteRepository:
         ).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def count_events_of_kind_by_actor(self, run_id: int, kind: str) -> dict[str, int]:
+        """{actor_id: COUNT} of one kind for a run (EM-346 — the Arena's
+        per-agent failure taxonomy needs each actor's `llm_call` turn count, and
+        a grouped COUNT is far cheaper than a second full event pass). The
+        empty-string key collects rows with no actor_id; absent actors omit."""
+        cur = self._conn.execute(
+            "SELECT actor_id, COUNT(*) FROM events "
+            "WHERE run_id = ? AND kind = ? GROUP BY actor_id",
+            (run_id, kind),
+        )
+        return {str(actor or ""): int(n or 0) for actor, n in cur.fetchall()}
+
     def run_max_tick(self, run_id: int) -> int:
         """MAX(events.tick) for a run, 0 when it has no events (W11b EM-101 —
         the fork endpoint's tick-range validation, same definition as RunRow

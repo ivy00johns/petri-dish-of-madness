@@ -227,6 +227,7 @@ describe('inspectorApi.arena (EM-334) — the contact_runs section', () => {
         counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
         shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
         total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
+        curve: [], by_agent: {},
       },
       family_a: '',
       family_b: '',

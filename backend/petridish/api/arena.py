@@ -16,7 +16,10 @@ Sources, all already persisted (no new instrumentation):
   failures     — the event log's failure rows (EM-343): the TRUE
                  action_rejected / provider_error / parse_failure counts +
                  shares and the failures-per-`llm_call` rate, re-derived from
-                 the payload on pre-EM-340 runs (see `failure_taxonomy`)
+                 the payload on pre-EM-340 runs (see `failure_taxonomy`). Each
+                 run block also carries the failures-over-ticks `curve`
+                 (EM-345) and the per-`actor_id` `by_agent` cut (EM-346); each
+                 family block carries the pooled rollup (EM-347)
 
 Heavy (full event fetch per run) — callers run it on a worker thread
 (same blocking class as /api/fingerprints). Family-level numbers are MEANS
@@ -26,7 +29,10 @@ with three stay comparable. Runs with no events still appear (zeros).
 
 from __future__ import annotations
 
-from ..agents.runtime import true_failure_kind
+# EM-344 — the taxonomy itself is a leaf module (`petridish.taxonomy`), shared
+# with the emit path in `agents/runtime.py`; the API layer reads it WITHOUT
+# depending on the agent runtime.
+from ..taxonomy import FAILURE_KIND_ORDER, true_failure_kind
 
 # Population sparklines are downsampled to this many points (first+last kept).
 _MAX_SPARK_POINTS = 48
@@ -37,12 +43,43 @@ _BUILDINGS_KIND = "building_operational"
 # tolerates the legacy overloaded `parse_failure` via `true_failure_kind`) and
 # the turn denominator (one `llm_call` row per attempt — the same unit the
 # feed's failure rate is quoted in).
-_FAILURE_KINDS = ("action_rejected", "provider_error", "parse_failure")
+_FAILURE_KINDS = FAILURE_KIND_ORDER
 _TURNS_KIND = "llm_call"
 
 
+def _shares(counts: dict, total: int) -> dict:
+    """Per-kind share of the failure total (0..1; all 0 when there are none)."""
+    return {
+        k: (round(counts[k] / total, 4) if total else 0.0) for k in _FAILURE_KINDS
+    }
+
+
+def _failure_curve(points: list[tuple[int, str]], max_tick: int,
+                   cap: int = _MAX_SPARK_POINTS) -> list[dict]:
+    """EM-345 — the run's failures over ticks, as ≤`cap` even-width tick-bucket
+    SUMS per kind. Buckets SUM rather than point-SAMPLE on purpose: an even-
+    spaced sample of a 1,700-tick run would drop a single-tick provider-outage
+    spike, whereas a bucketed sum keeps it as one tall bar. `points` are
+    (tick, true_kind) pairs off the same ascending pass `failure_taxonomy` makes;
+    `max_tick` anchors the axis (so the spike's bucket sits where it happened).
+    All-zero buckets stay in the series so the curve reads as a continuous
+    timeline rather than a gap."""
+    if not points:
+        return []
+    top = max(int(max_tick), max(t for t, _ in points), 0)
+    span = top + 1                        # integer ticks 0..top inclusive
+    n = max(1, min(cap, span))            # one bucket per tick on a short run
+    width = span / n
+    buckets = [{k: 0 for k in _FAILURE_KINDS} for _ in range(n)]
+    for tick, kind in points:
+        idx = min(n - 1, int(max(tick, 0) / width))
+        buckets[idx][kind] += 1
+    return [{"tick": int(b * width), **buckets[b]} for b in range(n)]
+
+
 def failure_taxonomy(repo, run_id: int) -> dict:
-    """EM-343 — ONE run's failure taxonomy, read off its persisted event log.
+    """EM-343/EM-345/EM-346 — ONE run's failure taxonomy, read off its persisted
+    event log.
 
     The TRUE shares, not the raw kind counts: every failure row is routed
     through `true_failure_kind`, which re-derives the taxonomy from the payload
@@ -55,34 +92,100 @@ def failure_taxonomy(repo, run_id: int) -> dict:
     `shares` are of the failure total (the taxonomy mix); `failure_rate` is
     failures per `llm_call` (the turn-ish denominator, absent ⇒ 0). Defensive
     throughout: an absent payload degrades to `parse_failure`.
+
+    Two additive read-outs ride the same pass (EM-345/EM-346):
+      • `curve` — the failures over ticks (even-width bucket SUMS, see
+        `_failure_curve`), so a provider outage reads as a SPIKE, not a number;
+      • `by_agent` — the same taxonomy keyed by `actor_id`, the "WHICH agent
+        fails differently" cut. A per-agent rate separates ONE broken route
+        (run 23: ada 30% vs vesper 5.7%) from a provider outage that hits the
+        whole cast evenly (run 26: 16-18% each). It includes every actor with
+        turns or failures, so a clean agent shows as 0 rather than vanishing.
     """
     counts = {k: 0 for k in _FAILURE_KINDS}
     legacy_rows = 0
+    curve_points: list[tuple[int, str]] = []
+    agent_counts: dict[str, dict] = {}
+    agent_legacy: dict[str, int] = {}
     for event in repo.get_events(run_id, kinds=list(_FAILURE_KINDS), order="asc"):
         kind = event.get("kind")
         true_kind = true_failure_kind(kind, event.get("payload"))
         if true_kind is None:
             continue
         counts[true_kind] += 1
-        if true_kind != kind:
+        legacy = true_kind != kind
+        if legacy:
             legacy_rows += 1
+        tick = event.get("tick")
+        curve_points.append(
+            (int(tick) if isinstance(tick, (int, float)) else 0, true_kind))
+        actor = str(event.get("actor_id") or "")
+        per = agent_counts.setdefault(actor, {k: 0 for k in _FAILURE_KINDS})
+        per[true_kind] += 1
+        if legacy:
+            agent_legacy[actor] = agent_legacy.get(actor, 0) + 1
     total = sum(counts.values())
     turns = int(repo.count_events_of_kind(run_id, _TURNS_KIND) or 0)
+
+    # Per-agent turns: one grouped COUNT (cheap) rather than a second event pass.
+    turns_by_actor = repo.count_events_of_kind_by_actor(run_id, _TURNS_KIND)
+    by_agent: dict[str, dict] = {}
+    for actor in sorted(set(agent_counts) | set(turns_by_actor)):
+        per = agent_counts.get(actor) or {k: 0 for k in _FAILURE_KINDS}
+        atotal = sum(per.values())
+        aturns = int(turns_by_actor.get(actor) or 0)
+        by_agent[actor] = {
+            "counts": per,
+            "shares": _shares(per, atotal),
+            "total": atotal,
+            "turns": aturns,
+            "failure_rate": (round(atotal / aturns, 4) if aturns else 0.0),
+            "legacy_rows_reclassified": int(agent_legacy.get(actor, 0)),
+        }
+
     return {
         "counts": counts,
         "total": total,
-        "shares": {
-            k: (round(counts[k] / total, 4) if total else 0.0)
-            for k in _FAILURE_KINDS
-        },
+        "shares": _shares(counts, total),
         "turns": turns,
         "failure_rate": (round(total / turns, 4) if turns else 0.0),
         "legacy_rows_reclassified": legacy_rows,
+        "curve": _failure_curve(curve_points, repo.run_max_tick(run_id)),
+        "by_agent": by_agent,
     }
 
 
 def _mean(values: list[float]) -> float:
     return round(sum(values) / len(values), 4) if values else 0.0
+
+
+def _rollup_failures(runs: list[dict]) -> dict:
+    """EM-347 — a family's failure taxonomy, AGGREGATED across its runs'
+    already-computed `failures` blocks (no event re-read). Counts/turns/legacy
+    sum; `shares` are of the pooled failure total and `failure_rate` is pooled
+    failures per `llm_call` — the two comparable to a single run's block, so
+    "which family fails differently" reads off shares + rate while the raw
+    counts stay honest about how many runs fed them (`runs`)."""
+    counts = {k: 0 for k in _FAILURE_KINDS}
+    legacy = 0
+    turns = 0
+    for r in runs:
+        f = r.get("failures") or {}
+        fc = f.get("counts") or {}
+        for k in _FAILURE_KINDS:
+            counts[k] += int(fc.get(k) or 0)
+        legacy += int(f.get("legacy_rows_reclassified") or 0)
+        turns += int(f.get("turns") or 0)
+    total = sum(counts.values())
+    return {
+        "counts": counts,
+        "shares": _shares(counts, total),
+        "total": total,
+        "turns": turns,
+        "failure_rate": (round(total / turns, 4) if turns else 0.0),
+        "legacy_rows_reclassified": legacy,
+        "runs": len(runs),
+    }
 
 
 def _downsample(points: list[dict], cap: int = _MAX_SPARK_POINTS) -> list[dict]:
@@ -291,5 +394,8 @@ def arena_summary(repo) -> dict:
             "family": fam,
             "avg_per_run": means,
             "runs": runs,
+            # EM-347 — the family's pooled failure taxonomy (shares + rate), the
+            # "which family fails differently" rollup across its runs.
+            "failures": _rollup_failures(runs),
         })
     return {"families": families, "contact_runs": contact_runs}

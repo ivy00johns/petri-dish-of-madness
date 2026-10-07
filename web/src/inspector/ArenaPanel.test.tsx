@@ -31,11 +31,13 @@ const statusMock = vi.mocked(inspectorApi.tournamentStatus);
 const startMock = vi.mocked(inspectorApi.startTournament);
 const abortMock = vi.mocked(inspectorApi.abortTournament);
 
-const ZERO_FAIL = {
+const ZERO_CORE = {
   counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
   shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
   total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
 };
+
+const ZERO_FAIL = { ...ZERO_CORE, curve: [], by_agent: {} };
 
 const ARENA: ArenaSummary = {
   contact_runs: [
@@ -50,6 +52,24 @@ const ARENA: ArenaSummary = {
         counts: { action_rejected: 109, provider_error: 288, parse_failure: 20 },
         shares: { action_rejected: 0.2614, provider_error: 0.6906, parse_failure: 0.048 },
         total: 417, turns: 1652, failure_rate: 0.2524, legacy_rows_reclassified: 417,
+        curve: [
+          { tick: 0, action_rejected: 0, provider_error: 0, parse_failure: 0 },
+          { tick: 800, action_rejected: 0, provider_error: 60, parse_failure: 0 },
+          { tick: 1600, action_rejected: 2, provider_error: 19, parse_failure: 0 },
+        ],
+        by_agent: {
+          // run 26 is the UNIFORM provider-outage shape (~17-18% per agent)
+          agent_bram: {
+            counts: { action_rejected: 21, provider_error: 62, parse_failure: 4 },
+            shares: { action_rejected: 0.2414, provider_error: 0.7126, parse_failure: 0.046 },
+            total: 87, turns: 479, failure_rate: 0.1816, legacy_rows_reclassified: 87,
+          },
+          agent_vesper: {
+            counts: { action_rejected: 13, provider_error: 66, parse_failure: 5 },
+            shares: { action_rejected: 0.1548, provider_error: 0.7857, parse_failure: 0.0595 },
+            total: 84, turns: 481, failure_rate: 0.1746, legacy_rows_reclassified: 84,
+          },
+        },
       },
       population_by_town: { Ashvale: 3, Kettlebrook: 2 },
       contact_made: { tick: 81, agent_id: 'a1', from_settlement: 's1', to_settlement: 's2' },
@@ -61,6 +81,11 @@ const ARENA: ArenaSummary = {
     {
       family: 'gemini',
       avg_per_run: { population: 3, laws_passed: 1.5, buildings: 1, crimes: 2, credits: 40 },
+      failures: {
+        counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
+        shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
+        total: 322, turns: 1143, failure_rate: 0.2817, legacy_rows_reclassified: 322,
+      },
       runs: [
         {
           run_id: 12,
@@ -75,6 +100,24 @@ const ARENA: ArenaSummary = {
             counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
             shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
             total: 322, turns: 1103, failure_rate: 0.292, legacy_rows_reclassified: 322,
+            curve: [
+              { tick: 0, action_rejected: 0, provider_error: 0, parse_failure: 0 },
+              { tick: 500, action_rejected: 2, provider_error: 0, parse_failure: 0 },
+              { tick: 1000, action_rejected: 0, provider_error: 30, parse_failure: 0 },
+            ],
+            by_agent: {
+              // run 23 is the CONCENTRATED shape: ada's route is broken
+              agent_ada: {
+                counts: { action_rejected: 57, provider_error: 6, parse_failure: 47 },
+                shares: { action_rejected: 0.5182, provider_error: 0.0545, parse_failure: 0.4273 },
+                total: 110, turns: 367, failure_rate: 0.2997, legacy_rows_reclassified: 110,
+              },
+              agent_mox: {
+                counts: { action_rejected: 5, provider_error: 5, parse_failure: 13 },
+                shares: { action_rejected: 0.2174, provider_error: 0.2174, parse_failure: 0.5652 },
+                total: 23, turns: 302, failure_rate: 0.0762, legacy_rows_reclassified: 23,
+              },
+            },
           },
         },
         {
@@ -89,6 +132,7 @@ const ARENA: ArenaSummary = {
     {
       family: 'llama',
       avg_per_run: { population: 2, laws_passed: 0, buildings: 0, crimes: 5, credits: 10 },
+      failures: ZERO_CORE,
       runs: [
         {
           run_id: 11,
@@ -239,5 +283,40 @@ describe('ArenaPanel — failure taxonomy (EM-343)', () => {
     const line = await screen.findByTestId('arena-contact-failures-26');
     expect(line.textContent).toContain('prov 288 (69%)');
     expect(line.textContent).toContain('25.2%/turn');
+  });
+
+  it('EM-345 — draws the failures-over-ticks curve with the outage bucket as the peak', async () => {
+    render(<ArenaPanel />);
+    const curve = await screen.findByTestId('arena-run-curve-12');
+    expect(curve.tagName.toLowerCase()).toBe('svg');
+    // the tall provider bucket at t1000 is the labelled peak
+    expect(curve.getAttribute('aria-label')).toContain('peak t1000');
+    expect(curve.getAttribute('aria-label')).toContain('prov 30');
+    // a failure-free run gets a flat label instead of an empty chart
+    const flat = screen.getByTestId('arena-run-curve-9');
+    expect(flat.textContent).toContain('no failure curve');
+  });
+
+  it('EM-346 — the per-agent cut lists each actor with its own rate', async () => {
+    render(<ArenaPanel />);
+    const ada = await screen.findByTestId('arena-agent-failures-12-agent_ada');
+    expect(ada.textContent).toContain('agent_ada fails');
+    expect(ada.textContent).toContain('30.0%/turn');
+    // ada sorts first (highest rate); mox (0.0762) still shows, not hidden
+    const mox = screen.getByTestId('arena-agent-failures-12-agent_mox');
+    expect(mox.textContent).toContain('7.6%/turn');
+    // the contact card carries the cut too
+    expect(screen.getByTestId('arena-contact-agent-26-agent_bram')).toBeInTheDocument();
+  });
+
+  it('EM-347 — the family block shows its pooled failure rollup', async () => {
+    render(<ArenaPanel />);
+    const line = await screen.findByTestId('arena-family-failures-gemini');
+    expect(line.textContent).toContain('family fails');
+    expect(line.textContent).toContain('rej 147 (46%)');
+    expect(line.textContent).toContain('28.2%/turn');
+    // a failure-free family is labelled, not charted
+    const llama = screen.getByTestId('arena-family-failures-llama');
+    expect(llama.textContent).toContain('family fails none');
   });
 });

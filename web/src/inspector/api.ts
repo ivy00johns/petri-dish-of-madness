@@ -409,16 +409,17 @@ function eventsPath(query: EventsQuery): string {
 export type FailureKind = 'action_rejected' | 'provider_error' | 'parse_failure';
 
 /**
- * EM-343 — ONE run's failure taxonomy read off its event log. `counts` are the
- * TRUE per-kind counts (a pre-EM-340 run's overloaded `parse_failure` rows are
+ * EM-343 — the counts/shares core of a failure taxonomy: ONE run's, one
+ * actor's (EM-346), or a family's pooled rollup (EM-347). `counts` are the TRUE
+ * per-kind counts (a pre-EM-340 run's overloaded `parse_failure` rows are
  * re-derived from their payloads server-side), so `shares` describe what the
  * runtime MEANT rather than the raw kind tally; `failure_rate` is failures per
- * `llm_call`. `legacy_rows_reclassified` says how many rows needed
+ * `llm_call`; `legacy_rows_reclassified` says how many rows needed
  * re-derivation (0 on a run emitted after EM-340/EM-342).
  */
-export interface FailureTaxonomy {
+export interface FailureTaxonomyCore {
   counts: Record<FailureKind, number>;
-  /** share of the failure total (0..1); all 0 when the run has no failures */
+  /** share of the failure total (0..1); all 0 when there are no failures */
   shares: Record<FailureKind, number>;
   total: number;
   turns: number;
@@ -426,10 +427,29 @@ export interface FailureTaxonomy {
   legacy_rows_reclassified: number;
 }
 
+/** EM-345 — one even-width tick bucket of a run's failure curve (bucket SUMS). */
+export interface FailureCurvePoint {
+  tick: number;
+  action_rejected: number;
+  provider_error: number;
+  parse_failure: number;
+}
+
+/**
+ * EM-343/EM-345/EM-346 — a run's (or contact run's) full failure read-out: the
+ * core taxonomy + the failures-over-ticks `curve` (EM-345 — a provider outage
+ * reads as a SPIKE) + the per-`actor_id` `by_agent` cut (EM-346 — a per-agent
+ * rate separates ONE broken route from a provider-wide outage).
+ */
+export interface FailureTaxonomy extends FailureTaxonomyCore {
+  curve: FailureCurvePoint[];
+  by_agent: Record<string, FailureTaxonomyCore>;
+}
+
 const FAILURE_KINDS: FailureKind[] = ['action_rejected', 'provider_error', 'parse_failure'];
 
-/** Defensive parse of the additive `failures` block (absent ⇒ all zeros). */
-function parseFailures(raw: unknown): FailureTaxonomy {
+/** Defensive parse of the counts/shares core (absent ⇒ all zeros). */
+function parseFailureCore(raw: unknown): FailureTaxonomyCore {
   const src = isObject(raw) ? raw : {};
   const counts = isObject(src.counts) ? src.counts : {};
   const shares = isObject(src.shares) ? src.shares : {};
@@ -447,6 +467,26 @@ function parseFailures(raw: unknown): FailureTaxonomy {
     failure_rate: toNum(src.failure_rate),
     legacy_rows_reclassified: toNum(src.legacy_rows_reclassified),
   };
+}
+
+/** Defensive parse of the additive `failures` block (absent ⇒ all zeros). */
+function parseFailures(raw: unknown): FailureTaxonomy {
+  const src = isObject(raw) ? raw : {};
+  const curve: FailureCurvePoint[] = [];
+  for (const p of Array.isArray(src.curve) ? src.curve : []) {
+    if (!isObject(p)) continue;
+    curve.push({
+      tick: toNum(p.tick),
+      action_rejected: toNum(p.action_rejected),
+      provider_error: toNum(p.provider_error),
+      parse_failure: toNum(p.parse_failure),
+    });
+  }
+  const byAgent: Record<string, FailureTaxonomyCore> = {};
+  if (isObject(src.by_agent)) {
+    for (const [actor, a] of Object.entries(src.by_agent)) byAgent[actor] = parseFailureCore(a);
+  }
+  return { ...parseFailureCore(src), curve, by_agent: byAgent };
 }
 
 /** One run's civilization-outcome card (zero-LLM projection of its events). */
@@ -471,6 +511,8 @@ export interface ArenaFamily {
   family: string;
   avg_per_run: ArenaRun['outcomes'];
   runs: ArenaRun[];
+  /** EM-347 — the family's pooled failure taxonomy (shares + rate; absent ⇒ zeros). */
+  failures: FailureTaxonomyCore;
 }
 
 export interface ArenaSummary {
@@ -779,6 +821,7 @@ export const inspectorApi = {
           credits: num(avg.credits),
         },
         runs,
+        failures: parseFailureCore(rawFam.failures),
       });
     }
     // EM-334 — the additive contact-runs section (defensive: a pre-EM-334
