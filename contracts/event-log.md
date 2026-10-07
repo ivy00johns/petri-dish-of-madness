@@ -1,8 +1,33 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.9.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.10.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.10.0 (EM-350 + EM-351, 2026-10-07 — failure rate OVER TIME and ACROSS runs):**
+> Two additive changes to the `/api/arena` `failures` block, both answering the
+> same complaint — a single pooled rate cannot say WHEN a lane went bad, nor
+> whether it is bad by habit.
+> (1) EM-350: every `by_route` entry gains `curve`, a
+> `[{tick, failures, attempts}]` series on the SAME bucket plan as the run's own
+> failure `curve` (≤48 even-width tick buckets), so bucket SUMS reconstruct the
+> entry's scalar `failures`/`attempts` exactly. Only the busiest lanes are
+> charted (cap 6); the rest keep their scalar entry with `curve: []`.
+> (2) EM-351: `arena_summary` gains a third top-level key `routes`, the
+> CROSS-RUN rollup `[{lane, failures, attempts, runs, failure_rate}]` pooled
+> over every family-standings run plus contact runs, worst pooled rate first,
+> with `runs` as the sample size. `runs == 1` means the rate is one draw; a
+> lane high in every run is chronically bad. An empty arena returns `routes: []`.
+> Both are additive: a pre-EM-350/351 backend simply omits `curve` / `routes`.
+> Measured off the live `run.sqlite`: run 26's `google/gemini-3.5-flash` was
+> 19/109 (17%) in the first half of its ticks and 78/250 (31%) in the second,
+> and `cloudflare/@cf/meta/llama-3.3-70b-instruct-fp8-fast` 23% → 32% — late
+> degradation, indistinguishable from a constantly-bad lane in the pooled rate;
+> run 23's `kilo/inclusionai/ling-3.0-flash-sante:free`, by contrast, was flat
+> the whole way (15% → 14%). Across runs, `google/gemini-3.1-flash-lite` pooled
+> 74/255 (29%) over 3 runs (6/29, 5/9, 63/217) — bad every time — versus
+> `openrouter/qwen/qwen3.8-27b:free` 1/2 (50%) over 1 run, a single noisy draw.
+> See `api.openapi.yaml` v1.11.0.
 
 > **v1.9.0 (EM-349, 2026-10-07 — the per-lane failure RATE):**
 > The additive `/api/arena` `failures` block gains `by_route`:

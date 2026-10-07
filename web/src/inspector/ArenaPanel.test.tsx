@@ -47,6 +47,11 @@ const ZERO_FAIL = {
 };
 
 const ARENA: ArenaSummary = {
+  routes: [
+    { lane: 'google/gemini-3.1-flash-lite', failures: 74, attempts: 255, runs: 3, failure_rate: 0.2902 },
+    { lane: 'kilo/inclusionai/ling-3.0-flash-sante:free', failures: 218, attempts: 1449, runs: 1, failure_rate: 0.1504 },
+    { lane: 'cohere/command-r-plus-08-2024', failures: 0, attempts: 13, runs: 1, failure_rate: 0 },
+  ],
   contact_runs: [
     {
       run_id: 26,
@@ -64,8 +69,17 @@ const ARENA: ArenaSummary = {
           { tick: 1600, action_rejected: 2, provider_error: 19, parse_failure: 0 },
         ],
         by_route: {
-          'gemini/gemini-3.1-flash-lite': { failures: 63, attempts: 217, failure_rate: 0.2903 },
-          'groq/llama-3.3-70b-instruct-fp8-fast': { failures: 66, attempts: 446, failure_rate: 0.148 },
+          'gemini/gemini-3.1-flash-lite': {
+            failures: 63, attempts: 217, failure_rate: 0.2903,
+            curve: [
+              { tick: 0, failures: 1, attempts: 10 },
+              { tick: 800, failures: 30, attempts: 100 },
+              { tick: 1600, failures: 32, attempts: 107 },
+            ],
+          },
+          'groq/llama-3.3-70b-instruct-fp8-fast': {
+            failures: 66, attempts: 446, failure_rate: 0.148, curve: [],
+          },
         },
         failures_attributed: 417,
         attempts_attributed: 1652,
@@ -122,8 +136,17 @@ const ARENA: ArenaSummary = {
               { tick: 1000, action_rejected: 0, provider_error: 30, parse_failure: 0 },
             ],
             by_route: {
-              'kilo/inclusionai/ling-3.0-flash-sante:free': { failures: 81, attempts: 300, failure_rate: 0.27 },
-              'google/gemini-3.8-flash': { failures: 19, attempts: 149, failure_rate: 0.1275 },
+              'kilo/inclusionai/ling-3.0-flash-sante:free': {
+                failures: 81, attempts: 300, failure_rate: 0.27,
+                curve: [
+                  { tick: 0, failures: 2, attempts: 40 },
+                  { tick: 500, failures: 9, attempts: 60 },
+                  { tick: 1000, failures: 70, attempts: 200 },
+                ],
+              },
+              'google/gemini-3.8-flash': {
+                failures: 19, attempts: 149, failure_rate: 0.1275, curve: [],
+              },
             },
             failures_attributed: 300,
             attempts_attributed: 1103,
@@ -229,7 +252,7 @@ describe('ArenaPanel — standings (EM-119)', () => {
     await waitFor(() =>
       expect(screen.getByText(/no backend — the arena reads persisted runs/)).toBeInTheDocument());
 
-    arenaMock.mockResolvedValue({ families: [], contact_runs: [] });
+    arenaMock.mockResolvedValue({ families: [], contact_runs: [], routes: [] });
     render(<ArenaPanel />);
     await waitFor(() =>
       expect(screen.getAllByText(/no family-stamped runs yet/).length).toBeGreaterThan(0));
@@ -352,10 +375,30 @@ describe('ArenaPanel — failure taxonomy (EM-343)', () => {
     );
     expect(lane.textContent).toContain('81/300 · 27%');
     expect(lane.getAttribute('title')).toBe('kilo/inclusionai/ling-3.0-flash-sante:free');
-    expect(screen.getByTestId('arena-run-routes-12-google/gemini-3.8-flash').textContent)
-      .toContain('19/149 · 13%');
+    // EM-350 — a lane with a time series draws its rate sparkline; one without
+    // (a low-volume lane) does not
+    expect(lane.querySelector('svg')).not.toBeNull();
+    const noCurve = screen.getByTestId('arena-run-routes-12-google/gemini-3.8-flash');
+    expect(noCurve.textContent).toContain('19/149 · 13%');
+    expect(noCurve.querySelector('svg')).toBeNull();
     // the contact card carries the board too
     expect(screen.getByTestId('arena-contact-routes-26')).toBeInTheDocument();
+  });
+
+  it('EM-351 — the cross-run lane board pools lanes over the arena runs', async () => {
+    render(<ArenaPanel />);
+    const board = await screen.findByTestId('arena-lane-rates');
+    expect(board.textContent).toContain('lane failure rates — all runs');
+    // pooled rate + the sample size (runs) travel together
+    expect(screen.getByTestId('arena-lane-rates-google/gemini-3.1-flash-lite').textContent)
+      .toContain('74/255 · 29% · 3 runs');
+    expect(screen.getByTestId('arena-lane-rates-cohere/command-r-plus-08-2024').textContent)
+      .toContain('0/13 · 0% · 1 run');
+    // a lane that looks bad in ONE draw is shown against a single run
+    expect(
+      screen.getByTestId('arena-lane-rates-kilo/inclusionai/ling-3.0-flash-sante:free')
+        .textContent,
+    ).toContain('218/1449 · 15% · 1 run');
   });
 
   it('EM-347 — the family block shows its pooled failure rollup', async () => {

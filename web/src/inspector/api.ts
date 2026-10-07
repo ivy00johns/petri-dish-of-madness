@@ -454,14 +454,25 @@ export interface FailureByAgentEntry extends FailureTaxonomyCore {
   routes_attributed: number;
 }
 
+/** EM-350 — one tick bucket of a lane's failure curve (`failures` + `attempts`). */
+export interface FailureRouteBucket {
+  tick: number;
+  failures: number;
+  attempts: number;
+}
+
 /**
  * EM-349 — one lane's failure rate against its own usage: `failures` of
  * `attempts` `llm_call`s served by that lane, plus the resulting `failure_rate`.
+ * EM-350 — the busiest lanes also carry a `curve` (failures/attempts per tick
+ * bucket), so a lane that degraded only mid-run is distinguishable from one
+ * that was bad the whole way; empty for the rest.
  */
 export interface FailureRouteStat {
   failures: number;
   attempts: number;
   failure_rate: number;
+  curve: FailureRouteBucket[];
 }
 
 export interface FailureTaxonomy extends FailureTaxonomyCore {
@@ -529,10 +540,18 @@ function parseFailures(raw: unknown): FailureTaxonomy {
   if (isObject(src.by_route)) {
     for (const [lane, s] of Object.entries(src.by_route)) {
       const stat = isObject(s) ? s : {};
+      const curve: FailureRouteBucket[] = [];
+      for (const b of Array.isArray(stat.curve) ? stat.curve : []) {
+        if (!isObject(b)) continue;
+        curve.push({
+          tick: toNum(b.tick), failures: toNum(b.failures), attempts: toNum(b.attempts),
+        });
+      }
       byRoute[lane] = {
         failures: toNum(stat.failures),
         attempts: toNum(stat.attempts),
         failure_rate: toNum(stat.failure_rate),
+        curve,
       };
     }
   }
@@ -572,12 +591,25 @@ export interface ArenaFamily {
   failures: FailureTaxonomyCore;
 }
 
+/** EM-351 — one lane's failures/attempts pooled across the Arena's runs. */
+export interface LaneRollup {
+  lane: string;
+  failures: number;
+  attempts: number;
+  /** how many Arena runs the lane appeared in */
+  runs: number;
+  failure_rate: number;
+}
+
 export interface ArenaSummary {
   families: ArenaFamily[];
   /** EM-334 — contact runs: runs whose config_json carries an ARMED contact
    * block, with the family pairing + per-settlement cards. Absent on a
    * pre-EM-334 backend ⇒ parsed to []. */
   contact_runs: ContactArenaRun[];
+  /** EM-351 — the per-lane failure rate pooled across the Arena's runs
+   * (worst rate first). Absent on a pre-EM-351 backend ⇒ parsed to []. */
+  routes: LaneRollup[];
 }
 
 /** EM-334 — one contact run's Arena card (family pairing + per-town cards). */
@@ -935,7 +967,19 @@ export const inspectorApi = {
         events,
       });
     }
-    return { families, contact_runs: contactRuns };
+    // EM-351 — the cross-run per-lane rollup (absent ⇒ []).
+    const routes: LaneRollup[] = [];
+    for (const rawRoute of Array.isArray(data.routes) ? data.routes : []) {
+      if (!isObject(rawRoute) || typeof rawRoute.lane !== 'string') continue;
+      routes.push({
+        lane: rawRoute.lane,
+        failures: num(rawRoute.failures),
+        attempts: num(rawRoute.attempts),
+        runs: num(rawRoute.runs),
+        failure_rate: num(rawRoute.failure_rate),
+      });
+    }
+    return { families, contact_runs: contactRuns, routes };
   },
 
   /**

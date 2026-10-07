@@ -124,6 +124,14 @@ describe('inspectorApi.arena (EM-119)', () => {
       'GET /api/arena': {
         status: 200,
         body: {
+          // EM-351 — the cross-run lane rollup (junk lane id dropped)
+          routes: [
+            {
+              lane: 'google/gemini-3.1-flash-lite',
+              failures: 74, attempts: 255, runs: 3, failure_rate: 0.2902,
+            },
+            { lane: 42 },
+          ],
           families: [
             {
               family: 'gemini',
@@ -159,6 +167,11 @@ describe('inspectorApi.arena (EM-119)', () => {
                     by_route: {
                       'kilo/inclusionai/ling-3.0-flash-sante:free': {
                         failures: 218, attempts: 1449, failure_rate: 0.1504,
+                        curve: [
+                          { tick: 0, failures: 2, attempts: 900 },
+                          { tick: 1000, failures: 216, attempts: 549 },
+                          'junk', // dropped
+                        ],
                       },
                       'not-an-object': 'junk', // coerced to an all-zero stat
                     },
@@ -199,12 +212,25 @@ describe('inspectorApi.arena (EM-119)', () => {
     // EM-349 — the per-lane rate (a junk stat coerces to zeros, never dropped)
     expect(run.failures.by_route['kilo/inclusionai/ling-3.0-flash-sante:free']).toEqual({
       failures: 218, attempts: 1449, failure_rate: 0.1504,
+      curve: [
+        { tick: 0, failures: 2, attempts: 900 },
+        { tick: 1000, failures: 216, attempts: 549 },
+      ],
     });
+    // the junk `not-an-object` stat coerces to an all-zero entry (with a curve)
     expect(run.failures.by_route['not-an-object']).toEqual({
-      failures: 0, attempts: 0, failure_rate: 0,
+      failures: 0, attempts: 0, failure_rate: 0, curve: [],
     });
     expect(run.failures.failures_attributed).toBe(300);
     expect(run.failures.attempts_attributed).toBe(1999);
+    // EM-351 — the cross-run lane rollup parses (junk lane dropped; absent ⇒ [])
+    expect(out!.routes).toEqual([
+      { lane: 'google/gemini-3.1-flash-lite', failures: 74, attempts: 255, runs: 3, failure_rate: 0.2902 },
+    ]);
+    stubFetch({
+      'GET /api/arena': { status: 200, body: { families: [] } },
+    });
+    expect((await inspectorApi.arena())!.routes).toEqual([]);
   });
 
   it('returns null on network failure and on a non-object body', async () => {
