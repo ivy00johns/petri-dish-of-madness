@@ -599,8 +599,14 @@ def test_arena_summary_empty_and_zero_event_runs(tmp_path):
 
     repo = SQLiteRepository(str(tmp_path / "empty.sqlite"))
     # EM-334 — the payload gains the additive `contact_runs` section.
-    # `routes` is the EM-351 cross-run lane rollup — empty here, no lane activity
-    assert arena_summary(repo) == {"families": [], "contact_runs": [], "routes": []}
+    # `routes` is the EM-351 cross-run lane rollup — empty here, no lane activity.
+    # EM-352 — `chronic_rule` is the rule behind `routes[].chronic`; EM-353 —
+    # `lane_curves` echoes the opt-in gate (off by default).
+    assert arena_summary(repo) == {
+        "families": [], "contact_runs": [], "routes": [],
+        "chronic_rule": {"rate_threshold": 0.20, "min_runs": 2},
+        "lane_curves": False,
+    }
     _seed_run(repo, "gemini", spawns=0)  # a stamped run with NO events
     out = arena_summary(repo)
     assert out["families"][0]["avg_per_run"] == {
@@ -693,9 +699,15 @@ def test_tournament_end_to_end_two_families(arena_client):
 
     # Fresh boot: no stamped runs ⇒ empty arena.
     # EM-334 — the payload gains the additive `contact_runs` section.
+    # EM-352/353 — plus the `chronic_rule` and the `lane_curves` gate echo.
     assert client.get("/api/arena").json() == {
         "families": [], "contact_runs": [], "routes": [],
+        "chronic_rule": {"rate_threshold": 0.20, "min_runs": 2},
+        "lane_curves": False,
     }
+    # EM-353 — the curves are opt-in on the endpoint itself: the same empty
+    # arena asked for curves echoes the flag (and stays equally empty).
+    assert client.get("/api/arena?lane_curves=1").json()["lane_curves"] is True
     assert client.get("/api/arena/tournament").json()["status"] == "idle"
 
     body = client.post(

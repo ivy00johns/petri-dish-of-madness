@@ -39,6 +39,16 @@
  *  • CROSS-RUN LANE BOARD (EM-351): one board pools every lane's failures and
  *    attempts across the Arena's runs, so a lane that looks bad in one draw is
  *    judged against its whole record (`runs` is the sample size).
+ *  • CHRONIC ROUTE WARNING (EM-352): a lane whose OWN rate reaches the rule's
+ *    threshold in `min_runs` or more runs is flagged `chronic` server-side and
+ *    heads the board with a ⚠ — so a persistently bad lane flags ITSELF
+ *    instead of waiting to be spotted, and a single lucky draw can never flag
+ *    (the flag counts RUNS, and `runs` travels with it). Live: the lane at
+ *    50% over ONE run is not flagged, while gemini-3.1-flash-lite (≥20% in
+ *    3 of 3 runs) is.
+ *  • LAZY LANE CURVES (EM-353): the per-lane rate curves are about HALF the
+ *    /api/arena payload, so they are opt-in — the panel's default read is the
+ *    rates only and a "load rate curves" button refetches with them.
  *  • FAMILY ROLLUP (EM-347): each family block also shows its
  *    failures POOLED across its runs, so the panel answers "which family fails
  *    differently" (shares + failures-per-turn, comparable across families).
@@ -55,9 +65,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  DEFAULT_CHRONIC_RULE,
   inspectorApi,
   type ArenaRun,
   type ArenaSummary,
+  type ChronicRule,
   type FailureCurvePoint,
   type FailureRouteBucket,
   type FailureTaxonomy,
@@ -366,20 +378,43 @@ function FailureRouteBoard({ routes, testid }: {
 }
 
 /**
- * EM-351 — the cross-run lane board: every lane's failures/attempts pooled over
- * the Arena's runs (family standings + contact), worst pooled rate first, so a
- * lane that looks bad in one draw is judged against its whole record (`runs`
- * is the sample size). Top rows only; the count shows the rest.
+ * EM-351/352 — the cross-run lane board: every lane's failures/attempts pooled
+ * over the Arena's runs (family standings + contact), so a lane that looks bad
+ * in one draw is judged against its whole record (`runs` is the sample size).
+ * EM-352 — a `chronic` lane (at/above the rule's threshold in `min_runs`+
+ * runs) wears a ⚠ and its `runs_high/runs` evidence, says so in a header line,
+ * and the server orders those lanes first so they flag themselves. Top rows
+ * only; the count shows the rest.
+ * EM-353 — the per-lane rate curves are NOT in the default payload, so the
+ * board offers `loadCurves` when they have not been fetched yet.
  */
-function LaneFailureBoard({ routes, testid }: { routes: LaneRollup[]; testid: string }) {
+function LaneFailureBoard({ routes, rule, testid, curvesEnabled, onLoadCurves }: {
+  routes: LaneRollup[];
+  rule: ChronicRule;
+  testid: string;
+  curvesEnabled: boolean;
+  onLoadCurves: () => void;
+}) {
   if (routes.length === 0) return null;
   const shown = routes.slice(0, 12);
+  const chronic = routes.filter((r) => r.chronic);
   return (
     <details className="mt-2 p-2 rounded border border-current/10" data-testid={testid}>
       <summary className="font-mono text-[10px] uppercase tracking-wide opacity-70 cursor-pointer">
         lane failure rates — all runs ({routes.length})
+        {chronic.length > 0 ? ` · ⚠ ${chronic.length} chronic` : ''}
       </summary>
       <div className="flex flex-col gap-0.5 mt-1">
+        {chronic.length > 0 && (
+          <div
+            className="font-mono text-[10px] text-red-400"
+            data-testid={`${testid}-chronic`}
+            title={chronic.map((r) => r.lane).join('\n')}
+          >
+            ⚠ {chronic.length} chronically bad route{chronic.length === 1 ? '' : 's'} — ≥
+            {pct(rule.rate_threshold)} in {rule.min_runs}+ runs each
+          </div>
+        )}
         {shown.map((r) => (
           <div
             key={r.lane}
@@ -387,15 +422,32 @@ function LaneFailureBoard({ routes, testid }: { routes: LaneRollup[]; testid: st
             data-testid={`${testid}-${r.lane}`}
             title={r.lane}
           >
+            {r.chronic ? (
+              <span className="text-red-400" aria-label="chronic route">⚠ </span>
+            ) : null}
             <span className="opacity-80">{routeLabel(r.lane)}</span>{' '}
             {r.attempts > 0 ? `${r.failures}/${r.attempts} · ${pct(r.failure_rate)}` : 'no attempts'}
             {` · ${r.runs} run${r.runs === 1 ? '' : 's'}`}
+            {r.chronic
+              ? ` · ≥${pct(rule.rate_threshold)} in ${r.runs_high}/${r.runs} runs`
+              : ''}
           </div>
         ))}
         {routes.length > shown.length && (
           <div className="font-mono text-[10px] opacity-50">
             … {routes.length - shown.length} more
           </div>
+        )}
+        {!curvesEnabled && (
+          <button
+            type="button"
+            data-testid={`${testid}-load-curves`}
+            onClick={onLoadCurves}
+            className="font-mono text-[10px] opacity-60 hover:opacity-90 self-start"
+            title="the per-lane rate curves are about half the /api/arena payload — fetch them on demand"
+          >
+            ↻ load per-lane rate curves
+          </button>
         )}
       </div>
     </details>
@@ -410,12 +462,14 @@ export default function ArenaPanel() {
   const [ticksPerFamily, setTicksPerFamily] = useState(40);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  // EM-353 — the per-lane rate curves are opt-in (about half the payload).
+  const [wantCurves, setWantCurves] = useState(false);
 
   const loadArena = useCallback(async () => {
-    const data = await inspectorApi.arena();
+    const data = await inspectorApi.arena({ laneCurves: wantCurves });
     setArena(data);
     setArenaLoaded(true);
-  }, []);
+  }, [wantCurves]);
 
   const loadStatus = useCallback(async () => {
     setTStatus(await inspectorApi.tournamentStatus());
@@ -467,6 +521,7 @@ export default function ArenaPanel() {
   const families = arena?.families ?? [];
   const contactRuns = arena?.contact_runs ?? [];
   const laneRoutes = arena?.routes ?? [];
+  const chronicRule = arena?.chronic_rule ?? DEFAULT_CHRONIC_RULE;
 
   return (
     <section
@@ -705,7 +760,13 @@ export default function ArenaPanel() {
       )}
 
       {/* ── Lane failure rates across runs (EM-351) ─────────────────── */}
-      <LaneFailureBoard routes={laneRoutes} testid="arena-lane-rates" />
+      <LaneFailureBoard
+        routes={laneRoutes}
+        rule={chronicRule}
+        testid="arena-lane-rates"
+        curvesEnabled={arena?.lane_curves ?? false}
+        onLoadCurves={() => setWantCurves(true)}
+      />
     </section>
   );
 }

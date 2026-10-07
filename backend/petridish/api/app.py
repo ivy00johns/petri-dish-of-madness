@@ -2505,17 +2505,23 @@ def _tournament_guard() -> None:
 
 
 @app.get("/api/arena")
-async def get_arena():
+async def get_arena(lane_curves: bool = False):
     """EM-119 — Model-Family Arena standings. Every run stamped with
     `runs.model_family` (the EM-112 tournament stamps it at reset; forks
     inherit) grouped by family: per-run outcome cards (population / laws
     passed / buildings completed / crimes / credits) + downsampled population
     sparklines, plus family-level per-run means. Zero-LLM, read-only, OFF the
     replay surface. Heavy per-run analytics run on a worker thread (same
-    blocking class as /api/fingerprints)."""
+    blocking class as /api/fingerprints).
+
+    EM-352 — the response also carries `routes[].chronic` (a lane at/above the
+    `chronic_rule` threshold in 2+ runs) and the `chronic_rule` itself.
+    EM-353 — the per-lane failure CURVES are opt-in via `?lane_curves=1`; they
+    are about half the payload, so the default read is the rates only."""
     if _repo is None:
         return {"families": []}
-    return await anyio.to_thread.run_sync(arena_summary, _repo)
+    return await anyio.to_thread.run_sync(
+        lambda: arena_summary(_repo, lane_curves=lane_curves))
 
 
 @app.post("/api/arena/tournament", status_code=202)

@@ -325,19 +325,112 @@ def test_arena_routes_pool_lane_failures_across_runs(tmp_path):
 
     routes = {r["lane"]: r for r in arena_summary(repo)["routes"]}
     # the SAME lane pooled over two runs (2/8 + 1/12), with its sample size
+    # (EM-352 — plus the chronic evidence: lane/x sat at 0.25 in ONE run and
+    # 0.083 in the other, so `runs_high` is 1 and it does NOT flag)
     assert routes["lane/x"] == {
         "lane": "lane/x", "failures": 3, "attempts": 20,
         "runs": 2, "failure_rate": 0.15,
+        "worst_rate": 0.25, "runs_high": 1, "chronic": False,
     }
     assert routes["lane/y"]["runs"] == 1
     assert routes["lane/y"]["failure_rate"] == 1.0
-    # worst pooled rate first, so a lane bad in one draw is not buried
+    # one run is one draw, however bad — never a chronic flag
+    assert routes["lane/y"]["runs_high"] == 1
+    assert routes["lane/y"]["chronic"] is False
+    # when nothing is chronic the board keeps the worst pooled rate first
     assert arena_summary(repo)["routes"][0]["lane"] == "lane/y"
 
 
 def test_arena_routes_empty_arena(tmp_path):
     repo = SQLiteRepository(str(tmp_path / "empty.sqlite"))
     assert arena_summary(repo)["routes"] == []
+    # EM-352 — the rule rides even an empty arena, so a consumer has the
+    # threshold before any lane exists to judge.
+    assert arena_summary(repo)["chronic_rule"] == {
+        "rate_threshold": 0.20, "min_runs": 2}
+
+
+# ── EM-352 — the chronic-route flag ──────────────────────────────────────────
+
+def test_chronic_routes_flag_a_lane_bad_in_multiple_runs(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "chronic.sqlite"))
+
+    def seed(fam: str, lane: str, n_fail: int, n_attempt: int) -> int:
+        rid = _run(repo, family=fam)
+        for _ in range(n_fail):
+            _ev(repo, rid, "provider_error", 1, "agent_a",
+                {"reason": "provider_error: x", "routed_via": lane})
+        for _ in range(n_attempt):
+            _ev(repo, rid, "llm_call", 1, "agent_a", {"gen_ai.response.model": lane})
+        return rid
+
+    # a lane over the threshold in TWO runs (2/8 = 0.25, 3/10 = 0.30) and clean
+    # in a third (0/6) — bad by habit, not by luck
+    seed("gemini", "lane/chronic", 2, 8)
+    seed("llama", "lane/chronic", 3, 10)
+    seed("llama", "lane/chronic", 0, 6)
+    # a lane with a HIGHER pooled rate whose badness is ONE draw out of three
+    seed("gemini", "lane/oncedraw", 3, 3)
+    seed("llama", "lane/oncedraw", 0, 5)
+    seed("llama", "lane/oncedraw", 0, 5)
+
+    out = arena_summary(repo)
+    routes = {r["lane"]: r for r in out["routes"]}
+
+    ch = routes["lane/chronic"]
+    assert ch["runs"] == 3 and ch["runs_high"] == 2
+    assert ch["worst_rate"] == 0.30
+    assert ch["failure_rate"] == round(5 / 24, 4)       # pooled 0.2083
+    assert ch["chronic"] is True
+
+    od = routes["lane/oncedraw"]
+    assert od["runs"] == 3 and od["runs_high"] == 1
+    assert od["worst_rate"] == 1.0
+    assert od["failure_rate"] == round(3 / 13, 4)       # pooled 0.2308 — HIGHER
+    assert od["chronic"] is False
+
+    # the chronic lane flags ITSELF: it sorts first despite the lower pooled
+    # rate, which is the point of the flag (a one-draw lane cannot bury it).
+    assert out["routes"][0]["lane"] == "lane/chronic"
+    assert out["chronic_rule"] == {"rate_threshold": 0.20, "min_runs": 2}
+
+
+# ── EM-353 — the per-lane curves are opt-in ──────────────────────────────────
+
+def test_arena_summary_omits_lane_curves_unless_asked(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "lean.sqlite"))
+    rid = _run(repo)
+    lanes = ["lane/a", "lane/b", "lane/c"]
+    for lane in lanes:
+        for tick in range(0, 200, 10):                 # long enough for 48 buckets
+            _ev(repo, rid, "llm_call", tick, "agent_a", {"gen_ai.response.model": lane})
+        for tick in (120, 190):
+            _ev(repo, rid, "provider_error", tick, "agent_a",
+                {"reason": "provider_error: x", "routed_via": lane})
+
+    lean = arena_summary(repo)
+    assert lean["lane_curves"] is False
+    lean_failures = lean["families"][0]["runs"][0]["failures"]
+    # the run-level curve (EM-345) is NOT gated — it always rides
+    assert lean_failures["curve"]
+    for lane in lanes:
+        stat = lean_failures["by_route"][lane]
+        assert stat["curve"] == []                     # not requested ⇒ no bytes
+        assert stat["failures"] == 2 and stat["attempts"] == 20   # scalars still ride
+
+    full = arena_summary(repo, lane_curves=True)
+    assert full["lane_curves"] is True
+    full_failures = full["families"][0]["runs"][0]["failures"]
+    for lane in lanes:
+        curve = full_failures["by_route"][lane]["curve"]
+        assert curve and sum(b["attempts"] for b in curve) == 20
+        assert sum(b["failures"] for b in curve) == 2
+        # same bucket plan as the run curve, so the bars align tick for tick
+        assert [b["tick"] for b in curve] == [b["tick"] for b in full_failures["curve"]]
+
+    # the whole point: the default read sheds the per-lane curves (the payload's
+    # heavy half) while keeping every scalar the panel needs.
+    assert len(json.dumps(lean)) < 0.6 * len(json.dumps(full))
 
 
 # ── EM-347 — the per-family rollup ───────────────────────────────────────────

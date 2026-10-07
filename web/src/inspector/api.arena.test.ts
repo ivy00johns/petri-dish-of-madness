@@ -223,14 +223,51 @@ describe('inspectorApi.arena (EM-119)', () => {
     });
     expect(run.failures.failures_attributed).toBe(300);
     expect(run.failures.attempts_attributed).toBe(1999);
-    // EM-351 — the cross-run lane rollup parses (junk lane dropped; absent ⇒ [])
+    // EM-351 — the cross-run lane rollup parses (junk lane dropped) and
+    // EM-352 — a pre-EM-352 payload's missing chronic fields coerce safely
+    // (no evidence ⇒ not chronic; the rule falls back to the shipped default)
     expect(out!.routes).toEqual([
-      { lane: 'google/gemini-3.1-flash-lite', failures: 74, attempts: 255, runs: 3, failure_rate: 0.2902 },
+      {
+        lane: 'google/gemini-3.1-flash-lite', failures: 74, attempts: 255,
+        runs: 3, failure_rate: 0.2902,
+        worst_rate: 0, runs_high: 0, chronic: false,
+      },
     ]);
+    expect(out!.chronic_rule).toEqual({ rate_threshold: 0.2, min_runs: 2 });
+    // EM-353 — the default read did not carry the per-lane curves
+    expect(out!.lane_curves).toBe(false);
+
+    stubFetch({
+      'GET /api/arena': {
+        status: 200,
+        body: {
+          families: [],
+          routes: [
+            {
+              lane: 'lane/bad', failures: 74, attempts: 255, runs: 3,
+              failure_rate: 0.2902, worst_rate: 0.56, runs_high: 3, chronic: true,
+            },
+          ],
+          chronic_rule: { rate_threshold: 0.25, min_runs: 3 },
+          lane_curves: true,
+        },
+      },
+    });
+    const asked = await inspectorApi.arena({ laneCurves: true });
+    // EM-353 — the opt-in actually rides the request URL
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/arena?lane_curves=1');
+    expect(asked!.lane_curves).toBe(true);
+    expect(asked!.chronic_rule).toEqual({ rate_threshold: 0.25, min_runs: 3 });
+    expect(asked!.routes[0].chronic).toBe(true);
+    expect(asked!.routes[0].runs_high).toBe(3);
+
     stubFetch({
       'GET /api/arena': { status: 200, body: { families: [] } },
     });
-    expect((await inspectorApi.arena())!.routes).toEqual([]);
+    const absent = await inspectorApi.arena();
+    expect(absent!.routes).toEqual([]);
+    expect(absent!.lane_curves).toBe(false);
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/arena');
   });
 
   it('returns null on network failure and on a non-object body', async () => {
