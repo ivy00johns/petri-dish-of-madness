@@ -56,20 +56,23 @@ const ARENA: ArenaSummary = {
           { tick: 0, action_rejected: 0, provider_error: 0, parse_failure: 0 },
           { tick: 800, action_rejected: 0, provider_error: 60, parse_failure: 0 },
           { tick: 1600, action_rejected: 2, provider_error: 19, parse_failure: 0 },
-        ],
-        by_agent: {
-          // run 26 is the UNIFORM provider-outage shape (~17-18% per agent)
-          agent_bram: {
-            counts: { action_rejected: 21, provider_error: 62, parse_failure: 4 },
-            shares: { action_rejected: 0.2414, provider_error: 0.7126, parse_failure: 0.046 },
-            total: 87, turns: 479, failure_rate: 0.1816, legacy_rows_reclassified: 87,
+        ],          by_agent: {
+            // run 26 is the UNIFORM provider-outage shape (~17-18% per agent)
+            agent_bram: {
+              counts: { action_rejected: 21, provider_error: 62, parse_failure: 4 },
+              shares: { action_rejected: 0.2414, provider_error: 0.7126, parse_failure: 0.046 },
+              total: 87, turns: 479, failure_rate: 0.1816, legacy_rows_reclassified: 87,
+              routes: { 'gemini/gemini-3.1-flash-lite': 63, 'ollama/gpt-oss:120b': 8 },
+              top_route: 'gemini/gemini-3.1-flash-lite', routes_attributed: 71,
+            },
+            agent_vesper: {
+              counts: { action_rejected: 13, provider_error: 66, parse_failure: 5 },
+              shares: { action_rejected: 0.1548, provider_error: 0.7857, parse_failure: 0.0595 },
+              total: 84, turns: 481, failure_rate: 0.1746, legacy_rows_reclassified: 84,
+              routes: { 'groq/llama-3.3-70b-instruct-fp8-fast': 66 },
+              top_route: 'groq/llama-3.3-70b-instruct-fp8-fast', routes_attributed: 84,
+            },
           },
-          agent_vesper: {
-            counts: { action_rejected: 13, provider_error: 66, parse_failure: 5 },
-            shares: { action_rejected: 0.1548, provider_error: 0.7857, parse_failure: 0.0595 },
-            total: 84, turns: 481, failure_rate: 0.1746, legacy_rows_reclassified: 84,
-          },
-        },
       },
       population_by_town: { Ashvale: 3, Kettlebrook: 2 },
       contact_made: { tick: 81, agent_id: 'a1', from_settlement: 's1', to_settlement: 's2' },
@@ -106,16 +109,20 @@ const ARENA: ArenaSummary = {
               { tick: 1000, action_rejected: 0, provider_error: 30, parse_failure: 0 },
             ],
             by_agent: {
-              // run 23 is the CONCENTRATED shape: ada's route is broken
+              // run 23 is the CONCENTRATED shape: ONE bad lane drives the mass
               agent_ada: {
                 counts: { action_rejected: 57, provider_error: 6, parse_failure: 47 },
                 shares: { action_rejected: 0.5182, provider_error: 0.0545, parse_failure: 0.4273 },
                 total: 110, turns: 367, failure_rate: 0.2997, legacy_rows_reclassified: 110,
+                routes: { 'kilo/inclusionai/ling-3.0-flash-sante:free': 81, 'kilo/step-3.7-flash:free': 16 },
+                top_route: 'kilo/inclusionai/ling-3.0-flash-sante:free', routes_attributed: 104,
               },
               agent_mox: {
                 counts: { action_rejected: 5, provider_error: 5, parse_failure: 13 },
                 shares: { action_rejected: 0.2174, provider_error: 0.2174, parse_failure: 0.5652 },
                 total: 23, turns: 302, failure_rate: 0.0762, legacy_rows_reclassified: 23,
+                routes: { 'kilo/inclusionai/ling-3.0-flash-sante:free': 11 },
+                top_route: 'kilo/inclusionai/ling-3.0-flash-sante:free', routes_attributed: 15,
               },
             },
           },
@@ -305,8 +312,16 @@ describe('ArenaPanel — failure taxonomy (EM-343)', () => {
     // ada sorts first (highest rate); mox (0.0762) still shows, not hidden
     const mox = screen.getByTestId('arena-agent-failures-12-agent_mox');
     expect(mox.textContent).toContain('7.6%/turn');
+    // EM-348 — the cut NAMES the lane behind the agent's failure mass
+    const adaRoute = screen.getByTestId('arena-agent-failures-12-agent_ada-route');
+    expect(adaRoute.textContent).toContain('inclusionai/ling-3.0-flash-sante:free');
+    expect(adaRoute.textContent).toContain('104/110 attributed');
+    expect(adaRoute.getAttribute('title')).toContain('kilo/inclusionai/ling-3.0-flash-sante:free');
     // the contact card carries the cut too
     expect(screen.getByTestId('arena-contact-agent-26-agent_bram')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('arena-contact-agent-26-agent_bram-route').textContent,
+    ).toContain('gemini-3.1-flash-lite');
   });
 
   it('EM-347 — the family block shows its pooled failure rollup', async () => {

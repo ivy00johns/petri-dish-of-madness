@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.8.0
+  version: 1.9.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -30,6 +30,10 @@ info:
     failures-per-`llm_call` rate, read off the append-only event log. Pre-EM-340 runs are
     reported honestly: their overloaded `parse_failure` rows are re-derived from their
     payloads by the same classifier the emit path uses (event-log.md v1.6.0).
+    v1.9.0 (EM-348) adds LANE attribution to each `by_agent` entry: `routes` (the lane id each
+    failure row was `routed_via` → count, descending), `top_route` and `routes_attributed`
+    (coverage; unnamed rows stay unattributed). So the per-agent cut NAMES the broken route
+    instead of leaving an opaque actor id.
     v1.8.0 (EM-344–347) moves that classifier into a leaf module (`petridish/taxonomy.py`)
     shared by the emit path and the read side (the API no longer depends on the agent
     runtime), and EXTENDS the `failures` block with `curve` (EM-345 — failures over ticks
@@ -200,9 +204,11 @@ paths:
         EM-345/346 (v1.8.0): the block also carries `curve` (failures over ticks as ≤48
         even-width bucket sums per kind — `[{tick, action_rejected, provider_error,
         parse_failure}]`) and `by_agent` (the same counts/shares/total/turns/failure_rate/
-        legacy_rows_reclassified shape keyed by `actor_id`). EM-347 (v1.8.0): each family
-        block gains a pooled `failures` rollup (`counts, shares, total, turns,
-        failure_rate, legacy_rows_reclassified, runs`) — no `curve`/`by_agent`.
+        legacy_rows_reclassified shape keyed by `actor_id`). EM-348 (v1.9.0): each
+        `by_agent` entry also carries `routes` (lane → failure count, descending),
+        `top_route` and `routes_attributed`. EM-347 (v1.8.0): each family block gains a
+        pooled `failures` rollup (`counts, shares, total, turns, failure_rate,
+        legacy_rows_reclassified, runs`) — no `curve`/`by_agent`.
       responses:
         "200": { description: arena summary, content: { application/json: { schema: { type: object } } } }
   /api/contact:

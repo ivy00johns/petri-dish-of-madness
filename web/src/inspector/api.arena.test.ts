@@ -150,6 +150,9 @@ describe('inspectorApi.arena (EM-119)', () => {
                         counts: { action_rejected: 57, provider_error: 6, parse_failure: 47 },
                         shares: { action_rejected: 0.5182, provider_error: 0.0545, parse_failure: 0.4273 },
                         total: 110, turns: 367, failure_rate: 0.2997, legacy_rows_reclassified: 110,
+                        routes: { 'kilo/inclusionai/ling-3.0-flash-sante:free': 81, junk: 'x' },
+                        top_route: 'kilo/inclusionai/ling-3.0-flash-sante:free',
+                        routes_attributed: 104,
                       },
                     },
                   },
@@ -174,6 +177,13 @@ describe('inspectorApi.arena (EM-119)', () => {
     // EM-346 — the per-agent cut
     expect(run.failures.by_agent.agent_ada.total).toBe(110);
     expect(run.failures.by_agent.agent_ada.failure_rate).toBeCloseTo(0.2997, 3);
+    // EM-348 — the lane attribution (a junk count coerces to 0, not dropped)
+    expect(run.failures.by_agent.agent_ada.top_route).toBe(
+      'kilo/inclusionai/ling-3.0-flash-sante:free',
+    );
+    expect(run.failures.by_agent.agent_ada.routes_attributed).toBe(104);
+    expect(run.failures.by_agent.agent_ada.routes['kilo/inclusionai/ling-3.0-flash-sante:free']).toBe(81);
+    expect(run.failures.by_agent.agent_ada.routes.junk).toBe(0);
     // absent on a pre-EM-345 run ⇒ an empty cut, never null
     expect(out!.families[0].runs[1].failures.curve).toEqual([]);
     expect(out!.families[0].runs[1].failures.by_agent).toEqual({});
