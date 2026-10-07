@@ -599,7 +599,8 @@ def test_arena_summary_empty_and_zero_event_runs(tmp_path):
 
     repo = SQLiteRepository(str(tmp_path / "empty.sqlite"))
     # EM-334 — the payload gains the additive `contact_runs` section.
-    assert arena_summary(repo) == {"families": [], "contact_runs": []}
+    # `routes` is the EM-351 cross-run lane rollup — empty here, no lane activity
+    assert arena_summary(repo) == {"families": [], "contact_runs": [], "routes": []}
     _seed_run(repo, "gemini", spawns=0)  # a stamped run with NO events
     out = arena_summary(repo)
     assert out["families"][0]["avg_per_run"] == {
@@ -692,7 +693,9 @@ def test_tournament_end_to_end_two_families(arena_client):
 
     # Fresh boot: no stamped runs ⇒ empty arena.
     # EM-334 — the payload gains the additive `contact_runs` section.
-    assert client.get("/api/arena").json() == {"families": [], "contact_runs": []}
+    assert client.get("/api/arena").json() == {
+        "families": [], "contact_runs": [], "routes": [],
+    }
     assert client.get("/api/arena/tournament").json()["status"] == "idle"
 
     body = client.post(

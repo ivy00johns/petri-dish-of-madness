@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.10.0
+  version: 1.11.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -24,6 +24,15 @@ info:
     live TickLoop — never concurrent (free-tier key-pool protection, ARCHITECTURE.md
     §Instance). RunRow gains a nullable `model_family` stamp (null = un-stamped); a fork
     inherits its parent's stamp.
+    v1.11.0 (EM-350+EM-351) makes a lane's badness measurable in TIME and across runs.
+    EM-350: each `by_route` entry gains `curve` — that lane's failures AND attempts per tick
+    bucket on the same ≤48-bucket plan as the run's `curve` ([{tick, failures, attempts}]), so
+    a lane that degraded only MID-run is distinguishable from one that was bad the whole way
+    (a single pooled rate cannot tell them apart). Only the busiest lanes are charted; the
+    rest carry `curve: []`. EM-351: the Arena summary gains a top-level `routes` array —
+    `[{lane, failures, attempts, runs, failure_rate}]` pooling every lane's failures and
+    attempts across the Arena's runs (worst pooled rate first), so a lane that looks bad in
+    ONE draw is judged against its whole record (`runs` is the sample size).
     v1.7.0 (EM-343) adds the failure-taxonomy read side to GET /api/arena: every run card
     (family standings AND contact runs) gains an additive `failures` block reporting the
     TRUE action_rejected / provider_error / parse_failure counts + shares and the
@@ -212,9 +221,16 @@ paths:
         `by_agent` entry also carries `routes` (lane → failure count, descending),
         `top_route` and `routes_attributed`. EM-349 (v1.10.0): the block also carries
         `by_route` (`{lane: {failures, attempts, failure_rate}}`, worst rate first) and the
-        `failures_attributed` / `attempts_attributed` coverage counts. EM-347 (v1.8.0): each
+        `failures_attributed` / `attempts_attributed` coverage counts. EM-350 (v1.11.0): each
+        `by_route` entry also carries `curve` (`[{tick, failures, attempts}]` on the run
+        curve's bucket plan — the lane's rate over time; `[]` for lanes past the busiest-N
+        charting cap). EM-347 (v1.8.0): each
         family block gains a pooled `failures` rollup (`counts, shares, total, turns,
         failure_rate, legacy_rows_reclassified, runs`) — no `curve`/`by_agent`/`by_route`.
+        EM-351 (v1.11.0): the response also gains the top-level `routes` array
+        (`[{lane, failures, attempts, runs, failure_rate}]`, worst pooled rate first) — the
+        per-lane record pooled ACROSS the Arena's runs, which is the chronic-badness read.
+        Both are additive; a pre-EM-350/351 backend simply omits them.
       responses:
         "200": { description: arena summary, content: { application/json: { schema: { type: object } } } }
   /api/contact:

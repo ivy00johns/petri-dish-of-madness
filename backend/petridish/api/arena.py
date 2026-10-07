@@ -13,6 +13,8 @@ Sources, all already persisted (no new instrumentation):
   buildings    — `building_operational` events (a completed collective project)
   crimes       — analytics.crime.by_kind total (steal/attack/insult/arson/…)
   credits      — analytics.economy.by_agent total (event-fed, snapshot fallback)
+  routes       — EM-351's cross-run per-lane failure rollup (failures/attempts/
+                 rate pooled over the family-standing + contact runs above)
   failures     — the event log's failure rows (EM-343): the TRUE
                  action_rejected / provider_error / parse_failure counts +
                  shares and the failures-per-`llm_call` rate, re-derived from
@@ -47,6 +49,9 @@ _BUILDINGS_KIND = "building_operational"
 # feed's failure rate is quoted in).
 _FAILURE_KINDS = FAILURE_KIND_ORDER
 _TURNS_KIND = "llm_call"
+# EM-350 — how many lanes carry a per-tick failure curve (the busiest by
+# volume); the rest keep the scalar rate so the payload stays bounded.
+_LANE_CURVE_LANES = 6
 
 
 def _shares(counts: dict, total: int) -> dict:
@@ -56,32 +61,58 @@ def _shares(counts: dict, total: int) -> dict:
     }
 
 
-def _failure_curve(points: list[tuple[int, str]], max_tick: int,
-                   cap: int = _MAX_SPARK_POINTS) -> list[dict]:
-    """EM-345 — the run's failures over ticks, as ≤`cap` even-width tick-bucket
-    SUMS per kind. Buckets SUM rather than point-SAMPLE on purpose: an even-
-    spaced sample of a 1,700-tick run would drop a single-tick provider-outage
-    spike, whereas a bucketed sum keeps it as one tall bar. `points` are
-    (tick, true_kind) pairs off the same ascending pass `failure_taxonomy` makes;
-    `max_tick` anchors the axis (so the spike's bucket sits where it happened).
-    All-zero buckets stay in the series so the curve reads as a continuous
-    timeline rather than a gap."""
+def _bucket_plan(top_tick: int, cap: int = _MAX_SPARK_POINTS) -> tuple[int, float]:
+    """The shared even-width tick-bucket plan for a run: `(n, width)` over
+    integer ticks 0..top_tick (one bucket per tick when the run is short). The
+    run-level and per-lane curves share ONE plan so their bars align tick for
+    tick."""
+    span = max(int(top_tick), 0) + 1
+    n = max(1, min(cap, span))
+    return n, span / n
+
+
+def _bucket_index(tick: int, n: int, width: float) -> int:
+    return min(n - 1, int(max(int(tick), 0) / width))
+
+
+def _failure_curve(points: list[tuple[int, str]], n: int, width: float) -> list[dict]:
+    """EM-345 — the run's failures over ticks, as even-width tick-bucket SUMS
+    per kind. Buckets SUM rather than point-SAMPLE on purpose: an even-spaced
+    sample of a 1,700-tick run would drop a single-tick provider-outage spike,
+    whereas a bucketed sum keeps it as one tall bar. `points` are (tick,
+    true_kind) pairs off the same ascending pass `failure_taxonomy` makes; the
+    `(n, width)` plan comes from `_bucket_plan`. All-zero buckets stay in the
+    series so the curve reads as a continuous timeline rather than a gap."""
     if not points:
         return []
-    top = max(int(max_tick), max(t for t, _ in points), 0)
-    span = top + 1                        # integer ticks 0..top inclusive
-    n = max(1, min(cap, span))            # one bucket per tick on a short run
-    width = span / n
     buckets = [{k: 0 for k in _FAILURE_KINDS} for _ in range(n)]
     for tick, kind in points:
-        idx = min(n - 1, int(max(tick, 0) / width))
-        buckets[idx][kind] += 1
+        buckets[_bucket_index(tick, n, width)][kind] += 1
     return [{"tick": int(b * width), **buckets[b]} for b in range(n)]
 
 
+def _lane_curve(failure_ticks: list[int], attempt_rows: list[tuple[int, int]],
+                n: int, width: float) -> list[dict]:
+    """EM-350 — ONE lane's failures and attempts per tick bucket
+    (`[{tick, failures, attempts}]`), so a lane that degraded only MID-run is
+    distinguishable from one that was bad the whole way — which the single
+    run-level rate cannot tell apart. Shares the run's bucket plan, so a lane's
+    bar and the run bar sit on the same tick."""
+    fails = [0] * n
+    atts = [0] * n
+    for tick in failure_ticks:
+        fails[_bucket_index(tick, n, width)] += 1
+    for tick, count in attempt_rows:
+        atts[_bucket_index(tick, n, width)] += count
+    return [
+        {"tick": int(b * width), "failures": fails[b], "attempts": atts[b]}
+        for b in range(n)
+    ]
+
+
 def failure_taxonomy(repo, run_id: int) -> dict:
-    """EM-343/EM-345/EM-346 — ONE run's failure taxonomy, read off its persisted
-    event log.
+    """EM-343/EM-345/EM-346/EM-349/EM-350 — ONE run's failure taxonomy, read off
+    its persisted event log.
 
     The TRUE shares, not the raw kind counts: every failure row is routed
     through `true_failure_kind`, which re-derives the taxonomy from the payload
@@ -93,31 +124,26 @@ def failure_taxonomy(repo, run_id: int) -> dict:
 
     `shares` are of the failure total (the taxonomy mix); `failure_rate` is
     failures per `llm_call` (the turn-ish denominator, absent ⇒ 0). Defensive
-    throughout: an absent payload degrades to `parse_failure`.
+    throughout: an absent payload degrades to `parse_failure`. Additive
+    read-outs riding the same pass:
 
-    Two additive read-outs ride the same pass (EM-345/EM-346):
-      • `curve` — the failures over ticks (even-width bucket SUMS, see
-        `_failure_curve`), so a provider outage reads as a SPIKE, not a number;
-      • `by_agent` — the same taxonomy keyed by `actor_id`, the "WHICH agent
-        fails differently" cut. A per-agent rate separates ONE broken route
-        (run 23: ada 30% vs vesper 5.7%) from a provider outage that hits the
-        whole cast evenly (run 26: 16-18% each). It includes every actor with
-        turns or failures, so a clean agent shows as 0 rather than vanishing.
-      • EM-348 — each `by_agent` entry also carries `routes` (the lane each
-        failure row was `routed_via`, descending by count), `top_route` (the
-        lane behind most of that agent's failures) and `routes_attributed`
-        (how many failure rows named a lane; `total - routes_attributed` are
-        unattributed). This turns an opaque actor id into a NAMED route.
-      • EM-349 — `by_route` gives every lane its own FAILURE RATE
-        (`{failures, attempts, failure_rate}`), the denominator being the
-        lane's `llm_call` attempts (`gen_ai.response.model`), plus coverage
-        (`failures_attributed` / `attempts_attributed`). This is what makes a
-        lane comparable: measured off the live DB, run 23's `kilo/…ling-3.0-
-        flash-sante:free` carried the MOST failures (218) but only a 15.0%
-        rate — in line with its other lanes (step-3.7-flash 16.4%, gemini-3.8
-        12.8%) — i.e. that run was a broadly degraded routing period, NOT one
-        uniquely broken lane; run 26's lanes were uniformly worse (27–29%).
-        A rate on a low-attempt lane is noisy, so `attempts` travels with it.
+      • `curve` (EM-345) — the failures over ticks (even-width bucket SUMS), so
+        a provider outage reads as a SPIKE, not a number;
+      • `by_agent` (EM-346/348) — the same taxonomy keyed by `actor_id` (the
+        "which agent fails differently" cut; a per-agent rate separates one
+        broken route from a provider-wide outage), each entry carrying `routes`
+        (lane each failure row was `routed_via`), `top_route` and
+        `routes_attributed`;
+      • `by_route` (EM-349/350) — every lane's own failure RATE
+        (`{failures, attempts, failure_rate}`) against its `llm_call` attempts,
+        ordered worst rate first, plus `failures_attributed` /
+        `attempts_attributed` coverage. The top `_LANE_CURVE_LANES` lanes by
+        volume also carry a `curve` (`[{tick, failures, attempts}]`) so a lane
+        that degraded only mid-run is distinguishable from one that was bad
+        throughout. Measured off the live DB, run 23's busiest lane carried the
+        MOST failures (218) but only a 15.0% rate — a broadly degraded routing
+        period, not one uniquely broken lane — while run 26's lanes were
+        uniformly worse (27–29%).
     """
     counts = {k: 0 for k in _FAILURE_KINDS}
     legacy_rows = 0
@@ -125,6 +151,7 @@ def failure_taxonomy(repo, run_id: int) -> dict:
     agent_counts: dict[str, dict] = {}
     agent_legacy: dict[str, int] = {}
     agent_routes: dict[str, dict[str, int]] = {}
+    route_failure_ticks: dict[str, list[int]] = {}
     for event in repo.get_events(run_id, kinds=list(_FAILURE_KINDS), order="asc"):
         kind = event.get("kind")
         payload = event.get("payload")
@@ -136,21 +163,23 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         if legacy:
             legacy_rows += 1
         tick = event.get("tick")
-        curve_points.append(
-            (int(tick) if isinstance(tick, (int, float)) else 0, true_kind))
+        tick_i = int(tick) if isinstance(tick, (int, float)) else 0
+        curve_points.append((tick_i, true_kind))
         actor = str(event.get("actor_id") or "")
         per = agent_counts.setdefault(actor, {k: 0 for k in _FAILURE_KINDS})
         per[true_kind] += 1
         if legacy:
             agent_legacy[actor] = agent_legacy.get(actor, 0) + 1
-        # EM-348 — attribute the row to the lane it was routed through. The
+        # EM-348/350 — attribute the row to the lane it was routed through. The
         # `routed_via` key is absent on some historic/pre-diagnostic rows, so
         # `routes_attributed` keeps the coverage honest rather than inventing a
         # route for them.
         route = payload.get("routed_via") if isinstance(payload, dict) else None
         if isinstance(route, str) and route.strip():
+            lane = route.strip()
             routes = agent_routes.setdefault(actor, {})
-            routes[route.strip()] = routes.get(route.strip(), 0) + 1
+            routes[lane] = routes.get(lane, 0) + 1
+            route_failure_ticks.setdefault(lane, []).append(tick_i)
     total = sum(counts.values())
     turns = int(repo.count_events_of_kind(run_id, _TURNS_KIND) or 0)
 
@@ -199,6 +228,23 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         key=lambda kv: (-kv[1]["failure_rate"], -kv[1]["attempts"], kv[0]),
     ))
 
+    # EM-350 — per-lane curves for the busiest lanes (the ones with enough
+    # volume to be read), on the SAME bucket plan as the run curve.
+    max_tick = repo.run_max_tick(run_id)
+    n, width = _bucket_plan(max(max_tick, max((t for t, _ in curve_points), default=0)))
+    curve_lanes = set(sorted(by_route, key=lambda ln: (-by_route[ln]["attempts"], ln))
+                      [:_LANE_CURVE_LANES])
+    attempt_rows: dict[str, list[tuple[int, int]]] = {}
+    for tick, lane, count in repo.count_llm_attempts_by_tick_and_model(run_id):
+        if lane:
+            attempt_rows.setdefault(lane, []).append((tick, count))
+    for lane in by_route:
+        by_route[lane]["curve"] = (
+            _lane_curve(route_failure_ticks.get(lane, []),
+                        attempt_rows.get(lane, []), n, width)
+            if lane in curve_lanes else []
+        )
+
     return {
         "counts": counts,
         "total": total,
@@ -206,7 +252,7 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         "turns": turns,
         "failure_rate": (round(total / turns, 4) if turns else 0.0),
         "legacy_rows_reclassified": legacy_rows,
-        "curve": _failure_curve(curve_points, repo.run_max_tick(run_id)),
+        "curve": _failure_curve(curve_points, n, width),
         "by_agent": by_agent,
         "by_route": by_route,
         # Coverage: how much of the run the lane cut accounts for (failure rows
@@ -415,15 +461,42 @@ def contact_run_card(repo, run: dict, *, max_tick: int | None = None) -> dict:
     return card
 
 
+def _rollup_routes(per_run_routes: dict[int, dict]) -> list[dict]:
+    """EM-351 — every lane's failures/attempts POOLED across the Arena's runs
+    (the family-standing + contact runs already computed above; no extra event
+    read), so a lane that looks bad in one draw can be judged against its whole
+    record instead of in isolation. `runs` counts the runs the lane appeared in
+    (it had failures or attempts there). Ordered worst pooled rate first."""
+    agg: dict[str, dict] = {}
+    for by_route in per_run_routes.values():
+        for lane, stat in (by_route or {}).items():
+            rec = agg.setdefault(
+                lane, {"lane": lane, "failures": 0, "attempts": 0, "runs": 0})
+            rec["failures"] += int(stat.get("failures") or 0)
+            rec["attempts"] += int(stat.get("attempts") or 0)
+            rec["runs"] += 1
+    out = []
+    for rec in agg.values():
+        attempts = rec["attempts"]
+        out.append({**rec, "failure_rate": (
+            round(rec["failures"] / attempts, 4) if attempts else 0.0)})
+    out.sort(key=lambda r: (-r["failure_rate"], -r["attempts"], r["lane"]))
+    return out
+
+
 def arena_summary(repo) -> dict:
     """The /api/arena payload: families (with ≥1 stamped run) ordered by their
     EARLIEST stamped run (the chronological cast order), each with its runs'
     outcome cards + sparklines and family means — plus EM-334's contact_runs:
     every run whose config_json carries an ARMED contact block, with the
-    family pairing + per-settlement cards (the First Contact comparison)."""
+    family pairing + per-settlement cards (the First Contact comparison) — plus
+    EM-351's `routes`: the per-lane failure rate pooled across those runs."""
     blocks: dict[str, list[dict]] = {}
     first_seen: dict[str, int] = {}
     contact_runs: list[dict] = []
+    # EM-351 — one entry per INCLUDED run (deduped by run id, so a run that is
+    # both contact-armed and family-stamped is counted once).
+    per_run_routes: dict[int, dict] = {}
     # EM-334 follow-up — ONE batched read of every run's config_json screens
     # for the armed contact block (list_runs deliberately omits the blob; the
     # old path paid one get_run() fetch per run just to screen it). The card
@@ -434,15 +507,19 @@ def arena_summary(repo) -> dict:
         rid = int(run.get("id") or 0)
         full = dict(run, config_json=configs.get(rid, ""))
         if _contact_block(full) is not None:
-            contact_runs.append(
-                contact_run_card(repo, full, max_tick=run.get("max_tick") or 0))
+            card = contact_run_card(repo, full, max_tick=run.get("max_tick") or 0)
+            contact_runs.append(card)
+            per_run_routes[rid] = (card.get("failures") or {}).get("by_route") or {}
         fam = run.get("model_family")
         if not fam:
             continue
         if fam not in blocks:
             blocks[fam] = []
             first_seen[fam] = run["id"]
-        blocks[fam].append(run_outcomes(repo, run["id"], run.get("max_tick") or 0))
+        oc = run_outcomes(repo, run["id"], run.get("max_tick") or 0)
+        blocks[fam].append(oc)
+        per_run_routes.setdefault(
+            rid, (oc.get("failures") or {}).get("by_route") or {})
 
     families: list[dict] = []
     for fam in sorted(blocks, key=lambda f: first_seen[f]):
@@ -459,4 +536,9 @@ def arena_summary(repo) -> dict:
             # "which family fails differently" rollup across its runs.
             "failures": _rollup_failures(runs),
         })
-    return {"families": families, "contact_runs": contact_runs}
+    return {
+        "families": families,
+        "contact_runs": contact_runs,
+        # EM-351 — the cross-run per-lane failure rollup (worst pooled rate first).
+        "routes": _rollup_routes(per_run_routes),
+    }

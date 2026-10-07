@@ -648,6 +648,20 @@ class SQLiteRepository:
         )
         return {str(m or ""): int(n or 0) for m, n in cur.fetchall()}
 
+    def count_llm_attempts_by_tick_and_model(self, run_id: int) -> list[tuple[int, str, int]]:
+        """[(tick, gen_ai.response.model, COUNT)] of `llm_call` attempts for a
+        run — EM-350's per-lane time denominator (the lane a turn was served by,
+        per tick). Same flat-key JSON1 idiom as `count_llm_attempts_by_model`,
+        grouped by (tick, model) so the caller can bucket both axes without a
+        full Python pass over the events. Rows with no model carry `""`."""
+        path = '$."gen_ai.response.model"'
+        cur = self._conn.execute(
+            f"SELECT tick, COALESCE(json_extract(payload_json, '{path}'), '') AS m, "
+            "COUNT(*) FROM events WHERE run_id = ? AND kind = ? GROUP BY tick, m",
+            (run_id, "llm_call"),
+        )
+        return [(int(t or 0), str(m or ""), int(n or 0)) for t, m, n in cur.fetchall()]
+
     def run_max_tick(self, run_id: int) -> int:
         """MAX(events.tick) for a run, 0 when it has no events (W11b EM-101 —
         the fork endpoint's tick-range validation, same definition as RunRow

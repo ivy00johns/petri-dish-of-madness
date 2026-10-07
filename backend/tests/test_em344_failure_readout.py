@@ -217,13 +217,23 @@ def test_by_route_rates_each_lane_against_its_own_attempts(tmp_path):
 
     t = failure_taxonomy(repo, rid)
     br = t["by_route"]
-    assert br["lane/aaa"] == {"failures": 2, "attempts": 8, "failure_rate": 0.25}
-    assert br["lane/bbb"] == {"failures": 1, "attempts": 10, "failure_rate": 0.1}
-    assert br["lane/ccc"] == {"failures": 0, "attempts": 4, "failure_rate": 0.0}
+    assert (br["lane/aaa"]["failures"], br["lane/aaa"]["attempts"],
+            br["lane/aaa"]["failure_rate"]) == (2, 8, 0.25)
+    assert (br["lane/bbb"]["failures"], br["lane/bbb"]["attempts"],
+            br["lane/bbb"]["failure_rate"]) == (1, 10, 0.1)
+    assert (br["lane/ccc"]["failures"], br["lane/ccc"]["attempts"],
+            br["lane/ccc"]["failure_rate"]) == (0, 4, 0.0)
     # worst rate first — the lane with MORE failures also has the worse rate here
     assert list(br) == ["lane/aaa", "lane/bbb", "lane/ccc"]
     assert t["failures_attributed"] == 3
     assert t["attempts_attributed"] == 22
+    # EM-350: every lane also carries a curve on the run curve's tick plan, and
+    # the buckets sum back to the scalars exactly (nothing lost in bucketing)
+    run_ticks = [b["tick"] for b in t["curve"]]
+    for lane_stat in br.values():
+        assert [b["tick"] for b in lane_stat["curve"]] == run_ticks
+        assert sum(b["failures"] for b in lane_stat["curve"]) == lane_stat["failures"]
+        assert sum(b["attempts"] for b in lane_stat["curve"]) == lane_stat["attempts"]
 
 
 def test_by_route_edge_cases(tmp_path):
@@ -238,9 +248,8 @@ def test_by_route_edge_cases(tmp_path):
     _ev(repo, rid, "provider_error", 1, "agent_a",
         {"reason": "provider_error: x", "routed_via": "lane/ghost"})
     t2 = failure_taxonomy(repo, rid)
-    assert t2["by_route"]["lane/ghost"] == {
-        "failures": 1, "attempts": 0, "failure_rate": 0.0,
-    }
+    ghost = t2["by_route"]["lane/ghost"]
+    assert (ghost["failures"], ghost["attempts"], ghost["failure_rate"]) == (1, 0, 0.0)
     assert t2["failures_attributed"] == 1 and t2["attempts_attributed"] == 0
 
     # an attempt with no `gen_ai.response.model` is not attributed to a lane
@@ -248,6 +257,87 @@ def test_by_route_edge_cases(tmp_path):
     t3 = failure_taxonomy(repo, rid)
     assert t3["attempts_attributed"] == 0
     assert t3["turns"] == 1
+
+
+# ── EM-350 — the per-lane rate curve ─────────────────────────────────────────
+
+def test_by_route_carries_a_rate_curve_that_shows_a_mid_run_degradation(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "lanecurve.sqlite"))
+    rid = _run(repo)
+    lane = {"gen_ai.response.model": "lane/aaa"}
+    # healthy early (ticks 10-20), then failures LATE (ticks 90-95)
+    for tick in (10, 20, 90, 95, 100):
+        _ev(repo, rid, "llm_call", tick, "agent_a", lane)
+    for tick in (90, 95):
+        _ev(repo, rid, "provider_error", tick, "agent_a",
+            {"reason": "provider_error: x", "routed_via": "lane/aaa"})
+
+    t = failure_taxonomy(repo, rid)
+    stat = t["by_route"]["lane/aaa"]
+    assert stat["failures"] == 2 and stat["attempts"] == 5
+    curve = stat["curve"]
+    # shares the run curve's bucket plan, tick for tick
+    assert [b["tick"] for b in curve] == [b["tick"] for b in t["curve"]]
+    assert sum(b["attempts"] for b in curve) == 5
+    assert sum(b["failures"] for b in curve) == 2
+    # the failures sit in the SECOND half of the run, not the first — i.e. the
+    # single pooled rate could not show this, the curve does
+    assert all(b["failures"] == 0 for b in curve[: len(curve) // 2])
+    assert any(b["failures"] for b in curve[len(curve) // 2:])
+
+
+def test_lane_curves_are_capped_to_the_busiest_lanes(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "lanecap.sqlite"))
+    rid = _run(repo)
+    # seven lanes with descending volume; only the busiest six get a curve
+    for i in range(7):
+        for _ in range(10 - i):
+            _ev(repo, rid, "llm_call", 1, "agent_a",
+                {"gen_ai.response.model": f"lane/{i}"})
+
+    d = failure_taxonomy(repo, rid)["by_route"]
+    assert len(d) == 7
+    curved = [ln for ln, v in d.items() if v["curve"]]
+    assert len(curved) == 6
+    assert "lane/0" in curved and "lane/6" not in curved
+    # every lane still has the scalar entry (curve [] is just "not charted")
+    assert d["lane/6"]["curve"] == []
+    assert d["lane/6"]["attempts"] == 4
+
+
+# ── EM-351 — the cross-run lane rollup ───────────────────────────────────────
+
+def test_arena_routes_pool_lane_failures_across_runs(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "crossrun.sqlite"))
+
+    def seed(fam: str, lane: str, n_fail: int, n_attempt: int) -> int:
+        rid = _run(repo, family=fam)
+        for _ in range(n_fail):
+            _ev(repo, rid, "provider_error", 1, "agent_a",
+                {"reason": "provider_error: x", "routed_via": lane})
+        for _ in range(n_attempt):
+            _ev(repo, rid, "llm_call", 1, "agent_a", {"gen_ai.response.model": lane})
+        return rid
+
+    seed("gemini", "lane/x", 2, 8)
+    seed("llama", "lane/x", 1, 12)
+    seed("llama", "lane/y", 3, 3)
+
+    routes = {r["lane"]: r for r in arena_summary(repo)["routes"]}
+    # the SAME lane pooled over two runs (2/8 + 1/12), with its sample size
+    assert routes["lane/x"] == {
+        "lane": "lane/x", "failures": 3, "attempts": 20,
+        "runs": 2, "failure_rate": 0.15,
+    }
+    assert routes["lane/y"]["runs"] == 1
+    assert routes["lane/y"]["failure_rate"] == 1.0
+    # worst pooled rate first, so a lane bad in one draw is not buried
+    assert arena_summary(repo)["routes"][0]["lane"] == "lane/y"
+
+
+def test_arena_routes_empty_arena(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "empty.sqlite"))
+    assert arena_summary(repo)["routes"] == []
 
 
 # ── EM-347 — the per-family rollup ───────────────────────────────────────────

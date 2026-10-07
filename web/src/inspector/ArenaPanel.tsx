@@ -33,6 +33,12 @@
  *    actually USED (`llm_call` attempts), so a lane that merely carries the
  *    most traffic is not mistaken for a bad one (run 23's busiest lane had the
  *    most failures but only a 15% rate, in line with its peers).
+ *  • LANE RATE OVER TIME (EM-350): the busiest lanes also draw a rate sparkline,
+ *    so a lane that degraded only MID-run is distinguishable from one that was
+ *    bad the whole way (the single pooled rate cannot tell those apart).
+ *  • CROSS-RUN LANE BOARD (EM-351): one board pools every lane's failures and
+ *    attempts across the Arena's runs, so a lane that looks bad in one draw is
+ *    judged against its whole record (`runs` is the sample size).
  *  • FAMILY ROLLUP (EM-347): each family block also shows its
  *    failures POOLED across its runs, so the panel answers "which family fails
  *    differently" (shares + failures-per-turn, comparable across families).
@@ -53,8 +59,10 @@ import {
   type ArenaRun,
   type ArenaSummary,
   type FailureCurvePoint,
+  type FailureRouteBucket,
   type FailureTaxonomy,
   type FailureTaxonomyCore,
+  type LaneRollup,
   type TournamentStatus,
 } from './api';
 
@@ -282,11 +290,47 @@ function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix:
     </details>
   );
 }
+
+/**
+ * EM-350 — a lane's failure RATE over ticks (failures/attempts per bucket), so
+ * a lane that degraded only MID-run shows a late rise while a chronically bad
+ * one stays high across the whole span. Buckets with no attempts are skipped
+ * (absence of data, not a 0% claim).
+ */
+function RateSpark({ curve }: { curve: FailureRouteBucket[] }) {
+  const pts = curve
+    .filter((b) => b.attempts > 0)
+    .map((b) => ({ tick: b.tick, value: b.failures / b.attempts }));
+  if (pts.length < 2) return null;
+  const maxTick = pts[pts.length - 1].tick || 1;
+  const W = 60;
+  const H = 14;
+  const d = pts
+    .map(
+      (p, i) =>
+        `${i === 0 ? 'M' : 'L'}${((p.tick / maxTick) * W).toFixed(1)},${(
+          H - p.value * (H - 2) - 1
+        ).toFixed(1)}`,
+    )
+    .join('');
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-16 h-3.5 shrink-0"
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <path d={d} fill="none" stroke="currentColor" strokeWidth="1" className="opacity-70" />
+    </svg>
+  );
+}
+
 /**
  * EM-349 — the per-lane failure board, collapsed by default: every lane with
  * its failure RATE against its own usage (`llm_call` attempts), worst rate
  * first (server order). Shows `failures/attempts` so a low-volume lane's noisy
- * percentage is visibly low-volume.
+ * percentage is visibly low-volume; EM-350 adds a rate sparkline for the
+ * busiest lanes, so a mid-run degradation is visible.
  */
 function FailureRouteBoard({ routes, testid }: {
   routes: FailureTaxonomy['by_route'];
@@ -303,16 +347,56 @@ function FailureRouteBoard({ routes, testid }: {
         {lanes.map(([lane, s]) => (
           <div
             key={lane}
-            className="font-mono text-[10px] opacity-70 truncate"
+            className="flex items-center gap-1 font-mono text-[10px] opacity-70"
             data-testid={`${testid}-${lane}`}
             title={lane}
           >
-            <span className="opacity-80">{routeLabel(lane)}</span>{' '}
-            {s.attempts > 0
-              ? `${s.failures}/${s.attempts} · ${pct(s.failure_rate)}`
-              : `${s.failures} · no attempts logged`}
+            <RateSpark curve={s.curve} />
+            <span className="truncate">
+              <span className="opacity-80">{routeLabel(lane)}</span>{' '}
+              {s.attempts > 0
+                ? `${s.failures}/${s.attempts} · ${pct(s.failure_rate)}`
+                : `${s.failures} · no attempts logged`}
+            </span>
           </div>
         ))}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * EM-351 — the cross-run lane board: every lane's failures/attempts pooled over
+ * the Arena's runs (family standings + contact), worst pooled rate first, so a
+ * lane that looks bad in one draw is judged against its whole record (`runs`
+ * is the sample size). Top rows only; the count shows the rest.
+ */
+function LaneFailureBoard({ routes, testid }: { routes: LaneRollup[]; testid: string }) {
+  if (routes.length === 0) return null;
+  const shown = routes.slice(0, 12);
+  return (
+    <details className="mt-2 p-2 rounded border border-current/10" data-testid={testid}>
+      <summary className="font-mono text-[10px] uppercase tracking-wide opacity-70 cursor-pointer">
+        lane failure rates — all runs ({routes.length})
+      </summary>
+      <div className="flex flex-col gap-0.5 mt-1">
+        {shown.map((r) => (
+          <div
+            key={r.lane}
+            className="font-mono text-[10px] opacity-70 truncate"
+            data-testid={`${testid}-${r.lane}`}
+            title={r.lane}
+          >
+            <span className="opacity-80">{routeLabel(r.lane)}</span>{' '}
+            {r.attempts > 0 ? `${r.failures}/${r.attempts} · ${pct(r.failure_rate)}` : 'no attempts'}
+            {` · ${r.runs} run${r.runs === 1 ? '' : 's'}`}
+          </div>
+        ))}
+        {routes.length > shown.length && (
+          <div className="font-mono text-[10px] opacity-50">
+            … {routes.length - shown.length} more
+          </div>
+        )}
       </div>
     </details>
   );
@@ -382,6 +466,7 @@ export default function ArenaPanel() {
   const running = tStatus?.status === 'running';
   const families = arena?.families ?? [];
   const contactRuns = arena?.contact_runs ?? [];
+  const laneRoutes = arena?.routes ?? [];
 
   return (
     <section
@@ -618,6 +703,9 @@ export default function ArenaPanel() {
           </div>
         </div>
       )}
+
+      {/* ── Lane failure rates across runs (EM-351) ─────────────────── */}
+      <LaneFailureBoard routes={laneRoutes} testid="arena-lane-rates" />
     </section>
   );
 }
