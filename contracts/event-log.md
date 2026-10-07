@@ -1,8 +1,38 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.6.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.7.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.7.0 (EM-344–347, 2026-10-07 — the taxonomy's shared home + the read-out
+> expansion):**
+> **EM-344** MOVED the taxonomy out of `agents/runtime.py` into a leaf module
+> `petridish/taxonomy.py` (public `failure_kind_for` / `is_failure_kind` /
+> `true_failure_kind` / `FAILURE_KINDS` / `FAILURE_KIND_ORDER` + the reason→kind
+> prefix tables). The emit path re-imports them under the old private names
+> (`_failure_kind_for` / `_is_failure_kind`) and re-exports `true_failure_kind`;
+> `api/arena.py` now reads the classifier from the leaf module — so the API
+> layer no longer depends on the agent runtime for the taxonomy. The function
+> is the SAME object both sides call (the v1.6.0 note's location,
+> "`true_failure_kind` in `agents/runtime.py`", is SUPERSEDED).
+> **EM-345/346/347** grow the additive per-run `failures` block (still routed
+> through the ONE classifier) with:
+>   - `curve` (EM-345) — the failures OVER TICKS as ≤48 even-width tick-bucket
+>     SUMS per kind (`[{tick, action_rejected, provider_error, parse_failure}]`).
+>     Buckets SUM rather than point-sample ON PURPOSE: an even-spaced sample of a
+>     ~1,700-tick run would drop a one-tick provider outage, a bucketed sum keeps
+>     it as one tall bar (run 26's peak bucket t1516: prov 19, rej 1, parse 0);
+>   - `by_agent` (EM-346) — the same taxonomy keyed by `actor_id`
+>     (counts/shares/total/turns/failure_rate/legacy_rows_reclassified),
+>     including actors with turns but no failures (a clean agent reads 0, not
+>     absent). The per-agent RATE is the point: it separates ONE broken route
+>     from a provider-wide outage — run 23 = ada 0.2997 / bram 0.2672 / cleo
+>     0.2073 / mox 0.0762 / vesper 0.0571 (a concentrated route failure) vs run
+>     26 = 0.1653–0.1816 across all five (the provider failed everyone equally).
+> Each `arena_summary` FAMILY block also gains `failures` (EM-347): the family's
+> pooled counts/shares/turns/`failure_rate`/legacy + `runs` — comparable across
+> families (split shares + rate; the raw counts stay honest via `runs`).
+> `/api/arena` stays additive-only; see `api.openapi.yaml` v1.8.0.
 
 > **v1.6.0 (EM-343, 2026-10-05 — the failure-taxonomy read side):**
 > The Arena now reports each run's TRUE failure shares — `action_rejected` /
@@ -11,7 +41,8 @@ Lock it before building any instrumentation UI.
 > `failures` block; see `api.openapi.yaml` v1.7.0). Because events are
 > append-only, a pre-EM-340 run's rows all wear the overloaded `parse_failure`
 > kind and the true taxonomy survives only in the payload, so the reader
-> re-derives it — `true_failure_kind` in `agents/runtime.py`, which routes a
+> re-derives it — `true_failure_kind` (in `agents/runtime.py` v1.6.0; moved to
+> the leaf `petridish/taxonomy.py` by EM-344/v1.7.0), which routes a
 > legacy `parse_failure` row through the SAME `_failure_kind_for` mapping the
 > emit path uses:
 >   - `payload.rejected: true`, or a dispatch payload (`action`/`error` and no

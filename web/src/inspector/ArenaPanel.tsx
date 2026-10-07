@@ -16,6 +16,19 @@
  *    failures-per-turn rate, read off the event log server-side (pre-EM-340
  *    runs have their overloaded rows re-derived from the payload) — where run
  *    23/26's single "parse failure" number finally reads as three.
+ *  • FAILURE CURVE (EM-345): each run card also draws those failures OVER
+ *    TICKS as ≤48 even-width bucket sums stacked by kind, so a provider outage
+ *    reads as a SPIKE (a bucketed sum survives the downsample; a sampled point
+ *    would drop a one-tick outage).
+ *  • PER-AGENT CUT (EM-346): each run card can expand "by agent" to the same
+ *    taxonomy keyed by actor — a per-agent rate that is NOT uniform means ONE
+ *    route/model is broken (run 23: ada 30% vs vesper 5.7%), while a flat
+ *    spread means the provider (or the world) failed everyone equally (run 26:
+ *    ~16-18% each). This is WHY the taxonomy is exposed per agent: the run
+ *    total alone can't tell those two failures apart.
+ *  • FAMILY ROLLUP (EM-347): each family block also shows its
+ *    failures POOLED across its runs, so the panel answers "which family fails
+ *    differently" (shares + failures-per-turn, comparable across families).
  *
  * In MOCK MODE the backend calls fail (no backend) and the panel renders its
  * labeled zero states — the arena data is inherently cross-run/persisted, so
@@ -23,7 +36,8 @@
  * Off the replay surface entirely: not synced to currentTick.
  *
  * Styling is token-based lab-* classes (LaneHealthPanel idiom): dark panels,
- * mono chips, acid-green accents — no hardcoded hex outside the token map.
+ * mono chips, acid-green accents — no hardcoded hex outside the token map (the
+ * failure-curve segments use the declared CSS custom-property tokens).
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -31,7 +45,9 @@ import {
   inspectorApi,
   type ArenaRun,
   type ArenaSummary,
+  type FailureCurvePoint,
   type FailureTaxonomy,
+  type FailureTaxonomyCore,
   type TournamentStatus,
 } from './api';
 
@@ -91,21 +107,29 @@ function pct(share: number): string {
 }
 
 /**
- * EM-343 — the per-run failure taxonomy (the TRUE shares, not the raw kind
- * tally: a pre-EM-340 run's overloaded rows are re-derived server-side). Shows
- * the per-kind count + share of the failure total, and the failures-per-turn
- * rate; the tooltip carries the denominators and how much came from history.
+ * EM-343 — the per-run (or per-agent / per-family) failure taxonomy line: the
+ * TRUE shares, not the raw kind tally (a pre-EM-340 run's overloaded rows are
+ * re-derived server-side). Shows the per-kind count + share of the failure
+ * total and the failures-per-turn rate; the tooltip carries the denominators
+ * and how much came from history. `prefix` labels a per-agent line with its
+ * actor id.
  */
-function FailureTaxonomyLine({ f, testid }: { f: FailureTaxonomy; testid: string }) {
+function FailureTaxonomyLine({ f, testid, prefix }: {
+  f: FailureTaxonomyCore;
+  testid: string;
+  prefix?: string;
+}) {
+  const lead = prefix ? `${prefix} ` : '';
   if (f.total === 0) {
     return (
-      <div className="font-mono text-[10px] opacity-50" data-testid={testid}>
-        fails {f.turns > 0 ? `0/${f.turns} turns` : 'none'}
+      <div className="font-mono text-[10px] opacity-50 truncate" data-testid={testid}>
+        {lead}fails {f.turns > 0 ? `0/${f.turns} turns` : 'none'}
       </div>
     );
   }
   const title =
-    `true failure taxonomy off the event log — ${f.total} of ${f.turns} llm calls ` +
+    `${prefix ? `${prefix} — ` : ''}true failure taxonomy off the event log — ` +
+    `${f.total} of ${f.turns} llm calls ` +
     `(${(f.failure_rate * 100).toFixed(1)}%/turn): ` +
     FAILURE_LABELS.map(([k]) => `${k} ${f.counts[k]} (${pct(f.shares[k])})`).join(', ') +
     (f.legacy_rows_reclassified > 0
@@ -117,11 +141,110 @@ function FailureTaxonomyLine({ f, testid }: { f: FailureTaxonomy; testid: string
       data-testid={testid}
       title={title}
     >
-      fails{' '}
+      {lead}fails{' '}
       {FAILURE_LABELS.map(([k, l]) => `${l} ${f.counts[k]} (${pct(f.shares[k])})`).join(' · ')}
       {' · '}
       {(f.failure_rate * 100).toFixed(1)}%/turn
     </div>
+  );
+}
+
+/** EM-345 — the stacked per-kind curve segments, bottom-up, in token colors. */
+const FAILURE_SEGMENTS: Array<[keyof FailureCurvePoint, string]> = [
+  ['provider_error', 'var(--lab-danger)'],
+  ['action_rejected', 'var(--lab-warn)'],
+  ['parse_failure', 'var(--lab-text)'],
+];
+
+/** Sum of one curve bucket across the three kinds. */
+function curveTotal(p: FailureCurvePoint): number {
+  return p.action_rejected + p.provider_error + p.parse_failure;
+}
+
+/**
+ * EM-345 — the per-turn failure curve: the run's failures over ticks as ≤48
+ * even-width bucket SUMS, stacked by kind, so a provider outage reads as a
+ * SPIKE (the bucket that swallowed the outage stands tall and red) rather than
+ * the run's single "parse failure" number. Bucket SUMS — not sampled points —
+ * are why a one-tick spike survives the downsample.
+ */
+function FailureCurve({ points, testid }: { points: FailureCurvePoint[]; testid: string }) {
+  if (points.length < 2) {
+    return <div className="font-mono text-[10px] opacity-50" data-testid={testid}>no failure curve</div>;
+  }
+  const peak = Math.max(...points.map(curveTotal));
+  if (peak === 0) {
+    return (
+      <div className="font-mono text-[10px] opacity-50" data-testid={testid}>
+        flat — no failures over the run
+      </div>
+    );
+  }
+  const W = 100;
+  const H = 24;
+  const bw = W / points.length;
+  const tallest = points.reduce((a, b) => (curveTotal(a) >= curveTotal(b) ? a : b));
+  const title =
+    `failures per tick bucket — ${points.length} bucket(s) over the run; ` +
+    `peak t${tallest.tick}: prov ${tallest.provider_error}, ` +
+    `rej ${tallest.action_rejected}, parse ${tallest.parse_failure}`;
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full h-6"
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={title}
+      data-testid={testid}
+    >
+      <title>{title}</title>
+      {points.map((p, i) => {
+        let y = H;
+        const rects = [];
+        for (const [kind, color] of FAILURE_SEGMENTS) {
+          const h = (p[kind] / peak) * H;
+          if (h > 0) {
+            rects.push(
+              <rect key={kind} x={i * bw} y={y - h} width={bw} height={h} fill={color} />,
+            );
+          }
+          y -= h;
+        }
+        return rects;
+      })}
+    </svg>
+  );
+}
+
+/**
+ * EM-346 — the per-agent failure cut, collapsed by default. Answers "which
+ * agent fails differently": a per-agent rate that is NOT uniform means ONE
+ * route/model is broken; a flat spread across the cast means the provider (or
+ * the world) failed everyone equally. Clean agents (total 0) stay listed so
+ * the spread is readable rather than only the failing tail.
+ */
+function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix: string }) {
+  const actors = Object.keys(f.by_agent).sort(
+    (a, b) =>
+      f.by_agent[b].failure_rate - f.by_agent[a].failure_rate || a.localeCompare(b),
+  );
+  if (actors.length === 0) return null;
+  return (
+    <details className="mt-0.5">
+      <summary className="font-mono text-[10px] opacity-60 cursor-pointer">
+        by agent ({actors.length})
+      </summary>
+      <div className="flex flex-col gap-0.5 mt-0.5">
+        {actors.map((a) => (
+          <FailureTaxonomyLine
+            key={a}
+            f={f.by_agent[a]}
+            testid={`${testidPrefix}-${a}`}
+            prefix={a}
+          />
+        ))}
+      </div>
+    </details>
   );
 }
 export default function ArenaPanel() {
@@ -332,6 +455,13 @@ export default function ArenaPanel() {
                   </span>
                 ))}
               </div>
+              {/* EM-347 — the family's failures pooled across its runs (shares +
+                  per-turn rate), the "which family fails differently" read-off */}
+              <FailureTaxonomyLine
+                f={fam.failures}
+                testid={`arena-family-failures-${fam.family}`}
+                prefix="family"
+              />
               <div className="flex flex-col gap-1">
                 {fam.runs.map((r) => (
                   <div
@@ -349,7 +479,9 @@ export default function ArenaPanel() {
                       </span>
                     </div>
                     <Sparkline points={r.population_sparkline} />
+                    <FailureCurve points={r.failures.curve} testid={`arena-run-curve-${r.run_id}`} />
                     <FailureTaxonomyLine f={r.failures} testid={`arena-run-failures-${r.run_id}`} />
+                    <FailureByAgent f={r.failures} testidPrefix={`arena-agent-failures-${r.run_id}`} />
                   </div>
                 ))}
               </div>
@@ -396,10 +528,12 @@ export default function ArenaPanel() {
                     ? ` · ${c.ledger.crossings} crossings`
                     : ''}
                 </div>
+                <FailureCurve points={c.failures.curve} testid={`arena-contact-curve-${c.run_id}`} />
                 <FailureTaxonomyLine
                   f={c.failures}
                   testid={`arena-contact-failures-${c.run_id}`}
                 />
+                <FailureByAgent f={c.failures} testidPrefix={`arena-contact-agent-${c.run_id}`} />
               </div>
             ))}
           </div>

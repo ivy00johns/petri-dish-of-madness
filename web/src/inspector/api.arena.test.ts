@@ -114,7 +114,69 @@ describe('inspectorApi.arena (EM-119)', () => {
       counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
       shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
       total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
+      curve: [], by_agent: {},
     });
+  });
+
+  it('EM-344/345/346/347 — parses the family rollup + the run curve + per-agent cut', async () => {
+    stubFetch({
+      'GET /api/arena': {
+        status: 200,
+        body: {
+          families: [
+            {
+              family: 'gemini',
+              avg_per_run: {},
+              failures: {
+                counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
+                shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
+                total: 322, turns: 1143, failure_rate: 0.2817, legacy_rows_reclassified: 322,
+              },
+              runs: [
+                {
+                  run_id: 23,
+                  outcomes: {},
+                  failures: {
+                    counts: { action_rejected: 147, provider_error: 30, parse_failure: 145 },
+                    shares: { action_rejected: 0.4565, provider_error: 0.0932, parse_failure: 0.4503 },
+                    total: 322, turns: 1103, failure_rate: 0.292, legacy_rows_reclassified: 322,
+                    curve: [
+                      { tick: 0, action_rejected: 0, provider_error: 0, parse_failure: 0 },
+                      { tick: 1000, action_rejected: 0, provider_error: 30, parse_failure: 0 },
+                      'junk',
+                    ],
+                    by_agent: {
+                      agent_ada: {
+                        counts: { action_rejected: 57, provider_error: 6, parse_failure: 47 },
+                        shares: { action_rejected: 0.5182, provider_error: 0.0545, parse_failure: 0.4273 },
+                        total: 110, turns: 367, failure_rate: 0.2997, legacy_rows_reclassified: 110,
+                      },
+                    },
+                  },
+                },
+                { run_id: 9, outcomes: {} }, // pre-EM-345 run: no curve/by_agent
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const out = await inspectorApi.arena();
+    // EM-347 — the family rollup parses as a core (zeros when absent)
+    expect(out!.families[0].failures.total).toBe(322);
+    expect(out!.families[0].failures.shares.provider_error).toBeCloseTo(0.0932, 3);
+    // EM-345 — the curve drops the junk row and coerces each kind
+    const run = out!.families[0].runs[0];
+    expect(run.failures.curve).toHaveLength(2);
+    expect(run.failures.curve[1]).toEqual({
+      tick: 1000, action_rejected: 0, provider_error: 30, parse_failure: 0,
+    });
+    // EM-346 — the per-agent cut
+    expect(run.failures.by_agent.agent_ada.total).toBe(110);
+    expect(run.failures.by_agent.agent_ada.failure_rate).toBeCloseTo(0.2997, 3);
+    // absent on a pre-EM-345 run ⇒ an empty cut, never null
+    expect(out!.families[0].runs[1].failures.curve).toEqual([]);
+    expect(out!.families[0].runs[1].failures.by_agent).toEqual({});
   });
 
   it('returns null on network failure and on a non-object body', async () => {
