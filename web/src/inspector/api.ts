@@ -591,7 +591,13 @@ export interface ArenaFamily {
   failures: FailureTaxonomyCore;
 }
 
-/** EM-351 — one lane's failures/attempts pooled across the Arena's runs. */
+/**
+ * EM-351 — one lane's failures/attempts pooled across the Arena's runs.
+ * EM-352 — plus the chronic evidence: `worst_rate` (its highest per-run rate)
+ * and `runs_high` (how many runs were at/above the threshold), with `chronic`
+ * set when `runs_high` reaches the rule's `min_runs`. `runs` is the sample
+ * size, so a 1/1 flag reads as the single draw it is.
+ */
 export interface LaneRollup {
   lane: string;
   failures: number;
@@ -599,7 +605,23 @@ export interface LaneRollup {
   /** how many Arena runs the lane appeared in */
   runs: number;
   failure_rate: number;
+  /** EM-352 — the lane's highest failure rate in any one run */
+  worst_rate: number;
+  /** EM-352 — how many runs were at/above the chronic threshold */
+  runs_high: number;
+  /** EM-352 — `runs_high >= rule.min_runs`: bad by habit, not one draw */
+  chronic: boolean;
 }
+
+/** EM-352 — the rule behind every `LaneRollup.chronic` flag (echoed by the
+ * backend so the UI can label the threshold instead of hard-coding it). */
+export interface ChronicRule {
+  rate_threshold: number;
+  min_runs: number;
+}
+
+/** The pre-EM-352 backend's rule, used when `chronic_rule` is absent. */
+export const DEFAULT_CHRONIC_RULE: ChronicRule = { rate_threshold: 0.2, min_runs: 2 };
 
 export interface ArenaSummary {
   families: ArenaFamily[];
@@ -607,9 +629,15 @@ export interface ArenaSummary {
    * block, with the family pairing + per-settlement cards. Absent on a
    * pre-EM-334 backend ⇒ parsed to []. */
   contact_runs: ContactArenaRun[];
-  /** EM-351 — the per-lane failure rate pooled across the Arena's runs
-   * (worst rate first). Absent on a pre-EM-351 backend ⇒ parsed to []. */
+  /** EM-351 — the per-lane failure rate pooled across the Arena's runs.
+   * EM-352 — chronic lanes sort first, then worst pooled rate. Absent on a
+   * pre-EM-351 backend ⇒ parsed to []. */
   routes: LaneRollup[];
+  /** EM-352 — the chronic rule (absent ⇒ DEFAULT_CHRONIC_RULE). */
+  chronic_rule: ChronicRule;
+  /** EM-353 — whether this response carried the heavy per-lane curves (they
+   * are opt-in: about half the payload). Absent ⇒ false. */
+  lane_curves: boolean;
 }
 
 /** EM-334 — one contact run's Arena card (family pairing + per-town cards). */
@@ -869,8 +897,9 @@ export const inspectorApi = {
    * sparklines + family means). Returns `null` when the backend is
    * unreachable / pre-EM-119, so the panel can render its labeled state.
    */
-  async arena(): Promise<ArenaSummary | null> {
-    const data = await getJsonOrNull('/api/arena');
+  async arena(opts: { laneCurves?: boolean } = {}): Promise<ArenaSummary | null> {
+    // EM-353 — the per-lane curves are ~half the payload, so they are opt-in.
+    const data = await getJsonOrNull(opts.laneCurves ? '/api/arena?lane_curves=1' : '/api/arena');
     if (!isObject(data) || !Array.isArray(data.families)) return null;
     const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
     const families: ArenaFamily[] = [];
@@ -968,6 +997,7 @@ export const inspectorApi = {
       });
     }
     // EM-351 — the cross-run per-lane rollup (absent ⇒ []).
+    // EM-352 — each entry carries its chronic evidence.
     const routes: LaneRollup[] = [];
     for (const rawRoute of Array.isArray(data.routes) ? data.routes : []) {
       if (!isObject(rawRoute) || typeof rawRoute.lane !== 'string') continue;
@@ -977,9 +1007,31 @@ export const inspectorApi = {
         attempts: num(rawRoute.attempts),
         runs: num(rawRoute.runs),
         failure_rate: num(rawRoute.failure_rate),
+        worst_rate: num(rawRoute.worst_rate),
+        runs_high: num(rawRoute.runs_high),
+        chronic: rawRoute.chronic === true,
       });
     }
-    return { families, contact_runs: contactRuns, routes };
+    // EM-352 — the chronic rule (absent on a pre-EM-352 backend ⇒ the default
+    // the backend shipped with, so the warning reads the same either way).
+    const rawRule = isObject(data.chronic_rule) ? data.chronic_rule : {};
+    const chronicRule: ChronicRule = {
+      rate_threshold:
+        typeof rawRule.rate_threshold === 'number'
+          ? rawRule.rate_threshold
+          : DEFAULT_CHRONIC_RULE.rate_threshold,
+      min_runs:
+        typeof rawRule.min_runs === 'number'
+          ? rawRule.min_runs
+          : DEFAULT_CHRONIC_RULE.min_runs,
+    };
+    return {
+      families,
+      contact_runs: contactRuns,
+      routes,
+      chronic_rule: chronicRule,
+      lane_curves: data.lane_curves === true,
+    };
   },
 
   /**

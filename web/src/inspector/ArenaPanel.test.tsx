@@ -16,6 +16,8 @@ import ArenaPanel from './ArenaPanel';
 import type { ArenaSummary, TournamentStatus } from './api';
 
 vi.mock('./api', () => ({
+  // EM-352 — the panel falls back to this rule when the backend omits it.
+  DEFAULT_CHRONIC_RULE: { rate_threshold: 0.2, min_runs: 2 },
   inspectorApi: {
     arena: vi.fn(),
     tournamentStatus: vi.fn(),
@@ -47,11 +49,29 @@ const ZERO_FAIL = {
 };
 
 const ARENA: ArenaSummary = {
+  // EM-352 — chronic lanes head the list, each carrying its run evidence.
   routes: [
-    { lane: 'google/gemini-3.1-flash-lite', failures: 74, attempts: 255, runs: 3, failure_rate: 0.2902 },
-    { lane: 'kilo/inclusionai/ling-3.0-flash-sante:free', failures: 218, attempts: 1449, runs: 1, failure_rate: 0.1504 },
-    { lane: 'cohere/command-r-plus-08-2024', failures: 0, attempts: 13, runs: 1, failure_rate: 0 },
+    {
+      lane: 'google/gemini-3.1-flash-lite', failures: 74, attempts: 255, runs: 3,
+      failure_rate: 0.2902, worst_rate: 0.56, runs_high: 3, chronic: true,
+    },
+    {
+      lane: 'kilo/inclusionai/ling-3.0-flash-sante:free', failures: 218, attempts: 1449,
+      runs: 1, failure_rate: 0.1504, worst_rate: 0.1504, runs_high: 0, chronic: false,
+    },
+    // a HIGH rate over a single run — a draw, never a chronic flag
+    {
+      lane: 'openrouter/qwen/qwen3.8-27b:free', failures: 1, attempts: 2, runs: 1,
+      failure_rate: 0.5, worst_rate: 0.5, runs_high: 1, chronic: false,
+    },
+    {
+      lane: 'cohere/command-r-plus-08-2024', failures: 0, attempts: 13, runs: 1,
+      failure_rate: 0, worst_rate: 0, runs_high: 0, chronic: false,
+    },
   ],
+  chronic_rule: { rate_threshold: 0.2, min_runs: 2 },
+  // EM-353 — the default read has no per-lane curves.
+  lane_curves: false,
   contact_runs: [
     {
       run_id: 26,
@@ -252,7 +272,10 @@ describe('ArenaPanel — standings (EM-119)', () => {
     await waitFor(() =>
       expect(screen.getByText(/no backend — the arena reads persisted runs/)).toBeInTheDocument());
 
-    arenaMock.mockResolvedValue({ families: [], contact_runs: [], routes: [] });
+    arenaMock.mockResolvedValue({
+      families: [], contact_runs: [], routes: [],
+      chronic_rule: { rate_threshold: 0.2, min_runs: 2 }, lane_curves: false,
+    });
     render(<ArenaPanel />);
     await waitFor(() =>
       expect(screen.getAllByText(/no family-stamped runs yet/).length).toBeGreaterThan(0));
@@ -399,6 +422,46 @@ describe('ArenaPanel — failure taxonomy (EM-343)', () => {
       screen.getByTestId('arena-lane-rates-kilo/inclusionai/ling-3.0-flash-sante:free')
         .textContent,
     ).toContain('218/1449 · 15% · 1 run');
+  });
+
+  it('EM-352 — a chronically bad lane flags itself, a single draw never does', async () => {
+    render(<ArenaPanel />);
+    const board = await screen.findByTestId('arena-lane-rates');
+    // the count rides the summary so the warning is visible while collapsed
+    expect(board.textContent).toContain('⚠ 1 chronic');
+
+    const warn = screen.getByTestId('arena-lane-rates-chronic');
+    expect(warn.textContent).toContain('1 chronically bad route');
+    expect(warn.textContent).toContain('≥20% in 2+ runs');
+
+    // the lane over the threshold in ALL of its runs carries the marker + the
+    // evidence, so the flag is checkable rather than a bare assertion
+    const chronic = screen.getByTestId('arena-lane-rates-google/gemini-3.1-flash-lite');
+    expect(chronic.textContent).toContain('74/255 · 29% · 3 runs');
+    expect(chronic.textContent).toContain('≥20% in 3/3 runs');
+    expect(chronic.textContent).toContain('⚠');
+
+    // a FIFTY-PERCENT lane over ONE run is a draw, not a bad lane — the flag
+    // counts runs, so it must stay dark even though its pooled rate is higher
+    const draw = screen.getByTestId('arena-lane-rates-openrouter/qwen/qwen3.8-27b:free');
+    expect(draw.textContent).toContain('1/2 · 50% · 1 run');
+    expect(draw.textContent).not.toContain('⚠');
+  });
+
+  it('EM-353 — the per-lane rate curves are opt-in and load on demand', async () => {
+    render(<ArenaPanel />);
+    const load = await screen.findByTestId('arena-lane-rates-load-curves');
+    // the default read never asks for the heavy per-lane curves
+    expect(arenaMock).toHaveBeenCalledWith({ laneCurves: false });
+
+    arenaMock.mockResolvedValue({ ...ARENA, lane_curves: true });
+    fireEvent.click(load);
+
+    await waitFor(() => expect(arenaMock).toHaveBeenCalledWith({ laneCurves: true }));
+    // once the curves have been fetched the affordance is gone
+    await waitFor(() =>
+      expect(screen.queryByTestId('arena-lane-rates-load-curves')).toBeNull(),
+    );
   });
 
   it('EM-347 — the family block shows its pooled failure rollup', async () => {

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: PetriDishOfMadness Control API
-  version: 1.11.0
+  version: 1.12.0
   description: >
     REST control + config surface for the chaos lab. The live data stream is WS /ws
     (see events.schema.json). All endpoints are unauthenticated (local-first, single-user).
@@ -24,6 +24,15 @@ info:
     live TickLoop — never concurrent (free-tier key-pool protection, ARCHITECTURE.md
     §Instance). RunRow gains a nullable `model_family` stamp (null = un-stamped); a fork
     inherits its parent's stamp.
+    v1.12.0 (EM-352+EM-353) closes the loop on lane badness. EM-352: each top-level
+    `routes` entry gains the chronic evidence (`worst_rate`, `runs_high`, `chronic`) and the
+    response gains the `chronic_rule` it was judged by ({rate_threshold, min_runs}); a lane
+    whose OWN rate reaches the threshold in `min_runs` or more runs is flagged `chronic` and
+    sorts FIRST, so a persistently bad lane flags itself and a single bad draw never does
+    (the flag counts RUNS — `runs` travels with it as the sample size). EM-353: the per-lane
+    failure curves are OPT-IN via `GET /api/arena?lane_curves=1` — they were about half the
+    payload, so the default read carries the rates only and echoes `lane_curves: false`
+    (measured on the live DB: 44.6 KB default vs 79.4 KB with curves).
     v1.11.0 (EM-350+EM-351) makes a lane's badness measurable in TIME and across runs.
     EM-350: each `by_route` entry gains `curve` — that lane's failures AND attempts per tick
     bucket on the same ≤48-bucket plan as the run's `curve` ([{tick, failures, attempts}]), so
@@ -227,10 +236,26 @@ paths:
         charting cap). EM-347 (v1.8.0): each
         family block gains a pooled `failures` rollup (`counts, shares, total, turns,
         failure_rate, legacy_rows_reclassified, runs`) — no `curve`/`by_agent`/`by_route`.
-        EM-351 (v1.11.0): the response also gains the top-level `routes` array
-        (`[{lane, failures, attempts, runs, failure_rate}]`, worst pooled rate first) — the
-        per-lane record pooled ACROSS the Arena's runs, which is the chronic-badness read.
-        Both are additive; a pre-EM-350/351 backend simply omits them.
+        EM-351 (v1.11.0): the response also gains the top-level `routes` array — the
+        per-lane record pooled ACROSS the Arena's runs, which is the chronic-badness read:
+        `[{lane, failures, attempts, runs, failure_rate}]`. EM-352 (v1.12.0): each entry also
+        carries `worst_rate` (its highest per-run rate), `runs_high` (how many runs were at or
+        above the threshold) and `chronic` (`runs_high >= chronic_rule.min_runs`); the
+        response gains `chronic_rule: {rate_threshold, min_runs}` and orders chronic lanes
+        FIRST so a persistently bad lane surfaces on its own. EM-353 (v1.12.0): the per-lane
+        curves (`by_route[].curve`) are OPT-IN via the `lane_curves` query parameter (they
+        are about half the payload) — the default read returns `curve: []` everywhere and
+        `lane_curves: false`. All additive: a pre-EM-350/351/352 backend simply omits the
+        new keys, and a pre-EM-353 caller keeps the curves by passing `lane_curves=true`.
+      parameters:
+        - name: lane_curves
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: >
+            EM-353 — include the heavy per-lane failure curves (`by_route[].curve`). Off by
+            default (they are ~half the payload); echoed back as the top-level
+            `lane_curves` boolean. The run-level `failures.curve` always rides.
       responses:
         "200": { description: arena summary, content: { application/json: { schema: { type: object } } } }
   /api/contact:

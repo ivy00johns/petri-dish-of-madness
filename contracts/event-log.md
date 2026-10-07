@@ -1,8 +1,29 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.10.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.11.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.11.0 (EM-352 + EM-353, 2026-10-07 — chronic lanes + a leaner arena):**
+> Two changes closing the loop on the /api/arena lane read-out.
+> (1) EM-352: each top-level `routes` entry gains the CHRONIC evidence —
+> `worst_rate` (its highest per-run rate), `runs_high` (how many runs were at
+> or above the threshold) and `chronic` (`runs_high >= chronic_rule.min_runs`)
+> — and the response gains `chronic_rule: {rate_threshold: 0.20, min_runs: 2}`.
+> The flag counts RUNS, so a lane that was bad in a single draw can never flag;
+> chronic lanes sort FIRST (then worst pooled rate), so a persistently bad lane
+> surfaces on its own. Measured off the live `run.sqlite`: the lane pooled at
+> 50% over ONE run is NOT flagged, while `google/gemini-3.1-flash-lite`
+> (≥20% in 3 of 3 runs, worst 0.556) and `google/gemini-3.5-flash` (3 of 3)
+> are — exactly the habit-vs-luck distinction a pooled rate cannot make.
+> (2) EM-353: the per-lane failure curves are OPT-IN. They were about HALF
+> the `/api/arena` payload (48,876 → 88,942 bytes measured), so the default
+> read returns `curve: []` on every `by_route` entry and skips the extra
+> grouped `llm_call`-by-tick COUNT, echoing `lane_curves: false`; a caller
+> that wants the curves passes `?lane_curves=1`. The run-level `failures.curve`
+> (EM-345) is NOT gated. Measured through the real endpoint: 44,608 bytes
+> default vs 79,370 bytes with curves. Both changes are additive.
+> See `api.openapi.yaml` v1.12.0.
 
 > **v1.10.0 (EM-350 + EM-351, 2026-10-07 — failure rate OVER TIME and ACROSS runs):**
 > Two additive changes to the `/api/arena` `failures` block, both answering the

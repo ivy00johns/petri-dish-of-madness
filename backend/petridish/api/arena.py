@@ -53,6 +53,14 @@ _TURNS_KIND = "llm_call"
 # volume); the rest keep the scalar rate so the payload stays bounded.
 _LANE_CURVE_LANES = 6
 
+# EM-352 — the chronic-route rule. A lane is flagged `chronic` when its OWN
+# failure rate reaches `_CHRONIC_RATE` in `_CHRONIC_MIN_RUNS` or more of the
+# Arena runs it appeared in. Requiring more than one run is the whole point:
+# a lane that was bad in a single draw is a noisy sample, not a bad lane, and
+# `runs` travels with the flag so the sample size stays honest.
+_CHRONIC_RATE = 0.20
+_CHRONIC_MIN_RUNS = 2
+
 
 def _shares(counts: dict, total: int) -> dict:
     """Per-kind share of the failure total (0..1; all 0 when there are none)."""
@@ -110,9 +118,9 @@ def _lane_curve(failure_ticks: list[int], attempt_rows: list[tuple[int, int]],
     ]
 
 
-def failure_taxonomy(repo, run_id: int) -> dict:
-    """EM-343/EM-345/EM-346/EM-349/EM-350 — ONE run's failure taxonomy, read off
-    its persisted event log.
+def failure_taxonomy(repo, run_id: int, *, lane_curves: bool = True) -> dict:
+    """EM-343/EM-345/EM-346/EM-349/EM-350/EM-353 — ONE run's failure taxonomy,
+    read off its persisted event log.
 
     The TRUE shares, not the raw kind counts: every failure row is routed
     through `true_failure_kind`, which re-derives the taxonomy from the payload
@@ -144,6 +152,12 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         MOST failures (218) but only a 15.0% rate — a broadly degraded routing
         period, not one uniquely broken lane — while run 26's lanes were
         uniformly worse (27–29%).
+
+    EM-353 — `lane_curves=False` drops that per-lane `curve` (every entry keeps
+    its scalar rate and reports `curve: []`), skipping the extra grouped
+    `llm_call`-by-tick COUNT as well as the bytes. The per-lane curves are
+    roughly HALF the `/api/arena` payload, so the Arena panel asks for them
+    only when the reader opts in; the run-level `curve` above always rides.
     """
     counts = {k: 0 for k in _FAILURE_KINDS}
     legacy_rows = 0
@@ -232,18 +246,26 @@ def failure_taxonomy(repo, run_id: int) -> dict:
     # volume to be read), on the SAME bucket plan as the run curve.
     max_tick = repo.run_max_tick(run_id)
     n, width = _bucket_plan(max(max_tick, max((t for t, _ in curve_points), default=0)))
-    curve_lanes = set(sorted(by_route, key=lambda ln: (-by_route[ln]["attempts"], ln))
-                      [:_LANE_CURVE_LANES])
-    attempt_rows: dict[str, list[tuple[int, int]]] = {}
-    for tick, lane, count in repo.count_llm_attempts_by_tick_and_model(run_id):
-        if lane:
-            attempt_rows.setdefault(lane, []).append((tick, count))
-    for lane in by_route:
-        by_route[lane]["curve"] = (
-            _lane_curve(route_failure_ticks.get(lane, []),
-                        attempt_rows.get(lane, []), n, width)
-            if lane in curve_lanes else []
-        )
+    if lane_curves:
+        curve_lanes = set(
+            sorted(by_route, key=lambda ln: (-by_route[ln]["attempts"], ln))
+            [:_LANE_CURVE_LANES])
+        attempt_rows: dict[str, list[tuple[int, int]]] = {}
+        for tick, lane, count in repo.count_llm_attempts_by_tick_and_model(run_id):
+            if lane:
+                attempt_rows.setdefault(lane, []).append((tick, count))
+        for lane in by_route:
+            by_route[lane]["curve"] = (
+                _lane_curve(route_failure_ticks.get(lane, []),
+                            attempt_rows.get(lane, []), n, width)
+                if lane in curve_lanes else []
+            )
+    else:
+        # EM-353 — curves not requested: report the scalar rate only. No second
+        # grouped COUNT is paid either, so the lean read is cheaper in the DB
+        # as well as on the wire.
+        for lane in by_route:
+            by_route[lane]["curve"] = []
 
     return {
         "counts": counts,
@@ -315,7 +337,8 @@ def _as_num(v: object) -> float:
     return v if isinstance(v, (int, float)) else 0.0
 
 
-def run_outcomes(repo, run_id: int, max_tick: int) -> dict:
+def run_outcomes(repo, run_id: int, max_tick: int, *,
+                 lane_curves: bool = True) -> dict:
     """Civilization-outcome card for ONE run (defensive: absent fields ⇒ 0)."""
     a = repo.get_analytics(run_id) or {}
 
@@ -359,7 +382,8 @@ def run_outcomes(repo, run_id: int, max_tick: int) -> dict:
         },
         "population_sparkline": _downsample(spark),
         # EM-343 — the per-run failure taxonomy (the Arena panel's read-off).
-        "failures": failure_taxonomy(repo, run_id),
+        # EM-353 — `lane_curves` gates only the heavy per-lane curves.
+        "failures": failure_taxonomy(repo, run_id, lane_curves=lane_curves),
     }
 
 
@@ -379,7 +403,8 @@ def _contact_block(run: dict) -> dict | None:
     return block
 
 
-def contact_run_card(repo, run: dict, *, max_tick: int | None = None) -> dict:
+def contact_run_card(repo, run: dict, *, max_tick: int | None = None,
+                     lane_curves: bool = True) -> dict:
     """EM-334 — ONE contact run's Arena card: the family pairing from the
     run's own config_json + the ordinary civilization-outcome card + the
     PER-SETTLEMENT populations read straight from the run's latest snapshot
@@ -391,7 +416,7 @@ def contact_run_card(repo, run: dict, *, max_tick: int | None = None) -> dict:
     # ONE run_outcomes read feeds both the outcome chips and the EM-343
     # failure taxonomy (it is the heavy full-event pass — never pay it twice).
     oc = run_outcomes(repo, run_id, max_tick if max_tick is not None
-                      else (run.get("max_tick") or 0))
+                      else (run.get("max_tick") or 0), lane_curves=lane_curves)
     card: dict = {
         "run_id": run_id,
         "max_tick": int(max_tick if max_tick is not None
@@ -462,35 +487,65 @@ def contact_run_card(repo, run: dict, *, max_tick: int | None = None) -> dict:
 
 
 def _rollup_routes(per_run_routes: dict[int, dict]) -> list[dict]:
-    """EM-351 — every lane's failures/attempts POOLED across the Arena's runs
-    (the family-standing + contact runs already computed above; no extra event
-    read), so a lane that looks bad in one draw can be judged against its whole
-    record instead of in isolation. `runs` counts the runs the lane appeared in
-    (it had failures or attempts there). Ordered worst pooled rate first."""
+    """EM-351/EM-352 — every lane's failures/attempts POOLED across the Arena's
+    runs (the family-standing + contact runs already computed above; no extra
+    event read), so a lane that looks bad in one draw can be judged against its
+    whole record instead of in isolation. `runs` counts the runs the lane
+    appeared in (it had failures or attempts there).
+
+    EM-352 — each entry also carries the CHRONIC evidence: `worst_rate` (the
+    lane's highest per-run rate) and `runs_high` (how many runs were at or
+    above `_CHRONIC_RATE`), with `chronic` set when `runs_high` reaches
+    `_CHRONIC_MIN_RUNS`. A single bad draw can never flag, because `runs_high`
+    counts RUNS — so `chronic` distinguishes a habit from a one-off. Chronic
+    lanes sort first (then worst pooled rate), so a persistently bad lane
+    surfaces on its own instead of waiting to be spotted in the board."""
     agg: dict[str, dict] = {}
     for by_route in per_run_routes.values():
         for lane, stat in (by_route or {}).items():
-            rec = agg.setdefault(
-                lane, {"lane": lane, "failures": 0, "attempts": 0, "runs": 0})
+            rec = agg.setdefault(lane, {
+                "lane": lane, "failures": 0, "attempts": 0, "runs": 0,
+                "worst_rate": 0.0, "runs_high": 0})
             rec["failures"] += int(stat.get("failures") or 0)
             rec["attempts"] += int(stat.get("attempts") or 0)
             rec["runs"] += 1
+            # Judge each run by the rate that run REPORTS (rounded to 4dp), so
+            # the flag matches the number the per-run lane board shows.
+            rate = _as_num(stat.get("failure_rate"))
+            if rate > rec["worst_rate"]:
+                rec["worst_rate"] = rate
+            if rate >= _CHRONIC_RATE:
+                rec["runs_high"] += 1
     out = []
     for rec in agg.values():
         attempts = rec["attempts"]
-        out.append({**rec, "failure_rate": (
-            round(rec["failures"] / attempts, 4) if attempts else 0.0)})
-    out.sort(key=lambda r: (-r["failure_rate"], -r["attempts"], r["lane"]))
+        out.append({
+            **rec,
+            "worst_rate": round(rec["worst_rate"], 4),
+            "failure_rate": (
+                round(rec["failures"] / attempts, 4) if attempts else 0.0),
+            "chronic": rec["runs_high"] >= _CHRONIC_MIN_RUNS,
+        })
+    out.sort(key=lambda r: (
+        not r["chronic"], -r["failure_rate"], -r["attempts"], r["lane"]))
     return out
 
 
-def arena_summary(repo) -> dict:
+def arena_summary(repo, *, lane_curves: bool = False) -> dict:
     """The /api/arena payload: families (with ≥1 stamped run) ordered by their
     EARLIEST stamped run (the chronological cast order), each with its runs'
     outcome cards + sparklines and family means — plus EM-334's contact_runs:
     every run whose config_json carries an ARMED contact block, with the
     family pairing + per-settlement cards (the First Contact comparison) — plus
-    EM-351's `routes`: the per-lane failure rate pooled across those runs."""
+    EM-351's `routes`: the per-lane failure rate pooled across those runs, each
+    entry flagged `chronic` by EM-352's rule (echoed top-level as
+    `chronic_rule`).
+
+    EM-353 — `lane_curves` defaults OFF: the per-lane failure curves are about
+    HALF this payload, so the default read is the rates only and a caller that
+    wants the curves asks for them (`GET /api/arena?lane_curves=1`). The
+    top-level `lane_curves` echoes which read this is.
+    """
     blocks: dict[str, list[dict]] = {}
     first_seen: dict[str, int] = {}
     contact_runs: list[dict] = []
@@ -507,7 +562,8 @@ def arena_summary(repo) -> dict:
         rid = int(run.get("id") or 0)
         full = dict(run, config_json=configs.get(rid, ""))
         if _contact_block(full) is not None:
-            card = contact_run_card(repo, full, max_tick=run.get("max_tick") or 0)
+            card = contact_run_card(repo, full, max_tick=run.get("max_tick") or 0,
+                                    lane_curves=lane_curves)
             contact_runs.append(card)
             per_run_routes[rid] = (card.get("failures") or {}).get("by_route") or {}
         fam = run.get("model_family")
@@ -516,7 +572,8 @@ def arena_summary(repo) -> dict:
         if fam not in blocks:
             blocks[fam] = []
             first_seen[fam] = run["id"]
-        oc = run_outcomes(repo, run["id"], run.get("max_tick") or 0)
+        oc = run_outcomes(repo, run["id"], run.get("max_tick") or 0,
+                          lane_curves=lane_curves)
         blocks[fam].append(oc)
         per_run_routes.setdefault(
             rid, (oc.get("failures") or {}).get("by_route") or {})
@@ -539,6 +596,15 @@ def arena_summary(repo) -> dict:
     return {
         "families": families,
         "contact_runs": contact_runs,
-        # EM-351 — the cross-run per-lane failure rollup (worst pooled rate first).
+        # EM-351 — the cross-run per-lane failure rollup (chronic first, then
+        # worst pooled rate — see `_rollup_routes`).
         "routes": _rollup_routes(per_run_routes),
+        # EM-352 — the rule behind every `routes[].chronic` flag, so a consumer
+        # can render "≥N% in M+ runs" without hard-coding the threshold.
+        "chronic_rule": {
+            "rate_threshold": _CHRONIC_RATE,
+            "min_runs": _CHRONIC_MIN_RUNS,
+        },
+        # EM-353 — whether the heavy per-lane curves rode this response.
+        "lane_curves": lane_curves,
     }
