@@ -192,6 +192,64 @@ def test_clean_agent_has_no_route_and_a_nameless_row_falls_back(tmp_path):
     assert ba["animal_mochi"]["total"] == 0
 
 
+# ── EM-349 — the per-lane failure rate ───────────────────────────────────────
+
+def test_by_route_rates_each_lane_against_its_own_attempts(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "lanes.sqlite"))
+    rid = _run(repo)
+    # lane A: 2 failures across 8 attempts
+    for _ in range(2):
+        _ev(repo, rid, "provider_error", 1, "agent_a",
+            {"reason": "provider_error: x", "routed_via": "lane/aaa"})
+    for _ in range(8):
+        _ev(repo, rid, "llm_call", 1, "agent_a",
+            {"gen_ai.response.model": "lane/aaa"})
+    # lane B: fewer failures but a BETTER rate (the point of a rate, not volume)
+    _ev(repo, rid, "parse_failure", 1, "agent_a",
+        {"reason": "no valid JSON", "routed_via": "lane/bbb"})
+    for _ in range(10):
+        _ev(repo, rid, "llm_call", 1, "agent_a",
+            {"gen_ai.response.model": "lane/bbb"})
+    # a lane used but never failing is listed too (it is not bad)
+    for _ in range(4):
+        _ev(repo, rid, "llm_call", 1, "agent_a",
+            {"gen_ai.response.model": "lane/ccc"})
+
+    t = failure_taxonomy(repo, rid)
+    br = t["by_route"]
+    assert br["lane/aaa"] == {"failures": 2, "attempts": 8, "failure_rate": 0.25}
+    assert br["lane/bbb"] == {"failures": 1, "attempts": 10, "failure_rate": 0.1}
+    assert br["lane/ccc"] == {"failures": 0, "attempts": 4, "failure_rate": 0.0}
+    # worst rate first — the lane with MORE failures also has the worse rate here
+    assert list(br) == ["lane/aaa", "lane/bbb", "lane/ccc"]
+    assert t["failures_attributed"] == 3
+    assert t["attempts_attributed"] == 22
+
+
+def test_by_route_edge_cases(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "lanes2.sqlite"))
+    rid = _run(repo)
+    # nothing at all ⇒ no lanes, no coverage claim
+    t = failure_taxonomy(repo, rid)
+    assert t["by_route"] == {}
+    assert t["failures_attributed"] == 0 and t["attempts_attributed"] == 0
+
+    # a failure whose lane never recorded an attempt: listed, attempts 0
+    _ev(repo, rid, "provider_error", 1, "agent_a",
+        {"reason": "provider_error: x", "routed_via": "lane/ghost"})
+    t2 = failure_taxonomy(repo, rid)
+    assert t2["by_route"]["lane/ghost"] == {
+        "failures": 1, "attempts": 0, "failure_rate": 0.0,
+    }
+    assert t2["failures_attributed"] == 1 and t2["attempts_attributed"] == 0
+
+    # an attempt with no `gen_ai.response.model` is not attributed to a lane
+    _ev(repo, rid, "llm_call", 1, "agent_a", {})
+    t3 = failure_taxonomy(repo, rid)
+    assert t3["attempts_attributed"] == 0
+    assert t3["turns"] == 1
+
+
 # ── EM-347 — the per-family rollup ───────────────────────────────────────────
 
 def test_family_rollup_pools_counts_turns_and_rate(tmp_path):
@@ -239,6 +297,9 @@ def test_run_and_contact_cards_carry_curve_and_by_agent(tmp_path):
     card = run_outcomes(repo, rid, 10)
     assert isinstance(card["failures"]["curve"], list) and card["failures"]["curve"]
     assert card["failures"]["by_agent"]["agent_a"]["total"] == 1
+    # EM-349 — the per-lane board rides the same block
+    assert "by_route" in card["failures"]
+    assert card["failures"]["failures_attributed"] == 0  # this row named no lane
 
     contact = _run(repo, family=None, contact=True)
     _ev(repo, contact, "provider_error", 1, "agent_b", {"reason": "provider_error: x"})

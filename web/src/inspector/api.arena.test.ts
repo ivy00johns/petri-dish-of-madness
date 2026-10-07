@@ -114,7 +114,8 @@ describe('inspectorApi.arena (EM-119)', () => {
       counts: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
       shares: { action_rejected: 0, provider_error: 0, parse_failure: 0 },
       total: 0, turns: 0, failure_rate: 0, legacy_rows_reclassified: 0,
-      curve: [], by_agent: {},
+      curve: [], by_agent: {}, by_route: {},
+      failures_attributed: 0, attempts_attributed: 0,
     });
   });
 
@@ -155,6 +156,14 @@ describe('inspectorApi.arena (EM-119)', () => {
                         routes_attributed: 104,
                       },
                     },
+                    by_route: {
+                      'kilo/inclusionai/ling-3.0-flash-sante:free': {
+                        failures: 218, attempts: 1449, failure_rate: 0.1504,
+                      },
+                      'not-an-object': 'junk', // coerced to an all-zero stat
+                    },
+                    failures_attributed: 300,
+                    attempts_attributed: 1999,
                   },
                 },
                 { run_id: 9, outcomes: {} }, // pre-EM-345 run: no curve/by_agent
@@ -187,6 +196,15 @@ describe('inspectorApi.arena (EM-119)', () => {
     // absent on a pre-EM-345 run ⇒ an empty cut, never null
     expect(out!.families[0].runs[1].failures.curve).toEqual([]);
     expect(out!.families[0].runs[1].failures.by_agent).toEqual({});
+    // EM-349 — the per-lane rate (a junk stat coerces to zeros, never dropped)
+    expect(run.failures.by_route['kilo/inclusionai/ling-3.0-flash-sante:free']).toEqual({
+      failures: 218, attempts: 1449, failure_rate: 0.1504,
+    });
+    expect(run.failures.by_route['not-an-object']).toEqual({
+      failures: 0, attempts: 0, failure_rate: 0,
+    });
+    expect(run.failures.failures_attributed).toBe(300);
+    expect(run.failures.attempts_attributed).toBe(1999);
   });
 
   it('returns null on network failure and on a non-object body', async () => {

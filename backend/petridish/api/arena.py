@@ -18,8 +18,10 @@ Sources, all already persisted (no new instrumentation):
                  shares and the failures-per-`llm_call` rate, re-derived from
                  the payload on pre-EM-340 runs (see `failure_taxonomy`). Each
                  run block also carries the failures-over-ticks `curve`
-                 (EM-345) and the per-`actor_id` `by_agent` cut (EM-346); each
-                 family block carries the pooled rollup (EM-347)
+                 (EM-345), the per-`actor_id` `by_agent` cut (EM-346) and the
+                 per-LANE `by_route` failure rate (EM-349, against each lane's
+                 `llm_call` attempts); each family block carries the pooled
+                 rollup (EM-347)
 
 Heavy (full event fetch per run) — callers run it on a worker thread
 (same blocking class as /api/fingerprints). Family-level numbers are MEANS
@@ -105,11 +107,17 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         failure row was `routed_via`, descending by count), `top_route` (the
         lane behind most of that agent's failures) and `routes_attributed`
         (how many failure rows named a lane; `total - routes_attributed` are
-        unattributed). This turns an opaque actor id into a NAMED route: run
-        23's failures are dominated by ONE lane across the whole cast
-        (`kilo/inclusionai/ling-3.0-flash-sante:free` = 74% of ada's), whereas
-        run 26's concentrate on each agent's OWN lane — so the per-agent rate
-        difference is lane exposure, not agent merit.
+        unattributed). This turns an opaque actor id into a NAMED route.
+      • EM-349 — `by_route` gives every lane its own FAILURE RATE
+        (`{failures, attempts, failure_rate}`), the denominator being the
+        lane's `llm_call` attempts (`gen_ai.response.model`), plus coverage
+        (`failures_attributed` / `attempts_attributed`). This is what makes a
+        lane comparable: measured off the live DB, run 23's `kilo/…ling-3.0-
+        flash-sante:free` carried the MOST failures (218) but only a 15.0%
+        rate — in line with its other lanes (step-3.7-flash 16.4%, gemini-3.8
+        12.8%) — i.e. that run was a broadly degraded routing period, NOT one
+        uniquely broken lane; run 26's lanes were uniformly worse (27–29%).
+        A rate on a low-attempt lane is noisy, so `attempts` travels with it.
     """
     counts = {k: 0 for k in _FAILURE_KINDS}
     legacy_rows = 0
@@ -167,6 +175,30 @@ def failure_taxonomy(repo, run_id: int) -> dict:
             "routes_attributed": sum(routes.values()),
         }
 
+    # EM-349 — the per-LANE failure rate: attribute each lane's failures to how
+    # often the lane was actually USED (`llm_call` attempts, grouped by the
+    # serving `gen_ai.response.model`), so a lane that carries many failures
+    # simply because it carries most of the traffic is not mistaken for a bad
+    # one. Ordered worst-rate first, then by volume, then lane name.
+    attempts_by_model = repo.count_llm_attempts_by_model(run_id)
+    route_failures: dict[str, int] = {}
+    for routes in agent_routes.values():
+        for lane, n in routes.items():
+            route_failures[lane] = route_failures.get(lane, 0) + n
+    by_route: dict[str, dict] = {}
+    for lane in set(route_failures) | {ln for ln in attempts_by_model if ln}:
+        rf = route_failures.get(lane, 0)
+        attempts = int(attempts_by_model.get(lane) or 0)
+        by_route[lane] = {
+            "failures": rf,
+            "attempts": attempts,
+            "failure_rate": (round(rf / attempts, 4) if attempts else 0.0),
+        }
+    by_route = dict(sorted(
+        by_route.items(),
+        key=lambda kv: (-kv[1]["failure_rate"], -kv[1]["attempts"], kv[0]),
+    ))
+
     return {
         "counts": counts,
         "total": total,
@@ -176,6 +208,11 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         "legacy_rows_reclassified": legacy_rows,
         "curve": _failure_curve(curve_points, repo.run_max_tick(run_id)),
         "by_agent": by_agent,
+        "by_route": by_route,
+        # Coverage: how much of the run the lane cut accounts for (failure rows
+        # with a lane; `llm_call` attempts that named one). Never invented.
+        "failures_attributed": sum(route_failures.values()),
+        "attempts_attributed": sum(n for ln, n in attempts_by_model.items() if ln),
     }
 
 
