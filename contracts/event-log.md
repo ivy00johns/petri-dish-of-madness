@@ -1,8 +1,24 @@
-# Contract: Append-only Event Log + Replay + Query Interface — v1.7.0
+# Contract: Append-only Event Log + Replay + Query Interface — v1.8.0
 
 **Wave:** W5 (the gate). **Items:** EM-054 (event-log schema + WAL + snapshots),
 EM-066 (structured decision-trace output). **Every later wave (W6–W8) reads this.**
 Lock it before building any instrumentation UI.
+
+> **v1.8.0 (EM-348, 2026-10-07 — per-agent failure route attribution):**
+> Each `by_agent` entry in the additive `/api/arena` `failures` block also
+> carries `routes` (the lane each failure row was `routed_via`, descending by
+> failure count), `top_route` (the lane behind most of that agent's failures,
+> `""` when none) and `routes_attributed` (how many failure rows named a lane —
+> `total - routes_attributed` rows predate the diagnostic and stay honest as
+> unattributed). This turns an opaque `actor_id` into a NAMED route, which is
+> the point: measured off the live `run.sqlite`, run 23's failures are dominated
+> by ONE lane across the WHOLE cast (`kilo/inclusionai/ling-3.0-flash-sante:free`
+> tops every agent — ada 81/110, bram, cleo, mox, vesper), whereas run 26's
+> failures concentrate on each agent's OWN lane (`google/gemini-3.5-flash`,
+> `google/gemini-3.1-flash-lite`, `cloudflare/@cf/meta/llama-3.3-70b-…`) — so a
+> per-agent rate difference is LANE exposure, not agent merit. Coverage is
+> reported, never invented (run 23: 104/110 attributed on ada). See
+> `api.openapi.yaml` v1.9.0.
 
 > **v1.7.0 (EM-344–347, 2026-10-07 — the taxonomy's shared home + the read-out
 > expansion):**

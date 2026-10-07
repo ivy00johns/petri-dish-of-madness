@@ -137,6 +137,61 @@ def test_by_agent_rates_separate_a_broken_route_from_a_shared_outage(tmp_path):
     assert ba["agent_ada"]["shares"]["parse_failure"] == 1.0
 
 
+# ── EM-348 — the per-agent route attribution ─────────────────────────────────
+
+def test_by_agent_names_the_route_behind_each_agents_failures(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "routes.sqlite"))
+    rid = _run(repo)
+    # agent_ada: 3 failures — 2 on ONE bad lane, 1 with no routed_via
+    _ev(repo, rid, "provider_error", 1, "agent_ada",
+        {"reason": "provider_error: 502",
+         "routed_via": "kilo/inclusionai/ling-3.0-flash-sante:free"})
+    _ev(repo, rid, "parse_failure", 2, "agent_ada",
+        {"reason": "no valid JSON",
+         "routed_via": "kilo/inclusionai/ling-3.0-flash-sante:free"})
+    _ev(repo, rid, "action_rejected", 3, "agent_ada",
+        {"rejected": True, "action": "give"})
+    # agent_cleo: a SECOND lane, ordered descending by failure count
+    _ev(repo, rid, "provider_error", 1, "agent_cleo",
+        {"reason": "provider_error: x", "routed_via": "lane/bbb"})
+    for _ in range(3):
+        _ev(repo, rid, "parse_failure", 2, "agent_cleo",
+            {"reason": "no valid JSON", "routed_via": "lane/aaa"})
+    for i in range(6):
+        _ev(repo, rid, "llm_call", i, "agent_ada")
+    for i in range(4):
+        _ev(repo, rid, "llm_call", i, "agent_cleo")
+
+    ba = failure_taxonomy(repo, rid)["by_agent"]
+    ada = ba["agent_ada"]
+    assert ada["total"] == 3
+    assert ada["top_route"] == "kilo/inclusionai/ling-3.0-flash-sante:free"
+    # only the rows that NAMED a lane are attributed — coverage stays honest
+    assert ada["routes_attributed"] == 2
+    assert ada["routes"] == {"kilo/inclusionai/ling-3.0-flash-sante:free": 2}
+    # a multi-lane agent orders its routes by descending failure count
+    assert list(ba["agent_cleo"]["routes"]) == ["lane/aaa", "lane/bbb"]
+    assert ba["agent_cleo"]["routes_attributed"] == 4
+
+
+def test_clean_agent_has_no_route_and_a_nameless_row_falls_back(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "routes2.sqlite"))
+    rid = _run(repo)
+    # a failure whose payload carries no routed_via (pre-diagnostic row)
+    _ev(repo, rid, "provider_error", 1, "agent_ada", {"reason": "provider_error: x"})
+    _ev(repo, rid, "llm_call", 1, "agent_ada")
+    # a clean agent with turns only
+    for i in range(2):
+        _ev(repo, rid, "llm_call", i, "animal_mochi")
+
+    ba = failure_taxonomy(repo, rid)["by_agent"]
+    assert ba["agent_ada"]["top_route"] == ""
+    assert ba["agent_ada"]["routes"] == {}
+    assert ba["agent_ada"]["routes_attributed"] == 0
+    assert ba["animal_mochi"]["top_route"] == ""
+    assert ba["animal_mochi"]["total"] == 0
+
+
 # ── EM-347 — the per-family rollup ───────────────────────────────────────────
 
 def test_family_rollup_pools_counts_turns_and_rate(tmp_path):

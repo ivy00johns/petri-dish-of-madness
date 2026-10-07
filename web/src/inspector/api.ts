@@ -441,9 +441,22 @@ export interface FailureCurvePoint {
  * reads as a SPIKE) + the per-`actor_id` `by_agent` cut (EM-346 — a per-agent
  * rate separates ONE broken route from a provider-wide outage).
  */
+/**
+ * EM-348 — one actor's failure cut: the core taxonomy plus the LANE attribution
+ * (the `routed_via` each failure row was routed through). `routes` maps lane id
+ * → failure count (descending); `top_route` is the lane behind most of the
+ * actor's failures; `routes_attributed` is how many rows named a lane
+ * (`total - routes_attributed` rows are unattributed).
+ */
+export interface FailureByAgentEntry extends FailureTaxonomyCore {
+  routes: Record<string, number>;
+  top_route: string;
+  routes_attributed: number;
+}
+
 export interface FailureTaxonomy extends FailureTaxonomyCore {
   curve: FailureCurvePoint[];
-  by_agent: Record<string, FailureTaxonomyCore>;
+  by_agent: Record<string, FailureByAgentEntry>;
 }
 
 const FAILURE_KINDS: FailureKind[] = ['action_rejected', 'provider_error', 'parse_failure'];
@@ -482,9 +495,19 @@ function parseFailures(raw: unknown): FailureTaxonomy {
       parse_failure: toNum(p.parse_failure),
     });
   }
-  const byAgent: Record<string, FailureTaxonomyCore> = {};
+  const byAgent: Record<string, FailureByAgentEntry> = {};
   if (isObject(src.by_agent)) {
-    for (const [actor, a] of Object.entries(src.by_agent)) byAgent[actor] = parseFailureCore(a);
+    for (const [actor, a] of Object.entries(src.by_agent)) {
+      const routes: Record<string, number> = {};
+      const rawRoutes = isObject(a) && isObject(a.routes) ? a.routes : {};
+      for (const [lane, n] of Object.entries(rawRoutes)) routes[lane] = toNum(n);
+      byAgent[actor] = {
+        ...parseFailureCore(a),
+        routes,
+        top_route: isObject(a) && typeof a.top_route === 'string' ? a.top_route : '',
+        routes_attributed: isObject(a) ? toNum(a.routes_attributed) : 0,
+      };
+    }
   }
   return { ...parseFailureCore(src), curve, by_agent: byAgent };
 }

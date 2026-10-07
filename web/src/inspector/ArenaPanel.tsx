@@ -26,6 +26,11 @@
  *    spread means the provider (or the world) failed everyone equally (run 26:
  *    ~16-18% each). This is WHY the taxonomy is exposed per agent: the run
  *    total alone can't tell those two failures apart.
+ *  • ROUTE ATTRIBUTION (EM-348): each per-agent line is followed by the LANE
+ *    behind that agent's failure mass (`routed_via`), so the cut NAMES the
+ *    broken route instead of leaving an opaque actor id — run 23's failures are
+ *    dominated by ONE lane across the cast (ling-3.0-flash-sante:free = 74% of
+ *    ada's), run 26's by each agent's own lane.
  *  • FAMILY ROLLUP (EM-347): each family block also shows its
  *    failures POOLED across its runs, so the panel answers "which family fails
  *    differently" (shares + failures-per-turn, comparable across families).
@@ -217,11 +222,24 @@ function FailureCurve({ points, testid }: { points: FailureCurvePoint[]; testid:
 }
 
 /**
- * EM-346 — the per-agent failure cut, collapsed by default. Answers "which
+ * EM-348 — the last two path segments of a lane id (`kilo/inclusionai/
+ * ling-3.0-flash-sante:free` → `inclusionai/ling-3.0-flash-sante:free`), short
+ * enough for a line; the full lane id lives in the tooltip.
+ */
+function routeLabel(route: string): string {
+  const parts = route.split('/');
+  return parts.length > 1 ? parts.slice(-2).join('/') : route;
+}
+
+/**
+ * EM-346/348 — the per-agent failure cut, collapsed by default. Answers "which
  * agent fails differently": a per-agent rate that is NOT uniform means ONE
  * route/model is broken; a flat spread across the cast means the provider (or
- * the world) failed everyone equally. Clean agents (total 0) stay listed so
- * the spread is readable rather than only the failing tail.
+ * the world) failed everyone equally. EM-348 names the ROUTE behind each
+ * agent's failure mass (the lane each failure row was `routed_via`), so an
+ * opaque actor id becomes an actionable lane — and a shared bad lane vs each
+ * agent's own lane is immediately readable. Clean agents (total 0) stay listed
+ * so the spread is readable rather than only the failing tail.
  */
 function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix: string }) {
   const actors = Object.keys(f.by_agent).sort(
@@ -235,14 +253,25 @@ function FailureByAgent({ f, testidPrefix }: { f: FailureTaxonomy; testidPrefix:
         by agent ({actors.length})
       </summary>
       <div className="flex flex-col gap-0.5 mt-0.5">
-        {actors.map((a) => (
-          <FailureTaxonomyLine
-            key={a}
-            f={f.by_agent[a]}
-            testid={`${testidPrefix}-${a}`}
-            prefix={a}
-          />
-        ))}
+        {actors.map((a) => {
+          const e = f.by_agent[a];
+          return (
+            <div key={a} className="flex flex-col">
+              <FailureTaxonomyLine f={e} testid={`${testidPrefix}-${a}`} prefix={a} />
+              {e.total > 0 && (
+                <div
+                  className="font-mono text-[10px] opacity-50 truncate"
+                  data-testid={`${testidPrefix}-${a}-route`}
+                  title={e.top_route || "no routed_via on this actor's failure rows"}
+                >
+                  {e.top_route
+                    ? `↳ via ${routeLabel(e.top_route)} — ${e.routes_attributed}/${e.total} attributed`
+                    : 'route unattributed'}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </details>
   );

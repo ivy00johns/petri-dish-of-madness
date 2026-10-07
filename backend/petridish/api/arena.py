@@ -101,15 +101,26 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         (run 23: ada 30% vs vesper 5.7%) from a provider outage that hits the
         whole cast evenly (run 26: 16-18% each). It includes every actor with
         turns or failures, so a clean agent shows as 0 rather than vanishing.
+      • EM-348 — each `by_agent` entry also carries `routes` (the lane each
+        failure row was `routed_via`, descending by count), `top_route` (the
+        lane behind most of that agent's failures) and `routes_attributed`
+        (how many failure rows named a lane; `total - routes_attributed` are
+        unattributed). This turns an opaque actor id into a NAMED route: run
+        23's failures are dominated by ONE lane across the whole cast
+        (`kilo/inclusionai/ling-3.0-flash-sante:free` = 74% of ada's), whereas
+        run 26's concentrate on each agent's OWN lane — so the per-agent rate
+        difference is lane exposure, not agent merit.
     """
     counts = {k: 0 for k in _FAILURE_KINDS}
     legacy_rows = 0
     curve_points: list[tuple[int, str]] = []
     agent_counts: dict[str, dict] = {}
     agent_legacy: dict[str, int] = {}
+    agent_routes: dict[str, dict[str, int]] = {}
     for event in repo.get_events(run_id, kinds=list(_FAILURE_KINDS), order="asc"):
         kind = event.get("kind")
-        true_kind = true_failure_kind(kind, event.get("payload"))
+        payload = event.get("payload")
+        true_kind = true_failure_kind(kind, payload)
         if true_kind is None:
             continue
         counts[true_kind] += 1
@@ -124,6 +135,14 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         per[true_kind] += 1
         if legacy:
             agent_legacy[actor] = agent_legacy.get(actor, 0) + 1
+        # EM-348 — attribute the row to the lane it was routed through. The
+        # `routed_via` key is absent on some historic/pre-diagnostic rows, so
+        # `routes_attributed` keeps the coverage honest rather than inventing a
+        # route for them.
+        route = payload.get("routed_via") if isinstance(payload, dict) else None
+        if isinstance(route, str) and route.strip():
+            routes = agent_routes.setdefault(actor, {})
+            routes[route.strip()] = routes.get(route.strip(), 0) + 1
     total = sum(counts.values())
     turns = int(repo.count_events_of_kind(run_id, _TURNS_KIND) or 0)
 
@@ -134,6 +153,8 @@ def failure_taxonomy(repo, run_id: int) -> dict:
         per = agent_counts.get(actor) or {k: 0 for k in _FAILURE_KINDS}
         atotal = sum(per.values())
         aturns = int(turns_by_actor.get(actor) or 0)
+        routes = dict(sorted((agent_routes.get(actor) or {}).items(),
+                             key=lambda kv: (-kv[1], kv[0])))
         by_agent[actor] = {
             "counts": per,
             "shares": _shares(per, atotal),
@@ -141,6 +162,9 @@ def failure_taxonomy(repo, run_id: int) -> dict:
             "turns": aturns,
             "failure_rate": (round(atotal / aturns, 4) if aturns else 0.0),
             "legacy_rows_reclassified": int(agent_legacy.get(actor, 0)),
+            "routes": routes,
+            "top_route": next(iter(routes), ""),
+            "routes_attributed": sum(routes.values()),
         }
 
     return {
